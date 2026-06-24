@@ -20,8 +20,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test wallet-core
-        run: cargo test -p hacash-wallet-core
+      - name: Test wallet-core (unit)
+        run: cargo test -p hacash-wallet-core --lib
+
+      - name: Security audit gates
+        run: |
+          cargo test -p hacash-wallet-core audit_ -- --test-threads=1
+          cargo test -p hacash-wallet-core prop_
+
+      - name: Tier-0 elite adversarial gates
+        timeout-minutes: 20
+        run: cargo test -p hacash-wallet-core audit_tier0_ -- --test-threads=1
+
+      - name: Stress gates (Argon2-heavy; serial)
+        timeout-minutes: 15
+        run: cargo test -p hacash-wallet-core stress_ -- --test-threads=1
 
   desktop:
     runs-on: ubuntu-latest

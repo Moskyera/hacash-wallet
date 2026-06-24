@@ -22,7 +22,14 @@ tracing.workspace = true
 base64.workspace = true
 sha2.workspace = true
 url.workspace = true
+p256.workspace = true
+coset.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_Memory"] }
 
 sys = { path = "../../../hacash-fullnodedev/sys" }
 field = { path = "../../../hacash-fullnodedev/field" }
@@ -31,3 +38,5 @@ protocol = { path = "../../../hacash-fullnodedev/protocol" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+proptest = { workspace = true }
+tempfile = { workspace = true }

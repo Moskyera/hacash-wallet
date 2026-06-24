@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export type PrivacySettings = {
+  hide_balances: boolean;
+  hide_addresses: boolean;
+  screen_privacy: boolean;
+  store_tx_history: boolean;
+  clipboard_clear_secs: number;
+};
+
 export type WalletStatus = {
   has_wallet: boolean;
   locked: boolean;
@@ -11,6 +19,16 @@ export type WalletStatus = {
   channel_id: string | null;
   webauthn_enabled: boolean;
   l2_bill_count: number;
+  auto_lock_secs: number;
+  seconds_until_lock: number | null;
+  hardware_signing_mode: string;
+  watch_only: boolean;
+  privacy: PrivacySettings;
+}
+
+export type PlatformSecurityStatus = {
+  native_biometric_available: boolean;
+  platform: string;
 };
 
 export type WalletSettings = {
@@ -19,12 +37,19 @@ export type WalletSettings = {
   hub_right_address: string | null;
   channel_id_hex: string | null;
   webauthn_enabled: boolean;
+  security_profile: string;
+  privacy: PrivacySettings;
 };
 
 export type Hip23Check = {
   ok: boolean;
   warnings: string[];
   errors: string[];
+};
+
+export type Hip23PatternCheck = {
+  pattern: string;
+  check: Hip23Check;
 };
 
 export type SendPreview = {
@@ -63,9 +88,77 @@ export type ChannelInfo = {
   right: { address: string; hacash: string };
 };
 
+export type BillEntry = {
+  payment_id: string;
+  bill_hex: string;
+};
+
+export type TxRecord = {
+  tx_hash: string;
+  rail: string;
+  from: string;
+  to: string;
+  amount_mei: number;
+  summary: string;
+  timestamp: string;
+};
+
+export type HubHealth = {
+  ok: boolean;
+  version: number;
+  name?: string;
+};
+
+export type AirgapUnsigned = {
+  v: number;
+  from: string;
+  to: string;
+  amount_mei: number;
+  amount_wire: string;
+  fee: string;
+  body_hex: string;
+  summary: string;
+};
+
+export type AirgapSigned = {
+  v: number;
+  from: string;
+  to: string;
+  amount_mei: number;
+  signed_hex: string;
+  summary: string;
+};
+
+export type AirgapEnvelope =
+  | { kind: "unsigned"; v: number; from: string; to: string; amount_mei: number; amount_wire: string; fee: string; body_hex: string; summary: string }
+  | { kind: "signed"; v: number; from: string; to: string; amount_mei: number; signed_hex: string; summary: string };
+
+export type AirgapPrepareResult = {
+  envelope: AirgapUnsigned;
+  qr_parts: string[];
+};
+
+export type AirgapSignResult = {
+  envelope: AirgapSigned;
+  qr_parts: string[];
+};
+
+export type AirgapParseResult = {
+  envelope: AirgapEnvelope | null;
+  needs_more_parts: boolean;
+  received_parts: number;
+  total_parts: number;
+};
+
 export const api = {
   status: () => invoke<WalletStatus>("wallet_status"),
   create: (passphrase: string) => invoke<string>("wallet_create", { passphrase }),
+  import: (seed: string, passphrase: string) =>
+    invoke<string>("wallet_import", { seed, passphrase }),
+  exportBackup: (passphrase: string) =>
+    invoke<string>("wallet_export_backup", { passphrase }),
+  changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
+    invoke<void>("wallet_change_passphrase", { oldPassphrase, newPassphrase }),
   unlock: (passphrase: string) => invoke<string>("wallet_unlock", { passphrase }),
   lock: () => invoke<void>("wallet_lock"),
   balance: () => invoke<number>("wallet_balance"),
@@ -78,6 +171,14 @@ export const api = {
   webauthnAuthBegin: () => invoke<string>("wallet_webauthn_auth_begin"),
   webauthnAuthFinish: (assertionJson: string) =>
     invoke<void>("wallet_webauthn_auth_finish", { assertionJson }),
+  hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
+  listBills: () => invoke<BillEntry[]>("wallet_list_bills"),
+  txHistory: () => invoke<TxRecord[]>("wallet_tx_history"),
+  validateHip23: (
+    universal: Record<string, unknown>,
+    p2?: Record<string, unknown> | null,
+    p3?: Record<string, unknown> | null,
+  ) => invoke<Hip23PatternCheck[]>("wallet_validate_hip23", { universal, p2, p3 }),
   channelInfo: () => invoke<ChannelInfo | null>("wallet_channel_info"),
   previewChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
     invoke<ChannelSetupPreview>("wallet_preview_channel_open", {
@@ -91,15 +192,30 @@ export const api = {
       userDepositMei,
       hubDepositMei,
     }),
+  closeChannel: () => invoke<string>("wallet_close_channel"),
   previewSend: (to: string, amountMei: number) =>
     invoke<SendPreview>("wallet_preview_send", { to, amountMei }),
-  sendHac: (to: string, amountMei: number, biometricOk: boolean, yubikeyOk: boolean) =>
-    invoke<SendResult>("wallet_send_hac", {
-      to,
-      amountMei,
-      biometricOk,
-      yubikeyOk,
-    }),
+  platformSecurityStatus: () =>
+    invoke<PlatformSecurityStatus>("wallet_platform_security_status"),
+  confirmBiometricNative: () => invoke<void>("wallet_confirm_biometric_native"),
+  importWatchOnly: (address: string) => invoke<string>("wallet_import_watch_only", { address }),
+  openWatchOnly: () => invoke<string>("wallet_open_watch_only"),
+  setHardwareMode: (mode: string) => invoke<void>("wallet_set_hardware_mode", { mode }),
+  sendHac: (to: string, amountMei: number) =>
+    invoke<SendResult>("wallet_send_hac", { to, amountMei }),
   setSecurityProfile: (profile: string) =>
     invoke<void>("wallet_set_security_profile", { profile }),
+  updatePrivacySettings: (privacy: PrivacySettings) =>
+    invoke<void>("wallet_update_privacy_settings", { privacy }),
+  clearTxHistory: () => invoke<void>("wallet_clear_tx_history"),
+  airgapPrepareSend: (to: string, amountMei: number) =>
+    invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),
+  airgapSignUnsigned: (unsigned: AirgapUnsigned) =>
+    invoke<AirgapSignResult>("wallet_airgap_sign_unsigned", { unsigned }),
+  airgapBroadcastSigned: (signed: AirgapSigned) =>
+    invoke<SendResult>("wallet_airgap_broadcast_signed", { signed }),
+  airgapParseQr: (text: string) =>
+    invoke<AirgapParseResult>("wallet_airgap_parse_qr", { text }),
+  airgapParseQrBatch: (parts: string[]) =>
+    invoke<AirgapParseResult>("wallet_airgap_parse_qr_batch", { parts }),
 };

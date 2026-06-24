@@ -4,9 +4,14 @@
 use std::sync::Mutex;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use coset::{iana, CborSerializable, CoseKey, Label, RegisteredLabelWithPrivate};
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::EncodedPoint;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
+
 use crate::error::{WalletError, WalletResult};
 
 const RP_ID: &str = "localhost";
@@ -105,15 +110,61 @@ impl WebAuthnGate {
         serde_json::to_string(&options).map_err(|e| WalletError::Other(e.to_string()))
     }
 
-    pub fn finish_auth(&self, assertion_json: &str) -> WalletResult<()> {
+    pub fn finish_auth(&self, assertion_json: &str, stored_b64: Option<&str>) -> WalletResult<()> {
         let state = self.take_pending("authentication")?;
         let cred: AuthCredential = serde_json::from_str(assertion_json)
             .map_err(|e| WalletError::Other(e.to_string()))?;
-        verify_client_data(
-            &cred.response.client_data_json,
-            &state.challenge_b64,
-            "webauthn.get",
-        )?;
+        let client_data_bytes = decode_b64(&cred.response.client_data_json)?;
+        verify_client_data_bytes(&client_data_bytes, &state.challenge_b64, "webauthn.get")?;
+
+        let stored_cred = stored_b64
+            .map(load_stored_credential)
+            .transpose()?;
+
+        if stored_cred
+            .as_ref()
+            .and_then(|s| s.public_key_b64.as_ref())
+            .is_some()
+        {
+            let auth_b64 = cred
+                .response
+                .authenticator_data
+                .as_ref()
+                .ok_or_else(|| {
+                    WalletError::Policy(
+                        "authenticatorData required when credential has public key".into(),
+                    )
+                })?;
+            let sig_b64 = cred.response.signature.as_ref().ok_or_else(|| {
+                WalletError::Policy("signature required when credential has public key".into())
+            })?;
+            let auth_data = decode_b64(auth_b64)?;
+            verify_authenticator_data(&auth_data)?;
+            let pk_b64 = stored_cred
+                .as_ref()
+                .and_then(|s| s.public_key_b64.as_ref())
+                .expect("checked above");
+            let signature = decode_b64(sig_b64)?;
+            let client_hash = Sha256::digest(&client_data_bytes);
+            let mut signed = auth_data.clone();
+            signed.extend_from_slice(&client_hash);
+            verify_es256_signature(pk_b64, &signed, &signature)?;
+        } else if let (Some(auth_b64), Some(sig_b64)) = (
+            cred.response.authenticator_data.as_ref(),
+            cred.response.signature.as_ref(),
+        ) {
+            let auth_data = decode_b64(auth_b64)?;
+            verify_authenticator_data(&auth_data)?;
+            if let Some(stored) = stored_cred.as_ref() {
+                if let Some(pk_b64) = &stored.public_key_b64 {
+                    let signature = decode_b64(sig_b64)?;
+                    let client_hash = Sha256::digest(&client_data_bytes);
+                    let mut signed = auth_data.clone();
+                    signed.extend_from_slice(&client_hash);
+                    verify_es256_signature(pk_b64, &signed, &signature)?;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -148,6 +199,9 @@ struct AuthCredential {
 struct AuthResponse {
     #[serde(rename = "clientDataJSON")]
     client_data_json: String,
+    #[serde(rename = "authenticatorData")]
+    authenticator_data: Option<String>,
+    signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -159,11 +213,17 @@ struct ClientData {
 }
 
 fn verify_client_data(client_data_b64: &str, expected_challenge: &str, expected_type: &str) -> WalletResult<()> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(client_data_b64)
-        .map_err(|e| WalletError::Other(e.to_string()))?;
+    let bytes = decode_b64(client_data_b64)?;
+    verify_client_data_bytes(&bytes, expected_challenge, expected_type)
+}
+
+fn verify_client_data_bytes(
+    bytes: &[u8],
+    expected_challenge: &str,
+    expected_type: &str,
+) -> WalletResult<()> {
     let parsed: ClientData =
-        serde_json::from_slice(&bytes).map_err(|e| WalletError::Other(e.to_string()))?;
+        serde_json::from_slice(bytes).map_err(|e| WalletError::Other(e.to_string()))?;
     if parsed.typ != expected_type {
         return Err(WalletError::Policy("invalid WebAuthn ceremony type".into()));
     }
@@ -177,6 +237,73 @@ fn verify_client_data(client_data_b64: &str, expected_challenge: &str, expected_
         )));
     }
     Ok(())
+}
+
+fn verify_authenticator_data(auth_data: &[u8]) -> WalletResult<()> {
+    if auth_data.len() < 37 {
+        return Err(WalletError::Policy("authenticatorData too short".into()));
+    }
+    let rp_hash = Sha256::digest(RP_ID.as_bytes());
+    if auth_data[..32] != rp_hash[..] {
+        return Err(WalletError::Policy("WebAuthn rpIdHash mismatch".into()));
+    }
+    let flags = auth_data[32];
+    if flags & 0x01 == 0 {
+        return Err(WalletError::Policy("WebAuthn user not present".into()));
+    }
+    Ok(())
+}
+
+fn verify_es256_signature(pk_b64: &str, signed: &[u8], signature: &[u8]) -> WalletResult<()> {
+    let pk_bytes = decode_b64(pk_b64)?;
+    let cose = CoseKey::from_slice(&pk_bytes).map_err(|e| WalletError::Policy(e.to_string()))?;
+    if cose.alg != Some(RegisteredLabelWithPrivate::Assigned(iana::Algorithm::ES256)) {
+        return Err(WalletError::Policy("unsupported WebAuthn public key algorithm".into()));
+    }
+    let x = cose_param_bytes(&cose, -2)
+        .ok_or_else(|| WalletError::Policy("COSE key missing x coordinate".into()))?;
+    let y = cose_param_bytes(&cose, -3)
+        .ok_or_else(|| WalletError::Policy("COSE key missing y coordinate".into()))?;
+    let mut uncompressed = vec![0x04];
+    uncompressed.extend_from_slice(x);
+    uncompressed.extend_from_slice(y);
+    let point = EncodedPoint::from_bytes(&uncompressed)
+        .map_err(|e| WalletError::Policy(e.to_string()))?;
+    let verifying_key = VerifyingKey::from_encoded_point(&point)
+        .map_err(|e| WalletError::Policy(e.to_string()))?;
+    let sig = Signature::from_der(signature).or_else(|_| {
+        Signature::from_slice(signature)
+            .map_err(|e| WalletError::Policy(format!("invalid ES256 signature: {e}")))
+    })?;
+    verifying_key
+        .verify(signed, &sig)
+        .map_err(|e| WalletError::Policy(format!("WebAuthn signature invalid: {e}")))?;
+    Ok(())
+}
+
+fn decode_b64(value: &str) -> WalletResult<Vec<u8>> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .or_else(|_| {
+            use base64::engine::general_purpose::STANDARD;
+            STANDARD.decode(value)
+        })
+        .map_err(|e| WalletError::Other(e.to_string()))
+}
+
+fn cose_param_bytes<'a>(key: &'a CoseKey, label: i64) -> Option<&'a [u8]> {
+    key.params
+        .iter()
+        .find(|(l, _)| *l == Label::Int(label))
+        .and_then(|(_, v)| v.as_bytes().map(|b| b.as_slice()))
+}
+
+fn load_stored_credential(stored_b64: &str) -> WalletResult<StoredCredential> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(stored_b64)
+        .map_err(|e| WalletError::Other(e.to_string()))?;
+    let raw = String::from_utf8(bytes).map_err(|e| WalletError::Other(e.to_string()))?;
+    serde_json::from_str(&raw).map_err(|e| WalletError::Other(e.to_string()))
 }
 
 fn random_challenge() -> String {

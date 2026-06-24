@@ -33,6 +33,14 @@ impl SecurityProfile {
             biometric_unlock: false,
         }
     }
+
+    pub fn from_name(name: &str) -> Self {
+        if name == "paranoid" {
+            Self::paranoid()
+        } else {
+            Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -4,6 +4,16 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
+use crate::paths::secure_write;
+use crate::privacy::PrivacySettings;
+
+fn default_security_profile() -> String {
+    "balanced".into()
+}
+
+fn default_hardware_mode() -> String {
+    "software".into()
+}
 
 /// Non-secret wallet preferences (node URL, L2 hub, channel cache).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +23,14 @@ pub struct WalletSettings {
     pub hub_right_address: Option<String>,
     pub channel_id_hex: Option<String>,
     pub webauthn_enabled: bool,
+    #[serde(default = "default_security_profile")]
+    pub security_profile: String,
+    #[serde(default = "default_hardware_mode")]
+    pub hardware_signing_mode: String,
+    #[serde(default)]
+    pub watch_only_address: Option<String>,
+    #[serde(default)]
+    pub privacy: PrivacySettings,
 }
 
 impl Default for WalletSettings {
@@ -23,11 +41,19 @@ impl Default for WalletSettings {
             hub_right_address: None,
             channel_id_hex: None,
             webauthn_enabled: false,
+            security_profile: default_security_profile(),
+            hardware_signing_mode: default_hardware_mode(),
+            watch_only_address: None,
+            privacy: PrivacySettings::default(),
         }
     }
 }
 
 impl WalletSettings {
+    pub fn hardware_mode(&self) -> crate::hardware::HardwareSigningMode {
+        crate::hardware::HardwareSigningMode::from_name(&self.hardware_signing_mode)
+    }
+
     pub fn load() -> WalletResult<Self> {
         let path = settings_path();
         if !path.exists() {
@@ -39,18 +65,11 @@ impl WalletSettings {
 
     pub fn save(&self) -> WalletResult<()> {
         let path = settings_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| WalletError::Other(e.to_string()))?;
-        }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| WalletError::Other(e.to_string()))?;
-        fs::write(path, json).map_err(|e| WalletError::Other(e.to_string()))
+        let json = serde_json::to_string(self).map_err(|e| WalletError::Other(e.to_string()))?;
+        secure_write(&path, json.as_bytes()).map_err(|e| WalletError::Other(e.to_string()))
     }
 }
 
 pub fn settings_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("HacashWallet")
-        .join("settings.json")
+    crate::paths::settings_path()
 }

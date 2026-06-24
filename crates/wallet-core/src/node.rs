@@ -1,9 +1,25 @@
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{WalletError, WalletResult};
 
 const DEFAULT_NODE: &str = "https://nodeapi.hacash.org";
+
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(8)
+            .tcp_keepalive(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("http client")
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct NodeClient {
@@ -21,7 +37,7 @@ impl NodeClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http: shared_http_client().clone(),
         }
     }
 

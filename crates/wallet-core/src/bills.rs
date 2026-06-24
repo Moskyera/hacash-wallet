@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
+use crate::paths::secure_write;
 
 /// Encrypted-at-rest L2 settlement bill backup (dispute proofs).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -24,12 +25,8 @@ impl BillStore {
 
     pub fn save(&self) -> WalletResult<()> {
         let path = bills_path();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| WalletError::L2(e.to_string()))?;
-        }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| WalletError::L2(e.to_string()))?;
-        fs::write(path, json).map_err(|e| WalletError::L2(e.to_string()))
+        let json = serde_json::to_string(self).map_err(|e| WalletError::L2(e.to_string()))?;
+        secure_write(&path, json.as_bytes()).map_err(|e| WalletError::L2(e.to_string()))
     }
 
     pub fn store_bill(&mut self, payment_id: &str, bill_hex: &str) -> WalletResult<()> {
@@ -44,11 +41,27 @@ impl BillStore {
     pub fn count(&self) -> usize {
         self.bills.len()
     }
+
+    pub fn list(&self) -> Vec<BillEntry> {
+        let mut out: Vec<BillEntry> = self
+            .bills
+            .iter()
+            .map(|(id, hex)| BillEntry {
+                payment_id: id.clone(),
+                bill_hex: hex.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.payment_id.cmp(&b.payment_id));
+        out
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillEntry {
+    pub payment_id: String,
+    pub bill_hex: String,
 }
 
 pub fn bills_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("HacashWallet")
-        .join("l2_bills.json")
+    crate::paths::bills_path()
 }

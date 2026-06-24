@@ -14,6 +14,36 @@ pub struct Hip23SendCheck {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Type3CheckInput {
+    pub tx_type: u8,
+    pub chain_height: u64,
+    pub gas_max: u64,
+    pub has_asset_tex: bool,
+    pub ast_depth: u32,
+    pub guard_only: bool,
+    pub action_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeightScopeInput {
+    pub start: u64,
+    pub end: u64,
+    pub guard_before_debit: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BalanceFloorInput {
+    pub floor_hacash_mei: f64,
+    pub debit_before_floor: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hip23PatternCheck {
+    pub pattern: String,
+    pub check: Hip23SendCheck,
+}
+
 pub fn validate_simple_l1_send(
     to_address: &str,
     amount_mei: f64,
@@ -51,15 +81,30 @@ pub fn validate_simple_l1_send(
     })
 }
 
-pub fn validate_type3_readiness(gas_max: u64, has_asset_tex: bool, ast_depth: u32) -> Hip23SendCheck {
-    let warnings = Vec::new();
+pub fn validate_type3_universal(input: &Type3CheckInput) -> Hip23SendCheck {
+    let mut warnings = Vec::new();
     let mut errors = Vec::new();
 
-    if ast_depth > 0 && gas_max == 0 {
+    if input.tx_type < 3 {
+        errors.push("HIP-23 patterns require transaction type >= 3".into());
+    }
+    if input.chain_height < ISTANBUL_HEIGHT {
+        warnings.push(format!(
+            "Chain height {0} is before Istanbul activation ({ISTANBUL_HEIGHT})",
+            input.chain_height
+        ));
+    }
+    if input.ast_depth > 0 && input.gas_max == 0 {
         errors.push("Type3 with AST requires gas_max > 0".into());
     }
-    if has_asset_tex && gas_max == 0 {
+    if input.has_asset_tex && input.gas_max == 0 {
         errors.push("Asset TEX cells require gas_max > 0".into());
+    }
+    if input.guard_only {
+        errors.push("Guard-only topology: at least one non-guard top action required".into());
+    }
+    if input.action_count == 0 {
+        errors.push("Transaction must contain at least one action".into());
     }
 
     Hip23SendCheck {
@@ -67,6 +112,88 @@ pub fn validate_type3_readiness(gas_max: u64, has_asset_tex: bool, ast_depth: u3
         warnings,
         errors,
     }
+}
+
+pub fn validate_height_scope_pattern(input: &HeightScopeInput) -> Hip23SendCheck {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    if input.end != 0 && input.start > input.end {
+        errors.push("HeightScope: start must be <= end when end != 0".into());
+    }
+    if !input.guard_before_debit {
+        errors.push("P2: HeightScope must be listed before debit action".into());
+    }
+    if input.end == 0 {
+        warnings.push("HeightScope end=0 means open-ended upper bound".into());
+    }
+
+    Hip23SendCheck {
+        ok: errors.is_empty(),
+        warnings,
+        errors,
+    }
+}
+
+pub fn validate_balance_floor_pattern(input: &BalanceFloorInput) -> Hip23SendCheck {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    if !input.debit_before_floor {
+        errors.push("P3: debit action(s) must be listed before BalanceFloor".into());
+    }
+    if input.floor_hacash_mei <= 0.0 {
+        errors.push("P3: explicit non-zero HAC floor required for protection".into());
+    }
+    if input.floor_hacash_mei > 0.0 && input.floor_hacash_mei < 0.001 {
+        warnings.push("Very small floor — confirm fee and gas are accounted for".into());
+    }
+
+    Hip23SendCheck {
+        ok: errors.is_empty(),
+        warnings,
+        errors,
+    }
+}
+
+pub fn validate_type3_readiness(gas_max: u64, has_asset_tex: bool, ast_depth: u32) -> Hip23SendCheck {
+    validate_type3_universal(&Type3CheckInput {
+        tx_type: 3,
+        chain_height: ISTANBUL_HEIGHT,
+        gas_max,
+        has_asset_tex,
+        ast_depth,
+        guard_only: false,
+        action_count: 1,
+    })
+}
+
+pub fn validate_all_patterns(
+    universal: &Type3CheckInput,
+    p2: Option<&HeightScopeInput>,
+    p3: Option<&BalanceFloorInput>,
+) -> Vec<Hip23PatternCheck> {
+    let mut out = vec![Hip23PatternCheck {
+        pattern: "universal".into(),
+        check: validate_type3_universal(universal),
+    }];
+    if let Some(p2) = p2 {
+        out.push(Hip23PatternCheck {
+            pattern: "P2".into(),
+            check: validate_height_scope_pattern(p2),
+        });
+    }
+    if let Some(p3) = p3 {
+        out.push(Hip23PatternCheck {
+            pattern: "P3".into(),
+            check: validate_balance_floor_pattern(p3),
+        });
+    }
+    out
+}
+
+pub fn is_valid_hacash_address(addr: &str) -> bool {
+    verify_hacash_address(addr)
 }
 
 fn verify_hacash_address(addr: &str) -> bool {
@@ -97,5 +224,29 @@ mod tests {
         let check = validate_type3_readiness(0, false, 2);
         assert!(!check.ok);
         assert!(check.errors.iter().any(|e| e.contains("gas_max")));
+    }
+
+    #[test]
+    fn p2_rejects_inverted_height_scope() {
+        let check = validate_height_scope_pattern(&HeightScopeInput {
+            start: 100,
+            end: 50,
+            guard_before_debit: true,
+        });
+        assert!(!check.ok);
+    }
+
+    #[test]
+    fn universal_rejects_guard_only() {
+        let check = validate_type3_universal(&Type3CheckInput {
+            tx_type: 3,
+            chain_height: ISTANBUL_HEIGHT,
+            gas_max: 100,
+            has_asset_tex: false,
+            ast_depth: 0,
+            guard_only: true,
+            action_count: 1,
+        });
+        assert!(!check.ok);
     }
 }
