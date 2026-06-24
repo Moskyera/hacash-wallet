@@ -123,7 +123,13 @@ input {
   background: var(--bg-card);
 }
 .alert { border-color: rgba(255,107,107,0.5); color: #ffd0d0; }
+.info-box { border-color: rgba(110,168,255,0.4); color: #cfe0ff; }
+.warn-box { border-color: rgba(255,193,7,0.4); color: #ffe9a8; font-size: 13px; }
 .success-box { border-color: rgba(61,214,198,0.4); }
+.divider { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.status-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.preview-card ul, .warn-box ul { margin: 8px 0 0; padding-left: 18px; }
 .address-box code, code { word-break: break-all; color: var(--accent-2); }
 .muted { color: var(--muted); }
 

@@ -29,6 +29,36 @@ impl NodeClient {
         &self.base_url
     }
 
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    pub async fn post_create_transaction(
+        &self,
+        payload: serde_json::Value,
+    ) -> WalletResult<BuildTxResponse> {
+        let url = format!("{}/create/transaction", self.base_url);
+        let resp = self
+            .http
+            .post(url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?;
+        let body: BuildTxResponse = resp
+            .json()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?;
+        if body.ret != 0 {
+            return Err(WalletError::Node(
+                body.err
+                    .or(body.message)
+                    .unwrap_or_else(|| "create transaction failed".into()),
+            ));
+        }
+        Ok(body)
+    }
+
     pub async fn balance_mei(&self, address: &str) -> WalletResult<f64> {
         let url = format!(
             "{}/query/balance?unit=mei&address={}",
@@ -76,26 +106,7 @@ impl NodeClient {
                 }
             ]
         });
-        let url = format!("{}/create/transaction", self.base_url);
-        let resp = self
-            .http
-            .post(url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
-        let body: BuildTxResponse = resp
-            .json()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
-        if body.ret != 0 {
-            return Err(WalletError::Node(
-                body.err
-                    .or(body.message)
-                    .unwrap_or_else(|| "create transaction failed".into()),
-            ));
-        }
-        Ok(body)
+        self.post_create_transaction(payload).await
     }
 
     pub async fn submit_tx_hex(&self, tx_hex: &str) -> WalletResult<SubmitTxResponse> {

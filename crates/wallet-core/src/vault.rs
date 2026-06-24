@@ -21,6 +21,8 @@ pub struct VaultMetadata {
     pub created_at: String,
     pub kdf: String,
     pub security_profile: String,
+    #[serde(default)]
+    pub webauthn_credential_b64: Option<String>,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -59,6 +61,7 @@ impl EncryptedVault {
                 created_at: chrono::Utc::now().to_rfc3339(),
                 kdf: "argon2id-m=65536,t=3,p=4".into(),
                 security_profile: security_profile.into(),
+                webauthn_credential_b64: None,
             },
             ciphertext,
             salt,

@@ -1,7 +1,7 @@
 mod state;
 
 use hacash_wallet_core::security::{SecurityProfile, UnlockContext};
-use hacash_wallet_core::WalletService;
+use hacash_wallet_core::{WalletService, WalletSettings};
 use state::AppState;
 use tauri::Manager;
 
@@ -34,6 +34,89 @@ fn wallet_lock(state: tauri::State<'_, AppState>) -> Result<(), String> {
 async fn wallet_balance(state: tauri::State<'_, AppState>) -> Result<f64, String> {
     let mut svc = state.inner.lock().await;
     svc.balance_mei().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_get_settings(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let svc = state.inner.blocking_lock();
+    Ok(serde_json::to_value(svc.get_settings()).map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+fn wallet_update_settings(
+    settings: WalletSettings,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.update_settings(settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_webauthn_register_begin(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let svc = state.inner.blocking_lock();
+    svc.webauthn_register_begin().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_webauthn_register_finish(
+    credential_json: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.webauthn_register_finish(&credential_json)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_webauthn_auth_begin(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let svc = state.inner.blocking_lock();
+    svc.webauthn_auth_begin().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_webauthn_auth_finish(
+    assertion_json: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.webauthn_auth_finish(&assertion_json)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn wallet_channel_info(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut svc = state.inner.lock().await;
+    let info = svc.channel_info().await.map_err(|e| e.to_string())?;
+    serde_json::to_value(info).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_preview_channel_open(
+    hub_address: String,
+    user_deposit_mei: f64,
+    hub_deposit_mei: f64,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut svc = state.inner.blocking_lock();
+    let preview = svc
+        .preview_channel_open(&hub_address, user_deposit_mei, hub_deposit_mei)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(preview).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn wallet_open_channel(
+    hub_address: String,
+    user_deposit_mei: f64,
+    hub_deposit_mei: f64,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let mut svc = state.inner.lock().await;
+    svc.open_channel(&hub_address, user_deposit_mei, hub_deposit_mei)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -87,7 +170,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            app.manage(AppState::new(WalletService::new(None, None)));
+            let svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
+            app.manage(AppState::new(svc));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -96,6 +180,15 @@ pub fn run() {
             wallet_unlock,
             wallet_lock,
             wallet_balance,
+            wallet_get_settings,
+            wallet_update_settings,
+            wallet_webauthn_register_begin,
+            wallet_webauthn_register_finish,
+            wallet_webauthn_auth_begin,
+            wallet_webauthn_auth_finish,
+            wallet_channel_info,
+            wallet_preview_channel_open,
+            wallet_open_channel,
             wallet_preview_send,
             wallet_send_hac,
             wallet_set_security_profile,
