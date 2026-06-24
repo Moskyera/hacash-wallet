@@ -1,0 +1,27 @@
+use thiserror::Error;
+
+pub type WalletResult<T> = Result<T, WalletError>;
+
+#[derive(Debug, Error)]
+pub enum WalletError {
+    #[error("vault: {0}")]
+    Vault(String),
+    #[error("wallet locked")]
+    Locked,
+    #[error("wallet already unlocked")]
+    AlreadyUnlocked,
+    #[error("no wallet on device")]
+    NoWallet,
+    #[error("invalid passphrase")]
+    InvalidPassphrase,
+    #[error("node api: {0}")]
+    Node(String),
+    #[error("transaction: {0}")]
+    Transaction(String),
+    #[error("security policy blocked: {0}")]
+    Policy(String),
+    #[error("l2: {0}")]
+    L2(String),
+    #[error("{0}")]
+    Other(String),
+}

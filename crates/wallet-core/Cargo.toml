@@ -1,0 +1,29 @@
+[package]
+name = "hacash-wallet-core"
+version.workspace = true
+edition.workspace = true
+description = "Secure Hacash wallet core: vault, signing, L1/L2 payment routing"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+zeroize.workspace = true
+argon2.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+
+sys = { path = "../../../hacash-fullnodedev/sys" }
+field = { path = "../../../hacash-fullnodedev/field" }
+basis = { path = "../../../hacash-fullnodedev/basis" }
+protocol = { path = "../../../hacash-fullnodedev/protocol" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
