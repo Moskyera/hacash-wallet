@@ -75,6 +75,20 @@ fn version_from_kind(kind: Option<&str>) -> Option<u8> {
     }
 }
 
+/// Decode version byte from base58check address (authoritative; no string-prefix guessing).
+fn version_from_address_readable(addr: &str) -> Option<u8> {
+    use field::Address;
+    let v = Address::from_readable(addr).ok()?.version();
+    match v {
+        Address::PQCKEY | Address::HYBRID => Some(v),
+        _ => None,
+    }
+}
+
+fn resolve_quantum_version(kind: Option<&str>, address: Option<&str>) -> Option<u8> {
+    version_from_kind(kind).or_else(|| address.and_then(version_from_address_readable))
+}
+
 pub fn preview_keystore(json: &str, pass: &str) -> WalletResult<QuantumAccountInfo> {
     let info = unlock_hybrid_keystore(json, pass).map_err(WalletError::Other)?;
     Ok(map_info(info))
@@ -113,17 +127,7 @@ impl WalletService {
     pub fn quantum_settings(&self) -> QuantumSettings {
         let json = self.quantum_keystore_json();
         let (active, kind) = json.as_deref().map(parse_keystore_meta).unwrap_or((None, None));
-        let version = version_from_kind(kind.as_deref()).or_else(|| {
-            active.as_ref().map(|a| {
-                if a.starts_with("3x") {
-                    7u8
-                } else if a.starts_with('3') {
-                    6u8
-                } else {
-                    0u8
-                }
-            })
-        });
+        let version = resolve_quantum_version(kind.as_deref(), active.as_deref());
         QuantumSettings {
             quantum_mode: self.quantum_mode_enabled(),
             active_address: active,
@@ -256,8 +260,10 @@ mod tests {
         let (json, created) = create_pqc_keystore_offline(pass).unwrap();
         assert_eq!(created.kind, "pqckey");
         assert_eq!(created.address_version, 6);
-        assert!(created.address.starts_with('3'));
-        assert!(!created.address.starts_with("3x"));
+        assert_eq!(
+            version_from_address_readable(&created.address),
+            Some(6)
+        );
 
         let preview = preview_keystore(&json, pass).unwrap();
         assert_eq!(preview.address, created.address);
@@ -270,7 +276,10 @@ mod tests {
         let (json, created) = create_hybrid_keystore_offline(pass, None).unwrap();
         assert_eq!(created.kind, "hybrid");
         assert_eq!(created.address_version, 7);
-        assert!(!created.address.is_empty());
+        assert_eq!(
+            version_from_address_readable(&created.address),
+            Some(7)
+        );
 
         let preview = preview_keystore(&json, pass).unwrap();
         assert_eq!(preview.address, created.address);
@@ -298,5 +307,19 @@ mod tests {
         let preview = preview_keystore(&exported, new_pass).unwrap();
         assert_eq!(preview.address, info.address);
         assert!(preview_keystore(&exported, old_pass).is_err());
+    }
+
+    #[test]
+    fn pqc_and_hybrid_produce_distinct_v6_v7_addresses() {
+        let (_, pqc) = create_pqc_keystore_offline("distinct-pqc-pass").unwrap();
+        let (_, hybrid) = create_hybrid_keystore_offline("distinct-hyb-pass", None).unwrap();
+        assert_eq!(pqc.address_version, 6);
+        assert_eq!(hybrid.address_version, 7);
+        assert_ne!(pqc.address, hybrid.address);
+        assert_eq!(resolve_quantum_version(Some("pqckey"), Some(&pqc.address)), Some(6));
+        assert_eq!(
+            resolve_quantum_version(Some("hybrid"), Some(&hybrid.address)),
+            Some(7)
+        );
     }
 }

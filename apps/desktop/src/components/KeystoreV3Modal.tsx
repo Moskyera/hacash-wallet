@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { quantumApi, QuantumAccountInfo } from "../api";
+import { kindLabel } from "../quantumMeta";
 import AddressBadge from "./AddressBadge";
 
 type Props = {
@@ -16,15 +17,10 @@ function formatErr(e: unknown): string {
   return String(e);
 }
 
-function kindLabel(kind: string): string {
-  if (kind === "hybrid") return "Hybrid";
-  if (kind === "pqckey") return "PQC";
-  return kind;
-}
-
-function exportFilename(kind: string): string {
+function exportFilename(kind?: string): string {
   if (kind === "pqckey") return "pqc_keystore_v3.json";
-  return "hybrid_keystore_v3.json";
+  if (kind === "hybrid") return "hybrid_keystore_v3.json";
+  return "quantum_keystore_v3.json";
 }
 
 export default function KeystoreV3Modal({
@@ -112,7 +108,7 @@ export default function KeystoreV3Modal({
       const blob = new Blob([json], { type: "application/json" });
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = exportFilename(meta.kind ?? "hybrid");
+      a.download = exportFilename(meta.kind);
       a.click();
       URL.revokeObjectURL(a.href);
       setInfo(`Exported ${meta.address ?? "keystore"}`);

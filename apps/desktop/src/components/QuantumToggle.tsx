@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 import { quantumApi, QuantumAccountInfo, QuantumSettings } from "../api";
+import {
+  accountFromSettings,
+  kindLabel,
+  REPLACE_KEYSTORE_WARNING,
+} from "../quantumMeta";
 import AddressBadge from "./AddressBadge";
 import KeystoreV3Modal from "./KeystoreV3Modal";
 
@@ -7,25 +12,9 @@ type Props = {
   onAccountChange?: (acc: QuantumAccountInfo | null) => void;
 };
 
-function accountFromSettings(s: QuantumSettings): QuantumAccountInfo | null {
-  if (!s.active_address) return null;
-  const kind = s.kind ?? "hybrid";
-  const version =
-    kind === "hybrid" ? 7 : kind === "pqckey" ? 6 : (s.address_version ?? 0);
-  return {
-    address: s.active_address,
-    kind,
-    address_version: version,
-    alg_id: 3,
-    mldsa_pubkey: "",
-    secp_pubkey: "",
-  };
-}
-
-function kindLabel(kind: string): string {
-  if (kind === "hybrid") return "Hybrid";
-  if (kind === "pqckey") return "PQC";
-  return kind;
+function confirmReplaceKeystore(hasAccount: boolean): boolean {
+  if (!hasAccount) return true;
+  return window.confirm(`${REPLACE_KEYSTORE_WARNING}\n\nContinue?`);
 }
 
 function formatInvokeError(e: unknown): string {
@@ -79,6 +68,7 @@ export default function QuantumToggle({ onAccountChange }: Props) {
       setErr(`Password needs at least 8 characters (${pass.length}/8).`);
       return;
     }
+    if (!confirmReplaceKeystore(!!account)) return;
     setBusy(true);
     setErr("");
     setInfo("Creating PQC (v6)…");
@@ -101,6 +91,7 @@ export default function QuantumToggle({ onAccountChange }: Props) {
       setErr(`Password needs at least 8 characters (${pass.length}/8).`);
       return;
     }
+    if (!confirmReplaceKeystore(!!account)) return;
     setBusy(true);
     setErr("");
     setInfo("Creating Hybrid (v7)…");

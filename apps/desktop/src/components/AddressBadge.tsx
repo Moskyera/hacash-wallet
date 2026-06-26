@@ -1,23 +1,15 @@
 import "../quantum.css";
+import { badgeVersion } from "../quantumMeta";
 
 type Props = {
   address: string;
-  version?: number;
-  kind?: string;
+  version?: number | null;
+  kind?: string | null;
   compact?: boolean;
 };
 
-function inferVersion(address: string, kind?: string, version?: number): number {
-  if (version === 6 || version === 7) return version;
-  if (kind === "hybrid") return 7;
-  if (kind === "pqckey") return 6;
-  if (address.startsWith("3x")) return 7;
-  if (address.startsWith("3")) return 6;
-  return 0;
-}
-
 export default function AddressBadge({ address, version, kind, compact }: Props) {
-  const v = inferVersion(address, kind, version);
+  const v = badgeVersion(kind, version);
   const meta =
     v === 6
       ? { label: "PQC", cls: "badge-pqc", icon: "◇" }
