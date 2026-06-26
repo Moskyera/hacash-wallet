@@ -52,7 +52,11 @@ Quantum IPC lives in `apps/desktop/src-tauri/src/commands.rs` (additive; legacy 
 - Rust stable
 - Yarn
 - [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) (Windows: WebView2, VS Build Tools)
-- `hacash-fullnodedev` cloned as sibling: `../hacash-fullnodedev`
+- `hacash-fullnodedev` cloned as sibling: `../hacash-fullnodedev` (PQC branch required)
+
+```bash
+git clone --branch feature/pqc-phases-1-3 https://github.com/Moskyera/fullnodedev.git ../hacash-fullnodedev
+```
 
 ### Run
 

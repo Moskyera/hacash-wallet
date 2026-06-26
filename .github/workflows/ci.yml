@@ -12,9 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone fullnodedev dependency
+      - name: Clone fullnodedev dependency (PQC branch)
         working-directory: ${{ github.workspace }}/..
-        run: git clone --depth 1 https://github.com/hacash/fullnodedev.git hacash-fullnodedev
+        run: |
+          git clone --depth 1 --branch feature/pqc-phases-1-3 \
+            https://github.com/Moskyera/fullnodedev.git hacash-fullnodedev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -42,9 +44,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone fullnodedev dependency
+      - name: Clone fullnodedev dependency (PQC branch)
         working-directory: ${{ github.workspace }}/..
-        run: git clone --depth 1 https://github.com/hacash/fullnodedev.git hacash-fullnodedev
+        run: |
+          git clone --depth 1 --branch feature/pqc-phases-1-3 \
+            https://github.com/Moskyera/fullnodedev.git hacash-fullnodedev
 
       - uses: dtolnay/rust-toolchain@stable
 
