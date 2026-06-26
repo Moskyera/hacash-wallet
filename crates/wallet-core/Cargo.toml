@@ -35,6 +35,7 @@ sys = { path = "../../../hacash-fullnodedev/sys" }
 field = { path = "../../../hacash-fullnodedev/field" }
 basis = { path = "../../../hacash-fullnodedev/basis" }
 protocol = { path = "../../../hacash-fullnodedev/protocol" }
+sdk = { path = "../../../hacash-fullnodedev/sdk" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -126,7 +126,11 @@ impl NodeClient {
     }
 
     pub async fn submit_tx_hex(&self, tx_hex: &str) -> WalletResult<SubmitTxResponse> {
-        let url = format!("{}/submit/transaction", self.base_url);
+        self.submit_tx_hex_body(tx_hex).await
+    }
+
+    pub async fn submit_tx_hex_body(&self, tx_hex: &str) -> WalletResult<SubmitTxResponse> {
+        let url = format!("{}/submit/transaction?hexbody=true", self.base_url);
         let resp = self
             .http
             .post(url)
@@ -147,6 +151,19 @@ impl NodeClient {
             ));
         }
         Ok(body)
+    }
+
+    pub async fn query_metrics(&self) -> WalletResult<serde_json::Value> {
+        let url = format!("{}/query/metrics", self.base_url);
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?;
+        resp.json()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))
     }
 }
 

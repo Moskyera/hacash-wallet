@@ -400,6 +400,13 @@ impl WalletService {
         }
     }
 
+    /// Resets the auto-lock idle timer while the wallet stays unlocked.
+    pub fn bump_unlock_activity(&mut self) {
+        if let Some(session) = &mut self.unlocked {
+            session.unlocked_at = Instant::now();
+        }
+    }
+
     pub fn webauthn_register_begin(&self) -> WalletResult<String> {
         let address = self.require_address()?;
         self.webauthn.begin_register(&address)
@@ -964,4 +971,34 @@ fn random_biometric_nonce() -> String {
     let mut buf = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut buf);
     hex::encode(buf)
+}
+
+impl WalletService {
+    pub(crate) fn quantum_mode_enabled(&self) -> bool {
+        self.settings.quantum_mode
+    }
+
+    pub(crate) fn quantum_keystore_json(&self) -> Option<String> {
+        self.settings.quantum_keystore_json.clone()
+    }
+
+    pub(crate) fn set_quantum_mode_flag(&mut self, enabled: bool) -> WalletResult<()> {
+        self.bump_unlock_activity();
+        self.settings.quantum_mode = enabled;
+        self.settings.save()?;
+        Ok(())
+    }
+
+    pub fn store_quantum_keystore_json(&mut self, json: String) -> WalletResult<()> {
+        self.bump_unlock_activity();
+        self.settings.quantum_keystore_json = Some(json);
+        self.settings.quantum_mode = true;
+        self.settings.save()?;
+        Ok(())
+    }
+
+    pub(crate) fn node_client(&self) -> &NodeClient {
+        &self.node
+    }
+
 }

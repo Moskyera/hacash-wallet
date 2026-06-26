@@ -30,7 +30,7 @@ jobs:
 
       - name: Tier-0 elite adversarial gates
         timeout-minutes: 20
-        run: cargo test -p hacash-wallet-core audit_tier0_ -- --test-threads=1
+        run: cargo test -p hacash-wallet-core tier0_ -- --test-threads=1
 
       - name: Stress gates (Argon2-heavy; serial)
         timeout-minutes: 15

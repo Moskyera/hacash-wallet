@@ -14,6 +14,11 @@ import {
 } from "./api";
 import { runWebAuthnAuth, runWebAuthnRegister, webAuthnAvailable } from "./webauthn";
 import AirgapScreen from "./AirgapScreen";
+import QuantumToggle from "./components/QuantumToggle";
+import SendQuantumTx from "./components/SendQuantumTx";
+import AddressBadge from "./components/AddressBadge";
+import { QuantumAccountInfo } from "./api";
+import "./quantum.css";
 import {
   copyWithPrivacyClear,
   DEFAULT_PRIVACY,
@@ -34,13 +39,15 @@ type Screen =
   | "settings"
   | "security"
   | "privacy"
-  | "airgap";
+  | "airgap"
+  | "quantum";
 
 type WelcomeTab = "create" | "import" | "watch";
 
 const NAV_ITEMS: { id: Screen; label: string }[] = [
   { id: "home", label: "Home" },
   { id: "send", label: "Send" },
+  { id: "quantum", label: "Quantum" },
   { id: "receive", label: "Receive" },
   { id: "l2", label: "L2" },
   { id: "history", label: "History" },
@@ -118,6 +125,7 @@ export default function App() {
   const [includeP3, setIncludeP3] = useState(false);
   const [hipP3Floor, setHipP3Floor] = useState("1");
   const [hipP3DebitBeforeFloor, setHipP3DebitBeforeFloor] = useState(true);
+  const [quantumAccount, setQuantumAccount] = useState<QuantumAccountInfo | null>(null);
   const [hipResults, setHipResults] = useState<Hip23PatternCheck[] | null>(null);
 
   const [webauthnReady, setWebauthnReady] = useState(false);
@@ -1340,6 +1348,17 @@ export default function App() {
               Run validation
             </button>
             {hipResults?.map(renderHip23Result)}
+          </section>
+        )}
+
+        {screen === "quantum" && (
+          <section className="stack">
+            <QuantumToggle onAccountChange={setQuantumAccount} />
+            <SendQuantumTx
+              account={quantumAccount}
+              nodeUrl={settings?.node_url ?? status?.node_url}
+              disabled={busy || !!status?.locked}
+            />
           </section>
         )}
 

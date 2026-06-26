@@ -15,6 +15,7 @@ pub mod payment;
 pub mod privacy;
 pub mod security;
 pub mod settings;
+pub mod quantum;
 pub mod unlock_guard;
 pub mod vault;
 pub mod wallet;
@@ -32,4 +33,8 @@ pub use l2_hub::HubHealth;
 pub use hardware::HardwareSigningMode;
 pub use privacy::{mask_address, mask_amount, mask_hash, PrivacySettings};
 pub use settings::WalletSettings;
+pub use quantum::{
+    QuantumAccountInfo, QuantumSendResult, QuantumSettings, QuantumTestResult,
+    TEST_LEGACY_RECIPIENT, TYPE4_AUTO_FEE,
+};
 pub use wallet::WalletService;

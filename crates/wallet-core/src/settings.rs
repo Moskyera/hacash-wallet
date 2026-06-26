@@ -31,6 +31,10 @@ pub struct WalletSettings {
     pub watch_only_address: Option<String>,
     #[serde(default)]
     pub privacy: PrivacySettings,
+    #[serde(default)]
+    pub quantum_mode: bool,
+    #[serde(default)]
+    pub quantum_keystore_json: Option<String>,
 }
 
 impl Default for WalletSettings {
@@ -45,6 +49,8 @@ impl Default for WalletSettings {
             hardware_signing_mode: default_hardware_mode(),
             watch_only_address: None,
             privacy: PrivacySettings::default(),
+            quantum_mode: false,
+            quantum_keystore_json: None,
         }
     }
 }
