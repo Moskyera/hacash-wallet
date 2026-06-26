@@ -159,6 +159,13 @@ export type QuantumAccountInfo = {
   secp_pubkey: string;
 };
 
+/** Display/send identity from settings or mapped from a full account unlock. */
+export type QuantumAccountSummary = {
+  kind: string;
+  address: string;
+  address_version: number;
+};
+
 export type QuantumSettings = {
   quantum_mode: boolean;
   active_address?: string | null;

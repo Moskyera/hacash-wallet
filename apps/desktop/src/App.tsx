@@ -17,7 +17,7 @@ import AirgapScreen from "./AirgapScreen";
 import QuantumToggle from "./components/QuantumToggle";
 import SendQuantumTx from "./components/SendQuantumTx";
 import AddressBadge from "./components/AddressBadge";
-import { QuantumAccountInfo } from "./api";
+import { QuantumAccountSummary } from "./api";
 import "./quantum.css";
 import {
   copyWithPrivacyClear,
@@ -125,7 +125,7 @@ export default function App() {
   const [includeP3, setIncludeP3] = useState(false);
   const [hipP3Floor, setHipP3Floor] = useState("1");
   const [hipP3DebitBeforeFloor, setHipP3DebitBeforeFloor] = useState(true);
-  const [quantumAccount, setQuantumAccount] = useState<QuantumAccountInfo | null>(null);
+  const [quantumAccount, setQuantumAccount] = useState<QuantumAccountSummary | null>(null);
   const [hipResults, setHipResults] = useState<Hip23PatternCheck[] | null>(null);
 
   const [webauthnReady, setWebauthnReady] = useState(false);

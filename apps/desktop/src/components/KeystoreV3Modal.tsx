@@ -1,21 +1,15 @@
 import { useRef, useState } from "react";
-import { quantumApi, QuantumAccountInfo } from "../api";
-import { kindLabel } from "../quantumMeta";
+import { quantumApi, QuantumAccountInfo, QuantumAccountSummary } from "../api";
+import { formatInvokeError } from "../formatInvokeError";
+import { kindLabel, summaryFromAccountInfo } from "../quantumMeta";
 import AddressBadge from "./AddressBadge";
 
 type Props = {
   initialPassword?: string;
   hasAccount: boolean;
   onClose: () => void;
-  onImported: (acc: QuantumAccountInfo) => void;
+  onImported: (acc: QuantumAccountSummary) => void;
 };
-
-function formatErr(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  if (e && typeof e === "object" && "message" in e) return String((e as Error).message);
-  return String(e);
-}
 
 function exportFilename(kind?: string): string {
   if (kind === "pqckey") return "pqc_keystore_v3.json";
@@ -55,7 +49,7 @@ export default function KeystoreV3Modal({
       setPreview(acc);
       setInfo("Keystore unlocked — ready to import.");
     } catch (e) {
-      setErr(formatErr(e));
+      setErr(formatInvokeError(e));
       setPreview(null);
       setInfo("");
     } finally {
@@ -85,9 +79,9 @@ export default function KeystoreV3Modal({
     try {
       const acc = await quantumApi.importKeystore(pendingJson, pass);
       setInfo(`Imported ${acc.address}`);
-      onImported(acc);
+      onImported(summaryFromAccountInfo(acc));
     } catch (e) {
-      setErr(formatErr(e));
+      setErr(formatInvokeError(e));
       setInfo("");
     } finally {
       setBusy(false);
@@ -113,7 +107,7 @@ export default function KeystoreV3Modal({
       URL.revokeObjectURL(a.href);
       setInfo(`Exported ${meta.address ?? "keystore"}`);
     } catch (e) {
-      setErr(formatErr(e));
+      setErr(formatInvokeError(e));
       setInfo("");
     } finally {
       setBusy(false);

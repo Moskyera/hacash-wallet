@@ -75,6 +75,14 @@ fn version_from_kind(kind: Option<&str>) -> Option<u8> {
     }
 }
 
+fn kind_from_version(version: u8) -> Option<&'static str> {
+    match version {
+        6 => Some("pqckey"),
+        7 => Some("hybrid"),
+        _ => None,
+    }
+}
+
 /// Decode version byte from base58check address (authoritative; no string-prefix guessing).
 fn version_from_address_readable(addr: &str) -> Option<u8> {
     use field::Address;
@@ -85,8 +93,21 @@ fn version_from_address_readable(addr: &str) -> Option<u8> {
     }
 }
 
-fn resolve_quantum_version(kind: Option<&str>, address: Option<&str>) -> Option<u8> {
-    version_from_kind(kind).or_else(|| address.and_then(version_from_address_readable))
+/// Resolve `(kind, address_version)` once for settings/UI. On keystore/address disagreement,
+/// the decoded address wins (on-chain identity is authoritative).
+fn resolve_quantum_meta(kind: Option<&str>, address: Option<&str>) -> (Option<String>, Option<u8>) {
+    let kind_version = version_from_kind(kind);
+    let addr_version = address.and_then(version_from_address_readable);
+
+    let version = match (kind_version, addr_version) {
+        (Some(kv), Some(av)) if kv != av => Some(av),
+        (Some(kv), _) => Some(kv),
+        (None, Some(av)) => Some(av),
+        (None, None) => None,
+    };
+
+    let resolved_kind = version.and_then(|v| kind_from_version(v).map(str::to_owned));
+    (resolved_kind, version)
 }
 
 pub fn preview_keystore(json: &str, pass: &str) -> WalletResult<QuantumAccountInfo> {
@@ -127,12 +148,12 @@ impl WalletService {
     pub fn quantum_settings(&self) -> QuantumSettings {
         let json = self.quantum_keystore_json();
         let (active, kind) = json.as_deref().map(parse_keystore_meta).unwrap_or((None, None));
-        let version = resolve_quantum_version(kind.as_deref(), active.as_deref());
+        let (resolved_kind, version) = resolve_quantum_meta(kind.as_deref(), active.as_deref());
         QuantumSettings {
             quantum_mode: self.quantum_mode_enabled(),
             active_address: active,
             address_version: version,
-            kind,
+            kind: resolved_kind,
         }
     }
 
@@ -316,10 +337,28 @@ mod tests {
         assert_eq!(pqc.address_version, 6);
         assert_eq!(hybrid.address_version, 7);
         assert_ne!(pqc.address, hybrid.address);
-        assert_eq!(resolve_quantum_version(Some("pqckey"), Some(&pqc.address)), Some(6));
-        assert_eq!(
-            resolve_quantum_version(Some("hybrid"), Some(&hybrid.address)),
-            Some(7)
-        );
+        let (pqc_kind, pqc_ver) = resolve_quantum_meta(Some("pqckey"), Some(&pqc.address));
+        assert_eq!(pqc_ver, Some(6));
+        assert_eq!(pqc_kind.as_deref(), Some("pqckey"));
+
+        let (hyb_kind, hyb_ver) = resolve_quantum_meta(Some("hybrid"), Some(&hybrid.address));
+        assert_eq!(hyb_ver, Some(7));
+        assert_eq!(hyb_kind.as_deref(), Some("hybrid"));
+    }
+
+    #[test]
+    fn resolve_quantum_meta_prefers_address_on_kind_mismatch() {
+        let (_, pqc) = create_pqc_keystore_offline("mismatch-pass").unwrap();
+        let (kind, ver) = resolve_quantum_meta(Some("hybrid"), Some(&pqc.address));
+        assert_eq!(ver, Some(6));
+        assert_eq!(kind.as_deref(), Some("pqckey"));
+    }
+
+    #[test]
+    fn resolve_quantum_meta_backfills_kind_from_address() {
+        let (_, hybrid) = create_hybrid_keystore_offline("backfill-pass", None).unwrap();
+        let (kind, ver) = resolve_quantum_meta(None, Some(&hybrid.address));
+        assert_eq!(ver, Some(7));
+        assert_eq!(kind.as_deref(), Some("hybrid"));
     }
 }

@@ -65,6 +65,30 @@ fn audit_quantum_export_import_roundtrip() {
 }
 
 #[test]
+fn audit_quantum_settings_prefers_address_on_kind_mismatch() {
+    audit_gate("quantum_kind_addr_mismatch", || {
+        with_isolated_wallet_dir(|| {
+            let mut svc = WalletService::new(None, None).unwrap();
+            svc.create_wallet("vault-pass-123456").unwrap();
+            let pqc = svc.quantum_create_pqc("ks-pass-12345").unwrap();
+            let exported = svc.quantum_export_keystore("ks-pass-12345", None).unwrap();
+            let mut v: serde_json::Value = serde_json::from_str(&exported).unwrap();
+            v["kind"] = serde_json::Value::String("hybrid".into());
+            let tampered = v.to_string();
+            svc.store_quantum_keystore_json(tampered).unwrap();
+
+            let settings = svc.quantum_settings();
+            assert_eq!(settings.kind.as_deref(), Some("pqckey"));
+            assert_eq!(settings.address_version, Some(6));
+            assert_eq!(
+                settings.active_address.as_deref(),
+                Some(pqc.address.as_str())
+            );
+        });
+    });
+}
+
+#[test]
 fn audit_quantum_v6_to_v7_replaces_address_and_kind() {
     audit_gate("quantum_v6_to_v7", || {
         with_isolated_wallet_dir(|| {

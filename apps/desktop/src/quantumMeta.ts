@@ -1,40 +1,19 @@
-import type { QuantumAccountInfo, QuantumSettings } from "./api";
+import type { QuantumAccountInfo, QuantumAccountSummary, QuantumSettings } from "./api";
 
-/** Resolve kind + version from keystore metadata (never guess from address prefix). */
-export function resolveQuantumMeta(
-  s: Pick<QuantumSettings, "kind" | "address_version" | "active_address">,
-): { kind: string; address_version: number } | null {
-  if (!s.active_address) return null;
-
-  let kind = s.kind ?? null;
-  let version = s.address_version ?? null;
-
-  if (kind === "hybrid") {
-    version = 7;
-  } else if (kind === "pqckey") {
-    version = 6;
-  } else if (version === 7) {
-    kind = "hybrid";
-  } else if (version === 6) {
-    kind = "pqckey";
-  }
-
-  if (!kind || (version !== 6 && version !== 7)) {
+/** Map fully-resolved settings from the wallet core (no client-side reconciliation). */
+export function accountSummaryFromSettings(s: QuantumSettings): QuantumAccountSummary | null {
+  const { active_address, kind, address_version } = s;
+  if (!active_address || !kind || (address_version !== 6 && address_version !== 7)) {
     return null;
   }
-  return { kind, address_version: version };
+  return { address: active_address, kind, address_version };
 }
 
-export function accountFromSettings(s: QuantumSettings): QuantumAccountInfo | null {
-  const meta = resolveQuantumMeta(s);
-  if (!meta || !s.active_address) return null;
+export function summaryFromAccountInfo(a: QuantumAccountInfo): QuantumAccountSummary {
   return {
-    address: s.active_address,
-    kind: meta.kind,
-    address_version: meta.address_version,
-    alg_id: 3,
-    mldsa_pubkey: "",
-    secp_pubkey: "",
+    address: a.address,
+    kind: a.kind,
+    address_version: a.address_version,
   };
 }
 

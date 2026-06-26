@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { quantumApi, QuantumAccountInfo } from "../api";
+import { quantumApi, QuantumAccountSummary } from "../api";
 import AddressBadge from "./AddressBadge";
 
 const DEFAULT_TO = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
 
 type Props = {
-  account: QuantumAccountInfo | null;
+  account: QuantumAccountSummary | null;
   nodeUrl?: string;
   disabled?: boolean;
 };

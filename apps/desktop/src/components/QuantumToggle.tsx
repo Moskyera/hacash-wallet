@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
-import { quantumApi, QuantumAccountInfo, QuantumSettings } from "../api";
+import { quantumApi, QuantumAccountSummary, QuantumSettings } from "../api";
+import { formatInvokeError } from "../formatInvokeError";
 import {
-  accountFromSettings,
+  accountSummaryFromSettings,
   kindLabel,
   REPLACE_KEYSTORE_WARNING,
+  summaryFromAccountInfo,
 } from "../quantumMeta";
 import AddressBadge from "./AddressBadge";
 import KeystoreV3Modal from "./KeystoreV3Modal";
 
 type Props = {
-  onAccountChange?: (acc: QuantumAccountInfo | null) => void;
+  onAccountChange?: (acc: QuantumAccountSummary | null) => void;
 };
 
 function confirmReplaceKeystore(hasAccount: boolean): boolean {
@@ -17,20 +19,10 @@ function confirmReplaceKeystore(hasAccount: boolean): boolean {
   return window.confirm(`${REPLACE_KEYSTORE_WARNING}\n\nContinue?`);
 }
 
-function formatInvokeError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  if (e && typeof e === "object") {
-    const o = e as Record<string, unknown>;
-    if (typeof o.message === "string") return o.message;
-  }
-  return String(e);
-}
-
 export default function QuantumToggle({ onAccountChange }: Props) {
   const [settings, setSettings] = useState<QuantumSettings | null>(null);
-  const [account, setAccount] = useState<QuantumAccountInfo | null>(null);
-  const [pass, setPass] = useState("hybrid-pass-12345");
+  const [account, setAccount] = useState<QuantumAccountSummary | null>(null);
+  const [pass, setPass] = useState("");
   const [legacyPrikey, setLegacyPrikey] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -40,11 +32,9 @@ export default function QuantumToggle({ onAccountChange }: Props) {
   async function refreshSettings() {
     const s = await quantumApi.getSettings();
     setSettings(s);
-    const acc = accountFromSettings(s);
-    if (acc) {
-      setAccount(acc);
-      onAccountChange?.(acc);
-    }
+    const acc = accountSummaryFromSettings(s);
+    setAccount(acc);
+    onAccountChange?.(acc);
   }
 
   useEffect(() => {
@@ -73,7 +63,7 @@ export default function QuantumToggle({ onAccountChange }: Props) {
     setErr("");
     setInfo("Creating PQC (v6)…");
     try {
-      const acc = await quantumApi.createPqc(pass);
+      const acc = summaryFromAccountInfo(await quantumApi.createPqc(pass));
       setAccount(acc);
       onAccountChange?.(acc);
       await refreshSettings();
@@ -96,7 +86,9 @@ export default function QuantumToggle({ onAccountChange }: Props) {
     setErr("");
     setInfo("Creating Hybrid (v7)…");
     try {
-      const acc = await quantumApi.createHybrid(pass, legacyPrikey || undefined);
+      const acc = summaryFromAccountInfo(
+        await quantumApi.createHybrid(pass, legacyPrikey || undefined),
+      );
       setAccount(acc);
       onAccountChange?.(acc);
       await refreshSettings();
