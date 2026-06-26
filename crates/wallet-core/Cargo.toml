@@ -24,18 +24,17 @@ sha2.workspace = true
 url.workspace = true
 p256.workspace = true
 coset.workspace = true
+sys = { path = "../../../hacash-fullnodedev/sys" }
+field = { path = "../../../hacash-fullnodedev/field" }
+basis = { path = "../../../hacash-fullnodedev/basis" }
+protocol = { path = "../../../hacash-fullnodedev/protocol" }
+sdk = { path = "../../../hacash-fullnodedev/sdk" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_System_Memory"] }
-
-sys = { path = "../../../hacash-fullnodedev/sys" }
-field = { path = "../../../hacash-fullnodedev/field" }
-basis = { path = "../../../hacash-fullnodedev/basis" }
-protocol = { path = "../../../hacash-fullnodedev/protocol" }
-sdk = { path = "../../../hacash-fullnodedev/sdk" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
