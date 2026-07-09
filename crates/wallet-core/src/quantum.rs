@@ -271,29 +271,20 @@ impl WalletService {
             .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
         let amount_mei = parse_decimal_hac_mei(amount_hacash)?;
         let balance_mei = self.quantum_balance_mei().await.unwrap_or(0.0);
-        match crate::hip23::validate_type4_send(
+        let check = crate::hip23::validate_type4_send(
             &account.kind,
             to,
             amount_mei,
             balance_mei,
             TYPE4_AUTO_FEE,
-        ) {
-            Ok(check) => Ok(QuantumPreflight {
-                ok: check.ok,
-                warnings: check.warnings,
-                errors: check.errors,
-                balance_mei,
-                fee_wire: TYPE4_AUTO_FEE.into(),
-            }),
-            Err(WalletError::Policy(msg)) => Ok(QuantumPreflight {
-                ok: false,
-                warnings: Vec::new(),
-                errors: vec![msg],
-                balance_mei,
-                fee_wire: TYPE4_AUTO_FEE.into(),
-            }),
-            Err(e) => Err(e),
-        }
+        )?;
+        Ok(QuantumPreflight {
+            ok: check.ok,
+            warnings: check.warnings,
+            errors: check.errors,
+            balance_mei,
+            fee_wire: TYPE4_AUTO_FEE.into(),
+        })
     }
 
     pub fn set_quantum_mode(&mut self, enabled: bool) -> WalletResult<()> {
@@ -369,7 +360,16 @@ impl WalletService {
             .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
         let amount_mei = parse_decimal_hac_mei(amount)?;
         let balance_mei = self.quantum_balance_mei().await.unwrap_or(0.0);
-        crate::hip23::validate_type4_send(&from.kind, to, amount_mei, balance_mei, TYPE4_AUTO_FEE)?;
+        let check = crate::hip23::validate_type4_send(
+            &from.kind,
+            to,
+            amount_mei,
+            balance_mei,
+            TYPE4_AUTO_FEE,
+        )?;
+        if !check.ok {
+            return Err(WalletError::Policy(check.errors.join("; ")));
+        }
         let ks = self.require_keystore_json()?;
         let built = create_coin_transfer_v4(CoinTransferV4Param {
             main_keystore: ks,

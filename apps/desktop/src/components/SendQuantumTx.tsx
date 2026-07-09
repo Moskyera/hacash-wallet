@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, quantumApi, QuantumAccountSummary, QuantumPreflight } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
-import { canSendType4, PQC_SEND_BLOCKED_MSG } from "../quantumMeta";
+import { canSendType4, PQC_TYPE4_HINT } from "../quantumMeta";
 import { runWebAuthnAuth } from "../webauthn";
 import AddressBadge from "./AddressBadge";
 
@@ -60,7 +60,8 @@ export default function SendQuantumTx({
   const [airgapQr, setAirgapQr] = useState<string[]>([]);
   const [signedQr, setSignedQr] = useState<string[]>([]);
 
-  const hybridReady = canSendType4(account);
+  const type4Ready = canSendType4(account);
+  const isPqcSender = account?.kind === "pqckey" && account.address_version === 6;
 
   const refreshBalance = useCallback(async () => {
     if (!account) {
@@ -76,7 +77,7 @@ export default function SendQuantumTx({
   }, [account]);
 
   const runPreflight = useCallback(async () => {
-    if (!account || !hybridReady) {
+    if (!account || !type4Ready) {
       setPreflight(null);
       return;
     }
@@ -92,7 +93,7 @@ export default function SendQuantumTx({
         fee_wire: AUTO_FEE,
       });
     }
-  }, [account, hybridReady, to, amount, balance]);
+  }, [account, type4Ready, to, amount, balance]);
 
   useEffect(() => {
     refreshBalance();
@@ -110,8 +111,8 @@ export default function SendQuantumTx({
       setErr("Create or import a quantum account first.");
       return;
     }
-    if (!hybridReady) {
-      setErr(PQC_SEND_BLOCKED_MSG);
+    if (!type4Ready) {
+      setErr("Create or import a PQC (v6) or Hybrid (v7) quantum account first.");
       return;
     }
     if (preflight && !preflight.ok) {
@@ -142,8 +143,8 @@ export default function SendQuantumTx({
   }
 
   async function prepareAirgap() {
-    if (!hybridReady) {
-      setErr(PQC_SEND_BLOCKED_MSG);
+    if (!type4Ready) {
+      setErr("Create or import a PQC (v6) or Hybrid (v7) quantum account first.");
       return;
     }
     setPhase("busy");
@@ -215,8 +216,8 @@ export default function SendQuantumTx({
         Node: <code>{nodeUrl ?? "http://127.0.0.1:8080"}</code> · auto-fee <code>{fee}</code>
       </p>
 
-      {!hybridReady && account && (
-        <p className="error quantum-policy-block">{PQC_SEND_BLOCKED_MSG}</p>
+      {isPqcSender && (
+        <p className="warn quantum-policy-hint">{PQC_TYPE4_HINT}</p>
       )}
 
       <div className="from-row quantum-active">
@@ -272,21 +273,21 @@ export default function SendQuantumTx({
 
       <div className="actions-row">
         <button
-          disabled={disabled || phase === "busy" || !hybridReady}
+          disabled={disabled || phase === "busy" || !type4Ready}
           onClick={() => send(false)}
         >
           Sign &amp; Send Type 4
         </button>
         <button
           className="btn-test"
-          disabled={disabled || phase === "busy" || !hybridReady}
+          disabled={disabled || phase === "busy" || !type4Ready}
           onClick={() => send(true)}
         >
           Send Test Quantum TX
         </button>
         <button
           className="btn-ghost"
-          disabled={disabled || phase === "busy" || !hybridReady}
+          disabled={disabled || phase === "busy" || !type4Ready}
           onClick={prepareAirgap}
         >
           Air-gap prepare…

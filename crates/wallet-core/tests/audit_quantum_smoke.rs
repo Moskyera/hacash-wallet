@@ -134,6 +134,39 @@ fn audit_quantum_settings_roundtrip_includes_quantum_fields() {
 }
 
 #[test]
+fn audit_quantum_pqc_type4_preflight_allowed() {
+    audit_gate("quantum_pqc_type4_preflight", || {
+        with_isolated_wallet_dir(|| {
+            let mut svc = WalletService::new(None, None).unwrap();
+            svc.create_wallet("vault-pass-123456").unwrap();
+            svc.quantum_create_pqc("ks-pass-12345").unwrap();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let preflight = rt
+                .block_on(svc.quantum_preflight_type4(
+                    "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+                    "0.1",
+                ))
+                .unwrap();
+            assert!(
+                !preflight
+                    .errors
+                    .iter()
+                    .any(|e| e.contains("Hybrid (v7) account")),
+                "PQC must not be blocked from Type 4 preflight: {:?}",
+                preflight.errors
+            );
+            assert!(
+                preflight.warnings.iter().any(|w| w.contains("ML-DSA")),
+                "expected PQC signing hint: {:?}",
+                preflight.warnings
+            );
+            assert!(!preflight.ok);
+            assert!(preflight.errors.iter().any(|e| e.contains("Insufficient")));
+        });
+    });
+}
+
+#[test]
 fn audit_quantum_encrypted_keystore_survives_lock_reload() {
     audit_gate("quantum_encrypted_persist", || {
         with_isolated_wallet_dir(|| {

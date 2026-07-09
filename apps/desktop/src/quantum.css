@@ -186,6 +186,10 @@
 .quantum-policy-block {
   margin-bottom: 12px;
 }
+.quantum-policy-hint {
+  margin-bottom: 12px;
+  color: #fbbf24;
+}
 .quantum-airgap-box {
   margin-top: 16px;
   padding: 12px;

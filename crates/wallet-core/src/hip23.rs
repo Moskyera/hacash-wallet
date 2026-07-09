@@ -221,11 +221,19 @@ pub fn validate_type4_send(
     let mut warnings = Vec::new();
     let mut errors = Vec::new();
 
-    if from_kind != "hybrid" {
-        errors.push(
-            "Type 4 on-chain send requires a Hybrid (v7) account — create or import Hybrid keystore"
-                .into(),
-        );
+    match from_kind {
+        "hybrid" => {}
+        "pqckey" => {
+            warnings.push(
+                "PQC (v6) Type 4 uses ML-DSA only — Hybrid (v7) is recommended for secp256k1 + ML-DSA"
+                    .into(),
+            );
+        }
+        _ => {
+            errors.push(
+                "Type 4 send requires a PQC (v6) or Hybrid (v7) quantum account".into(),
+            );
+        }
     }
     if !verify_hacash_address(to_address) {
         errors.push("Invalid recipient address format".into());
@@ -245,12 +253,8 @@ pub fn validate_type4_send(
         warnings.push("Large Type 4 transfer — confirm WebAuthn/hardware gate if enabled".into());
     }
 
-    let ok = errors.is_empty();
-    if !ok {
-        return Err(WalletError::Policy(errors.join("; ")));
-    }
     Ok(Hip23SendCheck {
-        ok,
+        ok: errors.is_empty(),
         warnings,
         errors,
     })
@@ -306,20 +310,30 @@ mod tests {
     }
 
     #[test]
-    fn type4_rejects_pqc_only_sender() {
-        let err = validate_type4_send(
+    fn type4_pqc_ok_with_balance_and_warning() {
+        let check = validate_type4_send(
             "pqckey",
             "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
             0.1,
-            10.0,
+            50.0,
             "40:244",
-        );
-        assert!(err.is_err());
-        assert!(
-            err.unwrap_err()
-                .to_string()
-                .contains("Hybrid")
-        );
+        )
+        .unwrap();
+        assert!(check.ok);
+        assert!(!check.warnings.is_empty());
+    }
+
+    #[test]
+    fn type4_rejects_unknown_sender_kind() {
+        let check = validate_type4_send(
+            "legacy",
+            "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+            0.1,
+            50.0,
+            "40:244",
+        )
+        .unwrap();
+        assert!(!check.ok);
     }
 
     #[test]
@@ -337,14 +351,15 @@ mod tests {
 
     #[test]
     fn type4_rejects_insufficient_balance() {
-        let err = validate_type4_send(
+        let check = validate_type4_send(
             "hybrid",
             "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
             1.0,
             0.5,
             "40:244",
-        );
-        assert!(err.is_err());
+        )
+        .unwrap();
+        assert!(!check.ok);
     }
 
     #[test]

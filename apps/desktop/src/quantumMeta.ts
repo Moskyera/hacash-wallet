@@ -26,13 +26,17 @@ export function kindLabel(kind: string): string {
   return kind;
 }
 
-/** Type 4 on-chain send requires Hybrid (v7) per HIP-23 wallet policy. */
+/** Type 4 send is available for PQC (v6) and Hybrid (v7) quantum accounts. */
 export function canSendType4(account: QuantumAccountSummary | null): boolean {
-  return account?.kind === "hybrid" && account.address_version === 7;
+  if (!account) return false;
+  return (
+    (account.kind === "pqckey" && account.address_version === 6) ||
+    (account.kind === "hybrid" && account.address_version === 7)
+  );
 }
 
-export const PQC_SEND_BLOCKED_MSG =
-  "Type 4 send requires a Hybrid (v7) account. PQC-only (v6) can receive funds but cannot sign Type 4 transfers yet.";
+export const PQC_TYPE4_HINT =
+  "PQC (v6) signs Type 4 with ML-DSA only. Hybrid (v7) adds secp256k1 binding and is recommended for legacy-linked setups.";
 
 export const REPLACE_KEYSTORE_WARNING =
   "Creating a new quantum account replaces the stored keystore. " +
