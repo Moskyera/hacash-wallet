@@ -17,8 +17,8 @@ Modern, secure desktop wallet for Hacash with encrypted on-device keys, local si
 | Native biometric | Windows Hello `UserConsentVerifier` — OS-bound 2FA (not spoofable from UI) |
 | Hardware modes | Software · WebAuthn-gate (all signs) · Watch-only (Sparrow-style) |
 | Memory lock | `mlock` / `VirtualLock` on passphrase during KDF |
-| HIP-23 | Pre-sign checks for L1 sends + Type3 pattern validators (Advanced tab) |
-| Air-gap QR | L1 coordinator/signer flow — unsigned QR → offline sign → broadcast |
+| HIP-23 | Pre-sign checks for L1 + Type 4 quantum sends; Type3 validators (Advanced tab) |
+| Air-gap QR | L1 and Type 4 quantum flows — unsigned QR → offline sign → broadcast |
 | Privacy | Hide balances/addresses, screen blur, optional history, clipboard clear |
 
 ## Architecture
@@ -31,7 +31,7 @@ Rust Tauri shell
 hacash-wallet-core
   ├── vault (encrypted storage, import/backup/passphrase change)
   ├── account + protocol signing
-  ├── quantum (PQC/hybrid keystore v3, Type 4 send)
+  ├── quantum (PQC/hybrid keystore v3, encrypted vault, Type 4 send/preflight)
   ├── node client (balance, build, submit)
   ├── payment router (L2 hub → L1 fallback)
   ├── channel (L1 open/close)
@@ -104,21 +104,37 @@ cargo test
 ## Features (v0.4 — quantum)
 
 - [x] PQC account (v6, ML-DSA) — create / import / export keystore v3
-- [x] Hybrid account (v7, ML-DSA + secp256k1) — recommended for Type 4 txs
+- [x] Hybrid account (v7, ML-DSA + secp256k1) — optional legacy secp link
 - [x] Keystore v3 modal — paste JSON, password verify on export
-- [x] Type 4 on-chain send (auto-fee `40:244`) via local fullnode
-- [x] Quantum tab UI — address badges (Legacy / PQC / Hybrid), node metrics
-- [x] Settings persistence — `quantum_mode`, encrypted keystore JSON blob
+- [x] Encrypted quantum keystore at rest (`quantum.keystore.enc`, vault-derived key)
+- [x] Type 4 on-chain send for **PQC and Hybrid** (auto-fee `40:244`) via local PQC fullnode
+- [x] Preflight checks, quantum balance, node health panel, funding wizard
+- [x] Type 4 air-gap prepare / sign / broadcast (in addition to legacy L1 air-gap QR)
+- [x] Quantum tab UI — address badges (PQC / Hybrid), WebAuthn gate on send when enabled
+- [x] Settings — `quantum_mode`, `active_account` metadata (address, kind, version)
 - [x] Quantum unit + audit smoke tests; E2E in `hacash-wallet-integration`
 
-Requires sibling `hacash-fullnodedev` with PQC/Hybrid support (Phases 1–3).
+Requires sibling `hacash-fullnodedev` on branch `feature/pqc-phases-1-3` (PQC/Hybrid + Type 4).
 
-| Account kind | Version | Signing |
-|--------------|---------|---------|
-| PQC (`pqckey`) | v6 | ML-DSA only |
-| Hybrid (`hybrid`) | v7 | ML-DSA + secp (Type 4) |
+| Account kind | Version | Type 4 signing | When to use |
+|--------------|---------|----------------|-------------|
+| PQC (`pqckey`) | v6 | ML-DSA-65 only | Pure post-quantum identity |
+| Hybrid (`hybrid`) | v7 | secp256k1 + ML-DSA | Legacy-linked or dual-alg setups |
 
-Funding: send legacy Type 1 HAC **to** the quantum address (not from Create). One active quantum account at a time; Create replaces the stored keystore — export backup before switching.
+### Quantum quickstart
+
+1. Unlock legacy wallet → **Quantum** tab → enable Quantum Mode.
+2. **Create PQC (v6)** or **Create Hybrid (v7)** (keystore password ≥ 8 chars).
+3. **Fund:** legacy **Send** tab → Type 1 HAC **to** the quantum address shown in Quantum tab.
+4. **Send Type 4:** Quantum tab → enter recipient, amount, keystore password → Sign & Send.
+5. **Backup:** Keystore v3… → export before switching accounts.
+
+Notes:
+
+- Legacy **Send** spends from the main wallet address only — not from quantum balance.
+- One active quantum keystore at a time; **Create** replaces the stored keystore (export first).
+- PQC Type 4 uses ML-DSA only; Hybrid adds secp256k1 binding (recommended when migrating from legacy keys).
+- Live Type 4 on-chain requires a funded quantum address and a running PQC fullnode (`http://127.0.0.1:8080` or your node URL).
 
 ## Features (v0.3)
 
