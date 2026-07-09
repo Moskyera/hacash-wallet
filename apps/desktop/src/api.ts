@@ -238,8 +238,8 @@ export const quantumApi = {
     invoke<QuantumPreflight>("quantum_preflight_type4", { toAddress, amountHacash }),
   prepareAirgapType4: (toAddress: string, amountHacash: string) =>
     invoke<AirgapPrepareResult>("quantum_prepare_airgap_type4", { toAddress, amountHacash }),
-  airgapSignType4: (bodyHex: string, keystorePassword: string) =>
-    invoke<AirgapSignResult>("quantum_airgap_sign_type4", { bodyHex, keystorePassword }),
+  airgapSignType4: (unsigned: AirgapUnsigned, keystorePassword: string) =>
+    invoke<AirgapSignResult>("quantum_airgap_sign_type4", { unsigned, keystorePassword }),
 };
 
 export const api = {

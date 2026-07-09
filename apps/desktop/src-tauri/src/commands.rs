@@ -1,7 +1,7 @@
 //! Additive quantum IPC — legacy commands remain in lib.rs.
 use std::sync::Arc;
 
-use hacash_wallet_core::airgap::{AirgapPrepareResult, AirgapSignResult};
+use hacash_wallet_core::airgap::{AirgapPrepareResult, AirgapSignResult, AirgapUnsigned};
 use hacash_wallet_core::quantum::{
     QuantumAccountInfo, QuantumPreflight, QuantumSendResult, QuantumSettings, QuantumTestResult,
 };
@@ -203,12 +203,12 @@ pub async fn quantum_prepare_airgap_type4(
 
 #[tauri::command]
 pub async fn quantum_airgap_sign_type4(
-    body_hex: String,
+    unsigned: AirgapUnsigned,
     keystore_password: String,
     state: State<'_, AppState>,
 ) -> Result<AirgapSignResult, String> {
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
-        with_unlocked(svc, |s| s.quantum_airgap_sign_type4(&body_hex, &keystore_password))
+        with_unlocked(svc, |s| s.quantum_airgap_sign_type4(&unsigned, &keystore_password))
     })
     .await
 }

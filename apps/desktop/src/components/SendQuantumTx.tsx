@@ -106,6 +106,13 @@ export default function SendQuantumTx({
     return () => clearTimeout(t);
   }, [runPreflight]);
 
+  const canSubmit =
+    type4Ready &&
+    !!pass.trim() &&
+    preflight?.ok === true &&
+    phase !== "busy" &&
+    !disabled;
+
   async function send(isTest: boolean) {
     if (!account) {
       setErr("Create or import a quantum account first.");
@@ -115,8 +122,12 @@ export default function SendQuantumTx({
       setErr("Create or import a PQC (v6) or Hybrid (v7) quantum account first.");
       return;
     }
-    if (preflight && !preflight.ok) {
-      setErr(preflight.errors.join("; "));
+    if (!pass.trim()) {
+      setErr("Enter your quantum keystore password to sign.");
+      return;
+    }
+    if (!preflight?.ok) {
+      setErr(preflight?.errors.join("; ") || "Preflight checks failed — wait or fix amount/recipient.");
       return;
     }
     setPhase("busy");
@@ -172,7 +183,20 @@ export default function SendQuantumTx({
         throw new Error("Expected unsigned Type 4 envelope");
       }
       await maybeWebAuthnGate(Number(amount), webauthnEnabled, securityProfile, nativeBioAvailable);
-      const signed = await quantumApi.airgapSignType4(env.body_hex, pass);
+      const signed = await quantumApi.airgapSignType4(
+        {
+          v: env.v,
+          from: env.from,
+          to: env.to,
+          amount_mei: env.amount_mei,
+          amount_wire: env.amount_wire,
+          fee: env.fee,
+          body_hex: env.body_hex,
+          summary: env.summary,
+          tx_type: env.tx_type ?? 4,
+        },
+        pass,
+      );
       setSignedQr(signed.qr_parts);
       setPhase("idle");
     } catch (e) {
@@ -273,19 +297,23 @@ export default function SendQuantumTx({
 
       <div className="actions-row">
         <button
-          disabled={disabled || phase === "busy" || !type4Ready}
+          type="button"
+          className="primary"
+          disabled={!canSubmit}
           onClick={() => send(false)}
         >
           Sign &amp; Send Type 4
         </button>
         <button
+          type="button"
           className="btn-test"
-          disabled={disabled || phase === "busy" || !type4Ready}
+          disabled={!canSubmit}
           onClick={() => send(true)}
         >
           Send Test Quantum TX
         </button>
         <button
+          type="button"
           className="btn-ghost"
           disabled={disabled || phase === "busy" || !type4Ready}
           onClick={prepareAirgap}
@@ -293,6 +321,17 @@ export default function SendQuantumTx({
           Air-gap prepare…
         </button>
       </div>
+      {!canSubmit && type4Ready && phase !== "busy" && (
+        <p className="muted small">
+          {!pass.trim()
+            ? "Enter keystore password to enable signing."
+            : !preflight
+              ? "Running preflight checks…"
+              : !preflight.ok
+                ? "Fix preflight errors above before sending."
+                : null}
+        </p>
+      )}
 
       {showAirgap && (
         <div className="quantum-airgap-box">

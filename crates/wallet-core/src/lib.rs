@@ -12,6 +12,7 @@ pub mod l2_hub;
 pub mod node;
 pub mod paths;
 pub mod payment;
+pub mod protocol_init;
 pub mod privacy;
 pub mod security;
 pub mod settings;

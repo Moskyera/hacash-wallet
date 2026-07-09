@@ -117,6 +117,7 @@ pub struct ChannelSetupPreview {
 
 impl WalletService {
     pub fn new(node_url: Option<String>, l2_hub_url: Option<String>) -> WalletResult<Self> {
+        crate::protocol_init::ensure_protocol_setup();
         let mut settings = WalletSettings::load().unwrap_or_default();
         if let Some(url) = node_url {
             settings.node_url = url;
@@ -555,7 +556,7 @@ impl WalletService {
             &preview.left_deposit,
             &preview.right_address,
             &preview.right_deposit,
-            "1:244",
+            &crate::hip23::wire_mei_for_node("1:244"),
         )
         .await?;
         let body_hex = built
@@ -590,7 +591,13 @@ impl WalletService {
             .channel_id_hex
             .clone()
             .ok_or_else(|| WalletError::Transaction("no active channel configured".into()))?;
-        let built = build_channel_close_tx(&self.node, &from, &channel_id, "1:244").await?;
+        let built = build_channel_close_tx(
+            &self.node,
+            &from,
+            &channel_id,
+            &crate::hip23::wire_mei_for_node("1:244"),
+        )
+        .await?;
         let body_hex = built
             .body
             .ok_or_else(|| WalletError::Transaction("missing channel close body".into()))?;
@@ -618,7 +625,7 @@ impl WalletService {
         let from = self.require_address()?;
         let amount_wire = format_amount_mei(amount_mei);
         let balance = self.node.balance_mei(&from).await.unwrap_or(0.0);
-        let hip23 = validate_simple_l1_send(to, amount_mei, balance, 0.001)?;
+        let hip23 = validate_simple_l1_send(to, amount_mei, balance, crate::hip23::L1_DEFAULT_FEE_MEI)?;
         let plan = self.router.plan_send(&from, to, amount_mei).await?;
         Ok(SendPreview {
             plan,
@@ -626,7 +633,7 @@ impl WalletService {
             to: to.to_owned(),
             amount_mei,
             amount_wire: amount_wire.clone(),
-            fee: "1:244".into(),
+            fee: crate::hip23::wire_mei_for_node("1:244"),
             hip23,
         })
     }
@@ -1011,9 +1018,7 @@ impl WalletService {
 }
 
 fn format_amount_mei(amount_mei: f64) -> String {
-    let whole = amount_mei.floor() as u64;
-    let frac = ((amount_mei - whole as f64) * 1000.0).round() as u64;
-    format!("{whole}:{frac}")
+    crate::hip23::format_mei_for_node(amount_mei)
 }
 
 fn is_secret_hex(seed: &str) -> bool {

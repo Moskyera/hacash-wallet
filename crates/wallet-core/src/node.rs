@@ -95,9 +95,11 @@ impl NodeClient {
         }
         let entry = body
             .list
-            .into_iter()
-            .find(|x| x.address == address)
-            .ok_or_else(|| WalletError::Node("address not in balance response".into()))?;
+            .iter()
+            .find(|x| x.address.as_deref() == Some(address))
+            .or_else(|| body.list.first())
+            .ok_or_else(|| WalletError::Node("address not in balance response".into()))?
+            .clone();
         entry
             .hacash
             .parse::<f64>()
@@ -173,9 +175,9 @@ struct BalanceResponse {
     list: Vec<BalanceEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct BalanceEntry {
-    address: String,
+    address: Option<String>,
     hacash: String,
 }
 

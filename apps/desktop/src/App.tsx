@@ -20,6 +20,7 @@ import QuantumFundingCard from "./components/QuantumFundingCard";
 import QuantumNodeHealth from "./components/QuantumNodeHealth";
 import AddressBadge from "./components/AddressBadge";
 import { quantumApi, QuantumAccountSummary } from "./api";
+import { formatInvokeError } from "./formatInvokeError";
 import "./quantum.css";
 import {
   copyWithPrivacyClear,
@@ -493,7 +494,7 @@ export default function App() {
       const p = await api.previewSend(sendTo.trim(), Number(sendAmount));
       setPreview(p);
     } catch (e) {
-      setError(String(e));
+      setError(formatInvokeError(e));
     } finally {
       setBusy(false);
     }
@@ -508,11 +509,15 @@ export default function App() {
         status?.security_profile === "paranoid" ||
         (status?.security_profile !== "paranoid" && amount >= 100);
       if (needs2fa && status?.webauthn_enabled) {
+        setInfo("Complete WebAuthn (YubiKey / Windows Hello) in the system prompt…");
         const options = await api.webauthnAuthBegin();
         const assertion = await runWebAuthnAuth(options);
         await api.webauthnAuthFinish(assertion);
       } else if (needs2fa) {
         if (nativeBioAvailable) {
+          setInfo(
+            "Amount ≥ 100 HAC: confirm in the Windows Hello / PIN dialog (check taskbar if hidden).",
+          );
           await api.confirmBiometricNative();
         } else if (status?.webauthn_enabled) {
           const options = await api.webauthnAuthBegin();
@@ -532,7 +537,7 @@ export default function App() {
       setInfo(`Sent via ${result.rail}: ${result.summary}`);
       setScreen("home");
     } catch (e) {
-      setError(String(e));
+      setError(formatInvokeError(e));
     } finally {
       setBusy(false);
     }
@@ -947,6 +952,13 @@ export default function App() {
         {screen === "send" && (
           <section className="panel">
             <h2>Send HAC</h2>
+            <p className="muted">
+              Legacy L1 send (fund a quantum address here). Type 4 quantum sends use the{" "}
+              <button type="button" className="linkish" onClick={() => setScreen("quantum")}>
+                Quantum
+              </button>{" "}
+              tab.
+            </p>
             <label>To address</label>
             <input value={sendTo} onChange={(e) => setSendTo(e.target.value)} placeholder="1ABC..." />
             <label>Amount (mei)</label>
@@ -1005,11 +1017,12 @@ export default function App() {
                   </p>
                 )}
                 <button
+                  type="button"
                   className="primary"
                   disabled={busy || !preview.hip23.ok}
                   onClick={handleConfirmSend}
                 >
-                  Sign & send
+                  {busy ? "Signing…" : "Sign & send"}
                 </button>
               </div>
             )}

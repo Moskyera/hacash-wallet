@@ -130,6 +130,16 @@ input {
 .status-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .preview-card ul, .warn-box ul { margin: 8px 0 0; padding-left: 18px; }
 .address-box code, code { word-break: break-all; color: var(--accent-2); }
+.linkish {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent, #4a9eff);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
 .muted { color: var(--muted); }
 
 .security-grid {

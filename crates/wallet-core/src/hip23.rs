@@ -44,6 +44,9 @@ pub struct Hip23PatternCheck {
     pub check: Hip23SendCheck,
 }
 
+/// Default L1 fee (wallet millis wire `1:244`).
+pub const L1_DEFAULT_FEE_MEI: f64 = 1.244;
+
 pub fn validate_simple_l1_send(
     to_address: &str,
     amount_mei: f64,
@@ -199,6 +202,20 @@ pub fn is_valid_hacash_address(addr: &str) -> bool {
 fn verify_hacash_address(addr: &str) -> bool {
     use field::Address;
     Address::from_readable(addr).is_ok()
+}
+
+/// Serialize mei for node `Amount::from` (decimal mei). Colon form is fin `value:unit` on-chain.
+pub fn format_mei_for_node(amount_mei: f64) -> String {
+    let rounded = (amount_mei * 1000.0).round() / 1000.0;
+    let s = format!("{:.3}", rounded);
+    s.trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+/// Convert wallet millis wire (`whole:frac`) to node mei decimal.
+pub fn wire_mei_for_node(wire: &str) -> String {
+    format_mei_for_node(parse_hacash_wire_mei(wire))
 }
 
 /// Parse HAC wire `whole:frac` (frac = millis) to mei float.
@@ -366,5 +383,12 @@ mod tests {
     fn parse_hacash_wire_mei_splits_whole_frac() {
         let mei = parse_hacash_wire_mei("40:244");
         assert!((mei - 40.244).abs() < 0.001);
+    }
+
+    #[test]
+    fn wire_mei_for_node_uses_decimal_mei() {
+        assert_eq!(wire_mei_for_node("45:0"), "45");
+        assert_eq!(wire_mei_for_node("1:244"), "1.244");
+        assert_eq!(wire_mei_for_node("40:244"), "40.244");
     }
 }

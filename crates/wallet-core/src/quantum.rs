@@ -371,16 +371,22 @@ impl WalletService {
             return Err(WalletError::Policy(check.errors.join("; ")));
         }
         let ks = self.require_keystore_json()?;
-        let built = create_coin_transfer_v4(CoinTransferV4Param {
+        let param = CoinTransferV4Param {
             main_keystore: ks,
             keystore_pass: keystore_pass.into(),
-            fee: TYPE4_AUTO_FEE.into(),
+            fee: crate::hip23::wire_mei_for_node(TYPE4_AUTO_FEE),
             to_address: to.into(),
             timestamp: 0,
-            hacash: amount.into(),
+            hacash: crate::hip23::format_mei_for_node(amount_mei),
             gas_max: 0,
+        };
+        // PQC signing is stack-heavy; avoid running on the small async worker stack (debug builds).
+        let built = tokio::task::spawn_blocking(move || {
+            create_coin_transfer_v4(param).map_err(|e| WalletError::Other(e))
         })
-        .map_err(WalletError::Other)?;
+        .await
+        .map_err(|e| WalletError::Other(format!("type 4 sign task failed: {e}")))?;
+        let built = built?;
         let wire_size = built.body.len() / 2;
         let submitted = self.node_client().submit_tx_hex_body(&built.body).await?;
         let hash = submitted
@@ -442,32 +448,50 @@ impl WalletService {
 
     pub fn quantum_airgap_sign_type4(
         &mut self,
-        body_hex: &str,
+        unsigned: &crate::airgap::AirgapUnsigned,
         keystore_pass: &str,
     ) -> WalletResult<crate::airgap::AirgapSignResult> {
         self.touch_auto_lock();
         self.ensure_quantum_signing_policy()?;
         self.clear_second_factor();
+        if unsigned.tx_type != 4 {
+            return Err(WalletError::Policy(
+                "air-gap sign expects Type 4 unsigned envelope".into(),
+            ));
+        }
+        if unsigned.from.is_empty() || unsigned.to.is_empty() {
+            return Err(WalletError::Transaction(
+                "airgap unsigned missing addresses".into(),
+            ));
+        }
+        let expected_addr = self
+            .quantum_settings()
+            .active_account
+            .as_ref()
+            .ok_or_else(|| WalletError::Other("no quantum account".into()))?
+            .address
+            .clone();
+        if unsigned.from != expected_addr {
+            return Err(WalletError::Policy(format!(
+                "offline signer quantum address {expected_addr} does not match unsigned tx from {}",
+                unsigned.from
+            )));
+        }
         use sdk::sign_transaction_v4;
         use sdk::SignTxV4Param;
         let signed = sign_transaction_v4(SignTxV4Param {
-            body: body_hex.into(),
+            body: unsigned.body_hex.clone(),
             hybrid_keystore: self.require_keystore_json()?,
             keystore_pass: keystore_pass.into(),
         })
         .map_err(WalletError::Other)?;
-        let settings = self.quantum_settings();
-        let from = settings
-            .active_account
-            .map(|a| a.address)
-            .unwrap_or_default();
         let envelope = crate::airgap::AirgapSigned {
             v: crate::airgap::AIRGAP_VERSION,
-            from,
-            to: String::new(),
-            amount_mei: 0.0,
+            from: unsigned.from.clone(),
+            to: unsigned.to.clone(),
+            amount_mei: unsigned.amount_mei,
             signed_hex: signed.body,
-            summary: "Type 4 quantum signed (air-gap)".into(),
+            summary: unsigned.summary.clone(),
             tx_type: 4,
         };
         let qr_parts =

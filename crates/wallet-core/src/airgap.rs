@@ -349,4 +349,29 @@ mod tests {
         assert!(parse_qr_fragment("hacash-airgap:0/2:xx").is_err());
         assert!(parse_qr_fragment("hacash-airgap:2/1:xx").is_err());
     }
+
+    #[test]
+    fn type4_signed_envelope_requires_addresses() {
+        let valid = AirgapEnvelope::Signed(AirgapSigned {
+            v: AIRGAP_VERSION,
+            from: "3Sender".into(),
+            to: "1Recipient".into(),
+            amount_mei: 0.1,
+            signed_hex: "010203".into(),
+            summary: "type 4".into(),
+            tx_type: 4,
+        });
+        assert!(encode_envelope_qr(&valid).is_ok());
+
+        let missing_to = AirgapEnvelope::Signed(AirgapSigned {
+            v: AIRGAP_VERSION,
+            from: "3Sender".into(),
+            to: String::new(),
+            amount_mei: 0.1,
+            signed_hex: "010203".into(),
+            summary: "type 4".into(),
+            tx_type: 4,
+        });
+        assert!(encode_envelope_qr(&missing_to).is_err());
+    }
 }

@@ -210,10 +210,14 @@ fn wallet_platform_security_status() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn wallet_confirm_biometric_native(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    let nonce = svc.begin_native_biometric().map_err(|e| e.to_string())?;
+    let nonce = {
+        let mut svc = state.inner.blocking_lock();
+        svc.begin_native_biometric().map_err(|e| e.to_string())?
+    };
     let message = format!("Authorize Hacash Wallet transaction\nReference: {nonce}");
+    // Do not hold the wallet mutex during Hello — it blocks all IPC and freezes the UI.
     platform::verify_native_biometric(&message)?;
+    let mut svc = state.inner.blocking_lock();
     svc.finish_native_biometric(&nonce)
         .map_err(|e| e.to_string())
 }
