@@ -113,6 +113,36 @@ input {
   color: var(--muted);
 }
 .chip-accent { color: var(--accent); border-color: rgba(61,214,198,0.35); }
+.chip-ok { color: #7dffb8; border-color: rgba(61,214,198,0.45); }
+.chip-bad { color: #ff9a9a; border-color: rgba(255,107,107,0.45); }
+
+.relay-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+.relay-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #0f1722;
+  font-size: 13px;
+}
+.relay-status-row.online { border-color: rgba(61,214,198,0.35); }
+.relay-status-row.offline { border-color: rgba(255,107,107,0.35); }
+.relay-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.relay-status-dot.online { background: #3dd6c6; }
+.relay-status-dot.offline { background: #ff6b6b; }
 
 .actions-row { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
 .preview-card, .success-box, .address-box, .alert {

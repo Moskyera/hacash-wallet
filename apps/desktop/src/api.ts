@@ -8,6 +8,21 @@ export type PrivacySettings = {
   clipboard_clear_secs: number;
 };
 
+export type DustWhisperSettings = {
+  enabled: boolean;
+  relay_urls: string[];
+  fallback_direct: boolean;
+  auto_start_relay: boolean;
+};
+
+export type RelayHealthStatus = {
+  url: string;
+  online: boolean;
+  error: string | null;
+  node_url: string | null;
+  protocol_version: number | null;
+};
+
 export type WalletStatus = {
   has_wallet: boolean;
   locked: boolean;
@@ -24,6 +39,7 @@ export type WalletStatus = {
   hardware_signing_mode: string;
   watch_only: boolean;
   privacy: PrivacySettings;
+  dust_whisper: DustWhisperSettings;
 }
 
 export type PlatformSecurityStatus = {
@@ -299,6 +315,10 @@ export const api = {
     invoke<void>("wallet_set_security_profile", { profile }),
   updatePrivacySettings: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
+  updateDustWhisperSettings: (dustWhisper: DustWhisperSettings) =>
+    invoke<void>("wallet_update_dust_whisper_settings", { dustWhisper }),
+  whisperRelayHealth: () =>
+    invoke<RelayHealthStatus[]>("wallet_whisper_relay_health"),
   clearTxHistory: () => invoke<void>("wallet_clear_tx_history"),
   airgapPrepareSend: (to: string, amountMei: number) =>
     invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),

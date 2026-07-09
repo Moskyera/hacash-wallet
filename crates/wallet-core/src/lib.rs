@@ -2,6 +2,7 @@ pub mod account;
 pub mod airgap;
 pub mod bills;
 pub mod channel;
+pub mod dust_whisper;
 pub mod error;
 pub mod history;
 pub mod hardware;
@@ -33,6 +34,7 @@ pub use history::TxRecord;
 pub use hip23::{Hip23PatternCheck, Type3CheckInput, HeightScopeInput, BalanceFloorInput};
 pub use l2_hub::HubHealth;
 pub use hardware::HardwareSigningMode;
+pub use dust_whisper::{DustWhisperSettings, RelayHealthStatus};
 pub use privacy::{mask_address, mask_amount, mask_hash, PrivacySettings};
 pub use settings::WalletSettings;
 pub use quantum::{

@@ -24,6 +24,7 @@ sha2.workspace = true
 url.workspace = true
 p256.workspace = true
 coset.workspace = true
+dust-whisper = { path = "../dust-whisper" }
 sys = { path = "../../../hacash-fullnodedev/sys" }
 field = { path = "../../../hacash-fullnodedev/field" }
 basis = { path = "../../../hacash-fullnodedev/basis" }
@@ -40,3 +41,5 @@ windows = { version = "0.58", features = ["Win32_System_Memory"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+axum = { workspace = true }
+serde_json = { workspace = true }

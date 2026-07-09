@@ -1,13 +1,14 @@
 mod commands;
 mod platform;
 mod state;
+mod whisper_relay;
 
 use hacash_wallet_core::hip23::{BalanceFloorInput, HeightScopeInput, Type3CheckInput};
 use hacash_wallet_core::hardware::HardwareSigningMode;
 use hacash_wallet_core::security::SecurityProfile;
-use hacash_wallet_core::{PrivacySettings, WalletService, WalletSettings};
+use hacash_wallet_core::{DustWhisperSettings, PrivacySettings, WalletService, WalletSettings};
 use state::AppState;
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 
 #[tauri::command]
 fn wallet_status(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -320,6 +321,30 @@ fn wallet_update_privacy_settings(
 }
 
 #[tauri::command]
+async fn wallet_whisper_relay_health(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let health = svc.whisper_relay_health().await;
+    serde_json::to_value(health).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn wallet_update_dust_whisper_settings(
+    dust_whisper: DustWhisperSettings,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    {
+        let mut svc = state.inner.lock().await;
+        svc.update_dust_whisper_settings(dust_whisper)
+            .map_err(|e| e.to_string())?;
+    }
+    whisper_relay::sync_managed_relay(&app).await?;
+    Ok(())
+}
+
+#[tauri::command]
 fn wallet_clear_tx_history(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut svc = state.inner.blocking_lock();
     svc.clear_tx_history().map_err(|e| e.to_string())
@@ -358,13 +383,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let mut svc = WalletService::new(
-                Some("http://127.0.0.1:8080".into()),
-                None,
-            )
+            let mut svc = WalletService::new(None, None)
             .map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = whisper_relay::sync_managed_relay(&handle).await {
+                    tracing::warn!(error = %e, "DUST Whisper relay auto-start skipped");
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -402,6 +430,8 @@ pub fn run() {
             wallet_airgap_parse_qr,
             wallet_airgap_parse_qr_batch,
             wallet_update_privacy_settings,
+            wallet_whisper_relay_health,
+            wallet_update_dust_whisper_settings,
             wallet_clear_tx_history,
             wallet_send_hac,
             wallet_set_security_profile,
@@ -421,6 +451,13 @@ pub fn run() {
             commands::quantum_prepare_airgap_type4,
             commands::quantum_airgap_sign_type4,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let _ = whisper_relay::stop_managed_relay(&state);
+                }
+            }
+        });
 }

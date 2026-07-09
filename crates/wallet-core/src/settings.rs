@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
 use crate::paths::secure_write;
+use crate::dust_whisper::DustWhisperSettings;
 use crate::privacy::PrivacySettings;
 
 fn default_security_profile() -> String {
@@ -40,6 +41,8 @@ pub struct WalletSettings {
     #[serde(default)]
     pub privacy: PrivacySettings,
     #[serde(default)]
+    pub dust_whisper: DustWhisperSettings,
+    #[serde(default)]
     pub quantum_mode: bool,
     #[serde(default)]
     pub quantum_meta: Option<QuantumMeta>,
@@ -51,7 +54,7 @@ pub struct WalletSettings {
 impl Default for WalletSettings {
     fn default() -> Self {
         Self {
-            node_url: "https://nodeapi.hacash.org".into(),
+            node_url: "http://nodeapi.hacash.org".into(),
             l2_hub_url: None,
             hub_right_address: None,
             channel_id_hex: None,
@@ -60,6 +63,7 @@ impl Default for WalletSettings {
             hardware_signing_mode: default_hardware_mode(),
             watch_only_address: None,
             privacy: PrivacySettings::default(),
+            dust_whisper: DustWhisperSettings::default(),
             quantum_mode: false,
             quantum_meta: None,
             quantum_keystore_json: None,

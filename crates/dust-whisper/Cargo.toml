@@ -1,0 +1,40 @@
+[package]
+name = "dust-whisper"
+version.workspace = true
+edition.workspace = true
+description = "DUST Whisper — encrypted relay transport for private transaction submission"
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
+base64.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+url.workspace = true
+axum = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true, optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+[features]
+default = []
+relay = ["dep:clap", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "dust-whisper-relay"
+path = "src/bin/dust-whisper-relay.rs"
+required-features = ["relay"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+axum = { workspace = true }
+serde_json = { workspace = true }

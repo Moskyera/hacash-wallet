@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::error::{WalletError, WalletResult};
 
-const DEFAULT_NODE: &str = "https://nodeapi.hacash.org";
+const DEFAULT_NODE: &str = "http://nodeapi.hacash.org";
 
 fn shared_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();

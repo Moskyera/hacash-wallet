@@ -24,6 +24,10 @@ use crate::hip23::{
 
 use crate::history::{TxHistory, TxRecord};
 use crate::l2_hub::{HubHealth, L2HubClient};
+use crate::dust_whisper::{
+    relay_health as whisper_relay_health, submit_tx_hex as whisper_submit_tx_hex,
+    whisper_fallback_notice, DustWhisperSettings, RelayHealthStatus,
+};
 use crate::node::NodeClient;
 use crate::payment::{PaymentPlan, PaymentRail, PaymentRouter};
 use crate::privacy::{mask_address, mask_amount, mask_hash, PrivacySettings};
@@ -86,6 +90,7 @@ pub struct WalletStatus {
     pub hardware_signing_mode: String,
     pub watch_only: bool,
     pub privacy: PrivacySettings,
+    pub dust_whisper: DustWhisperSettings,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -186,6 +191,7 @@ impl WalletService {
             hardware_signing_mode: self.settings.hardware_signing_mode.clone(),
             watch_only,
             privacy: self.settings.privacy.clone(),
+            dust_whisper: self.settings.dust_whisper.clone(),
         }
     }
 
@@ -504,6 +510,40 @@ impl WalletService {
         self.settings.privacy.clone()
     }
 
+    pub fn update_dust_whisper_settings(
+        &mut self,
+        dust_whisper: DustWhisperSettings,
+    ) -> WalletResult<()> {
+        self.settings.dust_whisper = dust_whisper;
+        self.settings.save()
+    }
+
+    pub fn dust_whisper_settings(&self) -> DustWhisperSettings {
+        self.settings.dust_whisper.clone()
+    }
+
+    pub async fn whisper_relay_health(&self) -> Vec<RelayHealthStatus> {
+        whisper_relay_health(&self.node, &self.settings.dust_whisper).await
+    }
+
+    pub(crate) async fn submit_signed_tx(
+        &self,
+        signed_hex: &str,
+    ) -> WalletResult<crate::node::SubmitTxResponse> {
+        whisper_submit_tx_hex(&self.node, &self.settings.dust_whisper, signed_hex).await
+    }
+
+    fn summary_with_whisper_notice(
+        &self,
+        summary: String,
+        submitted: &crate::node::SubmitTxResponse,
+    ) -> String {
+        match whisper_fallback_notice(&submitted.message) {
+            Some(notice) => format!("{summary} — {notice}"),
+            None => summary,
+        }
+    }
+
     pub fn validate_hip23_patterns(
         &self,
         universal: Type3CheckInput,
@@ -563,7 +603,7 @@ impl WalletService {
             .body
             .ok_or_else(|| WalletError::Transaction("missing channel open body".into()))?;
         let signed_hex = self.sign_tx_hex(&body_hex)?;
-        let submitted = self.node.submit_tx_hex(&signed_hex).await?;
+        let submitted = self.submit_signed_tx(&signed_hex).await?;
         let hash = submitted
             .hash
             .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
@@ -602,7 +642,7 @@ impl WalletService {
             .body
             .ok_or_else(|| WalletError::Transaction("missing channel close body".into()))?;
         let signed_hex = self.sign_tx_hex(&body_hex)?;
-        let submitted = self.node.submit_tx_hex(&signed_hex).await?;
+        let submitted = self.submit_signed_tx(&signed_hex).await?;
         let hash = submitted
             .hash
             .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
@@ -731,7 +771,7 @@ impl WalletService {
                     "signed type 4 tx sender does not match active quantum account".into(),
                 ));
             }
-            let submitted = self.node.submit_tx_hex(&signed.signed_hex).await?;
+            let submitted = self.submit_signed_tx(&signed.signed_hex).await?;
             let hash = submitted
                 .hash
                 .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
@@ -755,7 +795,7 @@ impl WalletService {
                 "signed tx sender does not match this wallet address".into(),
             ));
         }
-        let submitted = self.node.submit_tx_hex(&signed.signed_hex).await?;
+        let submitted = self.submit_signed_tx(&signed.signed_hex).await?;
         let hash = submitted
             .hash
             .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
@@ -824,14 +864,16 @@ impl WalletService {
                     .body
                     .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
                 let signed_hex = self.sign_tx_hex(&body_hex)?;
-                let submitted = self.node.submit_tx_hex(&signed_hex).await?;
+                let submitted = self.submit_signed_tx(&signed_hex).await?;
+                let summary =
+                    self.summary_with_whisper_notice(preview.plan.summary, &submitted);
                 let hash = submitted
                     .hash
                     .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
                 SendResult {
                     rail: PaymentRail::L1OnChain,
                     tx_hash: hash,
-                    summary: preview.plan.summary,
+                    summary,
                 }
             }
             PaymentRail::QuantumType4 => {

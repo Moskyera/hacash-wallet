@@ -388,7 +388,7 @@ impl WalletService {
         .map_err(|e| WalletError::Other(format!("type 4 sign task failed: {e}")))?;
         let built = built?;
         let wire_size = built.body.len() / 2;
-        let submitted = self.node_client().submit_tx_hex_body(&built.body).await?;
+        let submitted = self.submit_signed_tx(&built.body).await?;
         let hash = submitted
             .hash
             .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;

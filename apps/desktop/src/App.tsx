@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api,
@@ -6,7 +6,9 @@ import {
   ChannelSetupPreview,
   Hip23PatternCheck,
   HubHealth,
+  DustWhisperSettings,
   PrivacySettings,
+  RelayHealthStatus,
   SendPreview,
   TxRecord,
   WalletSettings,
@@ -24,6 +26,7 @@ import { formatInvokeError } from "./formatInvokeError";
 import "./quantum.css";
 import {
   copyWithPrivacyClear,
+  DEFAULT_DUST_WHISPER,
   DEFAULT_PRIVACY,
   maskAddress,
   maskBalance,
@@ -137,8 +140,13 @@ export default function App() {
   const [watchAddress, setWatchAddress] = useState("");
   const [privacyShield, setPrivacyShield] = useState(false);
   const [privacyDraft, setPrivacyDraft] = useState<PrivacySettings>(DEFAULT_PRIVACY);
+  const [whisperDraft, setWhisperDraft] = useState<DustWhisperSettings>(DEFAULT_DUST_WHISPER);
+  const [whisperRelayText, setWhisperRelayText] = useState("");
+  const [relayHealth, setRelayHealth] = useState<RelayHealthStatus[]>([]);
+  const prevScreenRef = useRef<Screen>("welcome");
 
   const privacy = status?.privacy ?? DEFAULT_PRIVACY;
+  const dustWhisper = status?.dust_whisper ?? DEFAULT_DUST_WHISPER;
   const hideBalances = privacy.hide_balances;
   const hideAddresses = privacy.hide_addresses;
 
@@ -220,9 +228,47 @@ export default function App() {
     refreshStatus().catch((e) => setError(String(e)));
   }, [refreshStatus]);
 
+  // Sync privacy drafts only when opening the Privacy tab — not on 1s status polls.
   useEffect(() => {
+    const enteredPrivacy = screen === "privacy" && prevScreenRef.current !== "privacy";
+    prevScreenRef.current = screen;
+    if (!enteredPrivacy) return;
     if (status?.privacy) setPrivacyDraft(status.privacy);
-  }, [status?.privacy]);
+    if (status?.dust_whisper) {
+      setWhisperDraft(status.dust_whisper);
+      setWhisperRelayText(status.dust_whisper.relay_urls.join("\n"));
+    }
+  }, [screen, status?.privacy, status?.dust_whisper]);
+
+  const refreshRelayHealth = useCallback(async () => {
+    if (!dustWhisper.enabled || dustWhisper.relay_urls.length === 0) {
+      setRelayHealth([]);
+      return;
+    }
+    try {
+      const rows = await api.whisperRelayHealth();
+      setRelayHealth(rows);
+    } catch {
+      setRelayHealth([]);
+    }
+  }, [dustWhisper.enabled, dustWhisper.relay_urls.join("|")]);
+
+  const relayUrlsKey = dustWhisper.relay_urls.join("|");
+
+  useEffect(() => {
+    if (!dustWhisper.enabled) {
+      setRelayHealth([]);
+      return;
+    }
+    refreshRelayHealth().catch(() => undefined);
+    const id = window.setInterval(() => {
+      refreshRelayHealth().catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [dustWhisper.enabled, relayUrlsKey, refreshRelayHealth]);
+
+  const whisperRelayOnline =
+    relayHealth.length > 0 && relayHealth.some((row) => row.online);
 
   useEffect(() => {
     if (!privacy.screen_privacy) {
@@ -657,6 +703,35 @@ export default function App() {
     }
   }
 
+  async function handleSaveWhisper() {
+    setBusy(true);
+    clearMessages();
+    try {
+      const relay_urls = whisperRelayText
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const next: DustWhisperSettings = {
+        ...whisperDraft,
+        relay_urls,
+      };
+      if (next.enabled && relay_urls.length === 0) {
+        setError("Add at least one relay URL to enable DUST Whisper.");
+        return;
+      }
+      await api.updateDustWhisperSettings(next);
+      setWhisperDraft(next);
+      setWhisperRelayText(next.relay_urls.join("\n"));
+      await refreshStatus();
+      await refreshRelayHealth();
+      setInfo("DUST Whisper settings saved.");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleClearHistory() {
     setBusy(true);
     clearMessages();
@@ -778,6 +853,18 @@ export default function App() {
               {status.watch_only && <span className="chip">Watch-only</span>}
               {(privacy.hide_balances || privacy.hide_addresses) && (
                 <span className="chip chip-accent">Privacy on</span>
+              )}
+              {dustWhisper.enabled && (
+                <span
+                  className={`chip ${whisperRelayOnline ? "chip-ok" : "chip-bad"}`}
+                  title={
+                    whisperRelayOnline
+                      ? "Whisper relay online"
+                      : "Whisper relay offline — sends may fail or fall back"
+                  }
+                >
+                  Whisper {whisperRelayOnline ? "online" : "offline"}
+                </span>
               )}
               {status.hardware_signing_mode === "webauthn_gate" && (
                 <span className="chip chip-accent">HW gate</span>
@@ -1559,6 +1646,85 @@ export default function App() {
               </button>
               <button disabled={busy} onClick={handleClearHistory}>
                 Clear local history
+              </button>
+            </div>
+
+            <hr className="divider" />
+
+            <h3>DUST Whisper</h3>
+            <p className="muted">
+              Route signed transactions through an encrypted relay so the fullnode never sees your
+              IP. Balance queries still use your node URL directly.
+            </p>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={whisperDraft.enabled}
+                onChange={(e) =>
+                  setWhisperDraft((w) => ({ ...w, enabled: e.target.checked }))
+                }
+              />
+              Enable DUST Whisper for tx broadcast
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={whisperDraft.fallback_direct}
+                onChange={(e) =>
+                  setWhisperDraft((w) => ({ ...w, fallback_direct: e.target.checked }))
+                }
+              />
+              Fall back to direct node submit if relay fails
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={whisperDraft.auto_start_relay ?? true}
+                onChange={(e) =>
+                  setWhisperDraft((w) => ({ ...w, auto_start_relay: e.target.checked }))
+                }
+              />
+              Auto-start local relay when wallet opens (127.0.0.1 / localhost only)
+            </label>
+            {(whisperDraft.enabled || dustWhisper.enabled) && (
+              <div className="relay-status-list">
+                <strong>Relay status</strong>
+                {(relayHealth.length > 0 ? relayHealth : dustWhisper.relay_urls.map((url) => ({
+                  url,
+                  online: false,
+                  error: "Checking…",
+                  node_url: null,
+                  protocol_version: null,
+                }))).map((row) => (
+                  <div
+                    key={row.url}
+                    className={`relay-status-row ${row.online ? "online" : "offline"}`}
+                  >
+                    <span className={`relay-status-dot ${row.online ? "online" : "offline"}`} />
+                    <code>{row.url}</code>
+                    <span className="muted">
+                      {row.online
+                        ? `online · node ${row.node_url ?? "—"}`
+                        : row.error ?? "offline"}
+                    </span>
+                  </div>
+                ))}
+                {dustWhisper.relay_urls.length === 0 && (
+                  <p className="muted">Add a relay URL to see status.</p>
+                )}
+              </div>
+            )}
+            <label>Relay URLs (one per line)</label>
+            <textarea
+              className="textarea mono"
+              rows={3}
+              placeholder="http://127.0.0.1:8787"
+              value={whisperRelayText}
+              onChange={(e) => setWhisperRelayText(e.target.value)}
+            />
+            <div className="actions-row">
+              <button className="primary" disabled={busy} onClick={handleSaveWhisper}>
+                Save DUST Whisper
               </button>
             </div>
 

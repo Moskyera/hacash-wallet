@@ -1,4 +1,4 @@
-import type { PrivacySettings } from "./api";
+import type { DustWhisperSettings, PrivacySettings } from "./api";
 
 export function maskAddress(address: string | null | undefined, hide: boolean): string {
   if (!address) return "—";
@@ -37,4 +37,11 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
   screen_privacy: true,
   store_tx_history: true,
   clipboard_clear_secs: 30,
+};
+
+export const DEFAULT_DUST_WHISPER: DustWhisperSettings = {
+  enabled: false,
+  relay_urls: [],
+  fallback_direct: true,
+  auto_start_relay: true,
 };
