@@ -60,6 +60,7 @@ impl TxHistory {
                 rail: match rail {
                     PaymentRail::L2Fast => "L2Fast".into(),
                     PaymentRail::L1OnChain => "L1OnChain".into(),
+                    PaymentRail::QuantumType4 => "QuantumType4".into(),
                 },
                 from: from.to_owned(),
                 to: to.to_owned(),

@@ -201,6 +201,61 @@ fn verify_hacash_address(addr: &str) -> bool {
     Address::from_readable(addr).is_ok()
 }
 
+/// Parse HAC wire `whole:frac` (frac = millis) to mei float.
+pub fn parse_hacash_wire_mei(wire: &str) -> f64 {
+    let Some((whole, frac)) = wire.split_once(':') else {
+        return 0.0;
+    };
+    let whole: f64 = whole.parse().unwrap_or(0.0);
+    let frac: f64 = frac.parse().unwrap_or(0.0);
+    whole + frac / 1000.0
+}
+
+pub fn validate_type4_send(
+    from_kind: &str,
+    to_address: &str,
+    amount_mei: f64,
+    balance_mei: f64,
+    fee_wire: &str,
+) -> WalletResult<Hip23SendCheck> {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    if from_kind != "hybrid" {
+        errors.push(
+            "Type 4 on-chain send requires a Hybrid (v7) account — create or import Hybrid keystore"
+                .into(),
+        );
+    }
+    if !verify_hacash_address(to_address) {
+        errors.push("Invalid recipient address format".into());
+    }
+    if amount_mei <= 0.0 {
+        errors.push("Amount must be positive".into());
+    }
+    let fee_mei = parse_hacash_wire_mei(fee_wire);
+    if amount_mei + fee_mei > balance_mei {
+        errors.push(format!(
+            "Insufficient quantum balance: need {:.3} HAC (amount + fee), have {:.3}",
+            amount_mei + fee_mei,
+            balance_mei
+        ));
+    }
+    if amount_mei >= 100.0 {
+        warnings.push("Large Type 4 transfer — confirm WebAuthn/hardware gate if enabled".into());
+    }
+
+    let ok = errors.is_empty();
+    if !ok {
+        return Err(WalletError::Policy(errors.join("; ")));
+    }
+    Ok(Hip23SendCheck {
+        ok,
+        warnings,
+        errors,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +303,53 @@ mod tests {
             action_count: 1,
         });
         assert!(!check.ok);
+    }
+
+    #[test]
+    fn type4_rejects_pqc_only_sender() {
+        let err = validate_type4_send(
+            "pqckey",
+            "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+            0.1,
+            10.0,
+            "40:244",
+        );
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("Hybrid")
+        );
+    }
+
+    #[test]
+    fn type4_hybrid_ok_with_balance() {
+        let check = validate_type4_send(
+            "hybrid",
+            "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+            0.1,
+            50.0,
+            "40:244",
+        )
+        .unwrap();
+        assert!(check.ok);
+    }
+
+    #[test]
+    fn type4_rejects_insufficient_balance() {
+        let err = validate_type4_send(
+            "hybrid",
+            "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+            1.0,
+            0.5,
+            "40:244",
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn parse_hacash_wire_mei_splits_whole_frac() {
+        let mei = parse_hacash_wire_mei("40:244");
+        assert!((mei - 40.244).abs() < 0.001);
     }
 }

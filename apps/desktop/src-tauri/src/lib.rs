@@ -1,3 +1,4 @@
+mod commands;
 mod platform;
 mod state;
 
@@ -353,7 +354,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let mut svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
+            let mut svc = WalletService::new(
+                Some("http://127.0.0.1:8080".into()),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
             Ok(())
@@ -396,6 +401,21 @@ pub fn run() {
             wallet_clear_tx_history,
             wallet_send_hac,
             wallet_set_security_profile,
+            commands::quantum_get_settings,
+            commands::quantum_set_mode,
+            commands::quantum_create_pqc,
+            commands::quantum_create_hybrid,
+            commands::quantum_create_hybrid_from_privakey,
+            commands::quantum_import_keystore_v3,
+            commands::quantum_export_keystore_v3,
+            commands::quantum_preview_keystore,
+            commands::quantum_send_type4,
+            commands::quantum_send_test_tx,
+            commands::quantum_node_ping,
+            commands::quantum_balance,
+            commands::quantum_preflight_type4,
+            commands::quantum_prepare_airgap_type4,
+            commands::quantum_airgap_sign_type4,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

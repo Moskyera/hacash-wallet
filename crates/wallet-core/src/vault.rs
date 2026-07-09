@@ -169,6 +169,10 @@ impl EncryptedVault {
             webauthn_credential_b64: self.metadata.webauthn_credential_b64.clone(),
         }
     }
+
+    pub fn salt(&self) -> &[u8; SALT_LEN] {
+        &self.salt
+    }
 }
 
 #[derive(Debug, Clone)]

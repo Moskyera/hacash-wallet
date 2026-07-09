@@ -31,6 +31,7 @@ Rust Tauri shell
 hacash-wallet-core
   ├── vault (encrypted storage, import/backup/passphrase change)
   ├── account + protocol signing
+  ├── quantum (PQC/hybrid keystore v3, Type 4 send)
   ├── node client (balance, build, submit)
   ├── payment router (L2 hub → L1 fallback)
   ├── channel (L1 open/close)
@@ -42,6 +43,8 @@ hacash-wallet-core
   └── settings (persisted preferences)
 ```
 
+Quantum IPC lives in `apps/desktop/src-tauri/src/commands.rs` (additive; legacy commands stay in `lib.rs`).
+
 ## Development
 
 ### Prerequisites
@@ -49,7 +52,11 @@ hacash-wallet-core
 - Rust stable
 - Yarn
 - [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) (Windows: WebView2, VS Build Tools)
-- `hacash-fullnodedev` cloned as sibling: `../hacash-fullnodedev`
+- `hacash-fullnodedev` cloned as sibling: `../hacash-fullnodedev` (PQC branch required)
+
+```bash
+git clone --branch feature/pqc-phases-1-3 https://github.com/Moskyera/fullnodedev.git ../hacash-fullnodedev
+```
 
 ### Run
 
@@ -63,6 +70,7 @@ yarn tauri dev
 
 ```bash
 cargo test -p hacash-wallet-core --lib
+cargo test -p hacash-wallet-core audit_quantum_
 ```
 
 ### Security audit gates (enterprise-style)
@@ -92,6 +100,25 @@ See `../hacash-wallet-integration/AUDIT.md` for threat model, STRIDE, requiremen
 cd ../hacash-wallet-integration
 cargo test
 ```
+
+## Features (v0.4 — quantum)
+
+- [x] PQC account (v6, ML-DSA) — create / import / export keystore v3
+- [x] Hybrid account (v7, ML-DSA + secp256k1) — recommended for Type 4 txs
+- [x] Keystore v3 modal — paste JSON, password verify on export
+- [x] Type 4 on-chain send (auto-fee `40:244`) via local fullnode
+- [x] Quantum tab UI — address badges (Legacy / PQC / Hybrid), node metrics
+- [x] Settings persistence — `quantum_mode`, encrypted keystore JSON blob
+- [x] Quantum unit + audit smoke tests; E2E in `hacash-wallet-integration`
+
+Requires sibling `hacash-fullnodedev` with PQC/Hybrid support (Phases 1–3).
+
+| Account kind | Version | Signing |
+|--------------|---------|---------|
+| PQC (`pqckey`) | v6 | ML-DSA only |
+| Hybrid (`hybrid`) | v7 | ML-DSA + secp (Type 4) |
+
+Funding: send legacy Type 1 HAC **to** the quantum address (not from Create). One active quantum account at a time; Create replaces the stored keystore — export backup before switching.
 
 ## Features (v0.3)
 

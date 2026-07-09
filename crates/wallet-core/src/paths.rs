@@ -28,6 +28,10 @@ pub fn history_path() -> PathBuf {
     wallet_data_root().join("tx_history.json")
 }
 
+pub fn quantum_keystore_path() -> PathBuf {
+    wallet_data_root().join("quantum.keystore.enc")
+}
+
 /// Atomic write with restrictive permissions (0o600 on Unix).
 pub fn secure_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {

@@ -15,6 +15,14 @@ fn default_hardware_mode() -> String {
     "software".into()
 }
 
+/// Display-safe quantum account metadata (no secrets).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuantumMeta {
+    pub address: String,
+    pub kind: String,
+    pub address_version: u8,
+}
+
 /// Non-secret wallet preferences (node URL, L2 hub, channel cache).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletSettings {
@@ -31,6 +39,13 @@ pub struct WalletSettings {
     pub watch_only_address: Option<String>,
     #[serde(default)]
     pub privacy: PrivacySettings,
+    #[serde(default)]
+    pub quantum_mode: bool,
+    #[serde(default)]
+    pub quantum_meta: Option<QuantumMeta>,
+    /// Legacy plaintext storage — migrated to `quantum.keystore.enc` on unlock.
+    #[serde(default)]
+    pub quantum_keystore_json: Option<String>,
 }
 
 impl Default for WalletSettings {
@@ -45,6 +60,9 @@ impl Default for WalletSettings {
             hardware_signing_mode: default_hardware_mode(),
             watch_only_address: None,
             privacy: PrivacySettings::default(),
+            quantum_mode: false,
+            quantum_meta: None,
+            quantum_keystore_json: None,
         }
     }
 }

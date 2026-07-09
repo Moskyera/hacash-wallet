@@ -1,7 +1,12 @@
 //! Shared helpers for wallet security audit integration tests.
 
+use std::sync::Mutex;
+
 use protocol::setup::{install_test_scope, new_standard_protocol_setup};
 use sys::calculate_hash;
+
+/// Serializes `HACASH_WALLET_DATA` overrides — env vars are process-global and race under parallel tests.
+static WALLET_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Install scoped Hacash protocol registry (required for transaction signing in tests).
 pub fn with_protocol_setup<F: FnOnce()>(f: F) {
@@ -12,6 +17,9 @@ pub fn with_protocol_setup<F: FnOnce()>(f: F) {
 
 /// Isolate wallet data under a fresh temp directory for the duration of `f`.
 pub fn with_isolated_wallet_dir<F: FnOnce()>(f: F) {
+    let _guard = WALLET_DATA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().expect("tempdir");
     let wallet_root = dir.path().join("wallet-data");
     std::fs::create_dir_all(&wallet_root).expect("wallet root");

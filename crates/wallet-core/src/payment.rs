@@ -11,6 +11,7 @@ use crate::settings::WalletSettings;
 pub enum PaymentRail {
     L2Fast,
     L1OnChain,
+    QuantumType4,
 }
 
 #[derive(Debug, Clone, Serialize)]
