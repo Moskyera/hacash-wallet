@@ -60,11 +60,17 @@ git clone --branch feature/pqc-phases-1-3 https://github.com/Moskyera/fullnodede
 
 ### Run
 
+**Windows (recommended):** double-click `scripts/START-DEV-STACK.bat` — opens three separate terminals (fullnode → poworker → wallet). Requires `hacash-fullnodedev` built at `../hacash-fullnodedev/target/debug` with `hacash.config.ini` and `poworker.config.ini` in that folder. Keep all windows open.
+
+**Manual:**
+
 ```bash
 cd apps/desktop
 yarn install
 yarn tauri dev
 ```
+
+Also run `hacash.exe` and `poworker.exe` from the fullnode `target/debug` directory in **separate** terminals (do not pipe or background them).
 
 ### Test core
 
