@@ -29,6 +29,13 @@ pub struct AirgapUnsigned {
     pub fee: String,
     pub body_hex: String,
     pub summary: String,
+    /// `1` = legacy L1, `4` = quantum Type 4 (default `1` for older QRs).
+    #[serde(default = "default_airgap_tx_type")]
+    pub tx_type: u8,
+}
+
+fn default_airgap_tx_type() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -39,6 +46,8 @@ pub struct AirgapSigned {
     pub amount_mei: f64,
     pub signed_hex: String,
     pub summary: String,
+    #[serde(default = "default_airgap_tx_type")]
+    pub tx_type: u8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -308,6 +317,7 @@ mod tests {
             fee: "1:244".into(),
             body_hex: "010203".into(),
             summary: "test send".into(),
+            tx_type: 1,
         }
     }
 

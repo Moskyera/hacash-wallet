@@ -48,6 +48,7 @@ pub struct WalletService {
     webauthn: WebAuthnGate,
     unlock_guard: UnlockGuard,
     balance_cache: Option<(String, f64, Instant)>,
+    quantum_keystore_mem: Option<String>,
     unlocked: Option<UnlockedSession>,
 }
 
@@ -65,6 +66,7 @@ struct UnlockedSession {
     /// Set only by `finish_native_biometric` after OS verification.
     biometric_verified: bool,
     pending_biometric_nonce: Option<String>,
+    quantum_file_key: Option<crate::quantum_vault::QuantumFileKey>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -140,6 +142,7 @@ impl WalletService {
             webauthn: WebAuthnGate::new()?,
             unlock_guard: UnlockGuard::default(),
             balance_cache: None,
+            quantum_keystore_mem: None,
             unlocked: None,
         })
     }
@@ -291,6 +294,19 @@ impl WalletService {
         let address = account.address();
         self.profile = SecurityProfile::from_name(&self.settings.security_profile);
         self.balance_cache = None;
+        let qkey = crate::quantum_vault::QuantumFileKey::derive(passphrase, vault.salt())?;
+        let mut qks = crate::quantum_vault::load_encrypted(&qkey)?;
+        if qks.is_none() {
+            if let Some(legacy) = self.settings.quantum_keystore_json.take() {
+                crate::quantum_vault::save_encrypted(&qkey, &legacy)?;
+                if let Some(meta) = crate::quantum::quantum_meta_from_json(&legacy) {
+                    self.settings.quantum_meta = Some(meta);
+                }
+                self.settings.save()?;
+                qks = Some(legacy);
+            }
+        }
+        self.quantum_keystore_mem = qks;
         self.unlocked = Some(UnlockedSession {
             address: address.clone(),
             key: SessionKey::Signing(account),
@@ -298,6 +314,7 @@ impl WalletService {
             webauthn_verified: false,
             biometric_verified: false,
             pending_biometric_nonce: None,
+            quantum_file_key: Some(qkey),
         });
         Ok(address)
     }
@@ -336,6 +353,7 @@ impl WalletService {
             webauthn_verified: false,
             biometric_verified: false,
             pending_biometric_nonce: None,
+            quantum_file_key: None,
         });
         Ok(address)
     }
@@ -390,6 +408,7 @@ impl WalletService {
     pub fn lock(&mut self) {
         self.unlocked = None;
         self.balance_cache = None;
+        self.quantum_keystore_mem = None;
     }
 
     pub fn touch_auto_lock(&mut self) {
@@ -647,6 +666,7 @@ impl WalletService {
             fee: preview.fee,
             body_hex,
             summary: preview.plan.summary,
+            tx_type: 1,
         };
         let envelope = AirgapEnvelope::Unsigned(unsigned.clone());
         let qr_parts = encode_envelope_qr(&envelope)?;
@@ -672,6 +692,7 @@ impl WalletService {
         let signed_hex = self.sign_tx_hex(&unsigned.body_hex)?;
         let signed = AirgapSigned {
             v: AIRGAP_VERSION,
+            tx_type: unsigned.tx_type,
             from: unsigned.from.clone(),
             to: unsigned.to.clone(),
             amount_mei: unsigned.amount_mei,
@@ -692,6 +713,35 @@ impl WalletService {
         signed: &AirgapSigned,
     ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
+        if signed.tx_type == 4 {
+            let expected = self
+                .quantum_settings()
+                .active_account
+                .map(|a| a.address)
+                .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
+            if signed.from != expected {
+                return Err(WalletError::Policy(
+                    "signed type 4 tx sender does not match active quantum account".into(),
+                ));
+            }
+            let submitted = self.node.submit_tx_hex(&signed.signed_hex).await?;
+            let hash = submitted
+                .hash
+                .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
+            let summary = signed.summary.clone();
+            let _ = self.append_quantum_history(
+                &hash,
+                &signed.from,
+                &signed.to,
+                signed.amount_mei,
+                &summary,
+            );
+            return Ok(SendResult {
+                rail: PaymentRail::QuantumType4,
+                tx_hash: hash,
+                summary,
+            });
+        }
         let coordinator = self.require_address()?;
         if coordinator != signed.from {
             return Err(WalletError::Policy(
@@ -777,6 +827,11 @@ impl WalletService {
                     summary: preview.plan.summary,
                 }
             }
+            PaymentRail::QuantumType4 => {
+                return Err(WalletError::Policy(
+                    "Type 4 quantum sends use the Quantum tab — not legacy Send".into(),
+                ));
+            }
         };
 
         self.append_history_if_enabled(
@@ -834,7 +889,7 @@ impl WalletService {
         })
     }
 
-    fn clear_second_factor(&mut self) {
+    pub(crate) fn clear_second_factor(&mut self) {
         if let Some(session) = &mut self.unlocked {
             session.webauthn_verified = false;
             session.biometric_verified = false;
@@ -978,8 +1033,60 @@ impl WalletService {
         self.settings.quantum_mode
     }
 
+    pub(crate) fn quantum_meta_snapshot(&self) -> Option<crate::settings::QuantumMeta> {
+        self.settings.quantum_meta.clone()
+    }
+
     pub(crate) fn quantum_keystore_json(&self) -> Option<String> {
+        if let Some(mem) = &self.quantum_keystore_mem {
+            return Some(mem.clone());
+        }
         self.settings.quantum_keystore_json.clone()
+    }
+
+    pub(crate) fn ensure_quantum_signing_policy(&self) -> WalletResult<()> {
+        let watch_only = self
+            .unlocked
+            .as_ref()
+            .map(|s| matches!(s.key, SessionKey::WatchOnly))
+            .unwrap_or(true);
+        let webauthn_verified = self
+            .unlocked
+            .as_ref()
+            .map(|s| s.webauthn_verified)
+            .unwrap_or(false);
+        crate::hardware::check_signing_allowed(
+            self.settings.hardware_mode(),
+            watch_only,
+            webauthn_verified,
+        )?;
+        if self.profile.yubikey_required {
+            let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
+            if !session.webauthn_verified {
+                return Err(WalletError::Policy(
+                    "WebAuthn (YubiKey/Windows Hello) required — complete ceremony first".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_quantum_history(
+        &mut self,
+        tx_hash: &str,
+        from: &str,
+        to: &str,
+        amount_mei: f64,
+        summary: &str,
+    ) -> WalletResult<()> {
+        self.append_history_if_enabled(
+            PaymentRail::QuantumType4,
+            tx_hash,
+            from,
+            to,
+            amount_mei,
+            summary,
+        )
     }
 
     pub(crate) fn set_quantum_mode_flag(&mut self, enabled: bool) -> WalletResult<()> {
@@ -991,8 +1098,17 @@ impl WalletService {
 
     pub fn store_quantum_keystore_json(&mut self, json: String) -> WalletResult<()> {
         self.bump_unlock_activity();
-        self.settings.quantum_keystore_json = Some(json);
+        if let Some(meta) = crate::quantum::quantum_meta_from_json(&json) {
+            self.settings.quantum_meta = Some(meta);
+        }
+        self.settings.quantum_keystore_json = None;
         self.settings.quantum_mode = true;
+        self.quantum_keystore_mem = Some(json.clone());
+        if let Some(session) = self.unlocked.as_mut() {
+            if let Some(key) = session.quantum_file_key.as_ref() {
+                crate::quantum_vault::save_encrypted(key, &json)?;
+            }
+        }
         self.settings.save()?;
         Ok(())
     }

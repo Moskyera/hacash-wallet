@@ -5,6 +5,21 @@ mod common;
 use common::{audit_gate, with_isolated_wallet_dir};
 use hacash_wallet_core::WalletService;
 
+fn assert_active_account(
+    settings: &hacash_wallet_core::quantum::QuantumSettings,
+    expected_kind: &str,
+    expected_version: u8,
+    expected_address: &str,
+) {
+    let acc = settings
+        .active_account
+        .as_ref()
+        .expect("active_account should be set");
+    assert_eq!(acc.kind, expected_kind);
+    assert_eq!(acc.address_version, expected_version);
+    assert_eq!(acc.address, expected_address);
+}
+
 #[test]
 fn audit_quantum_pqc_create_persists_settings() {
     audit_gate("quantum_pqc_persist", || {
@@ -17,9 +32,7 @@ fn audit_quantum_pqc_create_persists_settings() {
 
             let settings = svc.quantum_settings();
             assert!(settings.quantum_mode);
-            assert_eq!(settings.active_address.as_deref(), Some(info.address.as_str()));
-            assert_eq!(settings.kind.as_deref(), Some("pqckey"));
-            assert_eq!(settings.address_version, Some(6));
+            assert_active_account(&settings, "pqckey", 6, &info.address);
         });
     });
 }
@@ -36,8 +49,7 @@ fn audit_quantum_hybrid_create_persists_settings() {
 
             let settings = svc.quantum_settings();
             assert!(settings.quantum_mode);
-            assert_eq!(settings.kind.as_deref(), Some("hybrid"));
-            assert_eq!(settings.address_version, Some(7));
+            assert_active_account(&settings, "hybrid", 7, &info.address);
         });
     });
 }
@@ -55,11 +67,7 @@ fn audit_quantum_export_import_roundtrip() {
 
             svc.quantum_import_keystore(&exported, "ks-pass-rotated").unwrap();
             let settings = svc.quantum_settings();
-            assert_eq!(
-                settings.active_address.as_deref(),
-                Some(created.address.as_str())
-            );
-            assert_eq!(settings.kind.as_deref(), Some("hybrid"));
+            assert_active_account(&settings, "hybrid", 7, &created.address);
         });
     });
 }
@@ -78,12 +86,7 @@ fn audit_quantum_settings_prefers_address_on_kind_mismatch() {
             svc.store_quantum_keystore_json(tampered).unwrap();
 
             let settings = svc.quantum_settings();
-            assert_eq!(settings.kind.as_deref(), Some("pqckey"));
-            assert_eq!(settings.address_version, Some(6));
-            assert_eq!(
-                settings.active_address.as_deref(),
-                Some(pqc.address.as_str())
-            );
+            assert_active_account(&settings, "pqckey", 6, &pqc.address);
         });
     });
 }
@@ -104,12 +107,7 @@ fn audit_quantum_v6_to_v7_replaces_address_and_kind() {
             assert_ne!(pqc.address, hybrid.address);
 
             let settings = svc.quantum_settings();
-            assert_eq!(settings.kind.as_deref(), Some("hybrid"));
-            assert_eq!(settings.address_version, Some(7));
-            assert_eq!(
-                settings.active_address.as_deref(),
-                Some(hybrid.address.as_str())
-            );
+            assert_active_account(&settings, "hybrid", 7, &hybrid.address);
         });
     });
 }
@@ -126,8 +124,32 @@ fn audit_quantum_settings_roundtrip_includes_quantum_fields() {
             let reloaded = WalletService::new(None, None).unwrap();
             let settings = reloaded.quantum_settings();
             assert!(!settings.quantum_mode);
-            assert!(settings.active_address.is_some());
-            assert_eq!(settings.kind.as_deref(), Some("pqckey"));
+            assert!(settings.active_account.is_some());
+            assert_eq!(
+                settings.active_account.as_ref().map(|a| a.kind.as_str()),
+                Some("pqckey")
+            );
+        });
+    });
+}
+
+#[test]
+fn audit_quantum_encrypted_keystore_survives_lock_reload() {
+    audit_gate("quantum_encrypted_persist", || {
+        with_isolated_wallet_dir(|| {
+            let mut svc = WalletService::new(None, None).unwrap();
+            svc.create_wallet("vault-pass-123456").unwrap();
+            let info = svc.quantum_create_hybrid("ks-pass-encrypt", None).unwrap();
+            svc.lock();
+
+            let reloaded = WalletService::new(None, None).unwrap();
+            let locked_settings = reloaded.quantum_settings();
+            assert_active_account(&locked_settings, "hybrid", 7, &info.address);
+
+            let mut unlocked = WalletService::new(None, None).unwrap();
+            unlocked.unlock("vault-pass-123456").unwrap();
+            let settings = unlocked.quantum_settings();
+            assert_active_account(&settings, "hybrid", 7, &info.address);
         });
     });
 }

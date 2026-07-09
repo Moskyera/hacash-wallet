@@ -2,11 +2,7 @@ import type { QuantumAccountInfo, QuantumAccountSummary, QuantumSettings } from 
 
 /** Map fully-resolved settings from the wallet core (no client-side reconciliation). */
 export function accountSummaryFromSettings(s: QuantumSettings): QuantumAccountSummary | null {
-  const { active_address, kind, address_version } = s;
-  if (!active_address || !kind || (address_version !== 6 && address_version !== 7)) {
-    return null;
-  }
-  return { address: active_address, kind, address_version };
+  return s.active_account ?? null;
 }
 
 export function summaryFromAccountInfo(a: QuantumAccountInfo): QuantumAccountSummary {
@@ -29,6 +25,14 @@ export function kindLabel(kind: string): string {
   if (kind === "pqckey") return "PQC";
   return kind;
 }
+
+/** Type 4 on-chain send requires Hybrid (v7) per HIP-23 wallet policy. */
+export function canSendType4(account: QuantumAccountSummary | null): boolean {
+  return account?.kind === "hybrid" && account.address_version === 7;
+}
+
+export const PQC_SEND_BLOCKED_MSG =
+  "Type 4 send requires a Hybrid (v7) account. PQC-only (v6) can receive funds but cannot sign Type 4 transfers yet.";
 
 export const REPLACE_KEYSTORE_WARNING =
   "Creating a new quantum account replaces the stored keystore. " +

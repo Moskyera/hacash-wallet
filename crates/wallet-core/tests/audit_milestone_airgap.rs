@@ -18,6 +18,7 @@ fn sample_unsigned(from: &str) -> AirgapUnsigned {
         fee: "1:244".into(),
         body_hex: "0102030405".into(),
         summary: "airgap test".into(),
+        tx_type: 1,
     }
 }
 

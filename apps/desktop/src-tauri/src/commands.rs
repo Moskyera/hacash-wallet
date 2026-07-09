@@ -1,8 +1,9 @@
 //! Additive quantum IPC — legacy commands remain in lib.rs.
 use std::sync::Arc;
 
+use hacash_wallet_core::airgap::{AirgapPrepareResult, AirgapSignResult};
 use hacash_wallet_core::quantum::{
-    QuantumAccountInfo, QuantumSendResult, QuantumSettings, QuantumTestResult,
+    QuantumAccountInfo, QuantumPreflight, QuantumSendResult, QuantumSettings, QuantumTestResult,
 };
 use hacash_wallet_core::WalletService;
 use tokio::sync::Mutex;
@@ -164,4 +165,50 @@ pub async fn quantum_send_test_tx(
 pub async fn quantum_node_ping(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let svc = state.inner.lock().await;
     svc.quantum_node_metrics().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn quantum_balance(state: State<'_, AppState>) -> Result<f64, String> {
+    let svc = state.inner.lock().await;
+    svc.quantum_balance_mei().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn quantum_preflight_type4(
+    to_address: String,
+    amount_hacash: String,
+    state: State<'_, AppState>,
+) -> Result<QuantumPreflight, String> {
+    let svc = state.inner.lock().await;
+    svc.quantum_preflight_type4(&to_address, &amount_hacash)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn quantum_prepare_airgap_type4(
+    to_address: String,
+    amount_hacash: String,
+    state: State<'_, AppState>,
+) -> Result<AirgapPrepareResult, String> {
+    let mut svc = state.inner.lock().await;
+    if svc.status().locked {
+        return Err("wallet locked".into());
+    }
+    svc.bump_unlock_activity();
+    svc.prepare_airgap_type4(&to_address, &amount_hacash)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn quantum_airgap_sign_type4(
+    body_hex: String,
+    keystore_password: String,
+    state: State<'_, AppState>,
+) -> Result<AirgapSignResult, String> {
+    run_wallet_task(Arc::clone(&state.inner), move |svc| {
+        with_unlocked(svc, |s| s.quantum_airgap_sign_type4(&body_hex, &keystore_password))
+    })
+    .await
 }

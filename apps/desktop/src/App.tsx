@@ -16,8 +16,10 @@ import { runWebAuthnAuth, runWebAuthnRegister, webAuthnAvailable } from "./webau
 import AirgapScreen from "./AirgapScreen";
 import QuantumToggle from "./components/QuantumToggle";
 import SendQuantumTx from "./components/SendQuantumTx";
+import QuantumFundingCard from "./components/QuantumFundingCard";
+import QuantumNodeHealth from "./components/QuantumNodeHealth";
 import AddressBadge from "./components/AddressBadge";
-import { QuantumAccountSummary } from "./api";
+import { quantumApi, QuantumAccountSummary } from "./api";
 import "./quantum.css";
 import {
   copyWithPrivacyClear,
@@ -126,6 +128,7 @@ export default function App() {
   const [hipP3Floor, setHipP3Floor] = useState("1");
   const [hipP3DebitBeforeFloor, setHipP3DebitBeforeFloor] = useState(true);
   const [quantumAccount, setQuantumAccount] = useState<QuantumAccountSummary | null>(null);
+  const [quantumBalance, setQuantumBalance] = useState<number | null>(null);
   const [hipResults, setHipResults] = useState<Hip23PatternCheck[] | null>(null);
 
   const [webauthnReady, setWebauthnReady] = useState(false);
@@ -1353,11 +1356,36 @@ export default function App() {
 
         {screen === "quantum" && (
           <section className="stack">
-            <QuantumToggle onAccountChange={setQuantumAccount} />
+            <QuantumToggle
+              onAccountChange={(acc) => {
+                setQuantumAccount(acc);
+                if (acc) {
+                  quantumApi
+                    .balance()
+                    .then(setQuantumBalance)
+                    .catch(() => setQuantumBalance(null));
+                } else {
+                  setQuantumBalance(null);
+                }
+              }}
+            />
+            <QuantumNodeHealth nodeUrl={settings?.node_url ?? status?.node_url} />
+            <QuantumFundingCard
+              account={quantumAccount}
+              balance={quantumBalance}
+              legacyAddress={status?.address}
+              onGoToSend={() => {
+                if (quantumAccount?.address) setSendTo(quantumAccount.address);
+                setScreen("send");
+              }}
+            />
             <SendQuantumTx
               account={quantumAccount}
               nodeUrl={settings?.node_url ?? status?.node_url}
               disabled={busy || !!status?.locked}
+              webauthnEnabled={status?.webauthn_enabled}
+              securityProfile={status?.security_profile}
+              nativeBioAvailable={nativeBioAvailable}
             />
           </section>
         )}

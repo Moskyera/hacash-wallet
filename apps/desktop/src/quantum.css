@@ -138,3 +138,57 @@
   align-items: center;
   gap: 12px;
 }
+.quantum-node-health .quantum-node-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.quantum-node-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #f87171;
+}
+.quantum-node-status.ok .quantum-node-dot {
+  background: #4ade80;
+  box-shadow: 0 0 8px #4ade80;
+}
+.quantum-metrics {
+  max-height: 160px;
+  overflow: auto;
+  font-size: 0.75rem;
+  margin: 0;
+}
+.quantum-funding .quantum-balance-line {
+  margin: 12px 0;
+}
+.quantum-funding .small {
+  font-size: 0.85rem;
+}
+.preflight-box {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.preflight-box.ok {
+  border-color: #166534;
+}
+.preflight-box.bad {
+  border-color: #991b1b;
+}
+.preflight-box .warn {
+  color: #fbbf24;
+  margin: 4px 0;
+}
+.quantum-policy-block {
+  margin-bottom: 12px;
+}
+.quantum-airgap-box {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}

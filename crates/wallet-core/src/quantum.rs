@@ -12,12 +12,27 @@ use crate::wallet::WalletService;
 pub const TYPE4_AUTO_FEE: &str = "40:244";
 pub const TEST_LEGACY_RECIPIENT: &str = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuantumAccountSummary {
+    pub kind: String,
+    pub address: String,
+    pub address_version: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantumSettings {
     pub quantum_mode: bool,
-    pub active_address: Option<String>,
-    pub address_version: Option<u8>,
-    pub kind: Option<String>,
+    #[serde(default)]
+    pub active_account: Option<QuantumAccountSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuantumPreflight {
+    pub ok: bool,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+    pub balance_mei: f64,
+    pub fee_wire: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +79,71 @@ fn parse_keystore_meta(json: &str) -> (Option<String>, Option<String>) {
     let addr = v.get("address").and_then(|a| a.as_str()).map(str::to_owned);
     let kind = v.get("kind").and_then(|k| k.as_str()).map(str::to_owned);
     (addr, kind)
+}
+
+fn summary_from_resolved(kind: String, address: String, address_version: u8) -> QuantumAccountSummary {
+    QuantumAccountSummary {
+        kind,
+        address,
+        address_version,
+    }
+}
+
+pub fn quantum_meta_from_json(json: &str) -> Option<crate::settings::QuantumMeta> {
+    let (addr, kind) = parse_keystore_meta(json);
+    let (resolved_kind, version) = resolve_quantum_meta(kind.as_deref(), addr.as_deref());
+    let address = addr?;
+    let kind = resolved_kind?;
+    let version = version?;
+    Some(crate::settings::QuantumMeta {
+        address,
+        kind,
+        address_version: version,
+    })
+}
+
+fn parse_decimal_hac_mei(amount: &str) -> WalletResult<f64> {
+    let v: f64 = amount
+        .trim()
+        .parse()
+        .map_err(|_| WalletError::Other(format!("invalid HAC amount: {amount}")))?;
+    if v <= 0.0 {
+        return Err(WalletError::Other("amount must be positive".into()));
+    }
+    Ok(v)
+}
+
+pub fn build_type4_unsigned_body(
+    from_address: &str,
+    to_address: &str,
+    amount_hacash: &str,
+    fee_wire: &str,
+) -> WalletResult<String> {
+    use basis::interface::Transaction;
+    use field::{Address, Amount, Serialize, Uint1};
+    use protocol::action::HacToTrs;
+    use protocol::transaction::TransactionType4;
+    use sys::{curtimes, ToHex};
+
+    let mainaddr = Address::from_readable(from_address)
+        .map_err(|e| WalletError::Other(format!("address invalid: {e}")))?;
+    if !mainaddr.is_pqckey() && !mainaddr.is_hybrid() {
+        return Err(WalletError::Other(
+            "type 4 sender must be a PQC or Hybrid address".into(),
+        ));
+    }
+    let fee = Amount::from(fee_wire)
+        .map_err(|e| WalletError::Other(format!("fee invalid: {e}")))?;
+    let toaddr = Address::from_readable(to_address)
+        .map_err(|e| WalletError::Other(format!("recipient invalid: {e}")))?;
+    let ts = curtimes();
+    let mut tx = TransactionType4::new_by(mainaddr, fee, ts);
+    tx.gas_max = Uint1::from(0u8);
+    let hac = Amount::from(amount_hacash)
+        .map_err(|e| WalletError::Other(format!("hacash invalid: {e}")))?;
+    tx.push_action(Box::new(HacToTrs::create_by(toaddr, hac)))
+        .map_err(|e| WalletError::Other(e.to_string()))?;
+    Ok(tx.serialize().to_hex())
 }
 
 /// Protocol address version: v6 = PQC (`pqckey`), v7 = hybrid (`hybrid`).
@@ -146,14 +226,73 @@ pub fn create_hybrid_from_privakey_offline(
 
 impl WalletService {
     pub fn quantum_settings(&self) -> QuantumSettings {
-        let json = self.quantum_keystore_json();
-        let (active, kind) = json.as_deref().map(parse_keystore_meta).unwrap_or((None, None));
-        let (resolved_kind, version) = resolve_quantum_meta(kind.as_deref(), active.as_deref());
+        let active_account = self
+            .quantum_meta_snapshot()
+            .as_ref()
+            .map(|m| {
+                summary_from_resolved(m.kind.clone(), m.address.clone(), m.address_version)
+            })
+            .or_else(|| {
+                let json = self.quantum_keystore_json();
+                let (active, kind) = json.as_deref().map(parse_keystore_meta).unwrap_or((None, None));
+                let (resolved_kind, version) = resolve_quantum_meta(kind.as_deref(), active.as_deref());
+                match (resolved_kind, active, version) {
+                    (Some(k), Some(a), Some(v)) => {
+                        Some(summary_from_resolved(k, a, v))
+                    }
+                    _ => None,
+                }
+            });
         QuantumSettings {
             quantum_mode: self.quantum_mode_enabled(),
-            active_address: active,
-            address_version: version,
-            kind: resolved_kind,
+            active_account,
+        }
+    }
+
+    pub async fn quantum_balance_mei(&self) -> WalletResult<f64> {
+        let settings = self.quantum_settings();
+        let addr = settings
+            .active_account
+            .as_ref()
+            .map(|a| a.address.as_str())
+            .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
+        self.node_client().balance_mei(addr).await
+    }
+
+    pub async fn quantum_preflight_type4(
+        &self,
+        to: &str,
+        amount_hacash: &str,
+    ) -> WalletResult<QuantumPreflight> {
+        let settings = self.quantum_settings();
+        let account = settings
+            .active_account
+            .as_ref()
+            .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
+        let amount_mei = parse_decimal_hac_mei(amount_hacash)?;
+        let balance_mei = self.quantum_balance_mei().await.unwrap_or(0.0);
+        match crate::hip23::validate_type4_send(
+            &account.kind,
+            to,
+            amount_mei,
+            balance_mei,
+            TYPE4_AUTO_FEE,
+        ) {
+            Ok(check) => Ok(QuantumPreflight {
+                ok: check.ok,
+                warnings: check.warnings,
+                errors: check.errors,
+                balance_mei,
+                fee_wire: TYPE4_AUTO_FEE.into(),
+            }),
+            Err(WalletError::Policy(msg)) => Ok(QuantumPreflight {
+                ok: false,
+                warnings: Vec::new(),
+                errors: vec![msg],
+                balance_mei,
+                fee_wire: TYPE4_AUTO_FEE.into(),
+            }),
+            Err(e) => Err(e),
         }
     }
 
@@ -221,6 +360,16 @@ impl WalletService {
         keystore_pass: &str,
     ) -> WalletResult<QuantumSendResult> {
         self.touch_auto_lock();
+        self.ensure_quantum_signing_policy()?;
+        self.clear_second_factor();
+        let settings = self.quantum_settings();
+        let from = settings
+            .active_account
+            .as_ref()
+            .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
+        let amount_mei = parse_decimal_hac_mei(amount)?;
+        let balance_mei = self.quantum_balance_mei().await.unwrap_or(0.0);
+        crate::hip23::validate_type4_send(&from.kind, to, amount_mei, balance_mei, TYPE4_AUTO_FEE)?;
         let ks = self.require_keystore_json()?;
         let built = create_coin_transfer_v4(CoinTransferV4Param {
             main_keystore: ks,
@@ -237,12 +386,95 @@ impl WalletService {
         let hash = submitted
             .hash
             .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-        Ok(QuantumSendResult {
-            hash,
+        let result = QuantumSendResult {
+            hash: hash.clone(),
             tx_type: 4,
             sign_alg: 3,
             wire_size,
             fee_used: TYPE4_AUTO_FEE.into(),
+        };
+        let _ = self.append_quantum_history(
+            &hash,
+            &from.address,
+            to,
+            amount_mei,
+            "Type 4 quantum transfer",
+        );
+        Ok(result)
+    }
+
+    pub async fn prepare_airgap_type4(
+        &mut self,
+        to: &str,
+        amount_hacash: &str,
+    ) -> WalletResult<crate::airgap::AirgapPrepareResult> {
+        self.touch_auto_lock();
+        let settings = self.quantum_settings();
+        let from = settings
+            .active_account
+            .as_ref()
+            .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
+        let preflight = self.quantum_preflight_type4(to, amount_hacash).await?;
+        if !preflight.ok {
+            return Err(WalletError::Policy(preflight.errors.join("; ")));
+        }
+        let amount_mei = parse_decimal_hac_mei(amount_hacash)?;
+        let body_hex = build_type4_unsigned_body(&from.address, to, amount_hacash, TYPE4_AUTO_FEE)?;
+        let unsigned = crate::airgap::AirgapUnsigned {
+            v: crate::airgap::AIRGAP_VERSION,
+            from: from.address.clone(),
+            to: to.to_owned(),
+            amount_mei,
+            amount_wire: amount_hacash.to_owned(),
+            fee: TYPE4_AUTO_FEE.into(),
+            body_hex,
+            summary: "Type 4 quantum transfer (air-gap)".into(),
+            tx_type: 4,
+        };
+        let qr_parts = crate::airgap::encode_envelope_qr(&crate::airgap::AirgapEnvelope::Unsigned(
+            unsigned.clone(),
+        ))?;
+        Ok(crate::airgap::AirgapPrepareResult {
+            envelope: unsigned,
+            qr_parts,
+        })
+    }
+
+    pub fn quantum_airgap_sign_type4(
+        &mut self,
+        body_hex: &str,
+        keystore_pass: &str,
+    ) -> WalletResult<crate::airgap::AirgapSignResult> {
+        self.touch_auto_lock();
+        self.ensure_quantum_signing_policy()?;
+        self.clear_second_factor();
+        use sdk::sign_transaction_v4;
+        use sdk::SignTxV4Param;
+        let signed = sign_transaction_v4(SignTxV4Param {
+            body: body_hex.into(),
+            hybrid_keystore: self.require_keystore_json()?,
+            keystore_pass: keystore_pass.into(),
+        })
+        .map_err(WalletError::Other)?;
+        let settings = self.quantum_settings();
+        let from = settings
+            .active_account
+            .map(|a| a.address)
+            .unwrap_or_default();
+        let envelope = crate::airgap::AirgapSigned {
+            v: crate::airgap::AIRGAP_VERSION,
+            from,
+            to: String::new(),
+            amount_mei: 0.0,
+            signed_hex: signed.body,
+            summary: "Type 4 quantum signed (air-gap)".into(),
+            tx_type: 4,
+        };
+        let qr_parts =
+            crate::airgap::encode_envelope_qr(&crate::airgap::AirgapEnvelope::Signed(envelope.clone()))?;
+        Ok(crate::airgap::AirgapSignResult {
+            envelope,
+            qr_parts,
         })
     }
 

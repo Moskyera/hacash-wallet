@@ -412,6 +412,10 @@ pub fn run() {
             commands::quantum_send_type4,
             commands::quantum_send_test_tx,
             commands::quantum_node_ping,
+            commands::quantum_balance,
+            commands::quantum_preflight_type4,
+            commands::quantum_prepare_airgap_type4,
+            commands::quantum_airgap_sign_type4,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

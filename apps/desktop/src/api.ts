@@ -68,7 +68,7 @@ export type SendPreview = {
 };
 
 export type SendResult = {
-  rail: "L2Fast" | "L1OnChain";
+  rail: "L2Fast" | "L1OnChain" | "QuantumType4";
   tx_hash: string;
   summary: string;
 };
@@ -118,6 +118,7 @@ export type AirgapUnsigned = {
   fee: string;
   body_hex: string;
   summary: string;
+  tx_type?: number;
 };
 
 export type AirgapSigned = {
@@ -127,11 +128,32 @@ export type AirgapSigned = {
   amount_mei: number;
   signed_hex: string;
   summary: string;
+  tx_type?: number;
 };
 
 export type AirgapEnvelope =
-  | { kind: "unsigned"; v: number; from: string; to: string; amount_mei: number; amount_wire: string; fee: string; body_hex: string; summary: string }
-  | { kind: "signed"; v: number; from: string; to: string; amount_mei: number; signed_hex: string; summary: string };
+  | {
+      kind: "unsigned";
+      v: number;
+      from: string;
+      to: string;
+      amount_mei: number;
+      amount_wire: string;
+      fee: string;
+      body_hex: string;
+      summary: string;
+      tx_type?: number;
+    }
+  | {
+      kind: "signed";
+      v: number;
+      from: string;
+      to: string;
+      amount_mei: number;
+      signed_hex: string;
+      summary: string;
+      tx_type?: number;
+    };
 
 export type AirgapPrepareResult = {
   envelope: AirgapUnsigned;
@@ -168,9 +190,15 @@ export type QuantumAccountSummary = {
 
 export type QuantumSettings = {
   quantum_mode: boolean;
-  active_address?: string | null;
-  address_version?: number | null;
-  kind?: string | null;
+  active_account: QuantumAccountSummary | null;
+};
+
+export type QuantumPreflight = {
+  ok: boolean;
+  warnings: string[];
+  errors: string[];
+  balance_mei: number;
+  fee_wire: string;
 };
 
 export type QuantumSendResult = {
@@ -205,6 +233,13 @@ export const quantumApi = {
   sendTestTx: (keystorePassword: string) =>
     invoke<QuantumTestResult>("quantum_send_test_tx", { keystorePassword }),
   nodePing: () => invoke<Record<string, unknown>>("quantum_node_ping"),
+  balance: () => invoke<number>("quantum_balance"),
+  preflightType4: (toAddress: string, amountHacash: string) =>
+    invoke<QuantumPreflight>("quantum_preflight_type4", { toAddress, amountHacash }),
+  prepareAirgapType4: (toAddress: string, amountHacash: string) =>
+    invoke<AirgapPrepareResult>("quantum_prepare_airgap_type4", { toAddress, amountHacash }),
+  airgapSignType4: (bodyHex: string, keystorePassword: string) =>
+    invoke<AirgapSignResult>("quantum_airgap_sign_type4", { bodyHex, keystorePassword }),
 };
 
 export const api = {
