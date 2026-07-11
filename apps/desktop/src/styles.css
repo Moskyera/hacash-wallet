@@ -470,3 +470,42 @@ input {
   font-size: 1.1rem;
   margin-bottom: 6px;
 }
+
+.bills-panel {
+  margin-top: 24px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #111822;
+}
+.bills-panel-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.bills-panel-header h3 { margin: 0 0 6px; }
+.bills-panel-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.bills-table code { font-size: 12px; }
+.bills-row-actions { display: flex; gap: 6px; flex-wrap: wrap; white-space: nowrap; }
+.bills-row-actions button { font-size: 12px; padding: 4px 8px; }
+.bill-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.bill-ok { background: rgba(61,214,198,0.15); color: var(--accent); }
+.bill-warn { background: rgba(255,193,7,0.15); color: #ffc107; }
+.bills-detail-row td { background: rgba(0,0,0,0.2); }
+.bills-detail { font-size: 13px; line-height: 1.5; }
+.bills-prove-card {
+  margin: 8px 0;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.bills-sig-list { margin: 8px 0 0; padding-left: 18px; }
+.bill-warn-text { color: #ffc107; margin-top: 8px; }

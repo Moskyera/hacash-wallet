@@ -21,6 +21,7 @@ import SendQuantumTx from "./components/SendQuantumTx";
 import QuantumFundingCard from "./components/QuantumFundingCard";
 import QuantumNodeHealth from "./components/QuantumNodeHealth";
 import AddressBadge from "./components/AddressBadge";
+import BillsPanel from "./components/BillsPanel";
 import { quantumApi, QuantumAccountSummary } from "./api";
 import { formatInvokeError } from "./formatInvokeError";
 import {
@@ -1179,6 +1180,12 @@ export default function App() {
                 <li>You always see which route is used before you confirm a payment.</li>
               </ul>
             </div>
+
+            <BillsPanel
+              hideAddresses={hideAddresses}
+              onError={(msg) => setError(msg)}
+              onInfo={(msg) => setInfo(msg)}
+            />
 
             <button
               type="button"

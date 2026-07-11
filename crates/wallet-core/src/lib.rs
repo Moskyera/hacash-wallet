@@ -31,6 +31,7 @@ pub use airgap::{
     AirgapUnsigned,
 };
 pub use bills::BillEntry;
+pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillSummary};
 pub use error::{WalletError, WalletResult};
 pub use history::TxRecord;
 pub use hip23::{Hip23PatternCheck, Type3CheckInput, HeightScopeInput, BalanceFloorInput};

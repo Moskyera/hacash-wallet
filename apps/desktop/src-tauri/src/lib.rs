@@ -156,6 +156,37 @@ fn wallet_list_bills(state: tauri::State<'_, AppState>) -> Result<serde_json::Va
 }
 
 #[tauri::command]
+fn wallet_list_bill_summaries(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let svc = state.inner.blocking_lock();
+    let summaries = svc.list_bill_summaries().map_err(|e| e.to_string())?;
+    Ok(serde_json::to_value(summaries).map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+fn wallet_export_bill_json(
+    payment_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let svc = state.inner.blocking_lock();
+    svc.export_bill_json(&payment_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_export_all_bills_json(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let svc = state.inner.blocking_lock();
+    svc.export_all_bills_json().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_get_bill_hex(
+    payment_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let svc = state.inner.blocking_lock();
+    svc.get_bill_hex(&payment_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn wallet_tx_history(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     let svc = state.inner.blocking_lock();
     Ok(serde_json::to_value(svc.tx_history()).map_err(|e| e.to_string())?)
@@ -436,6 +467,10 @@ pub fn run() {
             wallet_fast_pay_status,
             wallet_enable_fast_pay,
             wallet_list_bills,
+            wallet_list_bill_summaries,
+            wallet_export_bill_json,
+            wallet_export_all_bills_json,
+            wallet_get_bill_hex,
             wallet_tx_history,
             wallet_validate_hip23,
             wallet_channel_info,

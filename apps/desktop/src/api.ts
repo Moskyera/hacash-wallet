@@ -123,6 +123,36 @@ export type BillEntry = {
   bill_hex: string;
 };
 
+export type BillSignatureStatus = {
+  address: string;
+  filled: boolean;
+  verified: boolean;
+};
+
+export type BillProveSummary = {
+  channel_id_hex: string;
+  bill_auto_number: number;
+  pay_amount_mei: string;
+  pay_direction: string;
+  left_balance_mei: string;
+  right_balance_mei: string;
+  left_address: string;
+  right_address: string;
+};
+
+export type BillSummary = {
+  payment_id: string;
+  timestamp_unix: number;
+  timestamp_utc: string;
+  channel_legs: number;
+  hex_byte_length: number;
+  prove_bodies: BillProveSummary[];
+  signatures: BillSignatureStatus[];
+  all_signatures_filled: boolean;
+  all_signatures_verified: boolean;
+  dispute_ready: boolean;
+};
+
 export type TxRecord = {
   tx_hash: string;
   rail: string;
@@ -298,6 +328,11 @@ export const api = {
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei: depositMei ?? null }),
   listBills: () => invoke<BillEntry[]>("wallet_list_bills"),
+  listBillSummaries: () => invoke<BillSummary[]>("wallet_list_bill_summaries"),
+  exportBillJson: (paymentId: string) =>
+    invoke<string>("wallet_export_bill_json", { paymentId }),
+  exportAllBillsJson: () => invoke<string>("wallet_export_all_bills_json"),
+  getBillHex: (paymentId: string) => invoke<string>("wallet_get_bill_hex", { paymentId }),
   txHistory: () => invoke<TxRecord[]>("wallet_tx_history"),
   validateHip23: (
     universal: Record<string, unknown>,

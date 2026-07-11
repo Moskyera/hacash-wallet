@@ -580,6 +580,35 @@ impl WalletService {
         self.bills.list()
     }
 
+    pub fn list_bill_summaries(&self) -> WalletResult<Vec<crate::l2_bill::BillSummary>> {
+        self.bills
+            .list()
+            .iter()
+            .map(|e| crate::l2_bill::summarize_bill(&e.payment_id, &e.bill_hex))
+            .collect()
+    }
+
+    pub fn export_bill_json(&self, payment_id: &str) -> WalletResult<String> {
+        let entry = self
+            .bills
+            .list()
+            .into_iter()
+            .find(|e| e.payment_id == payment_id)
+            .ok_or_else(|| WalletError::L2(format!("bill {payment_id} not found")))?;
+        crate::l2_bill::export_bill_json(&entry)
+    }
+
+    pub fn export_all_bills_json(&self) -> WalletResult<String> {
+        crate::l2_bill::export_all_bills_json(&self.bills.list())
+    }
+
+    pub fn get_bill_hex(&self, payment_id: &str) -> WalletResult<String> {
+        self.bills
+            .get_bill(payment_id)
+            .map(|s| s.to_owned())
+            .ok_or_else(|| WalletError::L2(format!("bill {payment_id} not found")))
+    }
+
     pub fn tx_history(&self) -> Vec<TxRecord> {
         let rows = self.history.list().to_vec();
         self.redact_history(rows)

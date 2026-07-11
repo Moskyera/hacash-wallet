@@ -156,8 +156,11 @@ Notes:
 - [x] Privacy controls (masking, screen privacy, history opt-out)
 - [x] Watch-only, hardware signing modes, native Windows Hello
 - [x] Audit + stress + tier-0 adversarial test suites
-- [ ] Live L2 off-chain wire (requires public CSP hub)
-- [ ] Mobile (shared `wallet-core`)
+- [x] L2 off-chain wire + hub/wallet co-sign (reference CSP in `l2-fast-pay-hub`)
+- [x] Bill export / dispute UI (Fast Pay tab)
+- [x] CSP operator docs (`docs/HUB-OPERATOR.md`)
+- [ ] Public CSP network + liquidity
+- [ ] Mobile app (`apps/mobile/` — scaffold + shared `wallet-core`)
 
 ## Repository layout (jojoin model)
 
