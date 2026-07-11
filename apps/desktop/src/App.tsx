@@ -23,6 +23,15 @@ import QuantumNodeHealth from "./components/QuantumNodeHealth";
 import AddressBadge from "./components/AddressBadge";
 import { quantumApi, QuantumAccountSummary } from "./api";
 import { formatInvokeError } from "./formatInvokeError";
+import {
+  fastPayChipLabel,
+  fastPayNavHint,
+  fastPayStatusHeadline,
+  fastPayStatusTitle,
+  railBadgeClass,
+  sendSuccessMessage,
+  type FastPayStatus,
+} from "./fastPayUi";
 import "./quantum.css";
 import {
   copyWithPrivacyClear,
@@ -38,8 +47,8 @@ type Screen =
   | "unlock"
   | "home"
   | "send"
+  | "fastpay"
   | "receive"
-  | "l2"
   | "history"
   | "advanced"
   | "settings"
@@ -53,9 +62,9 @@ type WelcomeTab = "create" | "import" | "watch";
 const NAV_ITEMS: { id: Screen; label: string }[] = [
   { id: "home", label: "Home" },
   { id: "send", label: "Send" },
+  { id: "fastpay", label: "Fast Pay" },
   { id: "quantum", label: "Quantum" },
   { id: "receive", label: "Receive" },
-  { id: "l2", label: "L2" },
   { id: "history", label: "History" },
   { id: "advanced", label: "Advanced" },
   { id: "settings", label: "Settings" },
@@ -108,6 +117,8 @@ export default function App() {
   const [channelInfo, setChannelInfo] = useState<ChannelInfo | null>(null);
   const [hubHealth, setHubHealth] = useState<HubHealth | null | undefined>(undefined);
   const [billsCount, setBillsCount] = useState(0);
+  const [fastPayDetail, setFastPayDetail] = useState<FastPayStatus | null>(null);
+  const [showFastPayAdvanced, setShowFastPayAdvanced] = useState(false);
 
   const [txHistory, setTxHistory] = useState<TxRecord[]>([]);
 
@@ -212,6 +223,15 @@ export default function App() {
     }
   }, []);
 
+  const refreshFastPay = useCallback(async () => {
+    try {
+      const fp = await api.fastPayStatus();
+      setFastPayDetail(fp);
+    } catch {
+      setFastPayDetail(null);
+    }
+  }, []);
+
   const refreshUnlockedData = useCallback(async () => {
     await Promise.all([
       refreshBalance(),
@@ -219,8 +239,9 @@ export default function App() {
       refreshChannel(),
       refreshBills(),
       refreshHistory(),
+      refreshFastPay(),
     ]);
-  }, [refreshBalance, refreshSettings, refreshChannel, refreshBills, refreshHistory]);
+  }, [refreshBalance, refreshSettings, refreshChannel, refreshBills, refreshHistory, refreshFastPay]);
 
   useEffect(() => {
     setWebauthnReady(webAuthnAvailable());
@@ -311,7 +332,16 @@ export default function App() {
     }
   }, [screen, status?.locked, refreshHistory]);
 
-  const l2Active = !!(status?.l2_hub_url && status?.channel_id);
+  useEffect(() => {
+    if (screen === "fastpay" && status && !status.locked) {
+      refreshFastPay().catch(() => undefined);
+      refreshChannel().catch(() => undefined);
+      refreshBills().catch(() => undefined);
+    }
+  }, [screen, status?.locked, refreshFastPay, refreshChannel, refreshBills]);
+
+  const fastPayReady = status?.fast_pay_state === "ready";
+  const fastPayNeedsSetup = status?.fast_pay_state === "needs_channel";
 
   async function handleCreate() {
     setBusy(true);
@@ -398,6 +428,22 @@ export default function App() {
     setHubHealth(undefined);
     setWebauthnReady(webAuthnAvailable());
     await refreshStatus();
+  }
+
+  async function handleEnableFastPay() {
+    setBusy(true);
+    clearMessages();
+    try {
+      const fp = await api.enableFastPay(Number(userDeposit) || 10);
+      setFastPayDetail(fp);
+      await refreshStatus();
+      await refreshUnlockedData();
+      setInfo("Fast Pay is ready — your next send can be instant.");
+    } catch (e) {
+      setError(formatInvokeError(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleSaveL2Settings() {
@@ -580,7 +626,7 @@ export default function App() {
       setSendAmount("");
       await refreshBalance();
       await refreshHistory();
-      setInfo(`Sent via ${result.rail}: ${result.summary}`);
+      setInfo(sendSuccessMessage(result.rail, result.summary));
       setScreen("home");
     } catch (e) {
       setError(formatInvokeError(e));
@@ -823,7 +869,7 @@ export default function App() {
           <div className="brand-mark">H</div>
           <div>
             <div className="brand-title">Hacash Wallet</div>
-            <div className="brand-sub">Secure · L1 + L2 Ready</div>
+            <div className="brand-sub">Secure · Smart Send</div>
           </div>
         </div>
         {status && !status.locked && (
@@ -837,7 +883,18 @@ export default function App() {
                   setScreen(item.id);
                 }}
               >
-                {item.label}
+                {item.id === "fastpay" ? (
+                  <>
+                    Fast Pay{" "}
+                    <span
+                      className={`nav-fp-badge ${fastPayReady ? "nav-fp-on" : "nav-fp-off"}`}
+                    >
+                      {fastPayNavHint(status?.fast_pay_state ?? "no_provider")}
+                    </span>
+                  </>
+                ) : (
+                  item.label
+                )}
               </button>
             ))}
           </nav>
@@ -846,8 +903,11 @@ export default function App() {
           {status?.node_url && <span className="muted">{status.node_url}</span>}
           {status && !status.locked && (
             <div className="status-chips">
-              <span className={`chip ${l2Active ? "chip-accent" : ""}`}>
-                L2 {l2Active ? "configured" : "off"}
+              <span
+                className={`chip ${fastPayReady ? "chip-accent" : fastPayNeedsSetup ? "chip-ok" : ""}`}
+                title={status.fast_pay_message}
+              >
+                {fastPayChipLabel(status.fast_pay_state)}
               </span>
               {status.webauthn_enabled && <span className="chip chip-accent">WebAuthn</span>}
               {status.watch_only && <span className="chip">Watch-only</span>}
@@ -885,8 +945,8 @@ export default function App() {
           <section className="panel hero">
             <h1>Your modern Hacash wallet</h1>
             <p>
-              Encrypted keys on device. Human-readable signing. Fast Pay (L2) when hub is
-              available.
+              Encrypted keys on device. Send HAC in one tap — instant Fast Pay when available,
+              otherwise standard on-chain.
             </p>
             <div className="tab-row">
               <button
@@ -1005,10 +1065,6 @@ export default function App() {
                 {maskBalance(balance, hideBalances)} <small>HAC</small>
               </div>
               <div className="chips">
-                <span className="chip">L1 On-chain</span>
-                <span className={`chip ${l2Active ? "chip-accent" : ""}`}>
-                  L2 / Hub {l2Active ? "ready" : "not configured"}
-                </span>
                 {status?.seconds_until_lock != null && (
                   <span className="chip chip-accent">
                     Auto-lock in {formatCountdown(status.seconds_until_lock)}
@@ -1016,10 +1072,21 @@ export default function App() {
                 )}
               </div>
             </div>
+            {!status?.watch_only && (
+              <div className={`home-fp-hint ${fastPayReady ? "home-fp-hint-on" : ""}`}>
+                <span className="muted">Instant sends:</span>{" "}
+                <button type="button" className="linkish" onClick={() => setScreen("fastpay")}>
+                  {fastPayReady
+                    ? "Fast Pay is ON"
+                    : "Fast Pay is OFF — open tab to enable"}
+                </button>
+              </div>
+            )}
             <div className="actions-row">
               <button className="primary" onClick={() => setScreen("send")}>
-                Send
+                Send HAC
               </button>
+              <button onClick={() => setScreen("fastpay")}>Fast Pay</button>
               <button onClick={() => setScreen("receive")}>Receive</button>
               {status?.webauthn_enabled && (
                 <button disabled={busy} onClick={handleWebAuthnSession}>
@@ -1036,19 +1103,200 @@ export default function App() {
           </section>
         )}
 
+        {screen === "fastpay" && (
+          <section className="panel">
+            <h2>Fast Pay</h2>
+            <p className="muted">
+              Instant low-fee payments on the Hacash payment network. Check this tab to see whether
+              your sends will be Fast Pay or on-chain.
+            </p>
+
+            <div
+              className={`fp-status-banner ${fastPayReady ? "fp-status-on" : "fp-status-off"}`}
+            >
+              <div className="fp-status-pill">{fastPayReady ? "ON" : "OFF"}</div>
+              <div>
+                <h3>{fastPayStatusTitle(status?.fast_pay_state ?? "no_provider")}</h3>
+                <p>
+                  {fastPayDetail?.message ??
+                    status?.fast_pay_message ??
+                    fastPayStatusHeadline(status?.fast_pay_state ?? "no_provider")}
+                </p>
+              </div>
+            </div>
+
+            <div className="fp-route-hint">
+              <strong>When you tap Send:</strong>{" "}
+              {fastPayReady
+                ? "payments go via Fast Pay (instant)."
+                : "payments go on-chain (standard, few minutes)."}
+            </div>
+
+            {(fastPayNeedsSetup || fastPayDetail?.can_enable) && !status?.watch_only && (
+              <div className="fast-pay-card">
+                <h3>Turn Fast Pay ON</h3>
+                <p className="muted">One-time setup — deposit stays in your channel until you close it.</p>
+                <label>Your channel deposit (HAC)</label>
+                <input
+                  value={userDeposit}
+                  onChange={(e) => setUserDeposit(e.target.value)}
+                  type="number"
+                  min="1"
+                  step="1"
+                />
+                <button className="primary" disabled={busy} onClick={handleEnableFastPay}>
+                  Enable Fast Pay
+                </button>
+              </div>
+            )}
+
+            {fastPayReady && (
+              <div className="success-box">
+                <p>
+                  Provider: <strong>{fastPayDetail?.provider_name ?? "connected"}</strong>
+                  {status?.channel_id && (
+                    <>
+                      {" "}
+                      · Channel active · {billsCount} bill{billsCount === 1 ? "" : "s"} backed up
+                    </>
+                  )}
+                </p>
+                <button className="primary" onClick={() => setScreen("send")}>
+                  Go to Send
+                </button>
+              </div>
+            )}
+
+            <div className="fp-how-it-works">
+              <h3>How it works</h3>
+              <ul>
+                <li>
+                  <strong>Fast Pay ON</strong> — Send tab uses instant routing (~0.001 HAC fee).
+                </li>
+                <li>
+                  <strong>Fast Pay OFF</strong> — Send tab uses on-chain (~1:244 HAC fee).
+                </li>
+                <li>You always see which route is used before you confirm a payment.</li>
+              </ul>
+            </div>
+
+            <button
+              type="button"
+              className="collapse-toggle"
+              onClick={() => setShowFastPayAdvanced((v) => !v)}
+            >
+              {showFastPayAdvanced ? "▾" : "▸"} Technical settings (advanced)
+            </button>
+            {showFastPayAdvanced && (
+              <>
+                <label>Node API URL</label>
+                <input
+                  value={nodeUrl}
+                  onChange={(e) => setNodeUrl(e.target.value)}
+                  placeholder="https://node.example.com"
+                />
+                <label>Hub API URL</label>
+                <input
+                  value={hubUrl}
+                  onChange={(e) => setHubUrl(e.target.value)}
+                  placeholder="https://hub.example.com"
+                />
+                <div className="actions-row">
+                  <button disabled={busy} onClick={handleSaveL2Settings}>
+                    Save settings
+                  </button>
+                  <button disabled={busy || !hubUrl.trim()} onClick={handleHubHealth}>
+                    Hub health check
+                  </button>
+                </div>
+                {hubHealth !== undefined && (
+                  <div className={hubHealth?.ok ? "success-box" : "alert"}>
+                    {hubHealth === null && "Hub unreachable or misconfigured."}
+                    {hubHealth && hubHealth.ok && (
+                      <>
+                        Hub OK — <strong>{hubHealth.name ?? "hub"}</strong> (protocol v
+                        {hubHealth.version})
+                      </>
+                    )}
+                    {hubHealth && !hubHealth.ok && "Hub returned unhealthy status."}
+                  </div>
+                )}
+                <hr className="divider" />
+                <h3>Payment channel (L1)</h3>
+                <label>Provider address (hub)</label>
+                <input
+                  value={hubAddress}
+                  onChange={(e) => setHubAddress(e.target.value)}
+                  placeholder="1Hub..."
+                />
+                <div className="two-col">
+                  <div>
+                    <label>Your deposit (HAC)</label>
+                    <input
+                      value={userDeposit}
+                      onChange={(e) => setUserDeposit(e.target.value)}
+                      type="number"
+                      min="0"
+                    />
+                  </div>
+                  <div>
+                    <label>Hub deposit (HAC)</label>
+                    <input
+                      value={hubDeposit}
+                      onChange={(e) => setHubDeposit(e.target.value)}
+                      type="number"
+                      min="0"
+                    />
+                  </div>
+                </div>
+                <div className="actions-row">
+                  <button disabled={busy || !hubAddress} onClick={handlePreviewChannel}>
+                    Preview channel
+                  </button>
+                  <button
+                    className="primary"
+                    disabled={busy || !channelPreview}
+                    onClick={handleOpenChannel}
+                  >
+                    Sign & open channel
+                  </button>
+                  <button disabled={busy || !status?.channel_id} onClick={handleCloseChannel}>
+                    Close channel
+                  </button>
+                </div>
+                {channelPreview && (
+                  <div className="preview-card">
+                    <p>
+                      <strong>Channel ID:</strong> <code>{channelPreview.channel_id}</code>
+                    </p>
+                  </div>
+                )}
+                {status?.channel_id && channelInfo && (
+                  <p className="muted">
+                    Channel {channelInfo.status} · Left {channelInfo.left.hacash} · Right{" "}
+                    {channelInfo.right.hacash}
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
         {screen === "send" && (
           <section className="panel">
             <h2>Send HAC</h2>
-            <p className="muted">
-              Legacy L1 send (fund a quantum address here). Type 4 quantum sends use the{" "}
-              <button type="button" className="linkish" onClick={() => setScreen("quantum")}>
-                Quantum
-              </button>{" "}
-              tab.
-            </p>
-            <label>To address</label>
+            <div className={`fp-send-strip ${fastPayReady ? "fp-send-on" : "fp-send-off"}`}>
+              <span className="fp-send-label">Route for this wallet:</span>
+              <span className={`fp-send-badge ${fastPayReady ? "fp-send-badge-on" : "fp-send-badge-off"}`}>
+                {fastPayReady ? "Fast Pay ON" : "Fast Pay OFF (on-chain)"}
+              </span>
+              <button type="button" className="linkish" onClick={() => setScreen("fastpay")}>
+                Change
+              </button>
+            </div>
+            <label>Recipient address</label>
             <input value={sendTo} onChange={(e) => setSendTo(e.target.value)} placeholder="1ABC..." />
-            <label>Amount (mei)</label>
+            <label>Amount (HAC)</label>
             <input
               value={sendAmount}
               onChange={(e) => setSendAmount(e.target.value)}
@@ -1057,27 +1305,40 @@ export default function App() {
               min="0"
               step="0.001"
             />
-            <button disabled={busy || !sendTo || !sendAmount} onClick={handlePreviewSend}>
-              Preview (HIP-23 checks)
+            <button
+              className="primary"
+              disabled={busy || !sendTo || !sendAmount}
+              onClick={handlePreviewSend}
+            >
+              Continue
             </button>
             {preview && (
               <div className="preview-card">
-                <h3>Confirm payment</h3>
-                <p>{preview.plan.summary}</p>
-                <ul>
+                <h3>Review & confirm</h3>
+                <div className={railBadgeClass(preview.plan.rail)}>
+                  {preview.plan.rail_label}
+                </div>
+                <p className="muted">{preview.plan.rail_detail}</p>
+                <p>
+                  <strong>{preview.amount_mei} HAC</strong> →{" "}
+                  <code>{maskAddress(preview.to, hideAddresses)}</code>
+                </p>
+                <ul className="send-meta">
                   <li>
-                    <strong>Rail:</strong> {preview.plan.rail}
-                  </li>
-                  <li>
-                    <strong>Fee:</strong> {preview.plan.estimated_fee}
+                    <strong>Network fee:</strong> {preview.plan.estimated_fee}
                   </li>
                   <li>
                     <strong>From:</strong> <code>{maskAddress(preview.from, hideAddresses)}</code>
                   </li>
-                  <li>
-                    <strong>To:</strong> <code>{maskAddress(preview.to, hideAddresses)}</code>
-                  </li>
                 </ul>
+                {preview.plan.rail === "L1OnChain" && !fastPayReady && (
+                  <div className="info-box">
+                    <p>This payment will use on-chain. Enable Fast Pay for instant sends next time.</p>
+                    <button type="button" disabled={busy} onClick={() => setScreen("fastpay")}>
+                      Open Fast Pay tab
+                    </button>
+                  </div>
+                )}
                 {preview.hip23.errors.length > 0 && (
                   <div className="alert">
                     <strong>HIP-23 errors</strong>
@@ -1109,17 +1370,24 @@ export default function App() {
                   disabled={busy || !preview.hip23.ok}
                   onClick={handleConfirmSend}
                 >
-                  {busy ? "Signing…" : "Sign & send"}
+                  {busy ? "Sending…" : "Confirm & send"}
                 </button>
               </div>
             )}
+            <p className="muted small-note">
+              Quantum (Type 4) sends are on the{" "}
+              <button type="button" className="linkish" onClick={() => setScreen("quantum")}>
+                Quantum
+              </button>{" "}
+              tab.
+            </p>
           </section>
         )}
 
         {screen === "receive" && (
           <section className="panel">
             <h2>Receive HAC</h2>
-            <p>Share your address. L2 inbound routes via hub when channel is open.</p>
+            <p>Share your address. Incoming Fast Pay transfers arrive the same way as on-chain.</p>
             <div className="address-box">
               <code>{maskAddress(status?.address, hideAddresses)}</code>
             </div>
@@ -1128,127 +1396,6 @@ export default function App() {
                 Copy address
               </button>
             )}
-          </section>
-        )}
-
-        {screen === "l2" && (
-          <section className="panel">
-            <h2>L2 Fast Pay</h2>
-            <p className="muted">
-              Configure node and hub URLs, verify hub health, and manage your payment channel.
-            </p>
-
-            <label>Node API URL</label>
-            <input
-              value={nodeUrl}
-              onChange={(e) => setNodeUrl(e.target.value)}
-              placeholder="https://node.example.com"
-            />
-            <label>Hub API URL</label>
-            <input
-              value={hubUrl}
-              onChange={(e) => setHubUrl(e.target.value)}
-              placeholder="https://hub.example.com"
-            />
-            <div className="actions-row">
-              <button disabled={busy} onClick={handleSaveL2Settings}>
-                Save settings
-              </button>
-              <button disabled={busy || !hubUrl.trim()} onClick={handleHubHealth}>
-                Hub health check
-              </button>
-            </div>
-
-            {hubHealth !== undefined && (
-              <div className={hubHealth?.ok ? "success-box" : "alert"}>
-                {hubHealth === null && "Hub unreachable or misconfigured."}
-                {hubHealth && hubHealth.ok && (
-                  <>
-                    Hub OK — <strong>{hubHealth.name ?? "hub"}</strong> (protocol v
-                    {hubHealth.version})
-                  </>
-                )}
-                {hubHealth && !hubHealth.ok && "Hub returned unhealthy status."}
-              </div>
-            )}
-
-            <hr className="divider" />
-
-            <h3>Open payment channel (L1)</h3>
-            <label>Hub / CSP address (right party)</label>
-            <input
-              value={hubAddress}
-              onChange={(e) => setHubAddress(e.target.value)}
-              placeholder="1Hub..."
-            />
-            <div className="two-col">
-              <div>
-                <label>Your deposit (mei)</label>
-                <input
-                  value={userDeposit}
-                  onChange={(e) => setUserDeposit(e.target.value)}
-                  type="number"
-                  min="0"
-                />
-              </div>
-              <div>
-                <label>Hub deposit (mei)</label>
-                <input
-                  value={hubDeposit}
-                  onChange={(e) => setHubDeposit(e.target.value)}
-                  type="number"
-                  min="0"
-                />
-              </div>
-            </div>
-            <div className="actions-row">
-              <button disabled={busy || !hubAddress} onClick={handlePreviewChannel}>
-                Preview channel
-              </button>
-              <button
-                className="primary"
-                disabled={busy || !channelPreview}
-                onClick={handleOpenChannel}
-              >
-                Sign & open channel
-              </button>
-              <button disabled={busy || !status?.channel_id} onClick={handleCloseChannel}>
-                Close channel
-              </button>
-            </div>
-
-            {channelPreview && (
-              <div className="preview-card">
-                <p>
-                  <strong>Channel ID:</strong> <code>{channelPreview.channel_id}</code>
-                </p>
-                <p>
-                  Left: <code>{channelPreview.left_address}</code> — {channelPreview.left_deposit}
-                </p>
-                <p>
-                  Right: <code>{channelPreview.right_address}</code> —{" "}
-                  {channelPreview.right_deposit}
-                </p>
-              </div>
-            )}
-
-            {status?.channel_id && (
-              <div className="success-box">
-                Active channel: <code>{status.channel_id}</code>
-                {channelInfo && (
-                  <p className="muted">
-                    Status {channelInfo.status} · Left {channelInfo.left.hacash} · Right{" "}
-                    {channelInfo.right.hacash}
-                  </p>
-                )}
-              </div>
-            )}
-
-            <p className="muted">
-              {billsCount > 0
-                ? `${billsCount} L2 settlement bill(s) backed up locally.`
-                : "No L2 bills stored locally."}
-            </p>
           </section>
         )}
 
@@ -1274,7 +1421,13 @@ export default function App() {
                     {txHistory.map((tx) => (
                       <tr key={`${tx.tx_hash}-${tx.timestamp}`}>
                         <td>{tx.timestamp}</td>
-                        <td>{tx.rail}</td>
+                        <td>
+                          {tx.rail === "L2Fast"
+                            ? "Fast Pay"
+                            : tx.rail === "L1OnChain"
+                              ? "On-chain"
+                              : tx.rail}
+                        </td>
                         <td>
                           <code>{maskAddress(tx.from, hideAddresses)}</code>
                         </td>

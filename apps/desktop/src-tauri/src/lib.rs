@@ -128,6 +128,28 @@ async fn wallet_hub_health(
 }
 
 #[tauri::command]
+async fn wallet_fast_pay_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let status = svc.fast_pay_status().await.map_err(|e| e.to_string())?;
+    serde_json::to_value(status).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn wallet_enable_fast_pay(
+    deposit_mei: Option<f64>,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut svc = state.inner.lock().await;
+    let status = svc
+        .enable_fast_pay(deposit_mei)
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(status).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn wallet_list_bills(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     let svc = state.inner.blocking_lock();
     Ok(serde_json::to_value(svc.list_bills()).map_err(|e| e.to_string())?)
@@ -411,6 +433,8 @@ pub fn run() {
             wallet_webauthn_auth_begin,
             wallet_webauthn_auth_finish,
             wallet_hub_health,
+            wallet_fast_pay_status,
+            wallet_enable_fast_pay,
             wallet_list_bills,
             wallet_tx_history,
             wallet_validate_hip23,

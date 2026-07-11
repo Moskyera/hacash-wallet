@@ -73,6 +73,144 @@ nav button.active, button.primary {
 .sidebar-foot { margin-top: auto; font-size: 11px; }
 
 .content { padding: 28px; }
+
+.fast-pay-card {
+  margin: 16px 0;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(61, 214, 198, 0.08);
+}
+.fast-pay-card h3 { margin: 0 0 8px; font-size: 1rem; }
+.small-note { font-size: 12px; margin-top: 10px; }
+
+.rail-badge {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.rail-instant {
+  background: rgba(61, 214, 198, 0.2);
+  color: var(--accent);
+  border: 1px solid rgba(61, 214, 198, 0.35);
+}
+.rail-standard {
+  background: rgba(110, 168, 255, 0.15);
+  color: var(--accent-2);
+  border: 1px solid rgba(110, 168, 255, 0.3);
+}
+.send-meta { margin: 12px 0; padding-left: 18px; color: var(--muted); }
+.collapse-toggle {
+  width: 100%;
+  text-align: left;
+  font-weight: 700;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 0 0 12px;
+  cursor: pointer;
+}
+.fast-pay-advanced { margin-bottom: 0; max-width: 720px; }
+
+.fp-status-banner {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 20px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  margin: 16px 0;
+}
+.fp-status-on {
+  background: linear-gradient(145deg, rgba(61, 214, 198, 0.15), rgba(18, 25, 35, 0.9));
+  border-color: rgba(61, 214, 198, 0.4);
+}
+.fp-status-off {
+  background: linear-gradient(145deg, rgba(110, 168, 255, 0.1), rgba(18, 25, 35, 0.9));
+}
+.fp-status-banner h3 { margin: 0 0 6px; font-size: 1.15rem; }
+.fp-status-banner p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+.fp-status-pill {
+  flex-shrink: 0;
+  font-weight: 800;
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  padding: 8px 12px;
+  border-radius: 10px;
+  min-width: 52px;
+  text-align: center;
+}
+.fp-status-on .fp-status-pill {
+  background: var(--accent);
+  color: #041018;
+}
+.fp-status-off .fp-status-pill {
+  background: var(--bg-card);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.fp-route-hint {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.fp-how-it-works {
+  margin: 20px 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.fp-how-it-works h3 { margin: 0 0 10px; font-size: 1rem; }
+.fp-how-it-works ul { margin: 0; padding-left: 20px; color: var(--muted); font-size: 14px; }
+.fp-how-it-works li { margin-bottom: 8px; }
+
+.fp-send-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.fp-send-on { background: rgba(61, 214, 198, 0.1); border: 1px solid rgba(61, 214, 198, 0.25); }
+.fp-send-off { background: rgba(110, 168, 255, 0.08); border: 1px solid var(--border); }
+.fp-send-label { color: var(--muted); }
+.fp-send-badge {
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+.fp-send-badge-on { background: rgba(61, 214, 198, 0.25); color: var(--accent); }
+.fp-send-badge-off { background: var(--bg-card); color: var(--accent-2); }
+
+.nav-fp-badge {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 6px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+.nav-fp-on { background: rgba(4, 16, 24, 0.35); color: #041018; }
+nav button.active .nav-fp-on { background: rgba(4, 16, 24, 0.5); }
+.nav-fp-off { background: rgba(143, 163, 184, 0.25); color: var(--muted); }
+nav button.active .nav-fp-off { background: rgba(4, 16, 24, 0.25); color: #041018; }
+
+.home-fp-hint {
+  margin: 12px 0 4px;
+  font-size: 14px;
+}
+.home-fp-hint-on .linkish { color: var(--accent); }
 .panel {
   max-width: 720px;
   background: rgba(18, 25, 35, 0.85);

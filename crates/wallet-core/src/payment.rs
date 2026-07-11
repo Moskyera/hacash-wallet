@@ -20,6 +20,10 @@ pub struct PaymentPlan {
     pub summary: String,
     pub estimated_fee: String,
     pub channel_id: Option<String>,
+    /// Short label for UI, e.g. "Instant (Fast Pay)".
+    pub rail_label: String,
+    /// One-line explanation shown under the label.
+    pub rail_detail: String,
 }
 
 pub struct PaymentRouter {
@@ -68,9 +72,11 @@ impl PaymentRouter {
         let _ = self.node.balance_mei(from).await?;
         Ok(PaymentPlan {
             rail: PaymentRail::L1OnChain,
-            summary: format!("On-chain send {amount_mei} HAC to {to}"),
-            estimated_fee: "1:244".into(),
+            summary: format!("Send {amount_mei} HAC to {to}"),
+            estimated_fee: "~1:244 HAC".into(),
             channel_id: None,
+            rail_label: crate::fast_pay::rail_label(PaymentRail::L1OnChain).into(),
+            rail_detail: crate::fast_pay::rail_detail(PaymentRail::L1OnChain).into(),
         })
     }
 
@@ -102,9 +108,11 @@ impl PaymentRouter {
 
         Ok(Some(PaymentPlan {
             rail: PaymentRail::L2Fast,
-            summary: format!("Fast Pay {amount_mei} HAC to {to} via L2 channel"),
+            summary: format!("Send {amount_mei} HAC to {to}"),
             estimated_fee: "~0.001 HAC".into(),
             channel_id: Some(channel_id),
+            rail_label: crate::fast_pay::rail_label(PaymentRail::L2Fast).into(),
+            rail_detail: crate::fast_pay::rail_detail(PaymentRail::L2Fast).into(),
         }))
     }
 

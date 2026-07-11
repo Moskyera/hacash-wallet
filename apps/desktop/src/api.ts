@@ -23,6 +23,15 @@ export type RelayHealthStatus = {
   protocol_version: number | null;
 };
 
+export type FastPayStatus = {
+  state: "ready" | "needs_channel" | "hub_unreachable" | "no_provider";
+  message: string;
+  provider_name: string | null;
+  hub_url: string | null;
+  can_enable: boolean;
+  default_deposit_mei: number;
+};
+
 export type WalletStatus = {
   has_wallet: boolean;
   locked: boolean;
@@ -40,6 +49,8 @@ export type WalletStatus = {
   watch_only: boolean;
   privacy: PrivacySettings;
   dust_whisper: DustWhisperSettings;
+  fast_pay_state: FastPayStatus["state"];
+  fast_pay_message: string;
 }
 
 export type PlatformSecurityStatus = {
@@ -74,6 +85,8 @@ export type SendPreview = {
     summary: string;
     estimated_fee: string;
     channel_id?: string | null;
+    rail_label: string;
+    rail_detail: string;
   };
   from: string;
   to: string;
@@ -81,6 +94,7 @@ export type SendPreview = {
   amount_wire: string;
   fee: string;
   hip23: Hip23Check;
+  fast_pay: FastPayStatus;
 };
 
 export type SendResult = {
@@ -280,6 +294,9 @@ export const api = {
   webauthnAuthFinish: (assertionJson: string) =>
     invoke<void>("wallet_webauthn_auth_finish", { assertionJson }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
+  fastPayStatus: () => invoke<FastPayStatus>("wallet_fast_pay_status"),
+  enableFastPay: (depositMei?: number) =>
+    invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei: depositMei ?? null }),
   listBills: () => invoke<BillEntry[]>("wallet_list_bills"),
   txHistory: () => invoke<TxRecord[]>("wallet_tx_history"),
   validateHip23: (

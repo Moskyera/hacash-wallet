@@ -22,6 +22,10 @@ use crate::hip23::{
     HeightScopeInput, Hip23PatternCheck, Hip23SendCheck, Type3CheckInput,
 };
 
+use crate::fast_pay::{
+    apply_discovered_hub, discover_healthy_hub, evaluate_fast_pay, FastPayStatus,
+    DEFAULT_CHANNEL_DEPOSIT_MEI,
+};
 use crate::history::{TxHistory, TxRecord};
 use crate::l2_hub::{HubHealth, L2HubClient};
 use crate::dust_whisper::{
@@ -91,6 +95,8 @@ pub struct WalletStatus {
     pub watch_only: bool,
     pub privacy: PrivacySettings,
     pub dust_whisper: DustWhisperSettings,
+    pub fast_pay_state: String,
+    pub fast_pay_message: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -102,6 +108,7 @@ pub struct SendPreview {
     pub amount_wire: String,
     pub fee: String,
     pub hip23: Hip23SendCheck,
+    pub fast_pay: FastPayStatus,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -170,6 +177,7 @@ impl WalletService {
             let elapsed = s.unlocked_at.elapsed().as_secs();
             self.profile.auto_lock_secs.saturating_sub(elapsed)
         });
+        let fast_pay = self.fast_pay_status_sync();
         WalletStatus {
             has_wallet,
             locked: self.unlocked.is_none(),
@@ -192,7 +200,19 @@ impl WalletService {
             watch_only,
             privacy: self.settings.privacy.clone(),
             dust_whisper: self.settings.dust_whisper.clone(),
+            fast_pay_state: fast_pay.state.as_str().to_string(),
+            fast_pay_message: fast_pay.message,
         }
+    }
+
+    fn fast_pay_status_sync(&self) -> FastPayStatus {
+        if self.settings.channel_id_hex.is_some() && self.settings.l2_hub_url.is_some() {
+            return FastPayStatus::ready("Fast Pay");
+        }
+        if self.settings.l2_hub_url.is_some() {
+            return FastPayStatus::needs_channel("your provider", DEFAULT_CHANNEL_DEPOSIT_MEI);
+        }
+        FastPayStatus::no_provider()
     }
 
     pub fn get_settings(&self) -> WalletSettings {
@@ -487,6 +507,75 @@ impl WalletService {
         Ok(Some(L2HubClient::new(hub_url).health().await?))
     }
 
+    /// Discover a public CSP, persist hub settings, and open a channel when needed.
+    pub async fn enable_fast_pay(
+        &mut self,
+        deposit_mei: Option<f64>,
+    ) -> WalletResult<FastPayStatus> {
+        self.touch_auto_lock();
+        let deposit = deposit_mei.unwrap_or(DEFAULT_CHANNEL_DEPOSIT_MEI);
+
+        if self.settings.l2_hub_url.is_none() {
+            if let Some(discovered) = discover_healthy_hub().await {
+                apply_discovered_hub(&mut self.settings, &discovered);
+            }
+        }
+
+        let hub_address = match self.settings.hub_right_address.clone() {
+            Some(a) if !a.is_empty() => a,
+            _ => {
+                if let Some(url) = self.settings.l2_hub_url.clone() {
+                    if let Ok(health) = L2HubClient::new(url).health().await {
+                        if let Some(addr) = health.hub_address.filter(|a| !a.is_empty()) {
+                            self.settings.hub_right_address = Some(addr.clone());
+                            addr
+                        } else {
+                            return Err(WalletError::L2(
+                                "Fast Pay provider found but hub address is missing — set it in Advanced → Fast Pay"
+                                    .into(),
+                            ));
+                        }
+                    } else {
+                        return Err(WalletError::L2(
+                            "No Fast Pay provider is online right now. Try again later or send on-chain."
+                                .into(),
+                        ));
+                    }
+                } else {
+                    return Err(WalletError::L2(
+                        "No Fast Pay provider is online right now. Your sends still work on-chain."
+                            .into(),
+                    ));
+                }
+            }
+        };
+
+        if self.settings.channel_id_hex.is_none() {
+            self.open_channel(&hub_address, deposit, 0.0).await?;
+        }
+
+        self.settings.save()?;
+        self.router.update_settings(self.settings.clone());
+        self.fast_pay_status().await
+    }
+
+    pub async fn fast_pay_status(&self) -> WalletResult<FastPayStatus> {
+        let user = self.unlocked.as_ref().map(|s| s.address.as_str());
+        evaluate_fast_pay(&self.node, &self.settings, user).await
+    }
+
+    async fn maybe_discover_hub(&mut self) -> WalletResult<()> {
+        if self.settings.l2_hub_url.is_some() {
+            return Ok(());
+        }
+        if let Some(discovered) = discover_healthy_hub().await {
+            apply_discovered_hub(&mut self.settings, &discovered);
+            self.settings.save()?;
+            self.router.update_settings(self.settings.clone());
+        }
+        Ok(())
+    }
+
     pub fn list_bills(&self) -> Vec<BillEntry> {
         self.bills.list()
     }
@@ -662,10 +751,12 @@ impl WalletService {
 
     pub async fn preview_send(&mut self, to: &str, amount_mei: f64) -> WalletResult<SendPreview> {
         self.touch_auto_lock();
+        self.maybe_discover_hub().await?;
         let from = self.require_address()?;
         let amount_wire = format_amount_mei(amount_mei);
         let balance = self.node.balance_mei(&from).await.unwrap_or(0.0);
         let hip23 = validate_simple_l1_send(to, amount_mei, balance, crate::hip23::L1_DEFAULT_FEE_MEI)?;
+        let fast_pay = evaluate_fast_pay(&self.node, &self.settings, Some(&from)).await?;
         let plan = self.router.plan_send(&from, to, amount_mei).await?;
         Ok(SendPreview {
             plan,
@@ -675,6 +766,7 @@ impl WalletService {
             amount_wire: amount_wire.clone(),
             fee: crate::hip23::wire_mei_for_node("1:244"),
             hip23,
+            fast_pay,
         })
     }
 

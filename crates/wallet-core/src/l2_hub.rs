@@ -17,6 +17,9 @@ pub struct HubHealth {
     pub ok: bool,
     pub version: u32,
     pub name: Option<String>,
+    /// CSP on-chain address (optional Hub API v1 extension).
+    #[serde(default)]
+    pub hub_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
