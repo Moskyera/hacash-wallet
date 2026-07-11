@@ -80,6 +80,7 @@ type Props = {
   onSaveWalletName: () => void;
   onExportBackup: () => void;
   onChangePassphrase: () => void;
+  onResetWallet: () => void;
   onLock: () => void;
   onPersistPrivacy: (patch: Partial<PrivacySettings>) => void;
   onSelectContact: (c: SavedContact) => void;
@@ -132,6 +133,7 @@ export default function MoreRouter(props: Props) {
     onSaveWalletName,
     onExportBackup,
     onChangePassphrase,
+    onResetWallet,
     onLock,
     onPersistPrivacy,
     onSelectContact,
@@ -144,6 +146,7 @@ export default function MoreRouter(props: Props) {
   } = props;
 
   const [webauthnReady, setWebauthnReady] = useState(false);
+  const [nodeTestMsg, setNodeTestMsg] = useState<string | null>(null);
 
   useEffect(() => {
     setWebauthnReady(webAuthnAvailable());
@@ -305,6 +308,11 @@ export default function MoreRouter(props: Props) {
       {page === "settings" && (
         <div className="card">
           <h2>Network</h2>
+          {status?.node_url && (
+            <p className="muted">
+              Active node: <code>{status.node_url}</code>
+            </p>
+          )}
           <label className="label">Node URL</label>
           <input
             value={settingsNodeUrl}
@@ -314,7 +322,7 @@ export default function MoreRouter(props: Props) {
             autoCorrect="off"
             spellCheck={false}
           />
-          <p className="muted">Official Hacash node uses HTTP (not HTTPS).</p>
+          <p className="muted">Official Hacash node uses HTTP (not HTTPS). Tap Save after editing.</p>
           <label className="label">L2 Hub URL</label>
           <input
             value={settingsHubUrl}
@@ -327,9 +335,37 @@ export default function MoreRouter(props: Props) {
               {hubHealth.hub_fee_mei != null && ` · fee ${hubHealth.hub_fee_mei} HAC`}
             </p>
           )}
-          <button className="primary" disabled={busy} onClick={() => void onSaveSettings()}>
-            Save settings
-          </button>
+          <div className="row-btns">
+            <button className="primary" disabled={busy} onClick={() => void onSaveSettings()}>
+              Save settings
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setNodeTestMsg(null);
+                setBusy(true);
+                void api
+                  .pingNode()
+                  .then((r) => {
+                    setNodeTestMsg(`Node OK (${String(r.reachable ?? "true")})`);
+                    onToast("Node connection OK.", "success");
+                  })
+                  .catch((e) => {
+                    const msg = formatInvokeError(e);
+                    setNodeTestMsg(msg);
+                    onToast(msg, "error");
+                  })
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Test node
+            </button>
+          </div>
+          {nodeTestMsg && <p className="muted small">{nodeTestMsg}</p>}
+          <p className="muted small">
+            GrapheneOS: Settings → Apps → Hacash Wallet → Permissions → Network → Allow
+          </p>
         </div>
       )}
       {page === "security" && (
@@ -354,6 +390,16 @@ export default function MoreRouter(props: Props) {
             <input type="password" value={backupPass} onChange={(e) => setBackupPass(e.target.value)} />
             <button className="primary" disabled={busy || !backupPass} onClick={() => void onExportBackup()}>
               Download backup
+            </button>
+          </div>
+          <div className="card">
+            <h2>Delete wallet</h2>
+            <p className="muted">
+              Removes this wallet from the phone so you can create or import a different one. Export a
+              backup first if you need to recover funds later.
+            </p>
+            <button type="button" disabled={busy} onClick={onResetWallet}>
+              Delete wallet from device
             </button>
           </div>
           <div className="card">

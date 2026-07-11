@@ -246,6 +246,37 @@ impl WalletService {
         Ok(())
     }
 
+    /// Wipe all local wallet data so a new wallet can be created on this device.
+    pub fn reset_wallet(&mut self) -> WalletResult<()> {
+        self.lock();
+        let paths = [
+            self.vault_path.clone(),
+            crate::paths::settings_path(),
+            crate::paths::bills_path(),
+            crate::paths::history_path(),
+            crate::paths::messenger_path(),
+            crate::paths::quantum_keystore_path(),
+        ];
+        for path in paths {
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| WalletError::Vault(format!("failed to remove {}: {e}", path.display())))?;
+            }
+        }
+        self.vault_cache = None;
+        self.vault_meta = None;
+        self.balance_cache = None;
+        self.quantum_keystore_mem = None;
+        self.settings = WalletSettings::default();
+        self.settings.save()?;
+        self.bills = BillStore::default();
+        self.history = TxHistory::default();
+        self.node = NodeClient::new(self.settings.node_url.clone());
+        self.profile = SecurityProfile::from_name(&self.settings.security_profile);
+        self.router = PaymentRouter::new(self.node.clone(), self.settings.clone(), self.bills.clone());
+        Ok(())
+    }
+
     pub fn create_wallet(&mut self, passphrase: &str) -> WalletResult<String> {
         if self.vault_path.exists() {
             return Err(WalletError::Vault("wallet already exists".into()));

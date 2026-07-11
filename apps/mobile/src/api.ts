@@ -342,6 +342,8 @@ export const api = {
   getSettings: () => invoke<WalletSettings>("wallet_get_settings"),
   updateSettings: (settings: WalletSettings) =>
     invoke<void>("wallet_update_settings", { settings }),
+  pingNode: () => invoke<Record<string, unknown>>("wallet_ping_node"),
+  resetWallet: () => invoke<void>("wallet_reset"),
   updatePrivacy: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   txHistory: () => invoke<TxRecord[]>("wallet_tx_history"),

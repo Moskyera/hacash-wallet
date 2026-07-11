@@ -14,6 +14,8 @@ if (-not (Test-Path $gradle)) {
     throw "Missing $gradle. Run yarn tauri android init first."
 }
 
+& (Join-Path $mobile "merge-android-permissions.ps1")
+
 if (-not (Test-Path $netDstDir)) { New-Item -ItemType Directory -Path $netDstDir -Force | Out-Null }
 Copy-Item $netSrc $netDst -Force
 Copy-Item $rulesSrc $rulesDst -Force

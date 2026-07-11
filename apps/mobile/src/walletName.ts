@@ -27,6 +27,10 @@ export function saveWalletName(address: string, name: string): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
 }
 
+export function clearAllWalletNames(): void {
+  localStorage.removeItem(STORAGE_KEY);
+}
+
 export function walletDisplayName(
   address: string | null | undefined,
   customName?: string,

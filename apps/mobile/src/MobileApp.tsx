@@ -19,7 +19,7 @@ import { loadContacts, type SavedContact } from "./contacts";
 import { formatInvokeError } from "./formatInvokeError";
 import { encodePaymentUri } from "./paymentQr";
 import { copyWithPrivacyClear, maskAddress } from "./privacy";
-import { saveWalletName, walletDisplayName } from "./walletName";
+import { clearAllWalletNames, saveWalletName, walletDisplayName } from "./walletName";
 import { MIN_WALLET_PASS } from "./quantumMeta";
 import { clearDeepLink, parseDeepLinkPay, stashDeepLinkUrl } from "./utils/deepLink";
 import { downloadJson } from "./utils/downloadJson";
@@ -270,6 +270,28 @@ export default function MobileApp() {
     showToast("Address copied.", "success");
   };
 
+  const handleResetWallet = async () => {
+    const ok1 = window.confirm(
+      "Delete this wallet from the phone? You will need your seed/backup to recover funds.",
+    );
+    if (!ok1) return;
+    const ok2 = window.confirm("This cannot be undone. Delete wallet now?");
+    if (!ok2) return;
+    session.setBusy(true);
+    try {
+      await api.resetWallet();
+      clearAllWalletNames();
+      setPassphrase("");
+      setSeed("");
+      await session.refresh();
+      showToast("Wallet removed. You can create or import a new one.", "success");
+    } catch (e) {
+      showToast(formatInvokeError(e), "error");
+    } finally {
+      session.setBusy(false);
+    }
+  };
+
   const handleSaveSettings = async () => {
     if (!session.settings) return;
     session.setBusy(true);
@@ -358,6 +380,7 @@ export default function MobileApp() {
     return (
       <UnlockScreen
         displayName={displayName}
+        addressHint={maskAddress(session.status?.address, false)}
         passphrase={passphrase}
         setPassphrase={setPassphrase}
         busy={session.busy}
@@ -512,6 +535,7 @@ export default function MobileApp() {
             onSaveWalletName={session.handleSaveWalletName}
             onExportBackup={() => void handleExportBackup()}
             onChangePassphrase={() => void handleChangePassphrase()}
+            onResetWallet={() => void handleResetWallet()}
             onLock={() => void session.handleLock()}
             onPersistPrivacy={(p) => void session.persistPrivacy(p)}
             onSelectContact={(c) => {

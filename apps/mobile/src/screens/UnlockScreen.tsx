@@ -4,6 +4,7 @@ import type { ToastKind } from "../hooks/useToast";
 
 type Props = {
   displayName: string;
+  addressHint?: string | null;
   passphrase: string;
   setPassphrase: (v: string) => void;
   busy: boolean;
@@ -13,6 +14,7 @@ type Props = {
 
 export default function UnlockScreen({
   displayName,
+  addressHint,
   passphrase,
   setPassphrase,
   busy,
@@ -24,6 +26,7 @@ export default function UnlockScreen({
       <div className="auth-hero">
         <WalletLogo size="lg" />
         <h1>{displayName}</h1>
+        {addressHint ? <p className="muted mono">{addressHint}</p> : null}
         <p className="muted">Enter passphrase to unlock</p>
       </div>
       <div className="card">

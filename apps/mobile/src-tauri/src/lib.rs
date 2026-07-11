@@ -56,6 +56,7 @@ pub fn run() {
             wallet_tauri_common::commands::wallet_asset_summary,
             wallet_tauri_common::commands::wallet_get_settings,
             wallet_tauri_common::commands::wallet_update_settings,
+            wallet_tauri_common::commands::wallet_reset,
             wallet_tauri_common::commands::wallet_tx_history,
             wallet_tauri_common::commands::wallet_fast_pay_status,
             wallet_tauri_common::commands::wallet_enable_fast_pay,

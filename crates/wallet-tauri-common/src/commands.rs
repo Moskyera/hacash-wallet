@@ -73,6 +73,12 @@ pub fn wallet_update_settings(
 }
 
 #[tauri::command]
+pub fn wallet_reset(state: State<'_, AppState>) -> Result<(), String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.reset_wallet().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn wallet_tx_history(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let svc = state.inner.blocking_lock();
     Ok(serde_json::to_value(svc.tx_history()).map_err(|e| e.to_string())?)

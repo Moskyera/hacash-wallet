@@ -61,6 +61,7 @@ export default function WelcomeScreen({
       {tab === "create" && (
         <div className="card">
           <h2>Create wallet</h2>
+          <p className="muted">Updating the app keeps your existing wallet. Use More → Security → Delete wallet to start over.</p>
           <label className="label">Wallet name</label>
           <input
             placeholder="e.g. My Hacash"

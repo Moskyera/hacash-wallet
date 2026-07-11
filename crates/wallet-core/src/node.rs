@@ -9,31 +9,41 @@ use crate::error::{WalletError, WalletResult};
 use crate::settings::{sanitize_node_url, DEFAULT_NODE_URL};
 
 const DEFAULT_NODE: &str = DEFAULT_NODE_URL;
-const USER_AGENT: &str = "HacashWalletMobile/0.1.6";
+const USER_AGENT: &str = "HacashWalletMobile/0.1.7";
 
 fn shared_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .pool_max_idle_per_host(8)
             .tcp_keepalive(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(45))
-            .user_agent(USER_AGENT)
-            .no_proxy()
-            .build()
-            .expect("http client")
+            .user_agent(USER_AGENT);
+        #[cfg(not(target_os = "android"))]
+        {
+            builder = builder.no_proxy();
+        }
+        builder.build().expect("http client")
     })
 }
 
 fn blocking_http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    let mut builder = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(45))
-        .user_agent(USER_AGENT)
-        .no_proxy()
-        .build()
-        .expect("blocking http client")
+        .user_agent(USER_AGENT);
+    #[cfg(not(target_os = "android"))]
+    {
+        builder = builder.no_proxy();
+    }
+    builder.build().expect("blocking http client")
+}
+
+fn node_transport_err(url: &str, err: impl std::fmt::Display) -> WalletError {
+    WalletError::Node(format!(
+        "cannot reach {url} — {err}. On GrapheneOS: Settings → Apps → Hacash Wallet → Permissions → Network → Allow"
+    ))
 }
 
 async fn http_get_json<T>(url: String) -> WalletResult<T>
@@ -46,9 +56,9 @@ where
             blocking_http_client()
                 .get(&url)
                 .send()
-                .map_err(|e| WalletError::Node(e.to_string()))?
+                .map_err(|e| node_transport_err(&url, e))?
                 .json::<T>()
-                .map_err(|e| WalletError::Node(e.to_string()))
+                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
@@ -56,13 +66,13 @@ where
     #[cfg(not(target_os = "android"))]
     {
         shared_http_client()
-            .get(url)
+            .get(&url)
             .send()
             .await
-            .map_err(|e| WalletError::Node(e.to_string()))?
+            .map_err(|e| node_transport_err(&url, e))?
             .json::<T>()
             .await
-            .map_err(|e| WalletError::Node(e.to_string()))
+            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
     }
 }
 
@@ -78,9 +88,9 @@ where
                 .post(&url)
                 .json(&payload)
                 .send()
-                .map_err(|e| WalletError::Node(e.to_string()))?
+                .map_err(|e| node_transport_err(&url, e))?
                 .json::<R>()
-                .map_err(|e| WalletError::Node(e.to_string()))
+                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
@@ -92,10 +102,10 @@ where
             .json(&payload)
             .send()
             .await
-            .map_err(|e| WalletError::Node(e.to_string()))?
+            .map_err(|e| node_transport_err(&url, e))?
             .json::<R>()
             .await
-            .map_err(|e| WalletError::Node(e.to_string()))
+            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
     }
 }
 
@@ -111,9 +121,9 @@ where
                 .header("content-type", "text/plain")
                 .body(body)
                 .send()
-                .map_err(|e| WalletError::Node(e.to_string()))?
+                .map_err(|e| node_transport_err(&url, e))?
                 .json::<R>()
-                .map_err(|e| WalletError::Node(e.to_string()))
+                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
@@ -126,10 +136,10 @@ where
             .body(body)
             .send()
             .await
-            .map_err(|e| WalletError::Node(e.to_string()))?
+            .map_err(|e| node_transport_err(&url, e))?
             .json::<R>()
             .await
-            .map_err(|e| WalletError::Node(e.to_string()))
+            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
     }
 }
 
@@ -154,8 +164,14 @@ impl NodeClient {
     }
 
     pub async fn ping(&self) -> WalletResult<serde_json::Value> {
-        let url = format!("{}/query/metrics", self.base_url);
-        http_get_json(url).await
+        // /query/metrics returns 404 on the public node; any JSON response proves reachability.
+        let url = format!("{}/query/balance?unit=mei&address=1", self.base_url);
+        let body: BalanceResponse = http_get_json(url).await?;
+        Ok(serde_json::json!({
+            "reachable": true,
+            "node": self.base_url,
+            "ret": body.ret
+        }))
     }
 
     pub fn base_url(&self) -> &str {
