@@ -72,3 +72,46 @@ if ($gradleContent -match 'getByName\("release"\)' -and $gradleContent -notmatch
 }
 
 Set-Content -Path $gradle -Value $gradleContent -NoNewline
+
+# Sync branded launcher icons into generated Android res (gen/ uses Tauri placeholder by default).
+$iconSrcRoot = Join-Path $mobile "src-tauri\icons\android"
+$iconDstRoot = Join-Path $android "app\src\main\res"
+if (Test-Path $iconSrcRoot) {
+    Get-ChildItem -Path $iconSrcRoot -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($iconSrcRoot.Length).TrimStart('\')
+        $dst = Join-Path $iconDstRoot $rel
+        $parent = Split-Path -Parent $dst
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        Copy-Item $_.FullName $dst -Force
+    }
+    Write-Host "Synced branded launcher icons to gen/android res" -ForegroundColor Green
+}
+
+# Replace default green Tauri adaptive background with solid black (matches Hacash branding).
+$bgXml = Join-Path $iconDstRoot "drawable\ic_launcher_background.xml"
+if (Test-Path $bgXml) {
+    @'
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#000000"
+        android:pathData="M0,0h108v108h-108z" />
+</vector>
+'@ | Set-Content -Path $bgXml -Encoding UTF8 -NoNewline
+    Write-Host "Set adaptive icon background to black" -ForegroundColor Green
+}
+
+$bgColorXml = Join-Path $iconDstRoot "values\ic_launcher_background.xml"
+if (-not (Test-Path (Split-Path -Parent $bgColorXml))) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $bgColorXml) -Force | Out-Null
+}
+@'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <color name="ic_launcher_background">#000000</color>
+</resources>
+'@ | Set-Content -Path $bgColorXml -Encoding UTF8 -NoNewline
