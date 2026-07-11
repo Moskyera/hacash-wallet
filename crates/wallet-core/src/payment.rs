@@ -6,6 +6,9 @@ use crate::channel::{query_channel, ChannelInfo, CHANNEL_STATUS_OPENING};
 use crate::error::{WalletError, WalletResult};
 use crate::l2_hub::{FastPayRequest, L2HubClient};
 use crate::node::NodeClient;
+use crate::send_options::{
+    fast_pay_fee_breakdown, HubFeePayer, SendFeeBreakdown, SendOptions, DEFAULT_HUB_FEE_MEI,
+};
 use crate::settings::WalletSettings;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,6 +28,7 @@ pub struct PaymentPlan {
     pub rail_label: String,
     /// One-line explanation shown under the label.
     pub rail_detail: String,
+    pub fee_breakdown: SendFeeBreakdown,
 }
 
 pub struct PaymentRouter {
@@ -66,11 +70,25 @@ impl PaymentRouter {
         from: &str,
         to: &str,
         amount_mei: f64,
+        options: SendOptions,
     ) -> WalletResult<PaymentPlan> {
-        if let Some(plan) = self.try_l2_plan(from, to, amount_mei).await? {
-            return Ok(plan);
+        if !options.force_l1 {
+            if let Some(plan) = self
+                .try_l2_plan(from, to, amount_mei, options.hub_fee_payer)
+                .await?
+            {
+                return Ok(plan);
+            }
         }
         let _ = self.node.balance_mei(from).await?;
+        let l1_fee = crate::hip23::wire_mei_for_node("1:244");
+        let fee_breakdown = SendFeeBreakdown {
+            payer_debit_mei: amount_mei + crate::hip23::L1_DEFAULT_FEE_MEI,
+            recipient_credit_mei: amount_mei,
+            hub_fee_mei: None,
+            hub_fee_payer: options.hub_fee_payer,
+            l1_fee_wire: Some(l1_fee.clone()),
+        };
         Ok(PaymentPlan {
             rail: PaymentRail::L1OnChain,
             summary: format!("Send {amount_mei} HAC to {to}"),
@@ -78,6 +96,7 @@ impl PaymentRouter {
             channel_id: None,
             rail_label: crate::fast_pay::rail_label(PaymentRail::L1OnChain).into(),
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L1OnChain).into(),
+            fee_breakdown,
         })
     }
 
@@ -86,6 +105,7 @@ impl PaymentRouter {
         from: &str,
         to: &str,
         amount_mei: f64,
+        hub_fee_payer: HubFeePayer,
     ) -> WalletResult<Option<PaymentPlan>> {
         let hub_url = match &self.settings.l2_hub_url {
             Some(u) => u.clone(),
@@ -101,19 +121,26 @@ impl PaymentRouter {
         if !health.ok {
             return Ok(None);
         }
+        let hub_fee_mei = health.hub_fee_mei.unwrap_or(DEFAULT_HUB_FEE_MEI);
 
         let channel = query_channel(&self.node, &channel_id).await?;
         if !channel_is_ready(&channel, from) {
             return Ok(None);
         }
 
+        let fee_breakdown = fast_pay_fee_breakdown(amount_mei, hub_fee_mei, hub_fee_payer)?;
+        let fee_label = match hub_fee_payer {
+            HubFeePayer::Sender => format!("~{hub_fee_mei:.3} HAC (you pay)"),
+            HubFeePayer::Recipient => format!("~{hub_fee_mei:.3} HAC (recipient pays)"),
+        };
         Ok(Some(PaymentPlan {
             rail: PaymentRail::L2Fast,
             summary: format!("Send {amount_mei} HAC to {to}"),
-            estimated_fee: "~0.001 HAC".into(),
+            estimated_fee: fee_label,
             channel_id: Some(channel_id),
             rail_label: crate::fast_pay::rail_label(PaymentRail::L2Fast).into(),
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L2Fast).into(),
+            fee_breakdown,
         }))
     }
 
@@ -124,6 +151,7 @@ impl PaymentRouter {
         _amount_mei: f64,
         amount_wire: &str,
         payer_account: &WalletAccount,
+        hub_fee_payer: HubFeePayer,
     ) -> WalletResult<String> {
         let hub_url = self
             .settings
@@ -142,6 +170,7 @@ impl PaymentRouter {
             payee: to.to_owned(),
             amount: amount_wire.to_owned(),
             channel_id,
+            fee_payer: Some(hub_fee_payer.as_str().into()),
         };
         if payer_account.address() != from {
             return Err(WalletError::L2(format!(

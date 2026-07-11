@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   api,
+  AssetSummary,
   ChannelInfo,
   ChannelSetupPreview,
   Hip23PatternCheck,
@@ -9,6 +10,8 @@ import {
   DustWhisperSettings,
   PrivacySettings,
   RelayHealthStatus,
+  HubFeePayer,
+  SendOptions,
   SendPreview,
   TxRecord,
   WalletSettings,
@@ -22,6 +25,12 @@ import QuantumFundingCard from "./components/QuantumFundingCard";
 import QuantumNodeHealth from "./components/QuantumNodeHealth";
 import AddressBadge from "./components/AddressBadge";
 import BillsPanel from "./components/BillsPanel";
+import PaymentQrDisplay from "./components/PaymentQrDisplay";
+import PaymentQrScanner from "./components/PaymentQrScanner";
+import HacdSendPanel from "./components/HacdSendPanel";
+import BtcSendPanel from "./components/BtcSendPanel";
+import type { PaymentQrPayload } from "./paymentQr";
+import type { PaymentAsset } from "./utils/paymentAssets";
 import { quantumApi, QuantumAccountSummary } from "./api";
 import { formatInvokeError } from "./formatInvokeError";
 import {
@@ -41,6 +50,9 @@ import {
   maskAddress,
   maskBalance,
   maskHash,
+  formatBtcFromSatoshi,
+  maskBtcFromSatoshi,
+  maskAssetCount,
 } from "./privacy";
 
 type Screen =
@@ -96,6 +108,7 @@ export default function App() {
   const [settings, setSettings] = useState<WalletSettings | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [balance, setBalance] = useState<number | null>(null);
+  const [assets, setAssets] = useState<AssetSummary | null>(null);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -104,8 +117,14 @@ export default function App() {
   const [importSeed, setImportSeed] = useState("");
   const [importPassphrase, setImportPassphrase] = useState("");
 
+  const [sendAsset, setSendAsset] = useState<PaymentAsset>("HAC");
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
+  const [sendHubFeePayer, setSendHubFeePayer] = useState<HubFeePayer>("sender");
+  const [sendForceL1, setSendForceL1] = useState(false);
+  const [showSendOptions, setShowSendOptions] = useState(false);
+  const [sendQrScanOpen, setSendQrScanOpen] = useState(false);
+  const [receiveQrAmount, setReceiveQrAmount] = useState("");
   const [preview, setPreview] = useState<SendPreview | null>(null);
   const [lastTx, setLastTx] = useState("");
 
@@ -185,13 +204,38 @@ export default function App() {
     setNodeUrl(s.node_url);
     setHubUrl(s.l2_hub_url ?? "");
     setHubAddress(s.hub_right_address ?? "");
+    setSendHubFeePayer(s.send?.hub_fee_payer ?? "sender");
+    setSendForceL1(!(s.send?.prefer_fast_pay ?? true));
   }, []);
+
+  const currentSendOptions = (): SendOptions => ({
+    hub_fee_payer: sendHubFeePayer,
+    force_l1: sendForceL1,
+  });
+
+  async function persistSendPreferences(
+    hubFeePayer: HubFeePayer,
+    forceL1: boolean,
+  ) {
+    if (!settings) return;
+    const next = {
+      ...settings,
+      send: {
+        hub_fee_payer: hubFeePayer,
+        prefer_fast_pay: !forceL1,
+      },
+    };
+    await api.updateSettings(next);
+    setSettings(next);
+  }
 
   const refreshBalance = useCallback(async () => {
     try {
-      const b = await api.balance();
-      setBalance(b);
+      const summary = await api.assetSummary();
+      setAssets(summary);
+      setBalance(summary.hac_mei);
     } catch {
+      setAssets(null);
       setBalance(null);
     }
   }, []);
@@ -579,12 +623,48 @@ export default function App() {
     }
   }
 
+  function openQrPay() {
+    clearMessages();
+    setPreview(null);
+    setSendQrScanOpen(true);
+    setScreen("send");
+  }
+
+  async function handlePaymentQr(payload: PaymentQrPayload) {
+    clearMessages();
+    setSendQrScanOpen(false);
+    setSendTo(payload.address);
+    const amount = payload.amount_mei;
+    if (amount != null && amount > 0) {
+      setSendAmount(String(amount));
+      setBusy(true);
+      try {
+        const p = await api.previewSend(payload.address, amount, currentSendOptions());
+        setPreview(p);
+        setInfo(
+          payload.label
+            ? `QR payment (${payload.label}) — review and confirm.`
+            : "QR payment loaded — review and confirm.",
+        );
+      } catch (e) {
+        setError(formatInvokeError(e));
+      } finally {
+        setBusy(false);
+      }
+    } else {
+      setSendAmount("");
+      setPreview(null);
+      setInfo("Address scanned — enter amount and tap Continue.");
+    }
+    setScreen("send");
+  }
+
   async function handlePreviewSend() {
     setBusy(true);
     clearMessages();
     setPreview(null);
     try {
-      const p = await api.previewSend(sendTo.trim(), Number(sendAmount));
+      const p = await api.previewSend(sendTo.trim(), Number(sendAmount), currentSendOptions());
       setPreview(p);
     } catch (e) {
       setError(formatInvokeError(e));
@@ -620,7 +700,7 @@ export default function App() {
           throw new Error("Enable Windows Hello or register WebAuthn for large sends");
         }
       }
-      const result = await api.sendHac(sendTo.trim(), amount);
+      const result = await api.sendHac(sendTo.trim(), amount, currentSendOptions());
       setLastTx(result.tx_hash);
       setPreview(null);
       setSendTo("");
@@ -1065,6 +1145,23 @@ export default function App() {
               <div className="balance-value">
                 {maskBalance(balance, hideBalances)} <small>HAC</small>
               </div>
+              <div className="balance-assets-row">
+                <div className="balance-asset-pill">
+                  <span className="label">HACD</span>
+                  <span className="value">{maskAssetCount(assets?.hacd_count ?? null, hideBalances)}</span>
+                </div>
+                <div className="balance-asset-pill">
+                  <span className="label">BTC</span>
+                  <span className="value">
+                    {maskBtcFromSatoshi(assets?.btc_wallet_satoshi ?? null, hideBalances)}
+                  </span>
+                  {!hideBalances && (assets?.btc_channel_satoshi ?? 0) > 0 && (
+                    <span className="hint">
+                      + {formatBtcFromSatoshi(assets!.btc_channel_satoshi)} in Fast Pay
+                    </span>
+                  )}
+                </div>
+              </div>
               <div className="chips">
                 {status?.seconds_until_lock != null && (
                   <span className="chip chip-accent">
@@ -1087,6 +1184,9 @@ export default function App() {
               <button className="primary" onClick={() => setScreen("send")}>
                 Send HAC
               </button>
+              {!status?.watch_only && (
+                <button onClick={openQrPay}>Scan QR & Pay</button>
+              )}
               <button onClick={() => setScreen("fastpay")}>Fast Pay</button>
               <button onClick={() => setScreen("receive")}>Receive</button>
               {status?.webauthn_enabled && (
@@ -1291,11 +1391,103 @@ export default function App() {
 
         {screen === "send" && (
           <section className="panel">
-            <h2>Send HAC</h2>
-            <div className={`fp-send-strip ${fastPayReady ? "fp-send-on" : "fp-send-off"}`}>
+            <h2>Send</h2>
+            <div className="display-toggle send-asset-toggle">
+              <button
+                type="button"
+                className={sendAsset === "HAC" ? "selected" : ""}
+                onClick={() => {
+                  setSendAsset("HAC");
+                  setPreview(null);
+                }}
+              >
+                HAC
+              </button>
+              <button
+                type="button"
+                className={sendAsset === "HACD" ? "selected" : ""}
+                onClick={() => {
+                  setSendAsset("HACD");
+                  setPreview(null);
+                }}
+              >
+                HACD
+              </button>
+              <button
+                type="button"
+                className={sendAsset === "BTC" ? "selected" : ""}
+                onClick={() => {
+                  setSendAsset("BTC");
+                  setPreview(null);
+                }}
+              >
+                BTC
+              </button>
+            </div>
+
+            {sendAsset === "BTC" ? (
+              <BtcSendPanel
+                active={screen === "send" && sendAsset === "BTC"}
+                busy={busy}
+                setBusy={setBusy}
+                nativeBioAvailable={nativeBioAvailable}
+                hideAddresses={hideAddresses}
+                watchOnly={!!status?.watch_only}
+                onNotify={(msg, kind) => {
+                  if (kind === "error") setError(msg);
+                  else setInfo(msg);
+                }}
+                onSent={refreshUnlockedData}
+              />
+            ) : sendAsset === "HACD" ? (
+              <HacdSendPanel
+                active={screen === "send" && sendAsset === "HACD"}
+                busy={busy}
+                setBusy={setBusy}
+                nativeBioAvailable={nativeBioAvailable}
+                hideAddresses={hideAddresses}
+                watchOnly={!!status?.watch_only}
+                onNotify={(msg, kind) => {
+                  if (kind === "error") setError(msg);
+                  else setInfo(msg);
+                }}
+                onSent={refreshUnlockedData}
+              />
+            ) : (
+              <>
+            {!status?.watch_only && (
+              <>
+                <button
+                  type="button"
+                  className="collapse-toggle"
+                  onClick={() => {
+                    setSendQrScanOpen((v) => !v);
+                    setPreview(null);
+                  }}
+                >
+                  {sendQrScanOpen ? "▾" : "▸"} Scan QR payment
+                </button>
+                {sendQrScanOpen && (
+                  <PaymentQrScanner
+                    onDetected={(payload) => void handlePaymentQr(payload)}
+                    onError={(msg) => setError(msg)}
+                    disabled={busy}
+                  />
+                )}
+              </>
+            )}
+            <div
+              className={`fp-send-strip ${fastPayReady && !sendForceL1 ? "fp-send-on" : "fp-send-off"}`}
+            >
               <span className="fp-send-label">Route for this wallet:</span>
-              <span className={`fp-send-badge ${fastPayReady ? "fp-send-badge-on" : "fp-send-badge-off"}`}>
-                {fastPayReady ? "Fast Pay ON" : "Fast Pay OFF (on-chain)"}
+              <span
+                className={`fp-send-badge ${fastPayReady && !sendForceL1 ? "fp-send-badge-on" : "fp-send-badge-off"}`}
+              >
+                {sendForceL1
+                  ? "On-chain (forced)"
+                  : fastPayReady
+                    ? "Fast Pay ON"
+                    : "Fast Pay OFF (on-chain)"}
               </span>
               <button type="button" className="linkish" onClick={() => setScreen("fastpay")}>
                 Change
@@ -1312,6 +1504,64 @@ export default function App() {
               min="0"
               step="0.001"
             />
+
+            <button
+              type="button"
+              className="collapse-toggle"
+              onClick={() => setShowSendOptions((v) => !v)}
+            >
+              {showSendOptions ? "▾" : "▸"} Payment options
+            </button>
+            {showSendOptions && (
+              <div className="send-options-card">
+                <fieldset className="send-option-group">
+                  <legend>Fast Pay network fee</legend>
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="hubFeePayer"
+                      checked={sendHubFeePayer === "sender"}
+                      onChange={() => {
+                        setSendHubFeePayer("sender");
+                        setPreview(null);
+                        persistSendPreferences("sender", sendForceL1).catch(() => undefined);
+                      }}
+                    />
+                    I pay the fee (default)
+                  </label>
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="hubFeePayer"
+                      checked={sendHubFeePayer === "recipient"}
+                      onChange={() => {
+                        setSendHubFeePayer("recipient");
+                        setPreview(null);
+                        persistSendPreferences("recipient", sendForceL1).catch(() => undefined);
+                      }}
+                    />
+                    Recipient pays — deducted from amount they receive
+                  </label>
+                  <p className="muted small-note">
+                    Applies to Fast Pay only. On-chain L1 fees are always paid by the sender.
+                  </p>
+                </fieldset>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={sendForceL1}
+                    onChange={(e) => {
+                      const force = e.target.checked;
+                      setSendForceL1(force);
+                      setPreview(null);
+                      persistSendPreferences(sendHubFeePayer, force).catch(() => undefined);
+                    }}
+                  />
+                  Force on-chain (skip Fast Pay for this wallet)
+                </label>
+              </div>
+            )}
+
             <button
               className="primary"
               disabled={busy || !sendTo || !sendAmount}
@@ -1332,8 +1582,22 @@ export default function App() {
                 </p>
                 <ul className="send-meta">
                   <li>
+                    <strong>You pay:</strong> {preview.plan.fee_breakdown.payer_debit_mei.toFixed(3)}{" "}
+                    HAC
+                  </li>
+                  <li>
+                    <strong>Recipient receives:</strong>{" "}
+                    {preview.plan.fee_breakdown.recipient_credit_mei.toFixed(3)} HAC
+                  </li>
+                  <li>
                     <strong>Network fee:</strong> {preview.plan.estimated_fee}
                   </li>
+                  {preview.plan.rail === "L2Fast" &&
+                    preview.plan.fee_breakdown.hub_fee_payer === "recipient" && (
+                      <li className="muted">
+                        Hub fee is taken from the recipient&apos;s credit, not added to your debit.
+                      </li>
+                    )}
                   <li>
                     <strong>From:</strong> <code>{maskAddress(preview.from, hideAddresses)}</code>
                   </li>
@@ -1388,13 +1652,38 @@ export default function App() {
               </button>{" "}
               tab.
             </p>
+              </>
+            )}
           </section>
         )}
 
         {screen === "receive" && (
           <section className="panel">
             <h2>Receive HAC</h2>
-            <p>Share your address. Incoming Fast Pay transfers arrive the same way as on-chain.</p>
+            <p>
+              Show your QR code for quick payments. Fast Pay and on-chain both credit the same
+              address.
+            </p>
+            <label>Requested amount (optional, HAC)</label>
+            <input
+              value={receiveQrAmount}
+              onChange={(e) => setReceiveQrAmount(e.target.value)}
+              placeholder="Leave empty for any amount"
+              type="number"
+              min="0"
+              step="0.001"
+            />
+            {status?.address && (
+              <PaymentQrDisplay
+                address={status.address}
+                amountMei={
+                  receiveQrAmount && Number(receiveQrAmount) > 0
+                    ? Number(receiveQrAmount)
+                    : undefined
+                }
+                hideAddress={hideAddresses}
+              />
+            )}
             <div className="address-box">
               <code>{maskAddress(status?.address, hideAddresses)}</code>
             </div>

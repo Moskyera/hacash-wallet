@@ -11,6 +11,7 @@ use tower_http::trace::TraceLayer;
 use crate::crypto::{decrypt_payload, public_key_from_secret};
 use crate::error::WhisperError;
 use crate::http_util::ensure_success;
+use crate::messenger_relay::{self, MessengerInbox, RelayAppState};
 use crate::protocol::{
     WhisperInfo, WhisperSubmitRequest, WhisperSubmitResponse, INFO_PATH, PROTOCOL_VERSION,
     SUBMIT_PATH,
@@ -28,12 +29,17 @@ pub struct RelayState {
 }
 
 pub fn build_router(state: RelayState) -> Router {
+    let app_state = RelayAppState {
+        relay: Arc::new(state),
+        inbox: Arc::new(MessengerInbox::new()),
+    };
     Router::new()
         .route(INFO_PATH, get(info_handler))
         .route(SUBMIT_PATH, post(submit_handler))
+        .merge(messenger_relay::messenger_routes())
         .layer(DefaultBodyLimit::max(MAX_SUBMIT_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
-        .with_state(Arc::new(state))
+        .with_state(app_state)
 }
 
 pub async fn serve(addr: SocketAddr, state: RelayState) -> std::io::Result<()> {
@@ -43,20 +49,20 @@ pub async fn serve(addr: SocketAddr, state: RelayState) -> std::io::Result<()> {
     axum::serve(listener, app).await
 }
 
-async fn info_handler(State(state): State<Arc<RelayState>>) -> Json<WhisperInfo> {
+async fn info_handler(State(state): State<RelayAppState>) -> Json<WhisperInfo> {
     Json(WhisperInfo {
         v: PROTOCOL_VERSION,
-        pubkey: state.public_key_b64.clone(),
+        pubkey: state.relay.public_key_b64.clone(),
         // Informational only — relay always forwards to its configured node URL.
-        node_url: Some(state.default_node_url.clone()),
+        node_url: Some(state.relay.default_node_url.clone()),
     })
 }
 
 async fn submit_handler(
-    State(state): State<Arc<RelayState>>,
+    State(state): State<RelayAppState>,
     Json(request): Json<WhisperSubmitRequest>,
 ) -> Json<WhisperSubmitResponse> {
-    match forward_submit(&state, &request).await {
+    match forward_submit(&state.relay, &request).await {
         Ok(resp) => Json(resp),
         Err(e) => {
             tracing::warn!(error = %e, "whisper submit failed");

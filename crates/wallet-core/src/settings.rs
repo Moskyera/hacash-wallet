@@ -7,6 +7,7 @@ use crate::error::{WalletError, WalletResult};
 use crate::paths::secure_write;
 use crate::dust_whisper::DustWhisperSettings;
 use crate::privacy::PrivacySettings;
+use crate::send_options::SendPreferences;
 
 fn default_security_profile() -> String {
     "balanced".into()
@@ -43,6 +44,8 @@ pub struct WalletSettings {
     #[serde(default)]
     pub dust_whisper: DustWhisperSettings,
     #[serde(default)]
+    pub send: SendPreferences,
+    #[serde(default)]
     pub quantum_mode: bool,
     #[serde(default)]
     pub quantum_meta: Option<QuantumMeta>,
@@ -64,6 +67,7 @@ impl Default for WalletSettings {
             watch_only_address: None,
             privacy: PrivacySettings::default(),
             dust_whisper: DustWhisperSettings::default(),
+            send: SendPreferences::default(),
             quantum_mode: false,
             quantum_meta: None,
             quantum_keystore_json: None,

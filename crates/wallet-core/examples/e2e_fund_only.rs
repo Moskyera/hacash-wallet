@@ -32,7 +32,7 @@ fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(45.0);
         let preview = svc
-            .preview_send(&quantum, fund_amount)
+            .preview_send(&quantum, fund_amount, Default::default())
             .await
             .expect("preview");
         println!(
@@ -40,7 +40,7 @@ fn main() {
             preview.hip23.ok, preview.amount_wire, preview.fee
         );
 
-        match svc.send_hac(&quantum, fund_amount).await {
+        match svc.send_hac(&quantum, fund_amount, Default::default()).await {
             Ok(r) => println!("Fund OK rail={:?} hash={}", r.rail, r.tx_hash),
             Err(e) => println!("Fund FAIL: {e}"),
         }

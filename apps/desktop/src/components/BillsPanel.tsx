@@ -68,7 +68,7 @@ export default function BillsPanel({ hideAddresses, onError, onInfo }: Props) {
     setBusyId(paymentId);
     try {
       const hex = await api.getBillHex(paymentId);
-      await copyWithPrivacyClear(hex);
+      await copyWithPrivacyClear(hex, 30);
       onInfo("Bill hex copied to clipboard.");
     } catch (e) {
       onError(formatInvokeError(e));

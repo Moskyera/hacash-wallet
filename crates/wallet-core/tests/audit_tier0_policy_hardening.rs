@@ -17,7 +17,7 @@ fn tier0_paranoid_send_rejects_without_webauthn_ceremony() {
             svc.set_security_profile(SecurityProfile::paranoid()).unwrap();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let err = rt
-                .block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 1.0))
+                .block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 1.0, Default::default()))
                 .unwrap_err();
             assert!(matches!(err, WalletError::Policy(_)));
             let msg = err.to_string();
@@ -34,7 +34,7 @@ fn tier0_balanced_large_send_rejects_without_session_2fa() {
             svc.create_wallet("tier0-passphrase12").unwrap();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let err = rt
-                .block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 150.0))
+                .block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 150.0, Default::default()))
                 .unwrap_err();
             assert!(matches!(err, WalletError::Policy(_)));
         });
@@ -66,7 +66,7 @@ fn tier0_second_factor_single_use_consumed_before_send() {
             svc.confirm_biometric_for_send().unwrap();
             let rt = tokio::runtime::Runtime::new().unwrap();
             // Send will fail at network/node layer but must consume 2FA first.
-            let _ = rt.block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 150.0));
+            let _ = rt.block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 150.0, Default::default()));
             let ctx = svc.audit_second_factor_snapshot().expect("still unlocked");
             assert!(!ctx.biometric_ok);
             assert!(!ctx.yubikey_ok);

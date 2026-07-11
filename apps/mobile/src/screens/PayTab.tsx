@@ -1,0 +1,463 @@
+import { useState } from "react";
+import AssetSelector from "../components/AssetSelector";
+import HacdDiamondVisual from "../components/HacdDiamondVisual";
+import PaymentQrScanner from "../components/PaymentQrScanner";
+import { useHacdSend } from "../hooks/useHacdSend";
+import { useBtcSend } from "../hooks/useBtcSend";
+import type { HubFeePayer, PlatformSecurityStatus, SendPreview, WalletSettings } from "../api";
+import type { SavedContact } from "../contacts";
+import { maskAddress } from "../privacy";
+import { BIOMETRIC_THRESHOLD_MEI } from "../utils/appConstants";
+import {
+  isValidHacdName,
+  normalizeHacdName,
+  type PaymentAsset,
+} from "../utils/paymentAssets";
+import type { PaymentQrPayload } from "../paymentQr";
+
+type Props = {
+  contacts: SavedContact[];
+  sendTo: string;
+  setSendTo: (v: string) => void;
+  sendAmount: string;
+  setSendAmount: (v: string) => void;
+  sendHubFeePayer: HubFeePayer;
+  setSendHubFeePayer: (v: HubFeePayer) => void;
+  sendForceL1: boolean;
+  setSendForceL1: (v: boolean) => void;
+  preview: SendPreview | null;
+  payScanMode: boolean;
+  setPayScanMode: (v: boolean) => void;
+  payCameraIntent: boolean;
+  onCameraIntentConsumed: () => void;
+  hideAddresses: boolean;
+  settings: WalletSettings | null;
+  platformSec: PlatformSecurityStatus | null;
+  busy: boolean;
+  onPersistSendPrefs: (hubFee: HubFeePayer, forceL1: boolean) => void;
+  onResetPreview: () => void;
+  onPreviewSend: () => void;
+  onConfirmSend: () => void;
+  onPaymentQr: (p: PaymentQrPayload) => void;
+  onToast: (msg: string, kind: "success" | "info" | "error") => void;
+  onRefresh: () => Promise<void>;
+  setBusy: (b: boolean) => void;
+};
+
+export default function PayTab({
+  contacts,
+  sendTo,
+  setSendTo,
+  sendAmount,
+  setSendAmount,
+  sendHubFeePayer,
+  setSendHubFeePayer,
+  sendForceL1,
+  setSendForceL1,
+  preview,
+  payScanMode,
+  setPayScanMode,
+  payCameraIntent,
+  onCameraIntentConsumed,
+  hideAddresses,
+  settings,
+  platformSec,
+  busy,
+  onPersistSendPrefs,
+  onResetPreview,
+  onPreviewSend,
+  onConfirmSend,
+  onPaymentQr,
+  onToast,
+  onRefresh,
+  setBusy,
+}: Props) {
+  const [asset, setAsset] = useState<PaymentAsset>("HAC");
+  const [hacdDisplay, setHacdDisplay] = useState<"name" | "visual">("visual");
+  const [manualHacd, setManualHacd] = useState("");
+  const hacd = useHacdSend({
+    active: asset === "HACD",
+    settings,
+    platformSec,
+    setBusy,
+    refresh: onRefresh,
+    showToast: onToast,
+  });
+
+  const btc = useBtcSend({
+    active: asset === "BTC",
+    settings,
+    platformSec,
+    setBusy,
+    refresh: onRefresh,
+    showToast: onToast,
+  });
+
+  const primaryHacd = hacd.selected[0] ?? normalizeHacdName(manualHacd);
+
+  const applyManualHacd = (raw: string) => {
+    const norm = normalizeHacdName(raw);
+    setManualHacd(norm);
+    if (isValidHacdName(norm)) {
+      hacd.setSingleDiamond(norm);
+      hacd.resetPreview();
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Pay</h2>
+      <AssetSelector
+        value={asset}
+        onChange={(next) => {
+          setAsset(next);
+          onResetPreview();
+          hacd.resetPreview();
+          setPayScanMode(false);
+        }}
+      />
+
+      {asset === "HAC" && (
+        <>
+          {contacts.length > 0 && (
+            <div className="chip-row">
+              {contacts.slice(0, 6).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={`chip ${sendTo === c.address ? "selected" : ""}`}
+                  onClick={() => {
+                    setSendTo(c.address);
+                    onResetPreview();
+                  }}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {payScanMode ? (
+            <PaymentQrScanner
+              autoStart={payCameraIntent}
+              onAutoStarted={onCameraIntentConsumed}
+              disabled={busy}
+              onDetected={(p) => void onPaymentQr(p)}
+              onError={(msg) => onToast(msg, "error")}
+            />
+          ) : (
+            <button type="button" onClick={() => setPayScanMode(true)}>
+              Scan QR code
+            </button>
+          )}
+          <label className="label">Recipient</label>
+          <input
+            placeholder="Hacash address"
+            value={sendTo}
+            onChange={(e) => {
+              setSendTo(e.target.value);
+              onResetPreview();
+            }}
+          />
+          <label className="label">Amount (HAC)</label>
+          <input
+            type="number"
+            min="0"
+            step="0.001"
+            placeholder="0.000"
+            value={sendAmount}
+            onChange={(e) => {
+              setSendAmount(e.target.value);
+              onResetPreview();
+            }}
+          />
+          <div className="option-block">
+            <p className="label">Payment options</p>
+            <label className="check-row">
+              <input
+                type="radio"
+                name="fee"
+                checked={sendHubFeePayer === "sender"}
+                onChange={() => {
+                  setSendHubFeePayer("sender");
+                  void onPersistSendPrefs("sender", sendForceL1);
+                  onResetPreview();
+                }}
+              />
+              I pay network fee
+            </label>
+            <label className="check-row">
+              <input
+                type="radio"
+                name="fee"
+                checked={sendHubFeePayer === "recipient"}
+                onChange={() => {
+                  setSendHubFeePayer("recipient");
+                  void onPersistSendPrefs("recipient", sendForceL1);
+                  onResetPreview();
+                }}
+              />
+              Recipient pays fee
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={sendForceL1}
+                onChange={(e) => {
+                  const force = e.target.checked;
+                  setSendForceL1(force);
+                  void onPersistSendPrefs(sendHubFeePayer, force);
+                  onResetPreview();
+                }}
+              />
+              Force on-chain (L1)
+            </label>
+          </div>
+          <button className="primary" disabled={busy || !sendTo || !sendAmount} onClick={() => void onPreviewSend()}>
+            Preview payment
+          </button>
+          {preview && (
+            <div className="preview-box animate-in">
+              <span className="badge badge-rail">{preview.plan.rail_label}</span>
+              <p>
+                <strong>{preview.amount_mei} HAC</strong> →{" "}
+                <code>{maskAddress(preview.to, hideAddresses)}</code>
+              </p>
+              <p className="muted">
+                You pay {preview.plan.fee_breakdown.payer_debit_mei.toFixed(3)} HAC · Recipient gets{" "}
+                {preview.plan.fee_breakdown.recipient_credit_mei.toFixed(3)} HAC
+              </p>
+              {!preview.hip23.ok && <p className="error">{preview.hip23.errors.join("; ")}</p>}
+              {platformSec?.native_biometric_available && preview.amount_mei >= BIOMETRIC_THRESHOLD_MEI && (
+                <p className="muted">Biometric confirmation required.</p>
+              )}
+              <button
+                className="primary"
+                disabled={busy || !preview.hip23.ok}
+                onClick={() => void onConfirmSend()}
+              >
+                {busy ? "Sending…" : "Confirm & send"}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {asset === "HACD" && (
+        <>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={hacd.batchMode}
+              onChange={(e) => {
+                hacd.setBatchMode(e.target.checked);
+                if (!e.target.checked && hacd.selected.length > 1) {
+                  hacd.setSingleDiamond(hacd.selected[0] ?? "");
+                }
+                hacd.resetPreview();
+              }}
+            />
+            Batch send multiple HACD
+          </label>
+
+          <div className="display-toggle">
+            <button
+              type="button"
+              className={hacdDisplay === "name" ? "selected" : ""}
+              onClick={() => setHacdDisplay("name")}
+            >
+              Name
+            </button>
+            <button
+              type="button"
+              className={hacdDisplay === "visual" ? "selected" : ""}
+              onClick={() => setHacdDisplay("visual")}
+            >
+              Visual
+            </button>
+          </div>
+
+          <label className="label">
+            {hacd.batchMode ? "Select HACD to send" : "HACD to send"}
+          </label>
+          {hacd.owned.length > 0 && (
+            <div className="chip-row">
+              {hacd.owned.slice(0, 12).map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={`chip ${hacd.selected.includes(name) ? "selected" : ""}`}
+                  onClick={() => {
+                    hacd.toggleDiamond(name);
+                    setManualHacd(name);
+                    hacd.resetPreview();
+                  }}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+          <input
+            placeholder="e.g. ZAKXMI"
+            value={manualHacd}
+            onChange={(e) => applyManualHacd(e.target.value.toUpperCase())}
+            maxLength={6}
+          />
+          {hacd.batchMode && hacd.selected.length > 0 && (
+            <p className="muted small">Selected: {hacd.selected.join(", ")}</p>
+          )}
+          {hacd.owned.length === 0 && (
+            <p className="muted small">No HACD found in wallet. Enter a name you own on chain.</p>
+          )}
+
+          {hacdDisplay === "visual" && primaryHacd && <HacdDiamondVisual name={primaryHacd} />}
+
+          <label className="label">Recipient Hacash address</label>
+          {contacts.length > 0 && (
+            <div className="chip-row">
+              {contacts.slice(0, 6).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={`chip ${hacd.recipient === c.address ? "selected" : ""}`}
+                  onClick={() => {
+                    hacd.setRecipient(c.address);
+                    hacd.resetPreview();
+                  }}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {hacd.recipientScanOpen ? (
+            <PaymentQrScanner
+              disabled={busy}
+              onAddressDetected={(addr) => hacd.applyRecipientAddress(addr)}
+              onError={(msg) => onToast(msg, "error")}
+            />
+          ) : (
+            <button type="button" onClick={() => hacd.setRecipientScanOpen(true)}>
+              Scan recipient QR
+            </button>
+          )}
+          <input
+            placeholder="1ABC…"
+            value={hacd.recipient}
+            onChange={(e) => {
+              hacd.setRecipient(e.target.value);
+              hacd.resetPreview();
+            }}
+          />
+
+          <p className="muted small">
+            On chain L1. Network fee ~1.244 HAC. For stack tokens use Launchpad.
+          </p>
+
+          <button
+            className="primary"
+            disabled={busy || hacd.selected.length === 0 || !hacd.recipient.trim()}
+            onClick={() => void hacd.handlePreview()}
+          >
+            Preview HACD send
+          </button>
+
+          {hacd.preview && (
+            <div className="preview-box animate-in">
+              <span className="badge badge-rail">On-chain (L1)</span>
+              <p>
+                {hacd.preview.diamond_count === 1 ? (
+                  <>
+                    <strong>{hacd.preview.diamond_name}</strong>
+                    {hacd.preview.diamond_number != null && (
+                      <span className="muted"> #{hacd.preview.diamond_number}</span>
+                    )}
+                  </>
+                ) : (
+                  <strong>
+                    {hacd.preview.diamond_count} HACD ({hacd.preview.diamond_names.slice(0, 3).join(", ")}
+                    {hacd.preview.diamond_count > 3 ? "…" : ""})
+                  </strong>
+                )}{" "}
+                → <code>{maskAddress(hacd.preview.to, hideAddresses)}</code>
+              </p>
+              <p className="muted">Network fee: {hacd.preview.fee_mei.toFixed(3)} HAC</p>
+              {!hacd.preview.hip23.ok && <p className="error">{hacd.preview.hip23.errors.join("; ")}</p>}
+              {platformSec?.native_biometric_available && (
+                <p className="muted">Biometric confirmation will be required.</p>
+              )}
+              <button
+                className="primary"
+                disabled={busy || !hacd.preview.hip23.ok}
+                onClick={() => void hacd.handleConfirm()}
+              >
+                {busy ? "Sending…" : "Confirm & send HACD"}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {asset === "BTC" && (
+        <>
+          <p className="muted small">
+            On-chain BTC on the Hacash network. Recipient is a Hacash address (1…). Fee paid in HAC.
+          </p>
+          <label className="label">Recipient Hacash address</label>
+          <input
+            placeholder="1ABC…"
+            value={btc.recipient}
+            onChange={(e) => {
+              btc.setRecipient(e.target.value);
+              btc.resetPreview();
+            }}
+          />
+          <label className="label">Amount (BTC)</label>
+          <input
+            type="number"
+            min="0"
+            step="0.00000001"
+            placeholder="0.00000000"
+            value={btc.btcAmount}
+            onChange={(e) => {
+              btc.setBtcAmount(e.target.value);
+              btc.resetPreview();
+            }}
+          />
+          <button
+            className="primary"
+            disabled={
+              busy ||
+              !btc.recipient.trim().startsWith("1") ||
+              !btc.btcAmount ||
+              Number(btc.btcAmount) <= 0
+            }
+            onClick={() => void btc.handlePreview()}
+          >
+            Preview BTC send
+          </button>
+          {btc.preview && (
+            <div className="preview-box animate-in">
+              <span className="badge badge-rail">On-chain (L1)</span>
+              <p>
+                <strong>{btc.preview.btc_amount.toFixed(8)} BTC</strong> ({btc.preview.satoshi} sat) →{" "}
+                <code>{maskAddress(btc.preview.to, hideAddresses)}</code>
+              </p>
+              <p className="muted">Network fee: {btc.preview.fee_mei.toFixed(3)} HAC</p>
+              {!btc.preview.hip23.ok && (
+                <p className="error">{btc.preview.hip23.errors.join("; ")}</p>
+              )}
+              <button
+                className="primary"
+                disabled={busy || !btc.preview.hip23.ok}
+                onClick={() => void btc.handleConfirm()}
+              >
+                {busy ? "Sending…" : "Confirm & send BTC"}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}

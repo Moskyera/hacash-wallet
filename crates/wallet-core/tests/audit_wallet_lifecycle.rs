@@ -94,7 +94,7 @@ fn audit_locked_wallet_cannot_sign() {
             svc.lock();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let err = rt
-                .block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 1.0))
+                .block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 1.0, Default::default()))
                 .unwrap_err();
             assert!(matches!(err, WalletError::Locked));
         });

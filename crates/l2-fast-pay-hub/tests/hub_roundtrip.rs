@@ -85,6 +85,7 @@ async fn hub_health_and_same_channel_fast_pay() {
         .unwrap();
     assert_eq!(health["ok"], true);
     assert_eq!(health["hub_address"], "1Hub");
+    assert_eq!(health["hub_fee_mei"], 0.001);
 
     // Pay hub (other party on same channel)
     let pay: Value = client
@@ -265,6 +266,61 @@ async fn hub_rejects_payee_without_hub_channel() {
         .as_str()
         .unwrap()
         .contains("no open Fast Pay channel"));
+
+    hub_handle.abort();
+    node_handle.abort();
+}
+
+#[tokio::test]
+async fn hub_recipient_pays_fast_pay_fee() {
+    let ch_id = derive_channel_id("1Alice", "1Hub", 1);
+    let channel = json!({
+        "ret": 0,
+        "id": ch_id,
+        "status": 0,
+        "reuse_version": 1,
+        "left": { "address": "1Alice", "hacash": "10", "satoshi": 0 },
+        "right": { "address": "1Hub", "hacash": "0", "satoshi": 0 }
+    });
+    let mut channels = HashMap::new();
+    channels.insert(ch_id.clone(), channel);
+    let (node_url, node_handle) = spawn_mock_node(channels).await;
+
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("hub-state-recipient-fee.json");
+    let hub = Arc::new(
+        HubState::new("test hub", "1Hub", node_url, Some(state_path), 0.001, None).unwrap(),
+    );
+    let app = build_router(hub);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub_addr = listener.local_addr().unwrap();
+    let hub_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{hub_addr}");
+
+    let pay: Value = client
+        .post(format!("{base}/v1/fast-pay"))
+        .json(&json!({
+            "payer": "1Alice",
+            "payee": "1Hub",
+            "amount": "2",
+            "channel_id": ch_id,
+            "fee_payer": "recipient"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pay["status"], "settled");
+    assert!(pay["summary"]
+        .as_str()
+        .unwrap()
+        .contains("deducted from recipient"));
 
     hub_handle.abort();
     node_handle.abort();

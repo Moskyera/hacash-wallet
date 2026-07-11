@@ -9,6 +9,7 @@ pub mod amount;
 pub mod api;
 pub mod channel_id;
 pub mod error;
+pub mod fee_payer;
 pub mod hub_signer;
 pub mod node;
 pub mod routing;

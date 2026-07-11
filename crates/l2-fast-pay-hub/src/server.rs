@@ -41,9 +41,16 @@ async fn fast_pay_handler(
     State(state): State<AppState>,
     Json(req): Json<FastPayRequest>,
 ) -> Result<Json<FastPayResponse>, HubHttpError> {
+    let fee_payer = crate::fee_payer::parse_fee_payer(req.fee_payer.as_deref())?;
     let resp = state
         .hub
-        .settle_fast_pay(&req.payer, &req.payee, &req.amount, &req.channel_id)
+        .settle_fast_pay(
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            &req.channel_id,
+            fee_payer,
+        )
         .await?;
     Ok(Json(resp))
 }

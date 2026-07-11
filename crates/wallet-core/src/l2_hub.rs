@@ -22,6 +22,9 @@ pub struct HubHealth {
     /// CSP on-chain address (optional Hub API v1 extension).
     #[serde(default)]
     pub hub_address: Option<String>,
+    /// Per-payment hub fee in HAC (mei), when advertised by the hub.
+    #[serde(default)]
+    pub hub_fee_mei: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +33,9 @@ pub struct FastPayRequest {
     pub payee: String,
     pub amount: String,
     pub channel_id: String,
+    /// `sender` (default) or `recipient` — who pays the hub routing fee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_payer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

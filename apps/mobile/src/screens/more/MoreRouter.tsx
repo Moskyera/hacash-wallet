@@ -1,0 +1,577 @@
+import { useEffect, useState } from "react";
+import {
+  api,
+  BillSummary,
+  DustWhisperSettings,
+  HubHealth,
+  PlatformSecurityStatus,
+  PrivacySettings,
+  TxRecord,
+  WalletSettings,
+  WalletStatus,
+} from "../../api";
+import AirgapScreen from "../../components/AirgapScreen";
+import FastPayChannelScreen from "../FastPayChannelScreen";
+import HacdLaunchpadIcon from "../../components/HacdLaunchpadIcon";
+import LaunchpadScreen from "../../components/LaunchpadScreen";
+import MessengerScreen from "../../components/MessengerScreen";
+import QuantumScreen from "../../components/QuantumScreen";
+import WhisperScreen from "../../components/WhisperScreen";
+import { addContact, removeContact, type SavedContact } from "../../contacts";
+import { maskAddress } from "../../privacy";
+import { MIN_WALLET_PASS } from "../../quantumMeta";
+import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
+import { formatInvokeError } from "../../formatInvokeError";
+import { downloadJson } from "../../utils/downloadJson";
+import { runWebAuthnAuth, runWebAuthnRegister, webAuthnAvailable } from "../../webauthn";
+
+export type MorePage =
+  | "menu"
+  | "history"
+  | "bills"
+  | "fastpay"
+  | "settings"
+  | "security"
+  | "privacy"
+  | "contacts"
+  | "quantum"
+  | "airgap"
+  | "launchpad"
+  | "whisper"
+  | "messages";
+
+type Props = {
+  page: MorePage;
+  onBack: () => void;
+  onNavigate: (page: MorePage) => void;
+  history: TxRecord[];
+  bills: BillSummary[];
+  contacts: SavedContact[];
+  setContacts: (c: SavedContact[]) => void;
+  dustWhisper?: DustWhisperSettings;
+  privacy: PrivacySettings;
+  settings: WalletSettings | null;
+  hubHealth: HubHealth | null;
+  platformSec: PlatformSecurityStatus | null;
+  status: WalletStatus | null;
+  fastPay: import("../../api").FastPayStatus | null;
+  watchOnly: boolean;
+  statusAddress?: string | null;
+  clipboardSecs: number;
+  busy: boolean;
+  settingsNodeUrl: string;
+  setSettingsNodeUrl: (v: string) => void;
+  settingsHubUrl: string;
+  setSettingsHubUrl: (v: string) => void;
+  walletNameDraft: string;
+  setWalletNameDraft: (v: string) => void;
+  backupPass: string;
+  setBackupPass: (v: string) => void;
+  oldPass: string;
+  setOldPass: (v: string) => void;
+  newPass: string;
+  setNewPass: (v: string) => void;
+  contactLabel: string;
+  setContactLabel: (v: string) => void;
+  contactAddress: string;
+  setContactAddress: (v: string) => void;
+  onClearHistory: () => void;
+  onSaveSettings: () => void;
+  onSaveWalletName: () => void;
+  onExportBackup: () => void;
+  onChangePassphrase: () => void;
+  onLock: () => void;
+  onPersistPrivacy: (patch: Partial<PrivacySettings>) => void;
+  onSelectContact: (c: SavedContact) => void;
+  onGoPayPeer: (peer: string) => void;
+  onGoLegacySend: () => void;
+  onToast: (msg: string, kind: "success" | "info" | "error") => void;
+  onSelectBill: (bill: BillSummary) => void;
+  onRefresh: () => Promise<void>;
+  setBusy: (b: boolean) => void;
+};
+
+export default function MoreRouter(props: Props) {
+  const {
+    page,
+    onBack,
+    onNavigate,
+    history,
+    bills,
+    contacts,
+    setContacts,
+    dustWhisper,
+    privacy,
+    settings,
+    hubHealth,
+    platformSec,
+    status,
+    fastPay,
+    watchOnly,
+    statusAddress,
+    clipboardSecs,
+    busy,
+    settingsNodeUrl,
+    setSettingsNodeUrl,
+    settingsHubUrl,
+    setSettingsHubUrl,
+    walletNameDraft,
+    setWalletNameDraft,
+    backupPass,
+    setBackupPass,
+    oldPass,
+    setOldPass,
+    newPass,
+    setNewPass,
+    contactLabel,
+    setContactLabel,
+    contactAddress,
+    setContactAddress,
+    onClearHistory,
+    onSaveSettings,
+    onSaveWalletName,
+    onExportBackup,
+    onChangePassphrase,
+    onLock,
+    onPersistPrivacy,
+    onSelectContact,
+    onGoPayPeer,
+    onGoLegacySend,
+    onToast,
+    onSelectBill,
+    onRefresh,
+    setBusy,
+  } = props;
+
+  const [webauthnReady, setWebauthnReady] = useState(false);
+
+  useEffect(() => {
+    setWebauthnReady(webAuthnAvailable());
+  }, []);
+
+  async function handleRegisterWebAuthn() {
+    if (!webauthnReady) {
+      onToast("WebAuthn is not available in this WebView.", "error");
+      return;
+    }
+    setBusy(true);
+    try {
+      const options = await api.webauthnRegisterBegin();
+      const cred = await runWebAuthnRegister(options);
+      await api.webauthnRegisterFinish(cred);
+      await onRefresh();
+      onToast("WebAuthn passkey registered.", "success");
+    } catch (e) {
+      onToast(formatInvokeError(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleTestWebAuthn() {
+    if (!webauthnReady || !settings?.webauthn_enabled) return;
+    setBusy(true);
+    try {
+      const options = await api.webauthnAuthBegin();
+      const assertion = await runWebAuthnAuth(options);
+      await api.webauthnAuthFinish(assertion);
+      onToast("WebAuthn verification OK.", "success");
+    } catch (e) {
+      onToast(formatInvokeError(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (page === "menu") {
+    return (
+      <div className="more-menu">
+        <p className="section-title">Wallet</p>
+        <button type="button" onClick={() => onNavigate("history")}>
+          <span>Transaction history</span>
+          <span>{history.length}</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("bills")}>
+          <span>Dispute bills</span>
+          <span>{bills.length}</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("fastpay")}>
+          <span>Fast Pay channel</span>
+          <span>{fastPay?.state === "ready" ? "on" : "off"}</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("contacts")}>
+          <span>Contacts</span>
+          <span>{contacts.length}</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("quantum")}>
+          <span>Quantum (Type 4)</span>
+          <span>◇</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("airgap")}>
+          <span>Air-gap (L1 QR)</span>
+          <span>◎</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("launchpad")}>
+          <span>HACD Launchpad</span>
+          <span className="menu-icon" aria-hidden>
+            <HacdLaunchpadIcon />
+          </span>
+        </button>
+        <button type="button" onClick={() => onNavigate("whisper")}>
+          <span>DUST Whisper</span>
+          <span>{dustWhisper?.enabled ? "on" : "off"}</span>
+        </button>
+        <p className="section-title">Preferences</p>
+        <button type="button" onClick={() => onNavigate("settings")}>
+          <span>Network settings</span>
+          <span>→</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("privacy")}>
+          <span>Privacy</span>
+          <span>→</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("security")}>
+          <span>Security & backup</span>
+          <span>→</span>
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <button type="button" className="ghost small" onClick={onBack}>
+        ← Back
+      </button>
+      {page === "history" && (
+        <div className="card">
+          <h2>Transactions</h2>
+          {history.length === 0 ? (
+            <p className="muted">No transactions yet.</p>
+          ) : (
+            history.map((row) => (
+              <div key={row.tx_hash} className="list-item">
+                <div>
+                  <span className="badge badge-rail">{row.rail}</span> {row.amount_mei} HAC
+                </div>
+                <div className="muted">{row.summary}</div>
+                <div className="muted">{row.timestamp}</div>
+              </div>
+            ))
+          )}
+          {history.length > 0 && (
+            <button type="button" disabled={busy} onClick={() => void onClearHistory()}>
+              Clear history
+            </button>
+          )}
+        </div>
+      )}
+      {page === "bills" && (
+        <div className="card">
+          <h2>Dispute bills</h2>
+          <p className="muted">Signed Fast Pay receipts for channel disputes.</p>
+          <button
+            className="primary"
+            disabled={bills.length === 0}
+            onClick={async () => {
+              try {
+                const json = await api.exportAllBillsJson();
+                downloadJson(`hacash-bills-${Date.now()}.json`, json);
+                onToast("All bills exported.", "success");
+              } catch (e) {
+                onToast(String(e), "error");
+              }
+            }}
+          >
+            Export all JSON
+          </button>
+          {bills.length === 0 ? (
+            <p className="muted">No bills stored.</p>
+          ) : (
+            bills.map((bill) => (
+              <div key={bill.payment_id} className="list-item" onClick={() => onSelectBill(bill)}>
+                <div>
+                  <code>{bill.payment_id.slice(0, 10)}…</code>{" "}
+                  <span className={bill.dispute_ready ? "badge badge-ok" : "badge badge-warn"}>
+                    {bill.dispute_ready ? "Ready" : "Incomplete"}
+                  </span>
+                </div>
+                <div className="muted">{bill.timestamp_utc}</div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+      {page === "settings" && (
+        <div className="card">
+          <h2>Network</h2>
+          <label className="label">Node URL</label>
+          <input
+            value={settingsNodeUrl}
+            onChange={(e) => setSettingsNodeUrl(e.target.value)}
+            placeholder="https://node.example"
+          />
+          <label className="label">L2 Hub URL</label>
+          <input
+            value={settingsHubUrl}
+            onChange={(e) => setSettingsHubUrl(e.target.value)}
+            placeholder="https://hub.example (optional)"
+          />
+          {hubHealth && (
+            <p className="muted">
+              Hub: {hubHealth.ok ? "online" : "offline"}
+              {hubHealth.hub_fee_mei != null && ` · fee ${hubHealth.hub_fee_mei} HAC`}
+            </p>
+          )}
+          <button className="primary" disabled={busy} onClick={() => void onSaveSettings()}>
+            Save settings
+          </button>
+        </div>
+      )}
+      {page === "security" && (
+        <>
+          <div className="card">
+            <h2>Wallet name</h2>
+            <p className="muted">Shown on the unlock screen instead of your address.</p>
+            <label className="label">Display name</label>
+            <input
+              value={walletNameDraft}
+              onChange={(e) => setWalletNameDraft(e.target.value)}
+              placeholder="My Wallet"
+            />
+            <button type="button" className="primary" onClick={onSaveWalletName}>
+              Save name
+            </button>
+          </div>
+          <div className="card">
+            <h2>Backup</h2>
+            <p className="muted">Export encrypted wallet backup (requires passphrase).</p>
+            <label className="label">Passphrase</label>
+            <input type="password" value={backupPass} onChange={(e) => setBackupPass(e.target.value)} />
+            <button className="primary" disabled={busy || !backupPass} onClick={() => void onExportBackup()}>
+              Download backup
+            </button>
+          </div>
+          <div className="card">
+            <h2>Change passphrase</h2>
+            <label className="label">Current</label>
+            <input type="password" value={oldPass} onChange={(e) => setOldPass(e.target.value)} />
+            <label className="label">New</label>
+            <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} />
+            <button
+              className="primary"
+              disabled={busy || !oldPass || !newPass || newPass.length < MIN_WALLET_PASS}
+              onClick={() => void onChangePassphrase()}
+            >
+              Update passphrase
+            </button>
+            {newPass.length > 0 && newPass.length < MIN_WALLET_PASS && (
+              <p className="warn-text">New passphrase must be at least {MIN_WALLET_PASS} characters.</p>
+            )}
+          </div>
+          <div className="card">
+            <h2>Security profile</h2>
+            <p className="muted">Balanced is default. Paranoid requires WebAuthn or biometrics for large sends.</p>
+            <div className="display-toggle">
+              <button
+                type="button"
+                className={status?.security_profile !== "paranoid" ? "selected" : ""}
+                disabled={busy || watchOnly}
+                onClick={() =>
+                  void api
+                    .setSecurityProfile("balanced")
+                    .then(() => onRefresh())
+                    .then(() => onToast("Profile: balanced", "success"))
+                }
+              >
+                Balanced
+              </button>
+              <button
+                type="button"
+                className={status?.security_profile === "paranoid" ? "selected" : ""}
+                disabled={busy || watchOnly}
+                onClick={() =>
+                  void api
+                    .setSecurityProfile("paranoid")
+                    .then(() => onRefresh())
+                    .then(() => onToast("Profile: paranoid", "success"))
+                }
+              >
+                Paranoid
+              </button>
+            </div>
+            <p className="muted small">Current: {status?.security_profile ?? "balanced"}</p>
+          </div>
+          <div className="card">
+            <h2>Biometric</h2>
+            <p className="muted">
+              {platformSec?.native_biometric_available
+                ? `Available on ${platformSec.platform}. Required for sends ≥ ${BIOMETRIC_THRESHOLD_MEI} HAC.`
+                : "Not available on this device."}
+            </p>
+          </div>
+          <div className="card">
+            <h2>WebAuthn (passkey)</h2>
+            <p className="muted">
+              {settings?.webauthn_enabled
+                ? "Registered — used for paranoid profile and large sends."
+                : "Not registered yet."}
+            </p>
+            <div className="row-btns">
+              <button type="button" disabled={busy || !webauthnReady} onClick={() => void handleRegisterWebAuthn()}>
+                Register passkey
+              </button>
+              <button
+                type="button"
+                disabled={busy || !settings?.webauthn_enabled}
+                onClick={() => void handleTestWebAuthn()}
+              >
+                Test unlock
+              </button>
+            </div>
+          </div>
+          <button type="button" onClick={() => void onLock()}>
+            Lock wallet
+          </button>
+        </>
+      )}
+      {page === "privacy" && (
+        <div className="card">
+          <h2>Privacy</h2>
+          <div className="toggle-row">
+            <span>Hide balances</span>
+            <input
+              type="checkbox"
+              checked={privacy.hide_balances}
+              onChange={(e) => void onPersistPrivacy({ hide_balances: e.target.checked })}
+            />
+          </div>
+          <div className="toggle-row">
+            <span>Hide addresses</span>
+            <input
+              type="checkbox"
+              checked={privacy.hide_addresses}
+              onChange={(e) => void onPersistPrivacy({ hide_addresses: e.target.checked })}
+            />
+          </div>
+          <div className="toggle-row">
+            <span>Screen privacy shield</span>
+            <input
+              type="checkbox"
+              checked={privacy.screen_privacy}
+              onChange={(e) => void onPersistPrivacy({ screen_privacy: e.target.checked })}
+            />
+          </div>
+          <div className="toggle-row">
+            <span>Store tx history</span>
+            <input
+              type="checkbox"
+              checked={privacy.store_tx_history}
+              onChange={(e) => void onPersistPrivacy({ store_tx_history: e.target.checked })}
+            />
+          </div>
+          <label className="label">Clipboard clear (seconds)</label>
+          <input
+            type="number"
+            min={0}
+            max={300}
+            value={privacy.clipboard_clear_secs}
+            onChange={(e) =>
+              void onPersistPrivacy({ clipboard_clear_secs: Number(e.target.value) || 0 })
+            }
+          />
+        </div>
+      )}
+      {page === "fastpay" && (
+        <FastPayChannelScreen
+          fastPay={fastPay}
+          hubUrl={settingsHubUrl}
+          hubAddress={settings?.hub_right_address ?? ""}
+          userAddress={statusAddress}
+          hideAddresses={privacy.hide_addresses}
+          watchOnly={watchOnly}
+          busy={busy}
+          setBusy={setBusy}
+          onRefresh={onRefresh}
+          onToast={onToast}
+        />
+      )}
+      {page === "whisper" && <WhisperScreen initial={dustWhisper} onToast={onToast} />}
+      {page === "messages" && (
+        <MessengerScreen
+          myAddress={statusAddress}
+          hideAddresses={privacy.hide_addresses}
+          whisperEnabled={dustWhisper?.enabled}
+          contacts={contacts}
+          onToast={onToast}
+          onGoPay={onGoPayPeer}
+        />
+      )}
+      {page === "quantum" && (
+        <QuantumScreen
+          legacyAddress={statusAddress}
+          nodeUrl={settings?.node_url}
+          clipboardClearSecs={clipboardSecs}
+          platformSec={platformSec}
+          securityProfile={settings?.security_profile}
+          webauthnEnabled={settings?.webauthn_enabled}
+          onToast={onToast}
+          onGoLegacySend={onGoLegacySend}
+        />
+      )}
+      {page === "airgap" && (
+        <AirgapScreen
+          watchOnly={watchOnly}
+          busy={busy}
+          setBusy={setBusy}
+          onToast={onToast}
+          onBroadcast={() => void onRefresh()}
+        />
+      )}
+      {page === "launchpad" && <LaunchpadScreen />}
+      {page === "contacts" && (
+        <div className="card">
+          <h2>Contacts</h2>
+          <label className="label">Name</label>
+          <input value={contactLabel} onChange={(e) => setContactLabel(e.target.value)} placeholder="Alice" />
+          <label className="label">Address</label>
+          <input value={contactAddress} onChange={(e) => setContactAddress(e.target.value)} placeholder="1…" />
+          <button
+            className="primary"
+            disabled={!contactLabel.trim() || !contactAddress.trim()}
+            onClick={() => {
+              setContacts(addContact(contactLabel, contactAddress));
+              setContactLabel("");
+              setContactAddress("");
+              onToast("Contact saved.", "success");
+            }}
+          >
+            Add contact
+          </button>
+          {contacts.length === 0 ? (
+            <p className="muted">No saved contacts.</p>
+          ) : (
+            contacts.map((c) => (
+              <div key={c.id} className="list-item">
+                <div onClick={() => onSelectContact(c)}>
+                  <strong>{c.label}</strong>
+                  <div className="muted">{maskAddress(c.address, privacy.hide_addresses)}</div>
+                </div>
+                <button
+                  type="button"
+                  className="small ghost"
+                  onClick={() => {
+                    setContacts(removeContact(c.id));
+                    onToast("Contact removed.", "info");
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </>
+  );
+}

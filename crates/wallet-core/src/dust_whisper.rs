@@ -61,6 +61,18 @@ pub async fn relay_health(
 }
 
 impl DustWhisperSettings {
+    /// Non-empty relay URLs trimmed and deduplicated in order.
+    pub fn trimmed_relay_urls(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for u in &self.relay_urls {
+            let t = u.trim().to_string();
+            if !t.is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
     fn to_core(&self) -> CoreWhisperSettings {
         CoreWhisperSettings {
             enabled: self.enabled,

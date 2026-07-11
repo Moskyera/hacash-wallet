@@ -5,3 +5,16 @@
 *.log
 *.log.err
 wallet-run.log.err
+**/hacash-wallet-release.jks
+**/upload-keystore.jks
+**/keystore.properties
+apps/mobile/src-tauri/gen/
+apps/mobile/*.log
+apps/mobile/*-log.txt
+apps/mobile/wallet-*.txt
+apps/mobile/dev-log.txt
+apps/mobile/tauri-android-build*.log
+apps/mobile/aarch64-signed-build.log
+cargo-*.txt
+mobile-*.txt
+test-*.txt

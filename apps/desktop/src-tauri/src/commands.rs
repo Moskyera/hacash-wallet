@@ -7,7 +7,7 @@ use hacash_wallet_core::quantum::{
 };
 use hacash_wallet_core::WalletService;
 use tokio::sync::Mutex;
-use crate::state::AppState;
+use wallet_tauri_common::AppState;
 use tauri::State;
 
 fn with_unlocked<F, T>(svc: &mut WalletService, f: F) -> Result<T, String>

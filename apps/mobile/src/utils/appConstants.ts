@@ -1,0 +1,2 @@
+export const BIOMETRIC_THRESHOLD_MEI = 100;
+export const PULL_THRESHOLD = 72;

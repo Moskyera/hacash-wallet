@@ -28,6 +28,10 @@ pub fn history_path() -> PathBuf {
     wallet_data_root().join("tx_history.json")
 }
 
+pub fn messenger_path() -> PathBuf {
+    wallet_data_root().join("messenger.json")
+}
+
 pub fn quantum_keystore_path() -> PathBuf {
     wallet_data_root().join("quantum.keystore.enc")
 }

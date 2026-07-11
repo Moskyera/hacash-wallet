@@ -27,12 +27,12 @@ fn main() {
 
         let fund_amount = 45.0_f64;
         let preview = svc
-            .preview_send(&pqc.address, fund_amount)
+            .preview_send(&pqc.address, fund_amount, Default::default())
             .await
             .expect("preview");
         println!("Fund preview ok={} fee={}", preview.hip23.ok, preview.fee);
 
-        match svc.send_hac(&pqc.address, fund_amount).await {
+        match svc.send_hac(&pqc.address, fund_amount, Default::default()).await {
             Ok(send) => println!("Funded quantum: {}", send.tx_hash),
             Err(e) => println!("Fund send failed: {e}"),
         }

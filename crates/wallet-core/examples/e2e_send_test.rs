@@ -13,7 +13,7 @@ fn main() {
         let mut svc = WalletService::new(Some("http://127.0.0.1:8080".into()), None).expect("wallet");
         svc.unlock("HacashDev2026!").expect("unlock");
         let to = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
-        match svc.send_hac(to, 1.0).await {
+        match svc.send_hac(to, 1.0, Default::default()).await {
             Ok(r) => println!("OK hash={}", r.tx_hash),
             Err(e) => println!("FAIL: {e}"),
         }

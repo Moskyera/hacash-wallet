@@ -160,7 +160,8 @@ Notes:
 - [x] Bill export / dispute UI (Fast Pay tab)
 - [x] CSP operator docs (`docs/HUB-OPERATOR.md`)
 - [ ] Public CSP network + liquidity
-- [ ] Mobile app (`apps/mobile/` — scaffold + shared `wallet-core`)
+- [x] Mobile Phase 1 (`apps/mobile/` + `wallet-tauri-common` — balance, history, bills)
+- [ ] Mobile Phase 2 (send + Fast Pay on device)
 
 ## Repository layout (jojoin model)
 

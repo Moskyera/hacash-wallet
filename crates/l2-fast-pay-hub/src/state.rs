@@ -6,6 +6,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::amount::{format_amount_mei, parse_amount_mei};
+use crate::fee_payer::HubFeePayer;
 use crate::api::FastPayResponse;
 use crate::hub_signer::HubSigner;
 use crate::wire::{
@@ -87,6 +88,7 @@ impl HubState {
             version: crate::api::HUB_API_VERSION,
             name: Some(self.name.clone()),
             hub_address: Some(self.hub_address.clone()),
+            hub_fee_mei: Some(self.hub_fee_mei),
         }
     }
 
@@ -103,12 +105,24 @@ impl HubState {
         payee: &str,
         amount_wire: &str,
         channel_id: &str,
+        fee_payer: HubFeePayer,
     ) -> HubResult<FastPayResponse> {
         let amount_mei = parse_amount_mei(amount_wire)?;
         if amount_mei <= 0.0 {
             return Err(HubError::Payment("amount must be positive".into()));
         }
-        let total_debit = amount_mei + self.hub_fee_mei;
+        let (payer_debit, payee_credit) = match fee_payer {
+            HubFeePayer::Sender => (amount_mei + self.hub_fee_mei, amount_mei),
+            HubFeePayer::Recipient => {
+                if amount_mei <= self.hub_fee_mei {
+                    return Err(HubError::Payment(format!(
+                        "amount must exceed hub fee ({:.3} HAC) when recipient pays fee",
+                        self.hub_fee_mei
+                    )));
+                }
+                (amount_mei, amount_mei - self.hub_fee_mei)
+            }
+        };
 
         let payer_channel = self.node.query_channel(channel_id).await?;
         if !payer_channel.is_open() {
@@ -149,18 +163,18 @@ impl HubState {
                 .entry(channel_id.to_owned())
                 .or_insert_with(|| channel_ledger_from_l1(&payer_channel));
 
-            if payer_available_mei(payer_ledger, payer_side) < total_debit {
+            if payer_available_mei(payer_ledger, payer_side) < payer_debit {
                 return Err(HubError::Payment(format!(
-                    "insufficient channel balance: need {total_debit} HAC (amount + hub fee)"
+                    "insufficient channel balance: need {payer_debit} HAC"
                 )));
             }
 
-            apply_debit(payer_ledger, payer_side, total_debit);
+            apply_debit(payer_ledger, payer_side, payer_debit);
             payer_ledger.bill_auto_number =
                 next_bill_auto_number(payer_ledger, &payer_channel);
 
             if let PayeeRoute::SameChannel { side } = &payee_route {
-                apply_credit(payer_ledger, *side, amount_mei);
+                apply_credit(payer_ledger, *side, payee_credit);
             }
         }
 
@@ -177,7 +191,7 @@ impl HubState {
                     .channels
                     .entry(payee_ch_id.clone())
                     .or_insert_with(|| channel_ledger_from_l1(payee_channel));
-                apply_credit(payee_ledger, side, amount_mei);
+                apply_credit(payee_ledger, side, payee_credit);
                 payee_ledger.bill_auto_number =
                     next_bill_auto_number(payee_ledger, payee_channel);
                 let balances = Some((
@@ -199,15 +213,23 @@ impl HubState {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let summary = match route_label {
-            "same_channel" => format!(
-                "Fast Pay settled {amount_mei} HAC to {payee} on-channel (fee {:.3} HAC)",
+        let fee_note = match fee_payer {
+            HubFeePayer::Sender => format!(
+                "fee {:.3} HAC paid by sender",
                 self.hub_fee_mei
             ),
-            _ => format!(
-                "Fast Pay routed {amount_mei} HAC to {payee} via channel {} (fee {:.3} HAC)",
-                payee_channel_id.as_deref().unwrap_or("?"),
+            HubFeePayer::Recipient => format!(
+                "fee {:.3} HAC deducted from recipient (receives {payee_credit:.3} HAC)",
                 self.hub_fee_mei
+            ),
+        };
+        let summary = match route_label {
+            "same_channel" => format!(
+                "Fast Pay settled {amount_mei} HAC to {payee} on-channel ({fee_note})"
+            ),
+            _ => format!(
+                "Fast Pay routed {amount_mei} HAC to {payee} via channel {} ({fee_note})",
+                payee_channel_id.as_deref().unwrap_or("?"),
             ),
         };
 
@@ -222,7 +244,7 @@ impl HubState {
         };
 
         let mut documents = if route_label == "same_channel" {
-            build_same_channel_bill(&payer_wire, total_debit, timestamp)?
+            build_same_channel_bill(&payer_wire, payer_debit, timestamp)?
         } else {
             let payee_ch_id = payee_channel_id
                 .clone()
@@ -245,9 +267,9 @@ impl HubState {
             };
             build_cross_channel_bill(
                 &payer_wire,
-                total_debit,
+                payer_debit,
                 &payee_wire,
-                amount_mei,
+                payee_credit,
                 timestamp,
             )?
         };

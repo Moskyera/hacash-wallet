@@ -19,6 +19,22 @@ export function maskBalance(value: number | null | undefined, hide: boolean): st
   return value.toFixed(3);
 }
 
+export function formatBtcFromSatoshi(satoshi: number): string {
+  return (satoshi / 100_000_000).toFixed(8);
+}
+
+export function maskBtcFromSatoshi(satoshi: number | null | undefined, hide: boolean): string {
+  if (hide) return "••••";
+  if (satoshi == null) return "—";
+  return formatBtcFromSatoshi(satoshi);
+}
+
+export function maskAssetCount(count: number | null | undefined, hide: boolean): string {
+  if (hide) return "••••";
+  if (count == null) return "—";
+  return String(count);
+}
+
 export async function copyWithPrivacyClear(
   text: string,
   clipboardClearSecs: number,

@@ -1,0 +1,19 @@
+[package]
+name = "wallet-tauri-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared Tauri IPC commands for Hacash Wallet (desktop + mobile)"
+license.workspace = true
+
+[dependencies]
+hacash-wallet-core = { path = "../wallet-core" }
+tauri = { version = "2", features = [] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+desktop = []
+desktop-platform = []

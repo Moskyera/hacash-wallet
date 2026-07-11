@@ -4,7 +4,9 @@ members = [
     "crates/dust-whisper",
     "crates/l2-fast-pay-hub",
     "crates/wallet-core",
+    "crates/wallet-tauri-common",
     "apps/desktop/src-tauri",
+    "apps/mobile/src-tauri",
 ]
 
 [workspace.package]

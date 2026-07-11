@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 hacash-wallet-core = { path = "../../../crates/wallet-core" }
+wallet-tauri-common = { path = "../../../crates/wallet-tauri-common", features = ["desktop"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 serde.workspace = true

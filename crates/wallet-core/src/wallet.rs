@@ -109,6 +109,7 @@ pub struct SendPreview {
     pub fee: String,
     pub hip23: Hip23SendCheck,
     pub fast_pay: FastPayStatus,
+    pub send_options: crate::send_options::SendOptions,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -116,6 +117,17 @@ pub struct SendResult {
     pub rail: PaymentRail,
     pub tx_hash: String,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AssetSummary {
+    pub hac_mei: f64,
+    pub hacd_count: usize,
+    pub hacd_names: Vec<String>,
+    /// On-chain BTC balance in the Hacash wallet (satoshi).
+    pub btc_wallet_satoshi: u64,
+    /// BTC balance locked in the active Fast Pay channel (satoshi), if any.
+    pub btc_channel_satoshi: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -499,6 +511,164 @@ impl WalletService {
         Ok(bal)
     }
 
+    pub async fn asset_summary(&mut self) -> WalletResult<AssetSummary> {
+        self.touch_auto_lock();
+        let address = self.require_address()?;
+        let balance_entry = self.node.query_balance_entry(&address, false).await?;
+        let hac_mei = balance_entry.hacash_mei()?;
+        self.balance_cache = Some((address.clone(), hac_mei, Instant::now()));
+        let btc_wallet_satoshi = balance_entry.btc_satoshi();
+        let hacd_names = self.list_owned_diamonds().await?;
+        let hacd_count = hacd_names.len();
+        let mut btc_channel_satoshi = 0u64;
+        if let Some(ch) = self.channel_info().await? {
+            if ch.user_is_left(&address) {
+                btc_channel_satoshi = ch.left.satoshi;
+            } else if ch.user_is_right(&address) {
+                btc_channel_satoshi = ch.right.satoshi;
+            }
+        }
+        Ok(AssetSummary {
+            hac_mei,
+            hacd_count,
+            hacd_names: hacd_names.into_iter().take(8).collect(),
+            btc_wallet_satoshi,
+            btc_channel_satoshi,
+        })
+    }
+
+    pub async fn list_owned_diamonds(&self) -> WalletResult<Vec<String>> {
+        let from = self.require_address()?;
+        crate::hacd_send::list_owned_diamonds(&self.node, &from).await
+    }
+
+    pub async fn preview_send_hacd(
+        &mut self,
+        to: &str,
+        diamond_names: &[String],
+    ) -> WalletResult<crate::hacd_send::HacdSendPreview> {
+        self.touch_auto_lock();
+        let from = self.require_address()?;
+        crate::hacd_send::preview_hacd_send(&self.node, &from, to, diamond_names).await
+    }
+
+    pub async fn preview_send_btc(
+        &mut self,
+        to: &str,
+        satoshi: u64,
+    ) -> WalletResult<crate::btc_send::BtcSendPreview> {
+        self.touch_auto_lock();
+        let from = self.require_address()?;
+        crate::btc_send::preview_btc_send(&self.node, &from, to, satoshi).await
+    }
+
+    pub async fn send_btc(&mut self, to: &str, satoshi: u64) -> WalletResult<SendResult> {
+        self.touch_auto_lock();
+        let unlock_ctx = self.second_factor_from_session()?;
+        check_send_policy(&self.profile, 0, &unlock_ctx)?;
+        if self.profile.yubikey_required {
+            let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
+            if !session.webauthn_verified {
+                return Err(WalletError::Policy(
+                    "WebAuthn (YubiKey/Windows Hello) required — complete ceremony first".into(),
+                ));
+            }
+        }
+        self.clear_second_factor();
+        let from = self.require_address()?;
+        let preview = self.preview_send_btc(to, satoshi).await?;
+        if !preview.hip23.ok {
+            return Err(WalletError::Policy(preview.hip23.errors.join("; ")));
+        }
+        let built = self
+            .node
+            .build_send_btc_tx(&from, to, preview.satoshi, &preview.fee_wire)
+            .await?;
+        let body_hex = built
+            .body
+            .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+        let signed_hex = self.sign_tx_hex(&body_hex)?;
+        let submitted = self.submit_signed_tx(&signed_hex).await?;
+        let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
+        let hash = submitted
+            .hash
+            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
+        let result = SendResult {
+            rail: PaymentRail::L1OnChain,
+            tx_hash: hash,
+            summary,
+        };
+        self.append_history_if_enabled(
+            result.rail,
+            &result.tx_hash,
+            &from,
+            to,
+            0.0,
+            &result.summary,
+        )?;
+        Ok(result)
+    }
+
+    pub async fn send_hacd(&mut self, to: &str, diamond_names: &[String]) -> WalletResult<SendResult> {
+        self.touch_auto_lock();
+        let unlock_ctx = self.second_factor_from_session()?;
+        check_send_policy(&self.profile, 0, &unlock_ctx)?;
+        if self.profile.yubikey_required {
+            let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
+            if !session.webauthn_verified {
+                return Err(WalletError::Policy(
+                    "WebAuthn (YubiKey/Windows Hello) required — complete ceremony first".into(),
+                ));
+            }
+        }
+        self.clear_second_factor();
+        let from = self.require_address()?;
+        let preview = self.preview_send_hacd(to, diamond_names).await?;
+        if !preview.hip23.ok {
+            return Err(WalletError::Policy(preview.hip23.errors.join("; ")));
+        }
+        let built = self
+            .node
+            .build_send_diamond_tx(&from, to, &preview.diamond_names, &preview.fee_wire)
+            .await?;
+        let body_hex = built
+            .body
+            .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+        let signed_hex = self.sign_tx_hex(&body_hex)?;
+        let submitted = self.submit_signed_tx(&signed_hex).await?;
+        let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
+        let hash = submitted
+            .hash
+            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
+        let result = SendResult {
+            rail: PaymentRail::L1OnChain,
+            tx_hash: hash,
+            summary,
+        };
+        self.append_history_if_enabled(
+            result.rail,
+            &result.tx_hash,
+            &from,
+            to,
+            0.0,
+            &result.summary,
+        )?;
+        Ok(result)
+    }
+
+    pub async fn query_diamond(&self, name: &str) -> WalletResult<crate::node::DiamondInfo> {
+        let normalized = name.trim().to_uppercase();
+        if normalized.len() < 4 || normalized.len() > 6 {
+            return Err(WalletError::Other("HACD name must be 4–6 letters".into()));
+        }
+        if !normalized.chars().all(|c| c.is_ascii_uppercase()) {
+            return Err(WalletError::Other(
+                "HACD name must contain only A–Z letters".into(),
+            ));
+        }
+        self.node.query_diamond_by_name(&normalized).await
+    }
+
     pub async fn hub_health(&self) -> WalletResult<Option<HubHealth>> {
         let hub_url = match &self.settings.l2_hub_url {
             Some(u) => u.clone(),
@@ -644,6 +814,63 @@ impl WalletService {
         whisper_relay_health(&self.node, &self.settings.dust_whisper).await
     }
 
+    pub fn messenger_threads(&self) -> WalletResult<Vec<crate::messenger::ChatThread>> {
+        let my = self.require_address()?;
+        let account = self.require_signing_account()?;
+        crate::messenger::messenger_threads(account, &my)
+    }
+
+    pub fn messenger_messages(
+        &self,
+        peer: &str,
+    ) -> WalletResult<Vec<crate::messenger::ChatMessage>> {
+        let my = self.require_address()?;
+        let account = self.require_signing_account()?;
+        crate::messenger::messenger_messages(account, &my, peer)
+    }
+
+    pub fn messenger_mark_read(&self, peer: &str) -> WalletResult<()> {
+        let my = self.require_address()?;
+        let account = self.require_signing_account()?;
+        crate::messenger::messenger_mark_read(account, &my, peer)
+    }
+
+    pub async fn messenger_send(
+        &self,
+        peer: &str,
+        body: &str,
+        peer_pubkey_hex: Option<&str>,
+    ) -> WalletResult<crate::messenger::ChatMessage> {
+        let my = self.require_address()?;
+        let account = self.require_signing_account()?;
+        let relays = self.settings.dust_whisper.trimmed_relay_urls();
+        if relays.is_empty() {
+            return Err(WalletError::Other(
+                "configure at least one DUST Whisper relay URL for messenger".into(),
+            ));
+        }
+        crate::messenger::messenger_send(
+            self.node.http(),
+            account,
+            &my,
+            peer,
+            body,
+            &relays,
+            peer_pubkey_hex,
+        )
+        .await
+    }
+
+    pub async fn messenger_poll_inbox(&self) -> WalletResult<u32> {
+        let my = self.require_address()?;
+        let account = self.require_signing_account()?;
+        let relays = self.settings.dust_whisper.trimmed_relay_urls();
+        if relays.is_empty() {
+            return Ok(0);
+        }
+        crate::messenger::messenger_poll_inbox(self.node.http(), account, &my, &relays).await
+    }
+
     pub(crate) async fn submit_signed_tx(
         &self,
         signed_hex: &str,
@@ -778,7 +1005,12 @@ impl WalletService {
         Ok(hash)
     }
 
-    pub async fn preview_send(&mut self, to: &str, amount_mei: f64) -> WalletResult<SendPreview> {
+    pub async fn preview_send(
+        &mut self,
+        to: &str,
+        amount_mei: f64,
+        options: crate::send_options::SendOptions,
+    ) -> WalletResult<SendPreview> {
         self.touch_auto_lock();
         self.maybe_discover_hub().await?;
         let from = self.require_address()?;
@@ -786,7 +1018,10 @@ impl WalletService {
         let balance = self.node.balance_mei(&from).await.unwrap_or(0.0);
         let hip23 = validate_simple_l1_send(to, amount_mei, balance, crate::hip23::L1_DEFAULT_FEE_MEI)?;
         let fast_pay = evaluate_fast_pay(&self.node, &self.settings, Some(&from)).await?;
-        let plan = self.router.plan_send(&from, to, amount_mei).await?;
+        let plan = self
+            .router
+            .plan_send(&from, to, amount_mei, options)
+            .await?;
         Ok(SendPreview {
             plan,
             from,
@@ -796,6 +1031,7 @@ impl WalletService {
             fee: crate::hip23::wire_mei_for_node("1:244"),
             hip23,
             fast_pay,
+            send_options: options,
         })
     }
 
@@ -807,7 +1043,9 @@ impl WalletService {
     ) -> WalletResult<AirgapPrepareResult> {
         self.touch_auto_lock();
         let from = self.require_address()?;
-        let preview = self.preview_send(to, amount_mei).await?;
+        let preview = self
+            .preview_send(to, amount_mei, crate::send_options::SendOptions::default())
+            .await?;
         if preview.plan.rail != PaymentRail::L1OnChain {
             return Err(WalletError::Policy(
                 "air-gap QR supports L1 on-chain sends only (disable L2 route)".into(),
@@ -946,7 +1184,12 @@ impl WalletService {
         parse_airgap_qr_parts(parts)
     }
 
-    pub async fn send_hac(&mut self, to: &str, amount_mei: f64) -> WalletResult<SendResult> {
+    pub async fn send_hac(
+        &mut self,
+        to: &str,
+        amount_mei: f64,
+        options: crate::send_options::SendOptions,
+    ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(&self.profile, amount_mei as u64, &unlock_ctx)?;
@@ -961,7 +1204,7 @@ impl WalletService {
         // Single-use second factor: consumed before signing (enterprise per-tx model).
         self.clear_second_factor();
         let from = self.require_address()?;
-        let preview = self.preview_send(to, amount_mei).await?;
+        let preview = self.preview_send(to, amount_mei, options).await?;
 
         let result = match preview.plan.rail {
             PaymentRail::L2Fast => {
@@ -975,7 +1218,14 @@ impl WalletService {
                 };
                 let payment_id = self
                     .router
-                    .execute_l2(&from, to, amount_mei, &preview.amount_wire, &account)
+                    .execute_l2(
+                        &from,
+                        to,
+                        amount_mei,
+                        &preview.amount_wire,
+                        &account,
+                        options.hub_fee_payer,
+                    )
                     .await?;
                 self.bills = self.router.bills().clone();
                 SendResult {
@@ -1140,6 +1390,16 @@ impl WalletService {
             .as_ref()
             .map(|s| s.address.clone())
             .ok_or(WalletError::Locked)
+    }
+
+    fn require_signing_account(&self) -> WalletResult<&WalletAccount> {
+        let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
+        match &session.key {
+            SessionKey::Signing(acc) => Ok(acc),
+            SessionKey::WatchOnly => Err(WalletError::Policy(
+                "watch-only wallet cannot access messenger".into(),
+            )),
+        }
     }
 
     fn load_webauthn_credential(&self) -> WalletResult<Option<String>> {

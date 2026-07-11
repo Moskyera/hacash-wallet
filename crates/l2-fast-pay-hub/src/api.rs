@@ -13,6 +13,8 @@ pub struct HubHealth {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_fee_mei: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +23,9 @@ pub struct FastPayRequest {
     pub payee: String,
     pub amount: String,
     pub channel_id: String,
+    /// `sender` (default) or `recipient`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_payer: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

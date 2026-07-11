@@ -76,10 +76,21 @@ impl NodeClient {
     }
 
     pub async fn balance_mei(&self, address: &str) -> WalletResult<f64> {
-        let url = format!(
+        self.query_balance_entry(address, false).await?.hacash_mei()
+    }
+
+    pub async fn query_balance_entry(
+        &self,
+        address: &str,
+        include_diamonds: bool,
+    ) -> WalletResult<BalanceEntry> {
+        let mut url = format!(
             "{}/query/balance?unit=mei&address={}",
             self.base_url, address
         );
+        if include_diamonds {
+            url.push_str("&diamonds=true");
+        }
         let resp = self
             .http
             .get(url)
@@ -93,17 +104,40 @@ impl NodeClient {
         if body.ret != 0 {
             return Err(WalletError::Node(format!("balance query failed ret={}", body.ret)));
         }
-        let entry = body
-            .list
+        body.list
             .iter()
             .find(|x| x.address.as_deref() == Some(address))
             .or_else(|| body.list.first())
-            .ok_or_else(|| WalletError::Node("address not in balance response".into()))?
-            .clone();
-        entry
-            .hacash
-            .parse::<f64>()
-            .map_err(|e| WalletError::Node(e.to_string()))
+            .cloned()
+            .ok_or_else(|| WalletError::Node("address not in balance response".into()))
+    }
+
+    pub async fn build_send_diamond_tx(
+        &self,
+        from: &str,
+        to: &str,
+        diamond_names: &[String],
+        fee: &str,
+    ) -> WalletResult<BuildTxResponse> {
+        let action = if diamond_names.len() == 1 {
+            json!({
+                "kind": 5,
+                "to": to,
+                "diamond": diamond_names[0]
+            })
+        } else {
+            json!({
+                "kind": 7,
+                "to": to,
+                "diamonds": diamond_names.join("")
+            })
+        };
+        let payload = json!({
+            "main_address": from,
+            "fee": fee,
+            "actions": [action]
+        });
+        self.post_create_transaction(payload).await
     }
 
     pub async fn build_send_hac_tx(
@@ -121,6 +155,27 @@ impl NodeClient {
                     "kind": 1,
                     "to": to,
                     "hacash": amount
+                }
+            ]
+        });
+        self.post_create_transaction(payload).await
+    }
+
+    pub async fn build_send_btc_tx(
+        &self,
+        from: &str,
+        to: &str,
+        satoshi: u64,
+        fee: &str,
+    ) -> WalletResult<BuildTxResponse> {
+        let payload = json!({
+            "main_address": from,
+            "fee": fee,
+            "actions": [
+                {
+                    "kind": 8,
+                    "to": to,
+                    "satoshi": satoshi
                 }
             ]
         });
@@ -167,6 +222,52 @@ impl NodeClient {
             .await
             .map_err(|e| WalletError::Node(e.to_string()))
     }
+
+    pub async fn query_diamond_by_name(&self, name: &str) -> WalletResult<DiamondInfo> {
+        let url = format!("{}/query/diamond?name={}", self.base_url, name);
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?;
+        let body: DiamondQueryResponse = resp
+            .json()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?;
+        if body.ret != 0 {
+            return Err(WalletError::Node(format!(
+                "diamond '{}' not found (ret={})",
+                name, body.ret
+            )));
+        }
+        Ok(DiamondInfo {
+            name: body.name.unwrap_or_else(|| name.to_uppercase()),
+            number: body.number,
+            visual_gene: body.visual_gene,
+            life_gene: body.life_gene,
+            belong: body.belong,
+        })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiamondInfo {
+    pub name: String,
+    pub number: Option<u64>,
+    pub visual_gene: Option<String>,
+    pub life_gene: Option<String>,
+    pub belong: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiamondQueryResponse {
+    ret: i32,
+    name: Option<String>,
+    number: Option<u64>,
+    visual_gene: Option<String>,
+    life_gene: Option<String>,
+    belong: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,9 +277,26 @@ struct BalanceResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct BalanceEntry {
+pub struct BalanceEntry {
     address: Option<String>,
     hacash: String,
+    diamond: Option<u32>,
+    #[serde(default)]
+    pub satoshi: u64,
+    #[serde(default)]
+    pub diamonds: Option<String>,
+}
+
+impl BalanceEntry {
+    pub fn hacash_mei(&self) -> WalletResult<f64> {
+        self.hacash
+            .parse::<f64>()
+            .map_err(|e| WalletError::Node(e.to_string()))
+    }
+
+    pub fn btc_satoshi(&self) -> u64 {
+        self.satoshi
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

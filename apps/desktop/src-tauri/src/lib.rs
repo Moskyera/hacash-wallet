@@ -1,90 +1,12 @@
 mod commands;
 mod platform;
-mod state;
-mod whisper_relay;
 
 use hacash_wallet_core::hip23::{BalanceFloorInput, HeightScopeInput, Type3CheckInput};
 use hacash_wallet_core::hardware::HardwareSigningMode;
 use hacash_wallet_core::security::SecurityProfile;
-use hacash_wallet_core::{DustWhisperSettings, PrivacySettings, WalletService, WalletSettings};
-use state::AppState;
+use hacash_wallet_core::WalletService;
 use tauri::{Manager, RunEvent};
-
-#[tauri::command]
-fn wallet_status(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let svc = state.inner.blocking_lock();
-    Ok(serde_json::to_value(svc.status()).map_err(|e| e.to_string())?)
-}
-
-#[tauri::command]
-fn wallet_create(passphrase: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.create_wallet(&passphrase).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_import(
-    seed: String,
-    passphrase: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.import_wallet(&seed, &passphrase).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_export_backup(
-    passphrase: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let svc = state.inner.blocking_lock();
-    svc.export_backup(&passphrase).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_change_passphrase(
-    old_passphrase: String,
-    new_passphrase: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.change_passphrase(&old_passphrase, &new_passphrase)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_unlock(passphrase: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.unlock(&passphrase).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_lock(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.lock();
-    Ok(())
-}
-
-#[tauri::command]
-async fn wallet_balance(state: tauri::State<'_, AppState>) -> Result<f64, String> {
-    let mut svc = state.inner.lock().await;
-    svc.balance_mei().await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_get_settings(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let svc = state.inner.blocking_lock();
-    Ok(serde_json::to_value(svc.get_settings()).map_err(|e| e.to_string())?)
-}
-
-#[tauri::command]
-fn wallet_update_settings(
-    settings: WalletSettings,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.update_settings(settings).map_err(|e| e.to_string())
-}
+use wallet_tauri_common::AppState;
 
 #[tauri::command]
 fn wallet_webauthn_register_begin(state: tauri::State<'_, AppState>) -> Result<String, String> {
@@ -119,77 +41,9 @@ fn wallet_webauthn_auth_finish(
 }
 
 #[tauri::command]
-async fn wallet_hub_health(
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let svc = state.inner.lock().await;
-    let health = svc.hub_health().await.map_err(|e| e.to_string())?;
-    serde_json::to_value(health).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn wallet_fast_pay_status(
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let svc = state.inner.lock().await;
-    let status = svc.fast_pay_status().await.map_err(|e| e.to_string())?;
-    serde_json::to_value(status).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn wallet_enable_fast_pay(
-    deposit_mei: Option<f64>,
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let mut svc = state.inner.lock().await;
-    let status = svc
-        .enable_fast_pay(deposit_mei)
-        .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(status).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn wallet_list_bills(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     let svc = state.inner.blocking_lock();
     Ok(serde_json::to_value(svc.list_bills()).map_err(|e| e.to_string())?)
-}
-
-#[tauri::command]
-fn wallet_list_bill_summaries(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let svc = state.inner.blocking_lock();
-    let summaries = svc.list_bill_summaries().map_err(|e| e.to_string())?;
-    Ok(serde_json::to_value(summaries).map_err(|e| e.to_string())?)
-}
-
-#[tauri::command]
-fn wallet_export_bill_json(
-    payment_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let svc = state.inner.blocking_lock();
-    svc.export_bill_json(&payment_id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_export_all_bills_json(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let svc = state.inner.blocking_lock();
-    svc.export_all_bills_json().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_get_bill_hex(
-    payment_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, String> {
-    let svc = state.inner.blocking_lock();
-    svc.get_bill_hex(&payment_id).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn wallet_tx_history(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let svc = state.inner.blocking_lock();
-    Ok(serde_json::to_value(svc.tx_history()).map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
@@ -247,17 +101,6 @@ async fn wallet_close_channel(state: tauri::State<'_, AppState>) -> Result<Strin
 }
 
 #[tauri::command]
-async fn wallet_preview_send(
-    to: String,
-    amount_mei: f64,
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let mut svc = state.inner.lock().await;
-    let preview = svc.preview_send(&to, amount_mei).await.map_err(|e| e.to_string())?;
-    serde_json::to_value(preview).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn wallet_platform_security_status() -> Result<serde_json::Value, String> {
     Ok(serde_json::to_value(platform::platform_security_status()).map_err(|e| e.to_string())?)
 }
@@ -269,7 +112,6 @@ fn wallet_confirm_biometric_native(state: tauri::State<'_, AppState>) -> Result<
         svc.begin_native_biometric().map_err(|e| e.to_string())?
     };
     let message = format!("Authorize Hacash Wallet transaction\nReference: {nonce}");
-    // Do not hold the wallet mutex during Hello — it blocks all IPC and freezes the UI.
     platform::verify_native_biometric(&message)?;
     let mut svc = state.inner.blocking_lock();
     svc.finish_native_biometric(&nonce)
@@ -292,10 +134,7 @@ fn wallet_open_watch_only(state: tauri::State<'_, AppState>) -> Result<String, S
 }
 
 #[tauri::command]
-fn wallet_set_hardware_mode(
-    mode: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn wallet_set_hardware_mode(mode: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut svc = state.inner.blocking_lock();
     let hw = HardwareSigningMode::from_name(&mode);
     svc.set_hardware_signing_mode(hw)
@@ -364,60 +203,6 @@ fn wallet_airgap_parse_qr_batch(
 }
 
 #[tauri::command]
-fn wallet_update_privacy_settings(
-    privacy: PrivacySettings,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.update_privacy_settings(privacy)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn wallet_whisper_relay_health(
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let svc = state.inner.lock().await;
-    let health = svc.whisper_relay_health().await;
-    serde_json::to_value(health).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn wallet_update_dust_whisper_settings(
-    dust_whisper: DustWhisperSettings,
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    {
-        let mut svc = state.inner.lock().await;
-        svc.update_dust_whisper_settings(dust_whisper)
-            .map_err(|e| e.to_string())?;
-    }
-    whisper_relay::sync_managed_relay(&app).await?;
-    Ok(())
-}
-
-#[tauri::command]
-fn wallet_clear_tx_history(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.clear_tx_history().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn wallet_send_hac(
-    to: String,
-    amount_mei: f64,
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    let mut svc = state.inner.lock().await;
-    let result = svc
-        .send_hac(&to, amount_mei)
-        .await
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(result).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn wallet_set_security_profile(
     profile: String,
     state: tauri::State<'_, AppState>,
@@ -436,77 +221,90 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let mut svc = WalletService::new(None, None)
-            .map_err(|e| e.to_string())?;
+            let mut svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = whisper_relay::sync_managed_relay(&handle).await {
+                if let Err(e) = wallet_tauri_common::desktop_relay::sync_managed_relay(&handle).await
+                {
                     tracing::warn!(error = %e, "DUST Whisper relay auto-start skipped");
                 }
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            wallet_status,
-            wallet_create,
-            wallet_import,
-            wallet_export_backup,
-            wallet_change_passphrase,
-            wallet_unlock,
-            wallet_lock,
-            wallet_balance,
-            wallet_get_settings,
-            wallet_update_settings,
+            wallet_tauri_common::commands::wallet_status,
+            wallet_tauri_common::commands::wallet_create,
+            wallet_tauri_common::commands::wallet_import,
+            wallet_tauri_common::commands::wallet_export_backup,
+            wallet_tauri_common::commands::wallet_change_passphrase,
+            wallet_tauri_common::commands::wallet_unlock,
+            wallet_tauri_common::commands::wallet_lock,
+            wallet_tauri_common::commands::wallet_balance,
+            wallet_tauri_common::commands::wallet_asset_summary,
+            wallet_tauri_common::commands::wallet_get_settings,
+            wallet_tauri_common::commands::wallet_update_settings,
+            wallet_tauri_common::commands::wallet_tx_history,
+            wallet_tauri_common::commands::wallet_clear_tx_history,
+            wallet_tauri_common::commands::wallet_fast_pay_status,
+            wallet_tauri_common::commands::wallet_enable_fast_pay,
+            wallet_tauri_common::commands::wallet_hub_health,
+            wallet_tauri_common::commands::wallet_list_bill_summaries,
+            wallet_tauri_common::commands::wallet_export_bill_json,
+            wallet_tauri_common::commands::wallet_export_all_bills_json,
+            wallet_tauri_common::commands::wallet_get_bill_hex,
+            wallet_tauri_common::commands::wallet_update_privacy_settings,
+            wallet_tauri_common::commands::wallet_preview_send,
+            wallet_tauri_common::commands::wallet_send_hac,
+            wallet_tauri_common::commands::wallet_query_diamond,
+            wallet_tauri_common::commands::wallet_list_owned_diamonds,
+            wallet_tauri_common::commands::wallet_preview_send_hacd,
+            wallet_tauri_common::commands::wallet_send_hacd,
+            wallet_tauri_common::commands::wallet_preview_send_btc,
+            wallet_tauri_common::commands::wallet_send_btc,
+            wallet_tauri_common::commands::wallet_channel_info,
+            wallet_tauri_common::commands::wallet_preview_channel_open,
+            wallet_tauri_common::commands::wallet_open_channel,
+            wallet_tauri_common::commands::wallet_close_channel,
+            wallet_tauri_common::commands::wallet_import_watch_only,
+            wallet_tauri_common::commands::wallet_open_watch_only,
+            wallet_tauri_common::commands::wallet_set_security_profile,
+            wallet_tauri_common::commands::wallet_set_hardware_mode,
+            wallet_tauri_common::commands::wallet_platform_info,
+            wallet_tauri_common::whisper_commands::wallet_whisper_relay_health,
+            wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
+            wallet_tauri_common::whisper_commands::messenger_threads,
+            wallet_tauri_common::whisper_commands::messenger_messages,
+            wallet_tauri_common::whisper_commands::messenger_mark_read,
+            wallet_tauri_common::whisper_commands::messenger_send,
+            wallet_tauri_common::whisper_commands::messenger_poll_inbox,
+            wallet_tauri_common::quantum_commands::quantum_get_settings,
+            wallet_tauri_common::quantum_commands::quantum_set_mode,
+            wallet_tauri_common::quantum_commands::quantum_create_pqc,
+            wallet_tauri_common::quantum_commands::quantum_create_hybrid,
+            wallet_tauri_common::quantum_commands::quantum_import_keystore_v3,
+            wallet_tauri_common::quantum_commands::quantum_export_keystore_v3,
+            wallet_tauri_common::quantum_commands::quantum_preview_keystore,
+            wallet_tauri_common::quantum_commands::quantum_send_type4,
+            wallet_tauri_common::quantum_commands::quantum_send_test_tx,
+            wallet_tauri_common::quantum_commands::quantum_node_ping,
+            wallet_tauri_common::quantum_commands::quantum_balance,
+            wallet_tauri_common::quantum_commands::quantum_preflight_type4,
             wallet_webauthn_register_begin,
             wallet_webauthn_register_finish,
             wallet_webauthn_auth_begin,
             wallet_webauthn_auth_finish,
-            wallet_hub_health,
-            wallet_fast_pay_status,
-            wallet_enable_fast_pay,
             wallet_list_bills,
-            wallet_list_bill_summaries,
-            wallet_export_bill_json,
-            wallet_export_all_bills_json,
-            wallet_get_bill_hex,
-            wallet_tx_history,
             wallet_validate_hip23,
-            wallet_channel_info,
-            wallet_preview_channel_open,
-            wallet_open_channel,
-            wallet_close_channel,
-            wallet_preview_send,
             wallet_platform_security_status,
             wallet_confirm_biometric_native,
-            wallet_import_watch_only,
-            wallet_open_watch_only,
-            wallet_set_hardware_mode,
             wallet_airgap_prepare_send,
             wallet_airgap_sign_unsigned,
             wallet_airgap_broadcast_signed,
             wallet_airgap_parse_qr,
             wallet_airgap_parse_qr_batch,
-            wallet_update_privacy_settings,
-            wallet_whisper_relay_health,
-            wallet_update_dust_whisper_settings,
-            wallet_clear_tx_history,
-            wallet_send_hac,
-            wallet_set_security_profile,
-            commands::quantum_get_settings,
-            commands::quantum_set_mode,
-            commands::quantum_create_pqc,
-            commands::quantum_create_hybrid,
             commands::quantum_create_hybrid_from_privakey,
-            commands::quantum_import_keystore_v3,
-            commands::quantum_export_keystore_v3,
-            commands::quantum_preview_keystore,
-            commands::quantum_send_type4,
-            commands::quantum_send_test_tx,
-            commands::quantum_node_ping,
-            commands::quantum_balance,
-            commands::quantum_preflight_type4,
             commands::quantum_prepare_airgap_type4,
             commands::quantum_airgap_sign_type4,
         ])
@@ -515,7 +313,7 @@ pub fn run() {
         .run(|app, event| {
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let _ = whisper_relay::stop_managed_relay(&state);
+                    let _ = wallet_tauri_common::desktop_relay::stop_managed_relay(&state);
                 }
             }
         });

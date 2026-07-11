@@ -58,6 +58,26 @@ export type PlatformSecurityStatus = {
   platform: string;
 };
 
+export type HubFeePayer = "sender" | "recipient";
+
+export type SendPreferences = {
+  hub_fee_payer: HubFeePayer;
+  prefer_fast_pay: boolean;
+};
+
+export type SendOptions = {
+  hub_fee_payer: HubFeePayer;
+  force_l1: boolean;
+};
+
+export type SendFeeBreakdown = {
+  payer_debit_mei: number;
+  recipient_credit_mei: number;
+  hub_fee_mei: number | null;
+  hub_fee_payer: HubFeePayer;
+  l1_fee_wire: string | null;
+};
+
 export type WalletSettings = {
   node_url: string;
   l2_hub_url: string | null;
@@ -66,6 +86,7 @@ export type WalletSettings = {
   webauthn_enabled: boolean;
   security_profile: string;
   privacy: PrivacySettings;
+  send?: SendPreferences;
 };
 
 export type Hip23Check = {
@@ -87,6 +108,7 @@ export type SendPreview = {
     channel_id?: string | null;
     rail_label: string;
     rail_detail: string;
+    fee_breakdown: SendFeeBreakdown;
   };
   from: string;
   to: string;
@@ -95,6 +117,7 @@ export type SendPreview = {
   fee: string;
   hip23: Hip23Check;
   fast_pay: FastPayStatus;
+  send_options: SendOptions;
 };
 
 export type SendResult = {
@@ -275,6 +298,46 @@ export type QuantumTestResult = {
   metrics: Record<string, unknown>;
 };
 
+export type HacdDiamondInfo = {
+  name: string;
+  number?: number | null;
+  visual_gene?: string | null;
+  life_gene?: string | null;
+  belong?: string | null;
+};
+
+export type AssetSummary = {
+  hac_mei: number;
+  hacd_count: number;
+  hacd_names: string[];
+  btc_wallet_satoshi: number;
+  btc_channel_satoshi: number;
+};
+
+export type BtcSendPreview = {
+  from: string;
+  to: string;
+  satoshi: number;
+  btc_amount: number;
+  fee_mei: number;
+  fee_wire: string;
+  hip23: Hip23Check;
+  summary: string;
+};
+
+export type HacdSendPreview = {
+  from: string;
+  to: string;
+  diamond_name: string;
+  diamond_names: string[];
+  diamond_count: number;
+  diamond_number?: number | null;
+  fee_mei: number;
+  fee_wire: string;
+  hip23: Hip23Check;
+  summary: string;
+};
+
 export const quantumApi = {
   getSettings: () => invoke<QuantumSettings>("quantum_get_settings"),
   setMode: (enabled: boolean) => invoke<void>("quantum_set_mode", { enabled }),
@@ -314,6 +377,7 @@ export const api = {
   unlock: (passphrase: string) => invoke<string>("wallet_unlock", { passphrase }),
   lock: () => invoke<void>("wallet_lock"),
   balance: () => invoke<number>("wallet_balance"),
+  assetSummary: () => invoke<AssetSummary>("wallet_asset_summary"),
   getSettings: () => invoke<WalletSettings>("wallet_get_settings"),
   updateSettings: (settings: WalletSettings) =>
     invoke<void>("wallet_update_settings", { settings }),
@@ -353,22 +417,22 @@ export const api = {
       hubDepositMei,
     }),
   closeChannel: () => invoke<string>("wallet_close_channel"),
-  previewSend: (to: string, amountMei: number) =>
-    invoke<SendPreview>("wallet_preview_send", { to, amountMei }),
+  previewSend: (to: string, amountMei: number, sendOptions?: SendOptions) =>
+    invoke<SendPreview>("wallet_preview_send", { to, amountMei, sendOptions }),
   platformSecurityStatus: () =>
     invoke<PlatformSecurityStatus>("wallet_platform_security_status"),
   confirmBiometricNative: () => invoke<void>("wallet_confirm_biometric_native"),
   importWatchOnly: (address: string) => invoke<string>("wallet_import_watch_only", { address }),
   openWatchOnly: () => invoke<string>("wallet_open_watch_only"),
   setHardwareMode: (mode: string) => invoke<void>("wallet_set_hardware_mode", { mode }),
-  sendHac: (to: string, amountMei: number) =>
-    invoke<SendResult>("wallet_send_hac", { to, amountMei }),
+  sendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
+    invoke<SendResult>("wallet_send_hac", { to, amountMei, sendOptions }),
   setSecurityProfile: (profile: string) =>
     invoke<void>("wallet_set_security_profile", { profile }),
   updatePrivacySettings: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   updateDustWhisperSettings: (dustWhisper: DustWhisperSettings) =>
-    invoke<void>("wallet_update_dust_whisper_settings", { dustWhisper }),
+    invoke<void>("wallet_update_dust_whisper_settings_desktop", { dustWhisper }),
   whisperRelayHealth: () =>
     invoke<RelayHealthStatus[]>("wallet_whisper_relay_health"),
   clearTxHistory: () => invoke<void>("wallet_clear_tx_history"),
@@ -382,4 +446,14 @@ export const api = {
     invoke<AirgapParseResult>("wallet_airgap_parse_qr", { text }),
   airgapParseQrBatch: (parts: string[]) =>
     invoke<AirgapParseResult>("wallet_airgap_parse_qr_batch", { parts }),
+  queryDiamond: (name: string) => invoke<HacdDiamondInfo>("wallet_query_diamond", { name }),
+  listOwnedDiamonds: () => invoke<string[]>("wallet_list_owned_diamonds"),
+  previewSendHacd: (to: string, diamondNames: string[]) =>
+    invoke<HacdSendPreview>("wallet_preview_send_hacd", { to, diamondNames }),
+  sendHacd: (to: string, diamondNames: string[]) =>
+    invoke<SendResult>("wallet_send_hacd", { to, diamondNames }),
+  previewSendBtc: (to: string, satoshi: number) =>
+    invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
+  sendBtc: (to: string, satoshi: number) =>
+    invoke<SendResult>("wallet_send_btc", { to, satoshi }),
 };

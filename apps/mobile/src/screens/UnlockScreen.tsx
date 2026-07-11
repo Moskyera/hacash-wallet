@@ -1,0 +1,45 @@
+import Toast from "../components/Toast";
+import WalletLogo from "../components/WalletLogo";
+import type { ToastKind } from "../hooks/useToast";
+
+type Props = {
+  displayName: string;
+  passphrase: string;
+  setPassphrase: (v: string) => void;
+  busy: boolean;
+  onUnlock: () => void;
+  toast: { msg: string; kind: ToastKind } | null;
+};
+
+export default function UnlockScreen({
+  displayName,
+  passphrase,
+  setPassphrase,
+  busy,
+  onUnlock,
+  toast,
+}: Props) {
+  return (
+    <div className="auth-screen">
+      <div className="auth-hero">
+        <WalletLogo size="lg" />
+        <h1>{displayName}</h1>
+        <p className="muted">Enter passphrase to unlock</p>
+      </div>
+      <div className="card">
+        <label className="label">Passphrase</label>
+        <input
+          type="password"
+          placeholder="Enter passphrase"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void onUnlock()}
+        />
+        <button className="primary" disabled={busy || !passphrase} onClick={() => void onUnlock()}>
+          Unlock
+        </button>
+      </div>
+      {toast && <Toast message={toast.msg} kind={toast.kind} />}
+    </div>
+  );
+}
