@@ -37,24 +37,49 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
   const watchOnly = status?.watch_only ?? false;
 
   const loadWalletData = useCallback(async () => {
-    const [summary, fp, hist, billRows, cfg, hub, plat] = await Promise.all([
+    const results = await Promise.allSettled([
       api.assetSummary(),
       api.fastPayStatus(),
       api.txHistory(),
       api.listBillSummaries(),
       api.getSettings(),
-      api.hubHealth().catch(() => null),
-      api.platformSecurity().catch(() => null),
+      api.hubHealth(),
+      api.platformSecurity(),
     ]);
-    setAssets(summary);
-    setBalance(summary.hac_mei);
-    setFastPay(fp);
-    setHistory(hist);
-    setBills(billRows);
-    setSettings(cfg);
+
+    const pick = <T,>(idx: number): T | null =>
+      results[idx].status === "fulfilled" ? (results[idx] as PromiseFulfilledResult<T>).value : null;
+
+    const summary = pick<AssetSummary>(0);
+    const fp = pick<FastPayStatus>(1);
+    const hist = pick<TxRecord[]>(2);
+    const billRows = pick<BillSummary[]>(3);
+    const cfg = pick<WalletSettings>(4);
+    const hub = pick<HubHealth>(5);
+    const plat = pick<PlatformSecurityStatus>(6);
+
+    const nodeErr = results
+      .slice(0, 2)
+      .find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+
+    if (summary) {
+      setAssets(summary);
+      setBalance(summary.hac_mei);
+    } else {
+      setAssets(null);
+      setBalance(null);
+      if (nodeErr) {
+        throw nodeErr.reason;
+      }
+    }
+
+    if (fp) setFastPay(fp);
+    if (hist) setHistory(hist);
+    if (billRows) setBills(billRows);
+    if (cfg) setSettings(cfg);
     setHubHealth(hub);
     setPlatformSec(plat);
-    return cfg;
+    return cfg ?? (await api.getSettings());
   }, []);
 
   const refresh = useCallback(async () => {

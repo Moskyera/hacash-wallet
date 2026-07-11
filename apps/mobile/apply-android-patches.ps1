@@ -71,6 +71,15 @@ if ($gradleContent -match 'getByName\("release"\)' -and $gradleContent -notmatch
     Write-Host "Linked release signingConfig" -ForegroundColor Green
 }
 
+# Release builds must allow HTTP to nodeapi.hacash.org (Rust reqwest, not only WebView).
+if ($gradleContent -match 'manifestPlaceholders\["usesCleartextTraffic"\] = "false"') {
+    $gradleContent = $gradleContent.Replace(
+        'manifestPlaceholders["usesCleartextTraffic"] = "false"',
+        'manifestPlaceholders["usesCleartextTraffic"] = "true"'
+    )
+    Write-Host "Enabled cleartext HTTP for release (Hacash node API)" -ForegroundColor Green
+}
+
 Set-Content -Path $gradle -Value $gradleContent -NoNewline
 
 # Sync branded launcher icons into generated Android res (gen/ uses Tauri placeholder by default).
