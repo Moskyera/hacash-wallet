@@ -16,4 +16,14 @@ Get-ChildItem -Path $assets -File | Where-Object { $_.Name -ne "tauri.conf.json"
 Get-ChildItem -Path $assets -Directory | Where-Object { $_.Name -ne "dexopt" } | Remove-Item -Recurse -Force
 
 Copy-Item -Path (Join-Path $dist "*") -Destination $assets -Recurse -Force
+
+# Production APK must not advertise devUrl (otherwise Tauri may load 127.0.0.1:1421).
+$confPath = Join-Path $assets "tauri.conf.json"
+if (Test-Path $confPath) {
+    $conf = Get-Content $confPath -Raw
+    $conf = $conf -replace '"devUrl"\s*:\s*"[^"]*"\s*,?', ''
+    Set-Content -Path $confPath -Value $conf -NoNewline -Encoding UTF8
+    Write-Host "Stripped devUrl from bundled tauri.conf.json" -ForegroundColor Green
+}
+
 Write-Host "Bundled frontend into Android assets: $assets" -ForegroundColor Green
