@@ -115,3 +115,8 @@ if (-not (Test-Path (Split-Path -Parent $bgColorXml))) {
   <color name="ic_launcher_background">#000000</color>
 </resources>
 '@ | Set-Content -Path $bgColorXml -Encoding UTF8 -NoNewline
+
+$distIndex = Join-Path $mobile "dist\index.html"
+if (Test-Path $distIndex) {
+    & (Join-Path $mobile "sync-android-frontend.ps1")
+}

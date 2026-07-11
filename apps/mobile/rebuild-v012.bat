@@ -17,6 +17,9 @@ powershell -ExecutionPolicy Bypass -File .\apply-android-patches.ps1 >> "%LOG%" 
 yarn build >> "%LOG%" 2>&1
 if errorlevel 1 goto fail
 
+powershell -ExecutionPolicy Bypass -File .\sync-android-frontend.ps1 >> "%LOG%" 2>&1
+if errorlevel 1 goto fail
+
 set "SRC=%ROOT%\target\aarch64-linux-android\release\libhacash_wallet_mobile_lib.so"
 set "JNI=%MOBILE%\src-tauri\gen\android\app\src\main\jniLibs\arm64-v8a"
 if not exist "%JNI%" mkdir "%JNI%"
