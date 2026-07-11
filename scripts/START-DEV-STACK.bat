@@ -90,24 +90,37 @@ powershell -NoProfile -Command "try { Invoke-RestMethod '%RPC_URL%/query/latest'
 if errorlevel 1 goto waitrpc
 echo       Node RPC ready.
 
-echo [3/4] Starting POWORKER...
+echo [3/5] Starting POWORKER...
 start "HACASH-POWORKER" cmd /k "cd /d %NODE_DIR% && title HACASH-POWORKER && echo Directory: %NODE_DIR% && echo KEEP THIS WINDOW OPEN && echo. && poworker.exe"
 
 timeout /t 2 /nobreak >nul
 
-echo [4/4] Starting Quantum Wallet...
+echo [4/5] Starting Fast Pay hub (CSP)...
+set "HACASH_HUB_SECRET_ARG="
+if defined HACASH_HUB_SECRET_HEX set "HACASH_HUB_SECRET_ARG=--hub-secret-hex %HACASH_HUB_SECRET_HEX%"
+if defined HACASH_HUB_ADDRESS (
+    start "FAST-PAY-HUB" cmd /k "cd /d %REPO_ROOT% && title FAST-PAY-HUB && echo Directory: %REPO_ROOT% && echo Hub: http://127.0.0.1:8790 && echo KEEP THIS WINDOW OPEN && echo. && cargo run -p l2-fast-pay-hub --features server --bin fast-pay-hub -- --hub-address %HACASH_HUB_ADDRESS% %HACASH_HUB_SECRET_ARG%"
+) else (
+    echo       SKIP: set HACASH_HUB_ADDRESS=1YourHubAddress to auto-start the CSP hub.
+)
+
+timeout /t 2 /nobreak >nul
+
+echo [5/5] Starting Quantum Wallet...
 start "QUANTUM-WALLET" cmd /k "cd /d %WALLET_DIR% && title QUANTUM-WALLET && echo Directory: %WALLET_DIR% && echo First start may compile ~30s && echo Use your vault passphrase on Unlock && echo KEEP THIS WINDOW OPEN && echo. && yarn tauri dev"
 
 echo.
 echo  ========================================
-echo   Launched 3 windows - keep all open
+echo   Launched 4 windows - keep all open
 echo  ========================================
 echo.
 echo   1. HACASH-FULLNODE  ^(hacash.exe^)
 echo   2. HACASH-POWORKER  ^(poworker.exe^)
-echo   3. QUANTUM-WALLET   ^(yarn tauri dev^)
+echo   3. FAST-PAY-HUB     ^(http://127.0.0.1:8790^)
+echo   4. QUANTUM-WALLET   ^(yarn tauri dev^)
 echo.
 echo   Node: %RPC_URL%
+echo   Hub:  http://127.0.0.1:8790
 echo.
 echo   Send tab    - legacy L1 fund to quantum address
 echo   Quantum tab - Type 4 sends ^(keystore password^)

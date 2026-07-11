@@ -936,9 +936,17 @@ impl WalletService {
 
         let result = match preview.plan.rail {
             PaymentRail::L2Fast => {
+                let account = match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
+                    SessionKey::Signing(acc) => acc.clone(),
+                    SessionKey::WatchOnly => {
+                        return Err(WalletError::Policy(
+                            "watch-only wallet cannot sign L2 bills".into(),
+                        ));
+                    }
+                };
                 let payment_id = self
                     .router
-                    .execute_l2(&from, to, amount_mei, &preview.amount_wire)
+                    .execute_l2(&from, to, amount_mei, &preview.amount_wire, &account)
                     .await?;
                 self.bills = self.router.bills().clone();
                 SendResult {

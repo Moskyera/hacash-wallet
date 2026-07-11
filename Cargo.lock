@@ -1912,6 +1912,7 @@ dependencies = [
  "dust-whisper",
  "field",
  "hex",
+ "l2-fast-pay-hub",
  "libc",
  "p256",
  "proptest",
@@ -2494,6 +2495,31 @@ dependencies = [
  "bitflags 2.13.0",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "l2-fast-pay-hub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "basis",
+ "clap",
+ "field",
+ "hex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3",
+ "sys",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

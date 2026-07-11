@@ -9,8 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::account::WalletAccount;
 use crate::bills::BillStore;
 use crate::error::{WalletError, WalletResult};
+use crate::l2_bill::cosign_bill_hex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubHealth {
@@ -90,10 +92,12 @@ impl L2HubClient {
         &self,
         req: &FastPayRequest,
         bills: &mut BillStore,
+        payer_account: &WalletAccount,
     ) -> WalletResult<String> {
         let pay = self.fast_pay(req).await?;
         if let Some(bill_hex) = &pay.bill_hex {
-            bills.store_bill(&pay.payment_id, bill_hex)?;
+            let signed_hex = cosign_bill_hex(bill_hex, payer_account)?;
+            bills.store_bill(&pay.payment_id, &signed_hex)?;
         }
         if pay.status != "settled" {
             return Err(WalletError::L2(format!(

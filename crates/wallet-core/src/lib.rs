@@ -10,6 +10,7 @@ pub mod hardware;
 pub mod hip23;
 pub mod kdf;
 pub mod secure_mem;
+pub mod l2_bill;
 pub mod l2_hub;
 pub mod node;
 pub mod paths;

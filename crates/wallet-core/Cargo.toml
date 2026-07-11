@@ -25,6 +25,7 @@ url.workspace = true
 p256.workspace = true
 coset.workspace = true
 dust-whisper = { path = "../dust-whisper" }
+l2-fast-pay-hub = { path = "../l2-fast-pay-hub" }
 sys = { path = "../../../hacash-fullnodedev/sys" }
 field = { path = "../../../hacash-fullnodedev/field" }
 basis = { path = "../../../hacash-fullnodedev/basis" }

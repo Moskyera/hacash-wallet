@@ -1,0 +1,41 @@
+[package]
+name = "l2-fast-pay-hub"
+version.workspace = true
+edition.workspace = true
+description = "Hacash CSP / Fast Pay hub — Wallet Hub API v1 reference server"
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+sha3 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+field = { path = "../../../hacash-fullnodedev/field" }
+sys = { path = "../../../hacash-fullnodedev/sys" }
+axum = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true, optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+[features]
+default = []
+server = ["dep:clap", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "fast-pay-hub"
+path = "src/bin/fast-pay-hub.rs"
+required-features = ["server"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+axum = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+basis = { path = "../../../hacash-fullnodedev/basis" }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::account::WalletAccount;
 use crate::bills::BillStore;
 use crate::channel::{query_channel, ChannelInfo, CHANNEL_STATUS_OPENING};
 use crate::error::{WalletError, WalletResult};
@@ -122,6 +123,7 @@ impl PaymentRouter {
         to: &str,
         _amount_mei: f64,
         amount_wire: &str,
+        payer_account: &WalletAccount,
     ) -> WalletResult<String> {
         let hub_url = self
             .settings
@@ -141,7 +143,15 @@ impl PaymentRouter {
             amount: amount_wire.to_owned(),
             channel_id,
         };
-        hub.execute_and_store_bill(&req, &mut self.bills).await
+        if payer_account.address() != from {
+            return Err(WalletError::L2(format!(
+                "payer account {} does not match from {}",
+                payer_account.address(),
+                from
+            )));
+        }
+        hub.execute_and_store_bill(&req, &mut self.bills, payer_account)
+            .await
     }
 }
 
