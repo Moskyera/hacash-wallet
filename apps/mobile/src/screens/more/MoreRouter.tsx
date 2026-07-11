@@ -309,8 +309,12 @@ export default function MoreRouter(props: Props) {
           <input
             value={settingsNodeUrl}
             onChange={(e) => setSettingsNodeUrl(e.target.value)}
-            placeholder="https://node.example"
+            placeholder="http://nodeapi.hacash.org"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
           />
+          <p className="muted">Official Hacash node uses HTTP (not HTTPS).</p>
           <label className="label">L2 Hub URL</label>
           <input
             value={settingsHubUrl}

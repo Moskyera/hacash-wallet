@@ -101,6 +101,16 @@ pub async fn wallet_enable_fast_pay(
 }
 
 #[tauri::command]
+pub async fn wallet_ping_node(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let url = svc.get_settings().node_url.clone();
+    svc.ping_node()
+        .await
+        .map_err(|e| format!("{e} (node: {url})"))
+        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
 pub async fn wallet_hub_health(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {

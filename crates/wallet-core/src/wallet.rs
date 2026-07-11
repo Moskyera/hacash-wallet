@@ -149,6 +149,7 @@ impl WalletService {
         if let Some(hub) = l2_hub_url {
             settings.l2_hub_url = Some(hub);
         }
+        settings.normalize();
         let profile = SecurityProfile::from_name(&settings.security_profile);
         let node = NodeClient::new(settings.node_url.clone());
         let bills = BillStore::load().unwrap_or_default();
@@ -231,7 +232,12 @@ impl WalletService {
         self.settings.clone()
     }
 
-    pub fn update_settings(&mut self, settings: WalletSettings) -> WalletResult<()> {
+    pub async fn ping_node(&self) -> WalletResult<serde_json::Value> {
+        self.node.ping().await
+    }
+
+    pub fn update_settings(&mut self, mut settings: WalletSettings) -> WalletResult<()> {
+        settings.normalize();
         settings.save()?;
         self.router.update_settings(settings.clone());
         self.node = NodeClient::new(settings.node_url.clone());

@@ -60,6 +60,7 @@ pub fn run() {
             wallet_tauri_common::commands::wallet_fast_pay_status,
             wallet_tauri_common::commands::wallet_enable_fast_pay,
             wallet_tauri_common::commands::wallet_hub_health,
+            wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_export_backup,
             wallet_tauri_common::commands::wallet_change_passphrase,
             wallet_tauri_common::commands::wallet_clear_tx_history,

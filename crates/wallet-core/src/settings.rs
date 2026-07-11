@@ -17,6 +17,28 @@ fn default_hardware_mode() -> String {
     "software".into()
 }
 
+/// Public Hacash L1 node (HTTP only — no valid TLS cert).
+pub const DEFAULT_NODE_URL: &str = "http://nodeapi.hacash.org";
+
+/// Normalize node URL typos and enforce HTTP for the official Hacash node API.
+pub fn sanitize_node_url(raw: &str) -> String {
+    let mut url = raw.trim().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        return DEFAULT_NODE_URL.into();
+    }
+    if url.contains("nodeapi.org") && !url.contains("nodeapi.hacash.org") {
+        url = url.replace("nodeapi.org", "nodeapi.hacash.org");
+    }
+    if url.contains("nodeapi.hacash.org") && url.starts_with("https://") {
+        url = url.replacen("https://", "http://", 1);
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        format!("http://{url}")
+    } else {
+        url
+    }
+}
+
 /// Display-safe quantum account metadata (no secrets).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuantumMeta {
@@ -57,7 +79,7 @@ pub struct WalletSettings {
 impl Default for WalletSettings {
     fn default() -> Self {
         Self {
-            node_url: "http://nodeapi.hacash.org".into(),
+            node_url: DEFAULT_NODE_URL.into(),
             l2_hub_url: None,
             hub_right_address: None,
             channel_id_hex: None,
@@ -80,13 +102,24 @@ impl WalletSettings {
         crate::hardware::HardwareSigningMode::from_name(&self.hardware_signing_mode)
     }
 
+    pub fn normalize(&mut self) {
+        self.node_url = sanitize_node_url(&self.node_url);
+    }
+
     pub fn load() -> WalletResult<Self> {
         let path = settings_path();
         if !path.exists() {
             return Ok(Self::default());
         }
         let raw = fs::read_to_string(&path).map_err(|e| WalletError::Other(e.to_string()))?;
-        serde_json::from_str(&raw).map_err(|e| WalletError::Other(e.to_string()))
+        let mut settings: Self =
+            serde_json::from_str(&raw).map_err(|e| WalletError::Other(e.to_string()))?;
+        let before = settings.node_url.clone();
+        settings.normalize();
+        if settings.node_url != before {
+            let _ = settings.save();
+        }
+        Ok(settings)
     }
 
     pub fn save(&self) -> WalletResult<()> {

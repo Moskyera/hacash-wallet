@@ -1,12 +1,15 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::{WalletError, WalletResult};
+use crate::settings::{sanitize_node_url, DEFAULT_NODE_URL};
 
-const DEFAULT_NODE: &str = "http://nodeapi.hacash.org";
+const DEFAULT_NODE: &str = DEFAULT_NODE_URL;
+const USER_AGENT: &str = "HacashWalletMobile/0.1.6";
 
 fn shared_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -14,11 +17,120 @@ fn shared_http_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .pool_max_idle_per_host(8)
             .tcp_keepalive(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(45))
+            .user_agent(USER_AGENT)
+            .no_proxy()
             .build()
             .expect("http client")
     })
+}
+
+fn blocking_http_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(45))
+        .user_agent(USER_AGENT)
+        .no_proxy()
+        .build()
+        .expect("blocking http client")
+}
+
+async fn http_get_json<T>(url: String) -> WalletResult<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    #[cfg(target_os = "android")]
+    {
+        return tokio::task::spawn_blocking(move || {
+            blocking_http_client()
+                .get(&url)
+                .send()
+                .map_err(|e| WalletError::Node(e.to_string()))?
+                .json::<T>()
+                .map_err(|e| WalletError::Node(e.to_string()))
+        })
+        .await
+        .map_err(|e| WalletError::Node(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        shared_http_client()
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?
+            .json::<T>()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))
+    }
+}
+
+async fn http_post_json<T, R>(url: String, payload: T) -> WalletResult<R>
+where
+    T: serde::Serialize + Send + 'static,
+    R: DeserializeOwned + Send + 'static,
+{
+    #[cfg(target_os = "android")]
+    {
+        return tokio::task::spawn_blocking(move || {
+            blocking_http_client()
+                .post(&url)
+                .json(&payload)
+                .send()
+                .map_err(|e| WalletError::Node(e.to_string()))?
+                .json::<R>()
+                .map_err(|e| WalletError::Node(e.to_string()))
+        })
+        .await
+        .map_err(|e| WalletError::Node(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        shared_http_client()
+            .post(url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?
+            .json::<R>()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))
+    }
+}
+
+async fn http_post_text_json<R>(url: String, body: String) -> WalletResult<R>
+where
+    R: DeserializeOwned + Send + 'static,
+{
+    #[cfg(target_os = "android")]
+    {
+        return tokio::task::spawn_blocking(move || {
+            blocking_http_client()
+                .post(&url)
+                .header("content-type", "text/plain")
+                .body(body)
+                .send()
+                .map_err(|e| WalletError::Node(e.to_string()))?
+                .json::<R>()
+                .map_err(|e| WalletError::Node(e.to_string()))
+        })
+        .await
+        .map_err(|e| WalletError::Node(e.to_string()))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        shared_http_client()
+            .post(url)
+            .header("content-type", "text/plain")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))?
+            .json::<R>()
+            .await
+            .map_err(|e| WalletError::Node(e.to_string()))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -36,9 +148,14 @@ impl Default for NodeClient {
 impl NodeClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: sanitize_node_url(&base_url.into()),
             http: shared_http_client().clone(),
         }
+    }
+
+    pub async fn ping(&self) -> WalletResult<serde_json::Value> {
+        let url = format!("{}/query/metrics", self.base_url);
+        http_get_json(url).await
     }
 
     pub fn base_url(&self) -> &str {
@@ -54,17 +171,7 @@ impl NodeClient {
         payload: serde_json::Value,
     ) -> WalletResult<BuildTxResponse> {
         let url = format!("{}/create/transaction", self.base_url);
-        let resp = self
-            .http
-            .post(url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
-        let body: BuildTxResponse = resp
-            .json()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
+        let body: BuildTxResponse = http_post_json(url, payload).await?;
         if body.ret != 0 {
             return Err(WalletError::Node(
                 body.err
@@ -91,16 +198,7 @@ impl NodeClient {
         if include_diamonds {
             url.push_str("&diamonds=true");
         }
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
-        let body: BalanceResponse = resp
-            .json()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
+        let body: BalanceResponse = http_get_json(url).await?;
         if body.ret != 0 {
             return Err(WalletError::Node(format!("balance query failed ret={}", body.ret)));
         }
@@ -188,18 +286,7 @@ impl NodeClient {
 
     pub async fn submit_tx_hex_body(&self, tx_hex: &str) -> WalletResult<SubmitTxResponse> {
         let url = format!("{}/submit/transaction?hexbody=true", self.base_url);
-        let resp = self
-            .http
-            .post(url)
-            .body(tx_hex.to_owned())
-            .header("content-type", "text/plain")
-            .send()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
-        let body: SubmitTxResponse = resp
-            .json()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
+        let body: SubmitTxResponse = http_post_text_json(url, tx_hex.to_owned()).await?;
         if body.ret != 0 {
             return Err(WalletError::Node(
                 body.err
@@ -211,30 +298,12 @@ impl NodeClient {
     }
 
     pub async fn query_metrics(&self) -> WalletResult<serde_json::Value> {
-        let url = format!("{}/query/metrics", self.base_url);
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
-        resp.json()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))
+        self.ping().await
     }
 
     pub async fn query_diamond_by_name(&self, name: &str) -> WalletResult<DiamondInfo> {
         let url = format!("{}/query/diamond?name={}", self.base_url, name);
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
-        let body: DiamondQueryResponse = resp
-            .json()
-            .await
-            .map_err(|e| WalletError::Node(e.to_string()))?;
+        let body: DiamondQueryResponse = http_get_json(url).await?;
         if body.ret != 0 {
             return Err(WalletError::Node(format!(
                 "diamond '{}' not found (ret={})",
