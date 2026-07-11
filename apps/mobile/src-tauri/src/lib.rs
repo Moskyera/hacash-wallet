@@ -33,6 +33,14 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_biometric::init());
     builder
         .setup(|app| {
+            // Android/iOS: dirs::data_dir() is not app-writable; use internal app storage.
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+                // SAFETY: called once on the main thread during app setup, before wallet I/O.
+                unsafe { std::env::set_var("HACASH_WALLET_DATA", &data_dir) };
+            }
             let mut svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
