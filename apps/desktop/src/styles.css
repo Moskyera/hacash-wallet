@@ -489,6 +489,12 @@ input {
   margin: 0 0 14px;
 }
 
+.receive-name-only {
+  margin: 12px 0;
+  font-size: 1.5rem;
+  letter-spacing: 0.08em;
+}
+
 .result-ok { border-color: rgba(61,214,198,0.4); }
 .result-fail { border-color: rgba(255,107,107,0.5); }
 .result-ok h4, .result-fail h4 { margin: 0 0 8px; }

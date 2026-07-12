@@ -1,5 +1,11 @@
 export type PaymentAsset = "HAC" | "HACD" | "BTC";
 
+export const PAYMENT_ASSETS: { id: PaymentAsset; label: string; symbol: string }[] = [
+  { id: "HAC", label: "Hacash", symbol: "HAC" },
+  { id: "HACD", label: "Diamond", symbol: "HACD" },
+  { id: "BTC", label: "Bitcoin", symbol: "BTC" },
+];
+
 export type HacdArchetype = "Momentum" | "Contrarian" | "Arbitrageur" | "Sentinel" | "Unknown";
 
 const ARCHETYPE_MAP: Record<string, HacdArchetype> = {
@@ -33,4 +39,9 @@ export function hacdArchetype(name: string): HacdArchetype {
 export function isValidHacdName(name: string): boolean {
   const n = normalizeHacdName(name);
   return n.length >= 4 && n.length <= 6;
+}
+
+export function isValidBtcAddress(addr: string): boolean {
+  const a = addr.trim();
+  return /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62}$/.test(a);
 }

@@ -28,9 +28,10 @@ import QuantumNodeHealth from "./components/QuantumNodeHealth";
 import AddressBadge from "./components/AddressBadge";
 import BillsPanel from "./components/BillsPanel";
 import HubDiscoveryPanel from "./components/HubDiscoveryPanel";
-import PaymentQrDisplay from "./components/PaymentQrDisplay";
+
 import PaymentQrScanner from "./components/PaymentQrScanner";
 import HacdSendPanel from "./components/HacdSendPanel";
+import ReceivePanel from "./components/ReceivePanel";
 import BtcSendPanel from "./components/BtcSendPanel";
 import type { PaymentQrPayload } from "./paymentQr";
 import type { PaymentAsset } from "./utils/paymentAssets";
@@ -1715,39 +1716,22 @@ export default function App() {
 
         {screen === "receive" && (
           <section className="panel">
-            <h2>Receive HAC</h2>
-            <p>
-              Show your QR code for quick payments. Fast Pay and on-chain both credit the same
-              address.
-            </p>
-            <label>Requested amount (optional, HAC)</label>
-            <input
-              value={receiveQrAmount}
-              onChange={(e) => setReceiveQrAmount(e.target.value)}
-              placeholder="Leave empty for any amount"
-              type="number"
-              min="0"
-              step="0.001"
+            <h2>Receive</h2>
+            <ReceivePanel
+              address={status?.address}
+              ownedHacdNames={assets?.hacd_names}
+              receiveAmount={receiveQrAmount}
+              setReceiveAmount={setReceiveQrAmount}
+              hideAddresses={hideAddresses}
+              clipboardSecs={privacy.clipboard_clear_secs}
+              busy={busy}
+              onCopyAddress={handleCopyAddress}
+              onNotify={(msg, kind) => {
+                clearMessages();
+                if (kind === "error") setError(msg);
+                else setInfo(msg);
+              }}
             />
-            {status?.address && (
-              <PaymentQrDisplay
-                address={status.address}
-                amountMei={
-                  receiveQrAmount && Number(receiveQrAmount) > 0
-                    ? Number(receiveQrAmount)
-                    : undefined
-                }
-                hideAddress={hideAddresses}
-              />
-            )}
-            <div className="address-box">
-              <code>{maskAddress(status?.address, hideAddresses)}</code>
-            </div>
-            {status?.address && !hideAddresses && (
-              <button disabled={busy} onClick={handleCopyAddress}>
-                Copy address
-              </button>
-            )}
           </section>
         )}
 
