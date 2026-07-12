@@ -416,6 +416,7 @@ export default function MobileApp() {
             onPullMove={onBalanceTouchMove}
             onPullEnd={onBalanceTouchEnd}
             onEnableFastPay={() => void session.handleEnableFastPay()}
+            onDisableFastPay={() => void session.handleDisableFastPay()}
             onScanPay={() => navigateToPay({ openCamera: true })}
             onReceive={() => setTab("receive")}
             onContacts={() => {

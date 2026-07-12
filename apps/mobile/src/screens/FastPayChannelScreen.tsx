@@ -87,11 +87,25 @@ export default function FastPayChannelScreen({
     }
   }
 
-  async function handleCloseChannel() {
+  async function handleEnableFastPay() {
+    setBusy(true);
+    try {
+      await api.enableFastPay(fastPay?.default_deposit_mei ?? 10);
+      onToast("Fast Pay enabled!", "success");
+      await loadChannel();
+      await onRefresh();
+    } catch (e) {
+      onToast(formatInvokeError(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDisableFastPay() {
     setBusy(true);
     try {
       const tx = await api.closeChannel();
-      onToast(`Channel close submitted (${tx.slice(0, 12)}…)`, "success");
+      onToast(`Fast Pay disabled (${tx.slice(0, 12)}…)`, "success");
       await loadChannel();
       await onRefresh();
     } catch (e) {
@@ -126,9 +140,32 @@ export default function FastPayChannelScreen({
           </span>
         </div>
         {fastPay && (
-          <p className="muted" style={{ marginTop: "0.5rem" }}>
-            {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
-          </p>
+          <>
+            <p className="muted" style={{ marginTop: "0.5rem" }}>
+              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
+            </p>
+            {fastPay.state !== "ready" && fastPay.can_enable && (
+              <button
+                type="button"
+                className="primary"
+                style={{ marginTop: "0.75rem", width: "100%" }}
+                disabled={busy}
+                onClick={() => void handleEnableFastPay()}
+              >
+                Enable
+              </button>
+            )}
+            {fastPay.state === "ready" && (
+              <button
+                type="button"
+                style={{ marginTop: "0.75rem", width: "100%" }}
+                disabled={busy}
+                onClick={() => void handleDisableFastPay()}
+              >
+                Disable
+              </button>
+            )}
+          </>
         )}
         {hubUrl && <p className="muted small">Hub: {hubUrl}</p>}
       </div>
@@ -166,9 +203,7 @@ export default function FastPayChannelScreen({
               side.
             </p>
           )}
-          <button type="button" disabled={busy} onClick={() => void handleCloseChannel()}>
-            Close channel
-          </button>
+
         </div>
       )}
 

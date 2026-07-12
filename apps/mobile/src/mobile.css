@@ -483,14 +483,29 @@ button.small {
 
 .fp-banner {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
   padding: 14px 16px;
   border-radius: 14px;
   border: 1px solid var(--border);
   background: var(--bg-elevated);
   margin-bottom: 14px;
+}
+
+.fp-banner-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.fp-banner-status .muted {
+  margin: 0;
+}
+
+.fp-banner > button {
+  margin-top: 0.75rem;
+  width: 100%;
 }
 
 .fp-banner.on {

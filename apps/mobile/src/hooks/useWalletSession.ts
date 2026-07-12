@@ -149,6 +149,21 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     }
   }, [fastPay?.default_deposit_mei, refresh, showToast]);
 
+  const handleDisableFastPay = useCallback(async () => {
+    setBusy(true);
+    try {
+      await api.closeChannel();
+      const fp = await api.fastPayStatus();
+      setFastPay(fp);
+      await refresh();
+      showToast("Fast Pay disabled.", "info");
+    } catch (e) {
+      showToast(formatInvokeError(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh, showToast]);
+
   const handleClearHistory = useCallback(async () => {
     setBusy(true);
     try {
@@ -206,6 +221,7 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     handlePullRefresh,
     handleLock,
     handleEnableFastPay,
+    handleDisableFastPay,
     handleClearHistory,
     handleSaveWalletName,
     persistPrivacy,

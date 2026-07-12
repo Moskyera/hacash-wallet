@@ -15,6 +15,7 @@ type Props = {
   onPullMove: (e: React.TouchEvent) => void;
   onPullEnd: () => void;
   onEnableFastPay: () => void;
+  onDisableFastPay: () => void;
   onScanPay: () => void;
   onReceive: () => void;
   onContacts: () => void;
@@ -35,6 +36,7 @@ export default function HomeTab({
   onPullMove,
   onPullEnd,
   onEnableFastPay,
+  onDisableFastPay,
   onScanPay,
   onReceive,
   onContacts,
@@ -78,39 +80,28 @@ export default function HomeTab({
         </div>
       </div>
 
-      {fastPay && fastPay.state !== "ready" && fastPay.can_enable && !watchOnly && (
-        <div className="fp-banner">
-          <div>
-            <strong>{fastPayStatusTitle(fastPay.state)}</strong>
+      {fastPay && (
+        <div className={`fp-banner${fastPay.state === "ready" ? " on" : ""}`}>
+          <div className="fp-banner-status">
+            {fastPay.state === "ready" ? (
+              <span className="badge badge-ok">Fast Pay on</span>
+            ) : (
+              <strong>{fastPayStatusTitle(fastPay.state)}</strong>
+            )}
             <p className="muted">
               {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
             </p>
           </div>
-          <button type="button" className="primary small" disabled={busy} onClick={() => void onEnableFastPay()}>
-            Enable
-          </button>
-        </div>
-      )}
-
-      {fastPay?.state === "ready" && (
-        <div className="fp-banner on">
-          <div>
-            <span className="badge badge-ok">Fast Pay on</span>
-            <p className="muted">
-              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {fastPay && fastPay.state !== "ready" && !fastPay.can_enable && (
-        <div className="fp-banner">
-          <div>
-            <strong>{fastPayStatusTitle(fastPay.state)}</strong>
-            <p className="muted">
-              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
-            </p>
-          </div>
+          {!watchOnly && fastPay.state !== "ready" && fastPay.can_enable && (
+            <button type="button" className="primary" disabled={busy} onClick={() => void onEnableFastPay()}>
+              Enable
+            </button>
+          )}
+          {!watchOnly && fastPay.state === "ready" && (
+            <button type="button" disabled={busy} onClick={() => void onDisableFastPay()}>
+              Disable
+            </button>
+          )}
         </div>
       )}
 
