@@ -1,51 +1,60 @@
-{
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Hacash Wallet",
-  "version": "0.1.28",
-  "identifier": "org.hacash.wallet.mobile",
-  "build": {
-    "beforeDevCommand": "yarn dev",
-    "devUrl": "http://127.0.0.1:1421",
-    "beforeBuildCommand": "yarn build",
-    "frontendDist": "../dist"
-  },
-  "app": {
-    "windows": [
-      {
-        "title": "Hacash Wallet",
-        "width": 420,
-        "height": 780,
-        "resizable": false,
-        "useHttpsScheme": true
-      }
-    ],
-    "security": {
-      "csp": "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https:; frame-src https://hacd.it https://*.hacd.it; connect-src 'self' http://127.0.0.1:8080 http://localhost:8080 https://nodeapi.hacash.org https://*"
-    }
-  },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "icon": [
-      "icons/icon.png",
-      "icons/icon.ico",
-      "icons/icon.icns"
-    ],
-    "android": {
-      "minSdkVersion": 24
-    },
-    "iOS": {
-      "minimumSystemVersion": "14.0"
-    }
-  },
-  "plugins": {
-    "deep-link": {
-      "mobile": [
-        { "scheme": ["hacash", "hacd", "org.hacash.wallet.mobile"] }
-      ],
-      "desktop": {
-        "schemes": ["hacash", "hacd"]
-      }
-    }
-  }
+﻿{
+    "$schema":  "https://schema.tauri.app/config/2",
+    "productName":  "Hacash Wallet",
+    "version":  "0.1.30",
+    "identifier":  "org.hacash.wallet.mobile",
+    "build":  {
+                  "beforeDevCommand":  "yarn dev",
+                  "devUrl":  "http://127.0.0.1:1421",
+                  "beforeBuildCommand":  "yarn build",
+                  "frontendDist":  "../dist"
+              },
+    "app":  {
+                "windows":  [
+                                {
+                                    "title":  "Hacash Wallet",
+                                    "width":  420,
+                                    "height":  780,
+                                    "resizable":  false,
+                                    "useHttpsScheme":  true
+                                }
+                            ],
+                "security":  {
+                                 "csp":  "default-src \u0027self\u0027; img-src \u0027self\u0027 data: https:; style-src \u0027self\u0027 \u0027unsafe-inline\u0027 https:; script-src \u0027self\u0027 \u0027unsafe-inline\u0027 https:; frame-src https://hacd.it https://*.hacd.it; connect-src \u0027self\u0027 http://127.0.0.1:8080 http://localhost:8080 https://nodeapi.hacash.org https://*"
+                             }
+            },
+    "bundle":  {
+                   "active":  true,
+                   "targets":  "all",
+                   "icon":  [
+                                "icons/icon.png",
+                                "icons/icon.ico",
+                                "icons/icon.icns"
+                            ],
+                   "android":  {
+                                   "minSdkVersion":  24
+                               },
+                   "iOS":  {
+                               "minimumSystemVersion":  "14.0"
+                           }
+               },
+    "plugins":  {
+                    "deep-link":  {
+                                      "mobile":  [
+                                                     {
+                                                         "scheme":  [
+                                                                        "hacash",
+                                                                        "hacd",
+                                                                        "org.hacash.wallet.mobile"
+                                                                    ]
+                                                     }
+                                                 ],
+                                      "desktop":  {
+                                                      "schemes":  [
+                                                                      "hacash",
+                                                                      "hacd"
+                                                                  ]
+                                                  }
+                                  }
+                }
 }
