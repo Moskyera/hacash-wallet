@@ -38,7 +38,8 @@ export default function BillsPanel({ hideAddresses, onError, onInfo }: Props) {
   }, [onError]);
 
   useEffect(() => {
-    void refresh();
+    const id = window.setTimeout(() => void refresh(), 0);
+    return () => window.clearTimeout(id);
   }, [refresh]);
 
   const handleExportAll = async () => {

@@ -38,7 +38,10 @@ export default function QuantumToggle({ onAccountChange }: Props) {
   }
 
   useEffect(() => {
-    refreshSettings().catch((e) => setErr(formatInvokeError(e)));
+    const id = window.setTimeout(() => {
+      refreshSettings().catch((e) => setErr(formatInvokeError(e)));
+    }, 0);
+    return () => window.clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once
   }, []);
 

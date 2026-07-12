@@ -182,12 +182,30 @@ export function useDesktopWallet(
     return () => window.clearInterval(id);
   }, [dustWhisper.enabled, relayUrlsKey, refreshRelayHealth]);
 
+  // Load wallet data when unlocking or switching wallets — NOT on every tab click.
   useEffect(() => {
-    if (status && !status.locked) {
-      refreshUnlockedData().catch(() => undefined);
-      if (screen === "welcome" || screen === "unlock") setScreen("home");
+    if (!status || status.locked) return;
+    refreshUnlockedData().catch(() => undefined);
+  }, [status?.locked, status?.address, refreshUnlockedData]);
+
+  useEffect(() => {
+    if (status && !status.locked && (screen === "welcome" || screen === "unlock")) {
+      setScreen("home");
     }
-  }, [status?.locked, status?.address, refreshUnlockedData, screen, setScreen]);
+  }, [status?.locked, screen, setScreen]);
+
+  // Tick auto-lock countdown locally; full status sync stays on the 5s poll.
+  useEffect(() => {
+    if (!status || status.locked || status.seconds_until_lock == null) return;
+    const id = window.setInterval(() => {
+      setStatus((prev) => {
+        if (!prev || prev.locked || prev.seconds_until_lock == null) return prev;
+        if (prev.seconds_until_lock <= 0) return prev;
+        return { ...prev, seconds_until_lock: prev.seconds_until_lock - 1 };
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [status?.locked, status?.seconds_until_lock]);
 
   useEffect(() => {
     if (!status || status.locked) return;
@@ -198,17 +216,19 @@ export function useDesktopWallet(
   }, [status?.locked, refreshStatus]);
 
   useEffect(() => {
-    if (screen === "history" && status && !status.locked) {
+    if (screen !== "history" || !status || status.locked) return;
+    const id = window.setTimeout(() => {
       refreshHistory().catch(() => undefined);
-    }
+    }, 0);
+    return () => window.clearTimeout(id);
   }, [screen, status?.locked, refreshHistory]);
 
   useEffect(() => {
-    if (screen === "fastpay" && status && !status.locked) {
-      refreshFastPay().catch(() => undefined);
-      refreshChannel().catch(() => undefined);
-      refreshBills().catch(() => undefined);
-    }
+    if (screen !== "fastpay" || !status || status.locked) return;
+    const id = window.setTimeout(() => {
+      void Promise.all([refreshFastPay(), refreshChannel(), refreshBills()]);
+    }, 0);
+    return () => window.clearTimeout(id);
   }, [screen, status?.locked, refreshFastPay, refreshChannel, refreshBills]);
 
   const handleCreate = useCallback(

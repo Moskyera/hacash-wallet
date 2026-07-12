@@ -26,7 +26,8 @@ export default function QuantumNodeHealth({ nodeUrl }: Props) {
   }, []);
 
   useEffect(() => {
-    refresh();
+    const id = window.setTimeout(() => void refresh(), 0);
+    return () => window.clearTimeout(id);
   }, [refresh]);
 
   const ok = metrics != null && !err;
