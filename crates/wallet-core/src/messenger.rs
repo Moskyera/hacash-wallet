@@ -81,9 +81,13 @@ impl MessengerStore {
     }
 
     fn save(&self, ctx: &MessengerCtx<'_>) -> WalletResult<()> {
+        let path = messenger_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| WalletError::Other(e.to_string()))?;
+        }
         let json = serde_json::to_vec(self).map_err(|e| WalletError::Other(e.to_string()))?;
         let enc = encrypt_store(&json, &ctx.storage_key)?;
-        secure_write(&messenger_path(), &enc).map_err(|e| WalletError::Other(e.to_string()))
+        secure_write(&path, &enc).map_err(|e| WalletError::Other(e.to_string()))
     }
 
     pub fn threads(&self) -> Vec<ChatThread> {
@@ -349,9 +353,11 @@ pub fn messenger_mark_read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::IsolatedWalletData;
 
     #[test]
     fn store_roundtrip_encrypted() {
+        let _iso = IsolatedWalletData::new();
         let acc = WalletAccount::from_secret_hex(
             "0000000000000000000000000000000000000000000000000000000000000001",
         )

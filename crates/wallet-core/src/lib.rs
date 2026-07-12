@@ -33,6 +33,9 @@ pub mod vault;
 pub mod wallet;
 pub mod webauthn;
 
+#[cfg(test)]
+mod test_support;
+
 pub use airgap::{
     AirgapEnvelope, AirgapParseResult, AirgapPrepareResult, AirgapSignResult, AirgapSigned,
     AirgapUnsigned,

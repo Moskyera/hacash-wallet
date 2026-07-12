@@ -110,19 +110,11 @@ pub fn clear() -> WalletResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
+    use crate::test_support::IsolatedWalletData;
 
     #[test]
     fn biometric_unlock_roundtrip() {
-        let _g = test_guard();
-        let prev = std::env::var("HACASH_WALLET_DATA").ok();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HACASH_WALLET_DATA", dir.path()) };
+        let _iso = IsolatedWalletData::new();
         let _ = clear();
 
         save_encrypted_passphrase("test-pass-phrase").unwrap();
@@ -132,11 +124,5 @@ mod tests {
 
         clear().unwrap();
         assert!(!is_configured());
-
-        if let Some(p) = prev {
-            unsafe { std::env::set_var("HACASH_WALLET_DATA", p) };
-        } else {
-            unsafe { std::env::remove_var("HACASH_WALLET_DATA") };
-        }
     }
 }

@@ -87,9 +87,11 @@ pub fn history_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::IsolatedWalletData;
 
     #[test]
     fn append_prepends_newest() {
+        let _iso = IsolatedWalletData::new();
         let mut h = TxHistory::default();
         h.append(
             PaymentRail::L1OnChain,
