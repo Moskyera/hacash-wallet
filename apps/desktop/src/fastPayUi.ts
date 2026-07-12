@@ -18,7 +18,7 @@ export function fastPayChipLabel(state: FastPayState): string {
     case "ready":
       return "Fast Pay ON";
     case "needs_channel":
-      return "Fast Pay — setup";
+      return "Fast Pay setup";
     case "hub_unreachable":
       return "Fast Pay offline";
     default:

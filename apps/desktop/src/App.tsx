@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import WalletLogo from "./components/WalletLogo";
 import {
   api,
   AssetSummary,
@@ -89,7 +90,7 @@ const NAV_ITEMS: { id: Screen; label: string }[] = [
 const ISTANBUL_HEIGHT = 765_432;
 
 function formatCountdown(secs: number | null | undefined): string {
-  if (secs == null) return "—";
+  if (secs == null) return "n/a";
   const m = Math.floor(secs / 60);
   const s = secs % 60;
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
@@ -947,10 +948,10 @@ export default function App() {
       )}
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">H</div>
+          <WalletLogo size="sm" />
           <div>
             <div className="brand-title">Hacash Wallet</div>
-            <div className="brand-sub">Secure · Smart Send</div>
+            <div className="brand-sub">Secure Smart Send</div>
           </div>
         </div>
         {status && !status.locked && (
@@ -1001,7 +1002,7 @@ export default function App() {
                   title={
                     whisperRelayOnline
                       ? "Whisper relay online"
-                      : "Whisper relay offline — sends may fail or fall back"
+                      : "Whisper relay offline. Sends may fail or fall back."
                   }
                 >
                   Whisper {whisperRelayOnline ? "online" : "offline"}
@@ -1024,9 +1025,10 @@ export default function App() {
 
         {screen === "welcome" && (
           <section className="panel hero">
+            <WalletLogo size="lg" />
             <h1>Your modern Hacash wallet</h1>
             <p>
-              Encrypted keys on device. Send HAC in one tap — instant Fast Pay when available,
+              Encrypted keys on device. Send HAC in one tap. Instant Fast Pay when available,
               otherwise standard on-chain.
             </p>
             <div className="tab-row">
@@ -1077,7 +1079,7 @@ export default function App() {
                   placeholder="1YourAddress..."
                 />
                 <p className="muted">
-                  Sparrow-style watch-only — no private key on this device. Cannot send or sign.
+                  Sparrow-style watch-only. No private key on this device. Cannot send or sign.
                 </p>
                 <button disabled={busy || watchAddress.trim().length < 10} onClick={handleWatchOnlyImport}>
                   Add watch-only wallet
@@ -1176,7 +1178,7 @@ export default function App() {
                 <button type="button" className="linkish" onClick={() => setScreen("fastpay")}>
                   {fastPayReady
                     ? "Fast Pay is ON"
-                    : "Fast Pay is OFF — open tab to enable"}
+                    : "Fast Pay is OFF. Open tab to enable."}
                 </button>
               </div>
             )}
@@ -1236,7 +1238,7 @@ export default function App() {
             {(fastPayNeedsSetup || fastPayDetail?.can_enable) && !status?.watch_only && (
               <div className="fast-pay-card">
                 <h3>Turn Fast Pay ON</h3>
-                <p className="muted">One-time setup — deposit stays in your channel until you close it.</p>
+                <p className="muted">One-time setup. Deposit stays in your channel until you close it.</p>
                 <label>Your channel deposit (HAC)</label>
                 <input
                   value={userDeposit}
@@ -1272,10 +1274,10 @@ export default function App() {
               <h3>How it works</h3>
               <ul>
                 <li>
-                  <strong>Fast Pay ON</strong> — Send tab uses instant routing (~0.001 HAC fee).
+                  <strong>Fast Pay ON:</strong> Send tab uses instant routing (~0.001 HAC fee).
                 </li>
                 <li>
-                  <strong>Fast Pay OFF</strong> — Send tab uses on-chain (~1:244 HAC fee).
+                  <strong>Fast Pay OFF:</strong> Send tab uses on-chain (~1.244 HAC fee).
                 </li>
                 <li>You always see which route is used before you confirm a payment.</li>
               </ul>
@@ -1321,7 +1323,7 @@ export default function App() {
                     {hubHealth === null && "Hub unreachable or misconfigured."}
                     {hubHealth && hubHealth.ok && (
                       <>
-                        Hub OK — <strong>{hubHealth.name ?? "hub"}</strong> (protocol v
+                        Hub OK. <strong>{hubHealth.name ?? "hub"}</strong> (protocol v
                         {hubHealth.version})
                       </>
                     )}
@@ -1433,6 +1435,8 @@ export default function App() {
                 nativeBioAvailable={nativeBioAvailable}
                 hideAddresses={hideAddresses}
                 watchOnly={!!status?.watch_only}
+                btcSatoshi={assets?.btc_wallet_satoshi ?? null}
+                hideBalances={hideBalances}
                 onNotify={(msg, kind) => {
                   if (kind === "error") setError(msg);
                   else setInfo(msg);
@@ -1447,6 +1451,8 @@ export default function App() {
                 nativeBioAvailable={nativeBioAvailable}
                 hideAddresses={hideAddresses}
                 watchOnly={!!status?.watch_only}
+                hacdCount={assets?.hacd_count ?? null}
+                hideBalances={hideBalances}
                 onNotify={(msg, kind) => {
                   if (kind === "error") setError(msg);
                   else setInfo(msg);
@@ -1540,7 +1546,7 @@ export default function App() {
                         persistSendPreferences("recipient", sendForceL1).catch(() => undefined);
                       }}
                     />
-                    Recipient pays — deducted from amount they receive
+                    Recipient pays. Deducted from amount they receive.
                   </label>
                   <p className="muted small-note">
                     Applies to Fast Pay only. On-chain L1 fees are always paid by the sender.
@@ -2133,7 +2139,7 @@ export default function App() {
                   setWhisperDraft((w) => ({ ...w, auto_start_relay: e.target.checked }))
                 }
               />
-              Auto-start local relay when wallet opens (127.0.0.1 / localhost only)
+              Auto-start local relay when wallet opens (127.0.0.1 or localhost only)
             </label>
             {(whisperDraft.enabled || dustWhisper.enabled) && (
               <div className="relay-status-list">
@@ -2153,7 +2159,7 @@ export default function App() {
                     <code>{row.url}</code>
                     <span className="muted">
                       {row.online
-                        ? `online · node ${row.node_url ?? "—"}`
+                        ? `online · node ${row.node_url ?? "n/a"}`
                         : row.error ?? "offline"}
                     </span>
                   </div>
