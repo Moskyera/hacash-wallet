@@ -92,7 +92,9 @@ pub fn run() {
                 unsafe { std::env::set_var("HACASH_WALLET_DATA", &data_dir) };
             }
             let mut svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
-            svc.warm_vault_cache().map_err(|e| e.to_string())?;
+            if let Err(e) = svc.warm_vault_cache() {
+                tracing::warn!("vault cache warm failed (continuing): {e}");
+            }
             app.manage(AppState::new(svc));
             Ok(())
         })
