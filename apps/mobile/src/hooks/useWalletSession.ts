@@ -28,6 +28,7 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
   const [bills, setBills] = useState<BillSummary[]>([]);
   const [platformSec, setPlatformSec] = useState<PlatformSecurityStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const [booting, setBooting] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [walletName, setWalletName] = useState("");
   const [walletNameDraft, setWalletNameDraft] = useState("");
@@ -111,7 +112,9 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
   }, [loadWalletData]);
 
   useEffect(() => {
-    void refresh().catch((e) => showToast(formatInvokeError(e), "error"));
+    void refresh()
+      .catch((e) => showToast(formatInvokeError(e), "error"))
+      .finally(() => setBooting(false));
   }, [refresh, showToast]);
 
   useEffect(() => {
@@ -213,6 +216,7 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     platformSec,
     busy,
     setBusy,
+    booting,
     refreshing,
     walletName,
     walletNameDraft,

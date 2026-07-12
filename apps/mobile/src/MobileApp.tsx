@@ -5,6 +5,7 @@ import BillDetailModal from "./components/BillDetailModal";
 import MessengerScreen from "./components/MessengerScreen";
 import PrivacyShield from "./components/PrivacyShield";
 import Toast from "./components/Toast";
+import SplashScreen from "./components/SplashScreen";
 import WalletLogo from "./components/WalletLogo";
 import { usePaymentFlow } from "./hooks/usePaymentFlow";
 import { useToast } from "./hooks/useToast";
@@ -420,6 +421,10 @@ export default function MobileApp() {
     },
     [navigateToPay],
   );
+
+  if (session.booting) {
+    return <SplashScreen />;
+  }
 
   if (session.authScreen === "welcome") {
     return (

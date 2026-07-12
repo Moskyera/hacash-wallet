@@ -1,7 +1,7 @@
 import iconLogoSrc from "../assets/hb-icon.png";
 
 type Props = {
-  size?: "sm" | "lg";
+  size?: "sm" | "lg" | "splash";
   alt?: string;
 };
 
