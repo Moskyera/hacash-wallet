@@ -113,7 +113,9 @@ export default function QuantumScreen({
         warnings: [],
         errors: [formatInvokeError(e)],
         balance_mei: qBalance ?? 0,
-        fee_wire: "40:244",
+        fee_wire: "0:004",
+        fee_mei: 0.004,
+        total_mei: 0,
       });
     }
   }, [account, type4Ready, sendTo, sendAmount, qBalance]);
@@ -467,7 +469,10 @@ export default function QuantumScreen({
                 </p>
               ))}
               {preflight.ok && (
-                <p className="muted">Preflight OK · {preflight.balance_mei.toFixed(3)} HAC</p>
+                <p className="muted">
+                  Preflight OK · balance {preflight.balance_mei.toFixed(3)} HAC · fee ~
+                  {preflight.fee_mei.toFixed(4)} · total ~{preflight.total_mei.toFixed(4)} HAC
+                </p>
               )}
             </div>
           )}

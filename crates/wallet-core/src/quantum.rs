@@ -9,7 +9,10 @@ use sys::Account;
 use crate::error::{WalletError, WalletResult};
 use crate::wallet::WalletService;
 
-pub const TYPE4_AUTO_FEE: &str = "40:244";
+/// Placeholder fee for unsigned body sizing only.
+const TYPE4_PROBE_FEE_WIRE: &str = "0:001";
+const TYPE4_PROBE_FEE_NODE: &str = "0.001";
+
 pub const TEST_LEGACY_RECIPIENT: &str = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,6 +36,8 @@ pub struct QuantumPreflight {
     pub errors: Vec<String>,
     pub balance_mei: f64,
     pub fee_wire: String,
+    pub fee_mei: f64,
+    pub total_mei: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,20 +276,69 @@ impl WalletService {
             .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
         let amount_mei = parse_decimal_hac_mei(amount_hacash)?;
         let balance_mei = self.quantum_balance_mei().await.unwrap_or(0.0);
+        let fee_est = self
+            .estimate_type4_fee(&account.address, to, amount_hacash, None)
+            .await?;
         let check = crate::hip23::validate_type4_send(
             &account.kind,
             to,
             amount_mei,
             balance_mei,
-            TYPE4_AUTO_FEE,
+            &fee_est.fee_wire,
         )?;
         Ok(QuantumPreflight {
             ok: check.ok,
             warnings: check.warnings,
             errors: check.errors,
             balance_mei,
-            fee_wire: TYPE4_AUTO_FEE.into(),
+            fee_wire: fee_est.fee_wire,
+            fee_mei: fee_est.fee_mei,
+            total_mei: amount_mei + fee_est.fee_mei,
         })
+    }
+
+    async fn estimate_type4_fee(
+        &self,
+        from_address: &str,
+        to: &str,
+        amount_hacash: &str,
+        keystore_pass: Option<&str>,
+    ) -> WalletResult<crate::type4_fee::Type4FeeEstimate> {
+        use crate::type4_fee::{
+            estimate_signed_wire_bytes, fee_from_node_average, local_fee_from_wire_bytes,
+        };
+
+        let wire_bytes = if let Some(pass) = keystore_pass {
+            let ks = self.require_keystore_json()?;
+            let param = CoinTransferV4Param {
+                main_keystore: ks,
+                keystore_pass: pass.into(),
+                fee: TYPE4_PROBE_FEE_NODE.into(),
+                to_address: to.into(),
+                timestamp: 0,
+                hacash: crate::hip23::format_mei_for_node(parse_decimal_hac_mei(amount_hacash)?),
+                gas_max: 0,
+            };
+            let built = tokio::task::spawn_blocking(move || {
+                create_coin_transfer_v4(param).map_err(|e| WalletError::Other(e))
+            })
+            .await
+            .map_err(|e| WalletError::Other(format!("type 4 fee probe failed: {e}")))??;
+            built.body.len() / 2
+        } else {
+            let unsigned =
+                build_type4_unsigned_body(from_address, to, amount_hacash, TYPE4_PROBE_FEE_WIRE)?;
+            estimate_signed_wire_bytes(unsigned.len() / 2)
+        };
+
+        match self
+            .node_client()
+            .query_fee_average(wire_bytes, 4)
+            .await
+        {
+            Ok(resp) => fee_from_node_average(&resp.feasible, wire_bytes, resp.purity),
+            Err(_) => Ok(local_fee_from_wire_bytes(wire_bytes)),
+        }
     }
 
     pub fn set_quantum_mode(&mut self, enabled: bool) -> WalletResult<()> {
@@ -360,12 +414,15 @@ impl WalletService {
             .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
         let amount_mei = parse_decimal_hac_mei(amount)?;
         let balance_mei = self.quantum_balance_mei().await.unwrap_or(0.0);
+        let fee_est = self
+            .estimate_type4_fee(&from.address, to, amount, Some(keystore_pass))
+            .await?;
         let check = crate::hip23::validate_type4_send(
             &from.kind,
             to,
             amount_mei,
             balance_mei,
-            TYPE4_AUTO_FEE,
+            &fee_est.fee_wire,
         )?;
         if !check.ok {
             return Err(WalletError::Policy(check.errors.join("; ")));
@@ -374,7 +431,7 @@ impl WalletService {
         let param = CoinTransferV4Param {
             main_keystore: ks,
             keystore_pass: keystore_pass.into(),
-            fee: crate::hip23::wire_mei_for_node(TYPE4_AUTO_FEE),
+            fee: fee_est.fee_node,
             to_address: to.into(),
             timestamp: 0,
             hacash: crate::hip23::format_mei_for_node(amount_mei),
@@ -397,7 +454,7 @@ impl WalletService {
             tx_type: 4,
             sign_alg: 3,
             wire_size,
-            fee_used: TYPE4_AUTO_FEE.into(),
+            fee_used: fee_est.fee_wire,
         };
         let _ = self.append_quantum_history(
             &hash,
@@ -425,14 +482,18 @@ impl WalletService {
             return Err(WalletError::Policy(preflight.errors.join("; ")));
         }
         let amount_mei = parse_decimal_hac_mei(amount_hacash)?;
-        let body_hex = build_type4_unsigned_body(&from.address, to, amount_hacash, TYPE4_AUTO_FEE)?;
+        let fee_est = self
+            .estimate_type4_fee(&from.address, to, amount_hacash, None)
+            .await?;
+        let body_hex =
+            build_type4_unsigned_body(&from.address, to, amount_hacash, &fee_est.fee_wire)?;
         let unsigned = crate::airgap::AirgapUnsigned {
             v: crate::airgap::AIRGAP_VERSION,
             from: from.address.clone(),
             to: to.to_owned(),
             amount_mei,
             amount_wire: amount_hacash.to_owned(),
-            fee: TYPE4_AUTO_FEE.into(),
+            fee: fee_est.fee_wire,
             body_hex,
             summary: "Type 4 quantum transfer (air-gap)".into(),
             tx_type: 4,

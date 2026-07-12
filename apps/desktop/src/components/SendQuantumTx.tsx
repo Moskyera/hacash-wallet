@@ -6,7 +6,7 @@ import { runWebAuthnAuth } from "../webauthn";
 import AddressBadge from "./AddressBadge";
 
 const DEFAULT_TO = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
-const AUTO_FEE = "40:244";
+
 
 type Props = {
   account: QuantumAccountSummary | null;
@@ -54,7 +54,7 @@ export default function SendQuantumTx({
   const [preflight, setPreflight] = useState<QuantumPreflight | null>(null);
   const [phase, setPhase] = useState<"idle" | "busy" | "ok" | "err">("idle");
   const [hash, setHash] = useState("");
-  const [fee, setFee] = useState(AUTO_FEE);
+  const [fee, setFee] = useState("");
   const [err, setErr] = useState("");
   const [showAirgap, setShowAirgap] = useState(false);
   const [airgapQr, setAirgapQr] = useState<string[]>([]);
@@ -90,7 +90,9 @@ export default function SendQuantumTx({
         warnings: [],
         errors: [formatInvokeError(e)],
         balance_mei: balance ?? 0,
-        fee_wire: AUTO_FEE,
+        fee_wire: "0:004",
+        fee_mei: 0.004,
+        total_mei: 0,
       });
     }
   }, [account, type4Ready, to, amount, balance]);
@@ -138,11 +140,11 @@ export default function SendQuantumTx({
       if (isTest) {
         const test = await quantumApi.sendTestTx(pass);
         setHash(test.hash);
-        setFee(test.fee_used ?? AUTO_FEE);
+        setFee(test.fee_used ?? preflight?.fee_wire ?? "");
       } else {
         const res = await quantumApi.sendType4(to.trim(), amount.trim(), pass);
         setHash(res.hash);
-        setFee(res.fee_used ?? AUTO_FEE);
+        setFee(res.fee_used ?? preflight?.fee_wire ?? "");
       }
       setPhase("ok");
       await refreshBalance();
@@ -237,7 +239,19 @@ export default function SendQuantumTx({
     <section className="panel send-quantum">
       <h3>Send Type 4 (Quantum)</h3>
       <p className="muted">
-        Node: <code>{nodeUrl ?? "http://127.0.0.1:8080"}</code> · auto-fee <code>{fee}</code>
+        Node: <code>{nodeUrl ?? "http://127.0.0.1:8080"}</code>
+        {preflight?.ok ? (
+          <>
+            {" "}
+            · fee ~<code>{preflight.fee_mei.toFixed(4)}</code> HAC · total ~
+            <code>{preflight.total_mei.toFixed(4)}</code> HAC
+          </>
+        ) : fee ? (
+          <>
+            {" "}
+            · last fee <code>{fee}</code>
+          </>
+        ) : null}
       </p>
 
       {isPqcSender && (

@@ -333,7 +333,7 @@ mod tests {
             "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
             0.1,
             50.0,
-            "40:244",
+            "0:004",
         )
         .unwrap();
         assert!(check.ok);
@@ -347,7 +347,7 @@ mod tests {
             "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
             0.1,
             50.0,
-            "40:244",
+            "0:004",
         )
         .unwrap();
         assert!(!check.ok);
@@ -360,7 +360,7 @@ mod tests {
             "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
             0.1,
             50.0,
-            "40:244",
+            "0:004",
         )
         .unwrap();
         assert!(check.ok);
@@ -373,7 +373,7 @@ mod tests {
             "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
             1.0,
             0.5,
-            "40:244",
+            "0:004",
         )
         .unwrap();
         assert!(!check.ok);

@@ -34,7 +34,7 @@ export function canSendType4(account: QuantumAccountSummary | null): boolean {
 }
 
 export const PQC_TYPE4_HINT =
-  "PQC (v6) signs Type 4 with ML-DSA only. Hybrid (v7) adds secp256k1 binding.";
+  "PQC (v6) signs Type 4 with ML-DSA only. Hybrid (v7) adds secp256k1 binding. Network fee is ~0.004 HAC (not 40 HAC).";
 
 export const REPLACE_KEYSTORE_WARNING =
   "Creating a new quantum account replaces the stored keystore. " +

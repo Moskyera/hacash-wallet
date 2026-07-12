@@ -282,6 +282,8 @@ export type QuantumPreflight = {
   errors: string[];
   balance_mei: number;
   fee_wire: string;
+  fee_mei: number;
+  total_mei: number;
 };
 
 export type QuantumSendResult = {

@@ -174,6 +174,26 @@ impl NodeClient {
         }))
     }
 
+    /// Estimate minimum Type 4 fee: `fee_purity × wire_bytes` (see `/query/fee/average`).
+    pub async fn query_fee_average(
+        &self,
+        consumption_bytes: usize,
+        tx_type: u8,
+    ) -> WalletResult<FeeAverageResponse> {
+        let url = format!(
+            "{}/query/fee/average?consumption={}&tx_type={}&unit=mei",
+            self.base_url, consumption_bytes, tx_type
+        );
+        let body: FeeAverageResponse = http_get_json(url).await?;
+        if body.ret != 0 {
+            return Err(WalletError::Node(
+                body.err
+                    .unwrap_or_else(|| format!("fee/average failed (ret={})", body.ret)),
+            ));
+        }
+        Ok(body)
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -334,6 +354,15 @@ impl NodeClient {
             belong: body.belong,
         })
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeeAverageResponse {
+    pub ret: i32,
+    #[serde(default)]
+    pub err: Option<String>,
+    pub feasible: String,
+    pub purity: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

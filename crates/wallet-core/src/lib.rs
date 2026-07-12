@@ -26,6 +26,7 @@ pub mod privacy;
 pub mod security;
 pub mod settings;
 pub mod quantum;
+pub mod type4_fee;
 pub mod quantum_vault;
 pub mod unlock_guard;
 pub mod vault;
@@ -58,7 +59,7 @@ pub use send_options::{
 pub use settings::WalletSettings;
 pub use quantum::{
     QuantumAccountInfo, QuantumAccountSummary, QuantumPreflight, QuantumSendResult, QuantumSettings,
-    QuantumTestResult, TEST_LEGACY_RECIPIENT, TYPE4_AUTO_FEE,
+    QuantumTestResult, TEST_LEGACY_RECIPIENT,
 };
 pub use settings::QuantumMeta;
 pub use wallet::{AssetSummary, WalletService};

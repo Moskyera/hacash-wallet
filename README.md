@@ -113,7 +113,7 @@ cargo test
 - [x] Hybrid account (v7, ML-DSA + secp256k1) — optional legacy secp link
 - [x] Keystore v3 modal — paste JSON, password verify on export
 - [x] Encrypted quantum keystore at rest (`quantum.keystore.enc`, vault-derived key)
-- [x] Type 4 on-chain send for **PQC and Hybrid** (auto-fee `40:244`) via local PQC fullnode
+- [x] Type 4 on-chain send for **PQC and Hybrid** (dynamic fee via node `/query/fee/average`, ~0.004 HAC) via local PQC fullnode
 - [x] Preflight checks, quantum balance, node health panel, funding wizard
 - [x] Type 4 air-gap prepare / sign / broadcast (in addition to legacy L1 air-gap QR)
 - [x] Quantum tab UI — address badges (PQC / Hybrid), WebAuthn gate on send when enabled
