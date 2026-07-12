@@ -468,7 +468,7 @@ export default function MobileApp() {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-row">
-          <WalletLogo size="sm" />
+          <WalletLogo size="sm" variant="mark" />
           <div>
             <h1>{displayName}</h1>
             <p className="sub">{maskAddress(session.status?.address, session.privacy.hide_addresses)}</p>

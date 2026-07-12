@@ -1,12 +1,12 @@
-# Generate Hacash Wallet launcher icons from full glossy brand artwork (nhw → hb-icon.png).
+# Generate Hacash Wallet launcher icons from glossy symbol only (mosky.png — no text).
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $icons = Join-Path $mobile "src-tauri\icons"
 $androidRoot = Join-Path $icons "android"
-$srcIcon = Join-Path $mobile "src\assets\hb-icon.png"
+$srcIcon = Join-Path $mobile "src\assets\mosky.png"
 $fgOut = Join-Path $icons "android-fg.png"
 $appIcon = Join-Path $icons "app-icon.png"
-$fillRatio = 0.88
+$fillRatio = 0.92
 
 Add-Type -AssemblyName System.Drawing
 

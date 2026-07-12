@@ -97,6 +97,13 @@ body {
   image-rendering: auto;
 }
 
+.wallet-logo-mark.wallet-logo-sm {
+  width: 40px;
+  height: 40px;
+  max-width: 40px;
+  max-height: 40px;
+}
+
 .wallet-logo-splash {
   width: min(320px, 88vw);
   height: auto;

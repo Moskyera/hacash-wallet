@@ -9,7 +9,7 @@ set "ROOT=C:\Users\KQHEX\Documents\moskyera-quantum-wallet"
 set "MOBILE=%ROOT%\apps\mobile"
 set "TC=%NDK_HOME%\toolchains\llvm\prebuilt\windows-x86_64\bin"
 set "LOG=%MOBILE%\rebuild-v0119.log"
-set "VER=0.1.22"
+set "VER=0.1.23"
 
 echo === v%VER% rebuild started %DATE% %TIME% === > "%LOG%"
 
