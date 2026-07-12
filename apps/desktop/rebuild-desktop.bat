@@ -3,7 +3,7 @@ setlocal
 set "ROOT=C:\Users\KQHEX\Documents\moskyera-quantum-wallet"
 set "DESKTOP=%ROOT%\apps\desktop"
 set "LOG=%DESKTOP%\rebuild-desktop.log"
-set "VER=0.1.20"
+set "VER=0.1.22"
 
 echo === desktop v%VER% rebuild started %DATE% %TIME% === > "%LOG%"
 
