@@ -133,12 +133,13 @@ if (-not (Test-Path (Split-Path -Parent $bgColorXml))) {
 </resources>
 '@ | Set-Content -Path $bgColorXml -Encoding UTF8 -NoNewline
 
-# In-app APK updates: FileProvider + Kotlin installer helper.
+# In-app APK updates: merge paths into Tauri's file_paths.xml (single FileProvider authority).
 $providerPathsSrc = Join-Path $mobile "src-tauri\android-file-provider-paths.xml"
-$providerPathsDst = Join-Path $netDstDir "file_provider_paths.xml"
+$filePathsDst = Join-Path $netDstDir "file_paths.xml"
 if (Test-Path $providerPathsSrc) {
-    Copy-Item $providerPathsSrc $providerPathsDst -Force
-    Write-Host "Copied file_provider_paths.xml for APK updates" -ForegroundColor Green
+    Copy-Item $providerPathsSrc $filePathsDst -Force
+    Copy-Item $providerPathsSrc (Join-Path $netDstDir "file_provider_paths.xml") -Force
+    Write-Host "Updated file_paths.xml for APK updates" -ForegroundColor Green
 }
 
 $kotlinSrcRoot = Join-Path $mobile "src-tauri\android-src"
@@ -154,9 +155,13 @@ if (Test-Path $kotlinSrcRoot) {
     Write-Host "Synced Kotlin helpers (ApkInstaller)" -ForegroundColor Green
 }
 
+# Duplicate FileProvider authorities crash Android on launch; keep exactly one entry.
 $manifestContent = Get-Content $manifest -Raw
-if ($manifestContent -notmatch 'android:name=".fileprovider"') {
-    $providerBlock = @'
+$providerPattern = '(?s)\s*<provider[^>]*android:name="androidx\.core\.content\.FileProvider"[^>]*>.*?</provider>\s*'
+while ([regex]::Matches($manifestContent, $providerPattern).Count -gt 0) {
+    $manifestContent = [regex]::Replace($manifestContent, $providerPattern, '', 1)
+}
+$providerBlock = @'
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -164,13 +169,12 @@ if ($manifestContent -notmatch 'android:name=".fileprovider"') {
             android:grantUriPermissions="true">
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_provider_paths" />
+                android:resource="@xml/file_paths" />
         </provider>
 '@
-    $manifestContent = $manifestContent -replace '</application>', ($providerBlock + "`r`n    </application>")
-    Set-Content -Path $manifest -Value $manifestContent -NoNewline
-    Write-Host "Added FileProvider for in-app APK install" -ForegroundColor Green
-}
+$manifestContent = $manifestContent -replace '</application>', ($providerBlock + "`r`n    </application>")
+Set-Content -Path $manifest -Value $manifestContent -NoNewline
+Write-Host "Normalized single FileProvider in AndroidManifest" -ForegroundColor Green
 
 $distIndex = Join-Path $mobile "dist\index.html"
 if (Test-Path $distIndex) {

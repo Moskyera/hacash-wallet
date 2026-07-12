@@ -2,6 +2,7 @@ package org.hacash.wallet.mobile
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -34,7 +35,19 @@ object ApkInstaller {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        val chooser = Intent.createChooser(intent, "Install Hacash Wallet update")
-        activity.startActivity(chooser)
+
+        val handlers = activity.packageManager.queryIntentActivities(
+            intent,
+            PackageManager.MATCH_DEFAULT_ONLY,
+        )
+        if (handlers.isEmpty()) {
+            throw IllegalStateException("No app can install APK updates on this device.")
+        }
+        for (handler in handlers) {
+            val pkg = handler.activityInfo.packageName
+            activity.grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        activity.startActivity(intent)
     }
 }
