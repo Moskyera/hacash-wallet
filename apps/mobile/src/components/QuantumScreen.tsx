@@ -19,6 +19,7 @@ import {
   REPLACE_KEYSTORE_WARNING,
   summaryFromAccountInfo,
 } from "../quantumMeta";
+import { webAuthnClientOrigin } from "../webauthn";
 import { maybeWebAuthnGate } from "../utils/webauthnGate";
 import AddressBadge from "./AddressBadge";
 import KeystoreV3Modal from "./KeystoreV3Modal";
@@ -32,6 +33,7 @@ type Props = {
   platformSec: PlatformSecurityStatus | null;
   securityProfile?: string | null;
   webauthnEnabled?: boolean;
+  biometricSendEnabled?: boolean;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
   onGoLegacySend?: () => void;
 };
@@ -43,6 +45,7 @@ export default function QuantumScreen({
   platformSec,
   securityProfile,
   webauthnEnabled,
+  biometricSendEnabled = true,
   onToast,
   onGoLegacySend,
 }: Props) {
@@ -223,7 +226,9 @@ export default function QuantumScreen({
       amountMei: amount,
       securityProfile,
       webauthnEnabled,
+      biometricSendEnabled,
       nativeBiometricAvailable: platformSec?.native_biometric_available,
+      clientOrigin: webAuthnClientOrigin(),
     });
   }
 

@@ -30,7 +30,7 @@ fn audit_webauthn_finish_without_begin_fails() {
 fn audit_webauthn_wrong_ceremony_purpose_fails() {
     audit_gate("webauthn_purpose_mismatch", || {
         let gate = WebAuthnGate::new().unwrap();
-        gate.begin_register("1User").unwrap();
+        gate.begin_register("1User", None).unwrap();
         let challenge = "stale";
         let cred = json!({
             "rawId": "dGVzdA",
@@ -40,7 +40,7 @@ fn audit_webauthn_wrong_ceremony_purpose_fails() {
             }
         });
         // begin_auth after register begin should fail on purpose
-        gate.begin_auth("dGVzdA").unwrap();
+        gate.begin_auth("dGVzdA", None).unwrap();
         assert!(gate.finish_register(&cred.to_string()).is_err());
     });
 }
@@ -49,7 +49,7 @@ fn audit_webauthn_wrong_ceremony_purpose_fails() {
 fn audit_webauthn_wrong_origin_rejected() {
     audit_gate("webauthn_wrong_origin", || {
         let gate = WebAuthnGate::new().unwrap();
-        let options = gate.begin_register("1User").unwrap();
+        let options = gate.begin_register("1User", None).unwrap();
         let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
             .as_str()
             .unwrap()
@@ -69,7 +69,7 @@ fn audit_webauthn_wrong_origin_rejected() {
 fn audit_webauthn_stale_challenge_rejected() {
     audit_gate("webauthn_stale_challenge", || {
         let gate = WebAuthnGate::new().unwrap();
-        gate.begin_auth("dGVzdA").unwrap();
+        gate.begin_auth("dGVzdA", None).unwrap();
         let cred = json!({
             "response": {
                 "clientDataJSON": client_data_b64("not-the-active-challenge", "webauthn.get", RP_ORIGIN)
@@ -83,7 +83,7 @@ fn audit_webauthn_stale_challenge_rejected() {
 fn audit_webauthn_auth_data_rp_id_hash_mismatch() {
     audit_gate("webauthn_rpid_hash", || {
         let gate = WebAuthnGate::new().unwrap();
-        let options = gate.begin_auth("dGVzdA").unwrap();
+        let options = gate.begin_auth("dGVzdA", None).unwrap();
         let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
             .as_str()
             .unwrap()
@@ -104,8 +104,8 @@ fn audit_webauthn_auth_data_rp_id_hash_mismatch() {
 fn audit_webauthn_challenge_entropy() {
     audit_gate("webauthn_challenge_entropy", || {
         let gate = WebAuthnGate::new().unwrap();
-        let a = gate.begin_register("1A").unwrap();
-        let b = gate.begin_register("1B").unwrap();
+let a = gate.begin_register("1A", None).unwrap();
+        let b = gate.begin_register("1B", None).unwrap();
         let parsed_a: serde_json::Value = serde_json::from_str(&a).unwrap();
         let parsed_b: serde_json::Value = serde_json::from_str(&b).unwrap();
         let ca = parsed_a["publicKey"]["challenge"].as_str().unwrap();

@@ -503,9 +503,9 @@ impl WalletService {
         }
     }
 
-    pub fn webauthn_register_begin(&self) -> WalletResult<String> {
+    pub fn webauthn_register_begin(&self, client_origin: Option<&str>) -> WalletResult<String> {
         let address = self.require_address()?;
-        self.webauthn.begin_register(&address)
+        self.webauthn.begin_register(&address, client_origin)
     }
 
     pub fn webauthn_register_finish(&mut self, credential_json: &str) -> WalletResult<()> {
@@ -518,12 +518,12 @@ impl WalletService {
         Ok(())
     }
 
-    pub fn webauthn_auth_begin(&self) -> WalletResult<String> {
+    pub fn webauthn_auth_begin(&self, client_origin: Option<&str>) -> WalletResult<String> {
         let cred = self
             .load_webauthn_credential()?
             .ok_or_else(|| WalletError::Policy("WebAuthn not registered".into()))?;
         let cred_id = crate::webauthn::credential_id_from_store(&cred)?;
-        self.webauthn.begin_auth(&cred_id)
+        self.webauthn.begin_auth(&cred_id, client_origin)
     }
 
     pub fn webauthn_auth_finish(&mut self, assertion_json: &str) -> WalletResult<()> {

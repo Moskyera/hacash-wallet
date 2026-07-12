@@ -25,7 +25,12 @@ import { formatInvokeError } from "../../formatInvokeError";
 import HubDiscoveryPanel from "../../components/HubDiscoveryPanel";
 import { fastPayMenuBadge } from "../../fastPayUi";
 import { downloadJson } from "../../utils/downloadJson";
-import { runWebAuthnAuth, runWebAuthnRegister, webAuthnAvailable } from "../../webauthn";
+import {
+  runWebAuthnAuth,
+  runWebAuthnRegister,
+  webAuthnAvailable,
+  webAuthnClientOrigin,
+} from "../../webauthn";
 
 export type MorePage =
   | "menu"
@@ -153,7 +158,7 @@ export default function MoreRouter(props: Props) {
   const [nodeTestMsg, setNodeTestMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    setWebauthnReady(webAuthnAvailable());
+    void webAuthnAvailable().then(setWebauthnReady);
   }, []);
 
   async function handleRegisterWebAuthn() {
@@ -163,7 +168,7 @@ export default function MoreRouter(props: Props) {
     }
     setBusy(true);
     try {
-      const options = await api.webauthnRegisterBegin();
+      const options = await api.webauthnRegisterBegin(webAuthnClientOrigin());
       const cred = await runWebAuthnRegister(options);
       await api.webauthnRegisterFinish(cred);
       await onRefresh();
@@ -179,7 +184,7 @@ export default function MoreRouter(props: Props) {
     if (!webauthnReady || !settings?.webauthn_enabled) return;
     setBusy(true);
     try {
-      const options = await api.webauthnAuthBegin();
+      const options = await api.webauthnAuthBegin(webAuthnClientOrigin());
       const assertion = await runWebAuthnAuth(options);
       await api.webauthnAuthFinish(assertion);
       onToast("WebAuthn verification OK.", "success");
@@ -465,22 +470,55 @@ export default function MoreRouter(props: Props) {
             <p className="muted small">Current: {status?.security_profile ?? "balanced"}</p>
           </div>
           <div className="card">
-            <h2>Biometric</h2>
-            <p className="muted">
+            <h2>Biometric confirm</h2>
+            <p className="muted small">
               {platformSec?.native_biometric_available
-                ? `Available on ${platformSec.platform}. Required for sends ≥ ${BIOMETRIC_THRESHOLD_MEI} HAC.`
-                : "Not available on this device."}
+                ? `Device supports ${platformSec.biometric_kind ?? "biometric"} unlock. Used for sends ≥ ${BIOMETRIC_THRESHOLD_MEI} HAC.`
+                : "No biometric sensor detected. Use a passkey instead, or keep sends below the limit."}
             </p>
+            <div className="toggle-row">
+              <span>Use biometric for sends</span>
+              <input
+                type="checkbox"
+                checked={settings?.biometric_send_enabled ?? true}
+                disabled={busy || watchOnly || !platformSec?.native_biometric_available}
+                onChange={(e) => {
+                  if (!settings) return;
+                  void api
+                    .updateSettings({ ...settings, biometric_send_enabled: e.target.checked })
+                    .then(() => onRefresh())
+                    .then(() => onToast(e.target.checked ? "Biometric confirm on." : "Biometric confirm off.", "success"))
+                    .catch((err) => onToast(formatInvokeError(err), "error"));
+                }}
+              />
+            </div>
+            <button
+              type="button"
+              className="primary"
+              style={{ marginTop: "0.75rem", width: "100%" }}
+              disabled={busy || watchOnly || !platformSec?.native_biometric_available}
+              onClick={() => {
+                setBusy(true);
+                void api
+                  .confirmBiometric()
+                  .then(() => onToast("Biometric test OK.", "success"))
+                  .catch((err) => onToast(formatInvokeError(err), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Test biometric
+            </button>
           </div>
           <div className="card">
-            <h2>WebAuthn (passkey)</h2>
-            <p className="muted">
+            <h2>Passkey</h2>
+            <p className="muted small">
               {settings?.webauthn_enabled
-                ? "Registered — used for paranoid profile and large sends."
-                : "Not registered yet."}
+                ? "Registered. Used for paranoid profile and large sends when enabled."
+                : "Register once to confirm large sends with your device passkey."}
             </p>
+            <p className="muted small">App origin: {webAuthnClientOrigin() || "unknown"}</p>
             <div className="row-btns">
-              <button type="button" disabled={busy || !webauthnReady} onClick={() => void handleRegisterWebAuthn()}>
+              <button type="button" className="primary" disabled={busy || !webauthnReady} onClick={() => void handleRegisterWebAuthn()}>
                 Register passkey
               </button>
               <button
@@ -488,9 +526,12 @@ export default function MoreRouter(props: Props) {
                 disabled={busy || !settings?.webauthn_enabled}
                 onClick={() => void handleTestWebAuthn()}
               >
-                Test unlock
+                Test passkey
               </button>
             </div>
+            {!webauthnReady && (
+              <p className="muted small">Passkey not available in this WebView. Update the app if this persists.</p>
+            )}
           </div>
           <button type="button" onClick={() => void onLock()}>
             Lock wallet
@@ -579,6 +620,7 @@ export default function MoreRouter(props: Props) {
           platformSec={platformSec}
           securityProfile={settings?.security_profile}
           webauthnEnabled={settings?.webauthn_enabled}
+          biometricSendEnabled={settings?.biometric_send_enabled ?? true}
           onToast={onToast}
           onGoLegacySend={onGoLegacySend}
         />

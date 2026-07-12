@@ -28,7 +28,7 @@ fn fake_stored_with_pubkey() -> String {
 fn tier0_webauthn_pubkey_credential_rejects_assertion_without_signature() {
     tier0_gate("webauthn_strict_no_sig", || {
         let gate = WebAuthnGate::new().unwrap();
-        let options = gate.begin_auth("dGVzdA").unwrap();
+        let options = gate.begin_auth("dGVzdA", None).unwrap();
         let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
             ["publicKey"]["challenge"]
             .as_str()
@@ -48,7 +48,7 @@ fn tier0_webauthn_pubkey_credential_rejects_assertion_without_signature() {
 fn tier0_webauthn_pubkey_credential_rejects_bad_signature() {
     tier0_gate("webauthn_strict_bad_sig", || {
         let gate = WebAuthnGate::new().unwrap();
-        let options = gate.begin_auth("dGVzdA").unwrap();
+        let options = gate.begin_auth("dGVzdA", None).unwrap();
         let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
             ["publicKey"]["challenge"]
             .as_str()
@@ -74,7 +74,7 @@ fn tier0_webauthn_pubkey_credential_rejects_bad_signature() {
 fn tier0_webauthn_register_challenge_single_use() {
     tier0_gate("webauthn_register_single_use", || {
         let gate = WebAuthnGate::new().unwrap();
-        let options = gate.begin_register("1User").unwrap();
+        let options = gate.begin_register("1User", None).unwrap();
         let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
             ["publicKey"]["challenge"]
             .as_str()
@@ -96,7 +96,7 @@ fn tier0_webauthn_register_challenge_single_use() {
 fn tier0_webauthn_auth_challenge_single_use() {
     tier0_gate("webauthn_auth_single_use", || {
         let gate = WebAuthnGate::new().unwrap();
-        gate.begin_auth("dGVzdA").unwrap();
+        gate.begin_auth("dGVzdA", None).unwrap();
         let cred = json!({
             "response": {
                 "clientDataJSON": client_data_b64("stale", "webauthn.get")
@@ -111,7 +111,7 @@ fn tier0_webauthn_auth_challenge_single_use() {
 fn tier0_webauthn_user_not_present_flag_rejected() {
     tier0_gate("webauthn_up_flag", || {
         let gate = WebAuthnGate::new().unwrap();
-        let options = gate.begin_auth("dGVzdA").unwrap();
+        let options = gate.begin_auth("dGVzdA", None).unwrap();
         let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
             ["publicKey"]["challenge"]
             .as_str()

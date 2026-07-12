@@ -16,22 +16,31 @@ export async function maybeWebAuthnGate(opts: {
   amountMei: number;
   securityProfile?: string | null;
   webauthnEnabled?: boolean;
+  biometricSendEnabled?: boolean;
   nativeBiometricAvailable?: boolean;
+  clientOrigin?: string;
 }): Promise<void> {
-  const { amountMei, securityProfile, webauthnEnabled, nativeBiometricAvailable } = opts;
+  const {
+    amountMei,
+    securityProfile,
+    webauthnEnabled,
+    biometricSendEnabled = true,
+    nativeBiometricAvailable,
+    clientOrigin,
+  } = opts;
   if (!needsSecondFactor(amountMei, securityProfile)) return;
 
   if (webauthnEnabled) {
-    const options = await api.webauthnAuthBegin();
+    const options = await api.webauthnAuthBegin(clientOrigin);
     const assertion = await runWebAuthnAuth(options);
     await api.webauthnAuthFinish(assertion);
     return;
   }
 
-  if (nativeBiometricAvailable) {
+  if (nativeBiometricAvailable && biometricSendEnabled) {
     await api.confirmBiometric();
     return;
   }
 
-  throw new Error("Register WebAuthn or enable biometrics for large sends");
+  throw new Error("Register a passkey or turn on biometric confirm for large sends");
 }

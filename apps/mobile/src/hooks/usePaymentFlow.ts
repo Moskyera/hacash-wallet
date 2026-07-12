@@ -3,6 +3,7 @@ import { api, HubFeePayer, SendOptions, SendPreview, WalletSettings } from "../a
 import { formatInvokeError } from "../formatInvokeError";
 import { applyPaymentPayload } from "../utils/applyPaymentPayload";
 import { hapticSuccess } from "../utils/haptic";
+import { webAuthnClientOrigin } from "../webauthn";
 import { maybeWebAuthnGate } from "../utils/webauthnGate";
 import type { PaymentQrPayload } from "../paymentQr";
 import type { PlatformSecurityStatus } from "../api";
@@ -108,7 +109,9 @@ export function usePaymentFlow(opts: {
           amountMei,
           securityProfile: settings?.security_profile,
           webauthnEnabled: settings?.webauthn_enabled,
+          biometricSendEnabled: settings?.biometric_send_enabled ?? true,
           nativeBiometricAvailable: platformSec?.native_biometric_available,
+          clientOrigin: webAuthnClientOrigin(),
         });
         return true;
       } catch (e) {

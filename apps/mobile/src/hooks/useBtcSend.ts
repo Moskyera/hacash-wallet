@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { api, type BtcSendPreview, type PlatformSecurityStatus, type WalletSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { hapticSuccess } from "../utils/haptic";
+import { webAuthnClientOrigin } from "../webauthn";
 import { maybeWebAuthnGate } from "../utils/webauthnGate";
 
 export function useBtcSend(opts: {
@@ -50,7 +51,9 @@ export function useBtcSend(opts: {
         amountMei: preview.fee_mei,
         securityProfile: settings?.security_profile,
         webauthnEnabled: settings?.webauthn_enabled,
+        biometricSendEnabled: settings?.biometric_send_enabled ?? true,
         nativeBiometricAvailable: platformSec?.native_biometric_available,
+        clientOrigin: webAuthnClientOrigin(),
       });
     } catch (e) {
       showToast(formatInvokeError(e), "error");

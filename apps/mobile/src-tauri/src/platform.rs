@@ -6,12 +6,15 @@ use tauri::AppHandle;
 pub struct PlatformSecurityStatus {
     pub native_biometric_available: bool,
     pub platform: String,
+    pub biometric_kind: Option<String>,
 }
 
 pub fn platform_security_status(app: &AppHandle) -> PlatformSecurityStatus {
+    let (available, kind) = native_biometric_status(app);
     PlatformSecurityStatus {
-        native_biometric_available: native_biometric_available(app),
+        native_biometric_available: available,
         platform: std::env::consts::OS.into(),
+        biometric_kind: kind,
     }
 }
 
@@ -50,12 +53,29 @@ pub fn verify_native_biometric(app: &AppHandle, message: &str) -> Result<(), Str
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-fn mobile_biometric_available(app: &AppHandle) -> bool {
+fn native_biometric_status(app: &AppHandle) -> (bool, Option<String>) {
     use tauri_plugin_biometric::BiometricExt;
-    app.biometric()
-        .status()
-        .map(|s| s.is_available)
-        .unwrap_or(false)
+    match app.biometric().status() {
+        Ok(s) => {
+            let kind = if s.is_available {
+                Some(format!("{:?}", s.biometry_type))
+            } else {
+                None
+            };
+            (s.is_available, kind)
+        }
+        Err(_) => (false, None),
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn mobile_biometric_available(app: &AppHandle) -> bool {
+    native_biometric_status(app).0
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn native_biometric_status(_app: &AppHandle) -> (bool, Option<String>) {
+    (native_biometric_available(_app), None)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]

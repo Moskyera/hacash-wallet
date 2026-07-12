@@ -15,7 +15,8 @@
         "title": "Hacash Wallet",
         "width": 420,
         "height": 780,
-        "resizable": false
+        "resizable": false,
+        "useHttpsScheme": true
       }
     ],
     "security": {

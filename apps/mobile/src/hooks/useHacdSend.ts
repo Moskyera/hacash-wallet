@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type HacdSendPreview, type PlatformSecurityStatus, type WalletSettings } from "../api";
+import { webAuthnClientOrigin } from "../webauthn";
 import { maybeWebAuthnGate } from "../utils/webauthnGate";
 import { formatInvokeError } from "../formatInvokeError";
 import { hapticSuccess } from "../utils/haptic";
@@ -96,7 +97,9 @@ export function useHacdSend(opts: {
         amountMei: preview.fee_mei,
         securityProfile: settings?.security_profile,
         webauthnEnabled: settings?.webauthn_enabled,
+        biometricSendEnabled: settings?.biometric_send_enabled ?? true,
         nativeBiometricAvailable: platformSec?.native_biometric_available,
+        clientOrigin: webAuthnClientOrigin(),
       });
     } catch (e) {
       showToast(formatInvokeError(e), "error");

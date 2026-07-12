@@ -74,6 +74,20 @@ export async function runWebAuthnAuth(optionsJson: string): Promise<string> {
   return serializeCredential(cred);
 }
 
-export function webAuthnAvailable(): boolean {
-  return typeof window !== "undefined" && !!window.PublicKeyCredential;
+export function webAuthnClientOrigin(): string {
+  return typeof window !== "undefined" ? window.location.origin : "";
+}
+
+export async function webAuthnAvailable(): Promise<boolean> {
+  if (typeof window === "undefined" || !window.PublicKeyCredential) {
+    return false;
+  }
+  try {
+    if (window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
+      return await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }

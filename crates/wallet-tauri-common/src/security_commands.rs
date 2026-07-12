@@ -6,9 +6,13 @@ use tauri::State;
 use crate::state::AppState;
 
 #[tauri::command]
-pub fn wallet_webauthn_register_begin(state: State<'_, AppState>) -> Result<String, String> {
+pub fn wallet_webauthn_register_begin(
+    client_origin: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let svc = state.inner.blocking_lock();
-    svc.webauthn_register_begin().map_err(|e| e.to_string())
+    svc.webauthn_register_begin(client_origin.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -22,9 +26,13 @@ pub fn wallet_webauthn_register_finish(
 }
 
 #[tauri::command]
-pub fn wallet_webauthn_auth_begin(state: State<'_, AppState>) -> Result<String, String> {
+pub fn wallet_webauthn_auth_begin(
+    client_origin: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let svc = state.inner.blocking_lock();
-    svc.webauthn_auth_begin().map_err(|e| e.to_string())
+    svc.webauthn_auth_begin(client_origin.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

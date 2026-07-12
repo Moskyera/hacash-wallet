@@ -12,7 +12,7 @@ fn stress_webauthn_500_unique_challenges() {
         let gate = WebAuthnGate::new().unwrap();
         let mut seen = HashSet::new();
         for i in 0..500 {
-            let opts = gate.begin_register(&format!("1User{i}")).unwrap();
+            let opts = gate.begin_register(&format!("1User{i}"), None).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&opts).unwrap();
             let ch = parsed["publicKey"]["challenge"].as_str().unwrap().to_string();
             assert!(seen.insert(ch), "duplicate challenge at iteration {i}");
@@ -29,7 +29,7 @@ fn stress_webauthn_register_finish_100_roundtrips() {
         const ORIGIN: &str = "http://localhost:1420";
         let gate = WebAuthnGate::new().unwrap();
         for i in 0..100 {
-            let opts = gate.begin_register(&format!("1Stress{i}")).unwrap();
+            let opts = gate.begin_register(&format!("1Stress{i}"), None).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&opts).unwrap();
             let challenge = parsed["publicKey"]["challenge"].as_str().unwrap();
             let client_data = json!({

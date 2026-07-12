@@ -49,6 +49,7 @@ export type WalletSettings = {
   hub_right_address: string | null;
   channel_id_hex: string | null;
   webauthn_enabled: boolean;
+  biometric_send_enabled?: boolean;
   security_profile: string;
   privacy: PrivacySettings;
   dust_whisper?: DustWhisperSettings;
@@ -170,6 +171,7 @@ export type BillSummary = {
 export type PlatformSecurityStatus = {
   native_biometric_available: boolean;
   platform: string;
+  biometric_kind?: string | null;
 };
 
 export type AssetSummary = {
@@ -412,10 +414,16 @@ export const api = {
     invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
   sendBtc: (to: string, satoshi: number) =>
     invoke<SendResult>("wallet_send_btc", { to, satoshi }),
-  webauthnRegisterBegin: () => invoke<string>("wallet_webauthn_register_begin"),
+  webauthnRegisterBegin: (clientOrigin?: string) =>
+    invoke<string>("wallet_webauthn_register_begin", {
+      clientOrigin: clientOrigin ?? null,
+    }),
   webauthnRegisterFinish: (credentialJson: string) =>
     invoke<void>("wallet_webauthn_register_finish", { credentialJson }),
-  webauthnAuthBegin: () => invoke<string>("wallet_webauthn_auth_begin"),
+  webauthnAuthBegin: (clientOrigin?: string) =>
+    invoke<string>("wallet_webauthn_auth_begin", {
+      clientOrigin: clientOrigin ?? null,
+    }),
   webauthnAuthFinish: (assertionJson: string) =>
     invoke<void>("wallet_webauthn_auth_finish", { assertionJson }),
   airgapPrepareSend: (to: string, amountMei: number) =>

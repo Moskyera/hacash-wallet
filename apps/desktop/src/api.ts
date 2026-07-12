@@ -381,10 +381,12 @@ export const api = {
   getSettings: () => invoke<WalletSettings>("wallet_get_settings"),
   updateSettings: (settings: WalletSettings) =>
     invoke<void>("wallet_update_settings", { settings }),
-  webauthnRegisterBegin: () => invoke<string>("wallet_webauthn_register_begin"),
+  webauthnRegisterBegin: (clientOrigin?: string) =>
+    invoke<string>("wallet_webauthn_register_begin", { clientOrigin: clientOrigin ?? null }),
   webauthnRegisterFinish: (credentialJson: string) =>
     invoke<void>("wallet_webauthn_register_finish", { credentialJson }),
-  webauthnAuthBegin: () => invoke<string>("wallet_webauthn_auth_begin"),
+  webauthnAuthBegin: (clientOrigin?: string) =>
+    invoke<string>("wallet_webauthn_auth_begin", { clientOrigin: clientOrigin ?? null }),
   webauthnAuthFinish: (assertionJson: string) =>
     invoke<void>("wallet_webauthn_auth_finish", { assertionJson }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
