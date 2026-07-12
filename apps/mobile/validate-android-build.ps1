@@ -52,6 +52,14 @@ if ((Test-Path $pkgJson) -and (Test-Path $tauriProps)) {
     }
 }
 
+$filePaths = Join-Path $android "app\src\main\res\xml\file_paths.xml"
+if (Test-Path $filePaths) {
+    $fp = Get-Content $filePaths -Raw
+    if ($fp -notmatch 'cache-path[^>]*name="cache_updates"') {
+        $errors += "file_paths.xml must expose cache-path for in-app APK updates"
+    }
+}
+
 if (Test-Path $proguard) {
     $pg = Get-Content $proguard -Raw
     foreach ($keep in @("ApkInstaller", "app.tauri.opener.OpenerPlugin", "app.tauri.deep_link", "app.tauri.biometric")) {

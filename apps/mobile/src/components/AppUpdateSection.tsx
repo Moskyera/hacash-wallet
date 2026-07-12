@@ -11,6 +11,7 @@ export default function AppUpdateSection({ onToast }: Props) {
   const [info, setInfo] = useState<AppUpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [updatePhase, setUpdatePhase] = useState<"idle" | "downloading" | "installer">("idle");
   const [lastError, setLastError] = useState<string | null>(null);
 
   const check = useCallback(async () => {
@@ -42,14 +43,19 @@ export default function AppUpdateSection({ onToast }: Props) {
   const handleUpdate = async () => {
     if (!info?.download_url) return;
     setUpdating(true);
+    setUpdatePhase("downloading");
     setLastError(null);
     try {
       const name = info.download_url.split("/").pop() ?? "hacash-wallet-update.apk";
       onToast("Downloading update…", "info");
       const path = await api.downloadAppUpdate(info.download_url, name);
-      onToast("Opening installer…", "info");
+      setUpdatePhase("installer");
+      onToast("Opening system installer…", "info");
       await api.installMobileUpdate(path);
-      onToast("Confirm install on the system screen. Wallet data is kept.", "success");
+      onToast(
+        "Tap Install on the system screen. This app stays on the current version until you confirm.",
+        "success",
+      );
     } catch (e) {
       const msg = String(e);
       setLastError(msg);
@@ -59,6 +65,7 @@ export default function AppUpdateSection({ onToast }: Props) {
       }
     } finally {
       setUpdating(false);
+      setUpdatePhase("idle");
     }
   };
 
@@ -87,7 +94,11 @@ export default function AppUpdateSection({ onToast }: Props) {
         {info?.update_available && info.download_url ? (
           <>
             <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
-              {updating ? "Downloading…" : "Download & install"}
+              {updatePhase === "downloading"
+                ? "Downloading…"
+                : updatePhase === "installer"
+                  ? "Opening installer…"
+                  : "Download & install"}
             </button>
             <button type="button" disabled={updating} onClick={() => void openBrowserDownload()}>
               Open in browser
@@ -96,7 +107,8 @@ export default function AppUpdateSection({ onToast }: Props) {
         ) : null}
       </div>
       <p className="muted small">
-        If install asks for permission, enable &quot;Install unknown apps&quot; for Hacash Wallet, then try again.
+        The app may go to the background while Android shows the install screen — that is normal. If install asks
+        for permission, enable &quot;Install unknown apps&quot; for Hacash Wallet, then try again.
       </p>
       {info?.release_notes ? (
         <details className="update-notes">

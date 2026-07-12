@@ -126,6 +126,30 @@ pub async fn check_app_update(channel: &str, current_version: &str) -> Result<Ap
     })
 }
 
+/// APK downloads must live under a path exposed by Android FileProvider (`cache-path` / `files-path`).
+pub fn validate_apk_file(path: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+
+    let meta = std::fs::metadata(path).map_err(|e| format!("apk metadata: {e}"))?;
+    if !meta.is_file() {
+        return Err("download is not a file".into());
+    }
+    if meta.len() < 100_000 {
+        return Err(format!(
+            "downloaded APK too small ({} bytes) — download may have failed",
+            meta.len()
+        ));
+    }
+    let mut magic = [0u8; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map_err(|e| format!("apk read: {e}"))?;
+    if magic != [0x50, 0x4B] {
+        return Err("downloaded file is not a valid APK archive".into());
+    }
+    Ok(())
+}
+
 pub async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -145,6 +169,7 @@ pub async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(
         .await
         .map_err(|e| e.to_string())?;
     std::fs::write(dest, &bytes).map_err(|e| e.to_string())?;
+    validate_apk_file(dest)?;
     Ok(())
 }
 
@@ -171,4 +196,38 @@ pub fn run_windows_installer(path: &std::path::Path) -> Result<(), String> {
 #[cfg(not(target_os = "windows"))]
 pub fn run_windows_installer(_path: &std::path::Path) -> Result<(), String> {
     Err("desktop installer launch is only supported on Windows".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn validate_apk_rejects_tiny_or_non_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let tiny = dir.path().join("tiny.apk");
+        std::fs::write(&tiny, b"x").unwrap();
+        assert!(validate_apk_file(&tiny).is_err());
+
+        let bad = dir.path().join("bad.apk");
+        std::fs::write(&bad, vec![0u8; 200_000]).unwrap();
+        assert!(validate_apk_file(&bad).is_err());
+    }
+
+    #[test]
+    fn validate_apk_accepts_zip_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("ok.apk");
+        let mut f = std::fs::File::create(&ok).unwrap();
+        f.write_all(&[0x50, 0x4B, 0x03, 0x04]).unwrap();
+        f.write_all(&vec![0u8; 200_000]).unwrap();
+        assert!(validate_apk_file(&ok).is_ok());
+    }
+
+    #[test]
+    fn semver_parsing_for_update_channel() {
+        assert_eq!(parse_semver_triplet("0.1.30"), Some((0, 1, 30)));
+        assert_eq!(parse_semver_triplet("v0.1.30-mobile"), Some((0, 1, 30)));
+    }
 }

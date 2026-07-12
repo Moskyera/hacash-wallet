@@ -12,9 +12,12 @@ import java.io.File
 object ApkInstaller {
     @JvmStatic
     fun install(activity: Activity, apkPath: String) {
-        val file = File(apkPath)
-        if (!file.exists()) {
+        val source = File(apkPath)
+        if (!source.exists()) {
             throw IllegalArgumentException("APK not found: $apkPath")
+        }
+        if (!source.isFile || source.length() < 100_000L) {
+            throw IllegalArgumentException("APK file is missing or too small to install")
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -29,11 +32,24 @@ object ApkInstaller {
             }
         }
 
+        // Always stage under cacheDir — matches FileProvider cache-path in file_paths.xml.
+        val stagedDir = File(activity.cacheDir, "updates").apply { mkdirs() }
+        val staged = File(stagedDir, source.name)
+        if (source.canonicalPath != staged.canonicalPath) {
+            source.inputStream().use { input ->
+                staged.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+        if (!staged.exists() || staged.length() < 100_000L) {
+            throw IllegalStateException("Failed to stage APK for install")
+        }
+
         val authority = "${activity.packageName}.fileprovider"
-        val uri = FileProvider.getUriForFile(activity, authority, file)
+        val uri = FileProvider.getUriForFile(activity, authority, staged)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
         }
 
         val handlers = activity.packageManager.queryIntentActivities(

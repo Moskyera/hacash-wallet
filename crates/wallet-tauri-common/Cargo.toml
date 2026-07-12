@@ -20,6 +20,9 @@ tower-http = { workspace = true, features = ["cors"], optional = true }
 jni = "0.21"
 ndk-context = "0.1"
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default = []
 desktop = ["dep:axum", "dep:tower-http"]

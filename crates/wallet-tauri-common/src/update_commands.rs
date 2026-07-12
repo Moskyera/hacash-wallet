@@ -26,9 +26,10 @@ pub async fn wallet_download_app_update(
         safe_name
     };
 
+    // Android FileProvider exposes cacheDir + filesDir, not dataDir root (see android-file-provider-paths.xml).
     #[cfg(target_os = "android")]
     let dir = {
-        let base = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let base = app.path().app_cache_dir().map_err(|e| e.to_string())?;
         let updates = base.join("updates");
         std::fs::create_dir_all(&updates).map_err(|e| e.to_string())?;
         updates
