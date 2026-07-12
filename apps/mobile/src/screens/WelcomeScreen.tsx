@@ -60,17 +60,21 @@ export default function WelcomeScreen({
       {tab === "create" && (
         <div className="card">
           <h2>Create wallet</h2>
-          <p className="muted">Updating the app keeps your existing wallet. Use More → Security → Delete wallet to start over.</p>
+          <p className="muted">
+            A unique random wallet is generated. Your passphrase only encrypts it on this phone — the
+            same passphrase elsewhere creates a different wallet. Back up your secret in More →
+            Security. Updating the app keeps your wallet; Delete wallet starts over.
+          </p>
           <label className="label">Wallet name</label>
           <input
             placeholder="e.g. My Hacash"
             value={walletNameDraft}
             onChange={(e) => setWalletNameDraft(e.target.value)}
           />
-          <label className="label">Passphrase</label>
+          <label className="label">Encryption passphrase</label>
           <input
             type="password"
-            placeholder="Choose a strong passphrase"
+            placeholder="Encrypts wallet on this device (min 8 chars)"
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
@@ -89,9 +93,9 @@ export default function WelcomeScreen({
             value={walletNameDraft}
             onChange={(e) => setWalletNameDraft(e.target.value)}
           />
-          <label className="label">Seed or secret hex</label>
+          <label className="label">Secret hex or legacy passphrase</label>
           <textarea
-            placeholder="Paste your seed or hex"
+            placeholder="64-char hex, or legacy passphrase from older wallet versions"
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
           />

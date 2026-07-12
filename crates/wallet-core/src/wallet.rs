@@ -286,7 +286,12 @@ impl WalletService {
         if self.vault_path.exists() {
             return Err(WalletError::Vault("wallet already exists".into()));
         }
-        let account = WalletAccount::create(passphrase)?;
+        if passphrase.len() < 8 {
+            return Err(WalletError::Vault(
+                "passphrase (min 8 chars) required to encrypt your wallet".into(),
+            ));
+        }
+        let account = WalletAccount::create_random()?;
         let address = account.address();
         let mut secret = account.secret_hex();
         let vault = EncryptedVault::encrypt(&secret, &address, passphrase, &self.profile.name)?;

@@ -1,3 +1,4 @@
+use rand::RngCore;
 use sys::Account;
 
 use crate::error::{WalletError, WalletResult};
@@ -8,8 +9,19 @@ pub struct WalletAccount {
 }
 
 impl WalletAccount {
+    /// Deterministic account from seed text or passphrase (import / legacy recovery only).
     pub fn create(passphrase: &str) -> WalletResult<Self> {
         let account = Account::create_by(passphrase).map_err(|e| WalletError::Other(e))?;
+        Ok(Self { account })
+    }
+
+    /// Cryptographically random account — used for new wallet creation.
+    pub fn create_random() -> WalletResult<Self> {
+        let account = Account::create_randomly(&|buf| {
+            rand::thread_rng().fill_bytes(buf);
+            Ok(())
+        })
+        .map_err(|e| WalletError::Other(e))?;
         Ok(Self { account })
     }
 

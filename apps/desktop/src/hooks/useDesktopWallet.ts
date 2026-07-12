@@ -238,7 +238,9 @@ export function useDesktopWallet(
       try {
         await api.create(passphrase);
         await refreshStatus();
-        onInfo("Wallet created. Unlock with your passphrase.");
+        onInfo(
+          "Wallet created. Back up your secret in Security. Your passphrase only unlocks this device.",
+        );
       } catch (e) {
         onError(String(e));
       } finally {

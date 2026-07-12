@@ -50,12 +50,17 @@ export default function WelcomeScreen({ busy, onCreate, onImport, onWatchOnly }:
 
       {welcomeTab === "create" && (
         <>
-          <label>Choose a strong passphrase</label>
+          <p className="muted">
+            A unique random wallet is generated. Your passphrase only encrypts it on this device —
+            the same passphrase on another phone creates a different wallet. Back up your secret in
+            Security after creating.
+          </p>
+          <label>Encryption passphrase</label>
           <input
             type="password"
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
-            placeholder="Passphrase (min 12 chars recommended)"
+            placeholder="Passphrase (min 8 chars, 12+ recommended)"
           />
           <button
             disabled={busy || passphrase.length < 8}
@@ -88,12 +93,12 @@ export default function WelcomeScreen({ busy, onCreate, onImport, onWatchOnly }:
 
       {welcomeTab === "import" && (
         <>
-          <label>Seed (64-char hex or passphrase seed)</label>
+          <label>Secret hex or legacy passphrase seed</label>
           <textarea
             className="textarea"
             value={importSeed}
             onChange={(e) => setImportSeed(e.target.value)}
-            placeholder="64-char hex seed or passphrase-derived seed"
+            placeholder="64-char hex secret, or legacy passphrase from older wallet versions"
             rows={3}
           />
           <label>New passphrase for this device</label>

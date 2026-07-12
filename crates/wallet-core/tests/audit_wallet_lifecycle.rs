@@ -23,6 +23,26 @@ fn audit_double_create_rejected() {
 }
 
 #[test]
+fn audit_create_same_passphrase_yields_different_wallets() {
+    audit_gate("lifecycle_create_random", || {
+        let shared = "shared-passphrase12";
+        let mut addr_a = None;
+        with_isolated_wallet_dir(|| {
+            let mut svc = WalletService::new(None, None).unwrap();
+            svc.create_wallet(shared).unwrap();
+            addr_a = svc.status().address;
+        });
+        let mut addr_b = None;
+        with_isolated_wallet_dir(|| {
+            let mut svc = WalletService::new(None, None).unwrap();
+            svc.create_wallet(shared).unwrap();
+            addr_b = svc.status().address;
+        });
+        assert_ne!(addr_a, addr_b);
+    });
+}
+
+#[test]
 fn audit_double_unlock_rejected() {
     audit_gate("lifecycle_double_unlock", || {
         with_isolated_wallet_dir(|| {

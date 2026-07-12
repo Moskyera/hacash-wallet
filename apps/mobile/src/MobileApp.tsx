@@ -175,7 +175,10 @@ export default function MobileApp() {
       }
       setPassphrase("");
       await session.refresh();
-      showToast("Wallet created!", "success");
+      showToast(
+        "Wallet created! Back up your secret in More → Security.",
+        "success",
+      );
       hapticSuccess();
     } catch (e) {
       showToast(formatInvokeError(e), "error");
