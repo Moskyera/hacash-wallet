@@ -76,6 +76,20 @@ pub async fn quantum_create_hybrid(
 }
 
 #[tauri::command]
+pub async fn quantum_create_hybrid_from_privakey(
+    legacy_prikey_hex: String,
+    keystore_password: String,
+    state: State<'_, AppState>,
+) -> Result<QuantumAccountInfo, String> {
+    run_wallet_task(Arc::clone(&state.inner), move |svc| {
+        with_unlocked(svc, |s| {
+            s.quantum_create_hybrid_from_privakey(&legacy_prikey_hex, &keystore_password)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn quantum_import_keystore_v3(
     json: String,
     keystore_password: String,

@@ -1,4 +1,3 @@
-mod commands;
 mod platform;
 
 use hacash_wallet_core::hip23::{BalanceFloorInput, HeightScopeInput, Type3CheckInput};
@@ -62,9 +61,6 @@ pub fn run() {
         })
         .invoke_handler(wallet_tauri_common::wallet_invoke_handler![
             wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
-            commands::quantum_create_hybrid_from_privakey,
-            commands::quantum_prepare_airgap_type4,
-            commands::quantum_airgap_sign_type4,
             wallet_list_bills,
             wallet_validate_hip23,
             wallet_platform_security_status,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { api, type AppUpdateInfo } from "../api";
 import pkg from "../../package.json";
 
@@ -25,10 +25,6 @@ export default function AppUpdateSection({ onInfo, onError }: Props) {
       setChecking(false);
     }
   }, [onError]);
-
-  useEffect(() => {
-    void check();
-  }, [check]);
 
   const handleUpdate = async () => {
     if (!info?.download_url) return;

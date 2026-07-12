@@ -60,6 +60,7 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::quantum_commands::quantum_set_mode,
             wallet_tauri_common::quantum_commands::quantum_create_pqc,
             wallet_tauri_common::quantum_commands::quantum_create_hybrid,
+            wallet_tauri_common::quantum_commands::quantum_create_hybrid_from_privakey,
             wallet_tauri_common::quantum_commands::quantum_import_keystore_v3,
             wallet_tauri_common::quantum_commands::quantum_export_keystore_v3,
             wallet_tauri_common::quantum_commands::quantum_preview_keystore,

@@ -365,6 +365,11 @@ export const quantumApi = {
     invoke<QuantumAccountInfo>("quantum_create_pqc", { keystorePassword }),
   createHybrid: (keystorePassword: string, legacyPrikeyHex?: string) =>
     invoke<QuantumAccountInfo>("quantum_create_hybrid", { keystorePassword, legacyPrikeyHex }),
+  createHybridFromPrivakey: (legacyPrikeyHex: string, keystorePassword: string) =>
+    invoke<QuantumAccountInfo>("quantum_create_hybrid_from_privakey", {
+      legacyPrikeyHex,
+      keystorePassword,
+    }),
   importKeystore: (json: string, keystorePassword: string) =>
     invoke<QuantumAccountInfo>("quantum_import_keystore_v3", { json, keystorePassword }),
   exportKeystore: (keystorePassword: string, newPassword?: string) =>
