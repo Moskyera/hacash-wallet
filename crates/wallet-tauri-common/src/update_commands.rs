@@ -16,11 +16,28 @@ pub async fn wallet_download_app_update(
     url: String,
     filename: String,
 ) -> Result<String, String> {
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?;
-    let dest = dir.join(filename);
+    let safe_name = filename
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect::<String>();
+    let safe_name = if safe_name.is_empty() {
+        "hacash-wallet-update.apk".to_string()
+    } else {
+        safe_name
+    };
+
+    #[cfg(target_os = "android")]
+    let dir = {
+        let base = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let updates = base.join("updates");
+        std::fs::create_dir_all(&updates).map_err(|e| e.to_string())?;
+        updates
+    };
+
+    #[cfg(not(target_os = "android"))]
+    let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+
+    let dest = dir.join(safe_name);
     download_update_file(&url, &dest).await?;
     Ok(dest.to_string_lossy().to_string())
 }

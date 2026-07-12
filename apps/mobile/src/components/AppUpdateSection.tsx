@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type AppUpdateInfo } from "../api";
 import { WALLET_VERSION } from "../walletVersion";
 
@@ -10,14 +11,18 @@ export default function AppUpdateSection({ onToast }: Props) {
   const [info, setInfo] = useState<AppUpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [updating, setUpdating] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
 
   const check = useCallback(async () => {
     setChecking(true);
+    setLastError(null);
     try {
       const result = await api.checkAppUpdate("mobile", WALLET_VERSION.replace(/^v/, ""));
       setInfo(result);
     } catch (e) {
-      onToast(String(e), "error");
+      const msg = String(e);
+      setLastError(msg);
+      onToast(msg, "error");
     } finally {
       setChecking(false);
     }
@@ -27,17 +32,35 @@ export default function AppUpdateSection({ onToast }: Props) {
     void check();
   }, [check]);
 
+  const openBrowserDownload = async () => {
+    const url = info?.download_url ?? info?.release_page;
+    if (!url) return;
+    try {
+      await openUrl(url);
+      onToast("Download opened in browser. Install the APK when ready.", "info");
+    } catch (e) {
+      onToast(String(e), "error");
+    }
+  };
+
   const handleUpdate = async () => {
     if (!info?.download_url) return;
     setUpdating(true);
+    setLastError(null);
     try {
       const name = info.download_url.split("/").pop() ?? "hacash-wallet-update.apk";
       onToast("Downloading update…", "info");
       const path = await api.downloadAppUpdate(info.download_url, name);
+      onToast("Opening installer…", "info");
       await api.installMobileUpdate(path);
-      onToast("Confirm install on the system prompt. Wallet data is kept.", "success");
+      onToast("Confirm install on the system screen. Wallet data is kept.", "success");
     } catch (e) {
-      onToast(String(e), "error");
+      const msg = String(e);
+      setLastError(msg);
+      onToast(msg, "error");
+      if (info.download_url) {
+        onToast("Try “Open in browser” if install did not start.", "info");
+      }
     } finally {
       setUpdating(false);
     }
@@ -60,16 +83,25 @@ export default function AppUpdateSection({ onToast }: Props) {
       ) : (
         <p className="muted">You are on the latest release.</p>
       )}
+      {lastError ? <p className="update-error">{lastError}</p> : null}
       <div className="row-btns">
         <button type="button" disabled={checking || updating} onClick={() => void check()}>
           {checking ? "Checking…" : "Check again"}
         </button>
         {info?.update_available && info.download_url ? (
-          <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
-            {updating ? "Downloading…" : "Download & install"}
-          </button>
+          <>
+            <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
+              {updating ? "Downloading…" : "Download & install"}
+            </button>
+            <button type="button" disabled={updating} onClick={() => void openBrowserDownload()}>
+              Open in browser
+            </button>
+          </>
         ) : null}
       </div>
+      <p className="muted small">
+        If install asks for permission, enable &quot;Install unknown apps&quot; for Hacash Wallet, then try again.
+      </p>
       {info?.release_notes ? (
         <details className="update-notes">
           <summary>Release notes</summary>

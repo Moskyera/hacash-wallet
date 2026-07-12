@@ -12,13 +12,24 @@ fn install_apk_on_main(path: &str) -> Result<(), String> {
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
     let path_j = env.new_string(path).map_err(|e| format!("jstring: {e}"))?;
 
-    env.call_static_method(
+    let result = env.call_static_method(
         "org/hacash/wallet/mobile/ApkInstaller",
         "install",
         "(Landroid/app/Activity;Ljava/lang/String;)V",
         &[JValue::Object(&activity), JValue::Object(&path_j)],
-    )
-    .map_err(|e| format!("ApkInstaller.install: {e}"))?;
+    );
+
+    if env.exception_check().map_err(|e| format!("exception_check: {e}"))? {
+        env.exception_clear().map_err(|e| format!("exception_clear: {e}"))?;
+        return Err(
+            result
+                .err()
+                .map(|e| format!("ApkInstaller.install: {e}"))
+                .unwrap_or_else(|| "ApkInstaller.install failed".to_string()),
+        );
+    }
+
+    result.map_err(|e| format!("ApkInstaller.install: {e}"))?;
     Ok(())
 }
 

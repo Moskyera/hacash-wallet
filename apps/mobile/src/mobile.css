@@ -367,6 +367,12 @@ svg.dvhip5 .st16 {
   font-weight: 600;
 }
 
+.app-update-section .update-error {
+  color: var(--danger);
+  font-size: 0.85rem;
+  margin: 8px 0 0;
+}
+
 .app-update-section .update-notes pre {
   white-space: pre-wrap;
   font-size: 0.8rem;
