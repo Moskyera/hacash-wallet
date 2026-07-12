@@ -1,43 +1,50 @@
-# Hacash Wallet — Android releases
+# Hacash Wallet — Releases
 
-## Latest mobile APK
+## Latest downloads
 
-**File:** `hacash-wallet-mobile-v0.1.5-arm64.apk`  
-**Target:** Android arm64 (most phones, including GrapheneOS)  
-**Signed:** yes (release keystore)  
-**Backup:** disabled (`allowBackup=false`)  
-**Fixes in v0.1.5:**
-- Allow cleartext HTTP to Hacash node API on Android (`network_security_config` base-config + `usesCleartextTraffic=true` in release)
-- Graceful wallet data load: `Promise.allSettled` so partial node/hub failures do not block the UI
-- Enable Tauri `custom-protocol` feature in mobile Rust build (fixes `is_dev()` always true on Android → no more `127.0.0.1:1421` dev-server load)
-- Strip `devUrl` from bundled `tauri.conf.json` in release APK assets
-- Bundles UI inside APK (v0.1.3)
-- Branded Hacash launcher icon (v0.1.2)
-- Vault app-internal storage fix (v0.1.1)
+### Desktop (Windows x64) — v0.1.12
 
-### Direct download (GitHub)
+| File | Link |
+|------|------|
+| **Setup (recommended)** | [hacash-wallet-desktop-v0.1.12-x64-setup.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64-setup.exe) |
+| MSI installer | [hacash-wallet-desktop-v0.1.12-x64.msi](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64.msi) |
+| Portable EXE | [hacash-wallet-desktop-v0.1.12-x64-portable.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64-portable.exe) |
 
-```
-https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.5-mobile/hacash-wallet-mobile-v0.1.5-arm64.apk
-```
+### Mobile (Android arm64) — v0.1.13
 
-### Install on GrapheneOS
+| File | Link |
+|------|------|
+| APK | [hacash-wallet-mobile-v0.1.13-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.13-mobile/hacash-wallet-mobile-v0.1.13-arm64.apk) |
 
-1. Download the APK in **Vanadium** (or any browser) from the link above.
-2. Open **Files** → Downloads → tap the APK.
-3. If prompted, allow **Install unknown apps** for your browser or Files app (Settings → Apps → … → Install unknown apps).
-4. Confirm install → open **Hacash Wallet Mobile**.
+> App display name is **Hacash Wallet** (was "Hacash Wallet Mobile" in v0.1.12 and earlier).
 
-Or via `adb` from a PC:
+## Install — Desktop
+
+1. Download `hacash-wallet-desktop-v0.1.12-x64-setup.exe`
+2. Run installer → open **Hacash Wallet** from Start menu
+
+## Install — Mobile (GrapheneOS / Android)
+
+1. Download APK in browser
+2. Files → Downloads → tap APK
+3. Allow install from browser/Files if prompted
+4. Open **Hacash Wallet**
+
+Or via adb:
 
 ```bash
-adb install hacash-wallet-mobile-v0.1.5-arm64.apk
+adb install hacash-wallet-mobile-v0.1.13-arm64.apk
 ```
 
-### Verify checksum (optional)
+## Verify checksum (optional)
 
 ```powershell
-Get-FileHash releases\hacash-wallet-mobile-v0.1.5-arm64.apk -Algorithm SHA256
+Get-FileHash releases\hacash-wallet-desktop-v0.1.12-x64-setup.exe -Algorithm SHA256
 ```
 
-Expected SHA256: `BA84EE13F0636176EF9530530BA39D05DD28E4F4AB655A400AF5AB272B534490`
+Expected: `ABF0B5624E0CD81E06A5F22C7A04C8C2299F7D0303D060F55E92503963ECEBC0`
+
+## Release notes
+
+- Desktop: `v0.1.12-desktop-notes.md`
+- Mobile: `v0.1.13-mobile-notes.md`
