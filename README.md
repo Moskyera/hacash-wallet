@@ -163,6 +163,15 @@ Notes:
 - [x] Mobile Phase 1 (`apps/mobile/` + `wallet-tauri-common` — balance, history, bills)
 - [ ] Mobile Phase 2 (send + Fast Pay on device)
 
+## Community operation
+
+The legacy **Hacash Wallet** is intended for **community operation** (releases, hub operators, node runners). See [`docs/COMMUNITY-HANDOFF.md`](docs/COMMUNITY-HANDOFF.md).
+
+A separate **Hacash Quantum Wallet** (PQ-first fork) is planned for later — design only for now:
+
+- Full design: [`docs/hacash-quantum-wallet-design.md`](docs/hacash-quantum-wallet-design.md)
+- Summary: [`docs/hacash-quantum-wallet-design-summary.md`](docs/hacash-quantum-wallet-design-summary.md)
+
 ## Repository layout (jojoin model)
 
 | Repo | Contents |

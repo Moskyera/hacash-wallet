@@ -190,6 +190,23 @@ export type HubHealth = {
   ok: boolean;
   version: number;
   name?: string;
+  hub_address?: string;
+  hub_fee_mei?: number;
+};
+
+export type HubDiscoveryEntry = {
+  id: string;
+  name: string;
+  hub_url: string;
+  online: boolean;
+  hub_address: string | null;
+  hub_fee_mei: number | null;
+  error: string | null;
+};
+
+export type HubDiscoveryReport = {
+  hubs: HubDiscoveryEntry[];
+  online_count: number;
 };
 
 export type AirgapUnsigned = {
@@ -374,6 +391,8 @@ export const api = {
     invoke<string>("wallet_import", { seed, passphrase }),
   exportBackup: (passphrase: string) =>
     invoke<string>("wallet_export_backup", { passphrase }),
+  exportPrivateKey: (passphrase: string) =>
+    invoke<string>("wallet_export_private_key", { passphrase }),
   changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
     invoke<void>("wallet_change_passphrase", { oldPassphrase, newPassphrase }),
   unlock: (passphrase: string) => invoke<string>("wallet_unlock", { passphrase }),
@@ -392,6 +411,7 @@ export const api = {
   webauthnAuthFinish: (assertionJson: string) =>
     invoke<void>("wallet_webauthn_auth_finish", { assertionJson }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
+  discoverHubs: () => invoke<HubDiscoveryReport>("wallet_discover_hubs"),
   fastPayStatus: () => invoke<FastPayStatus>("wallet_fast_pay_status"),
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei: depositMei ?? null }),

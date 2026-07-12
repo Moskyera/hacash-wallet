@@ -8,6 +8,7 @@ import {
   ChannelSetupPreview,
   Hip23PatternCheck,
   HubHealth,
+  HubDiscoveryEntry,
   DustWhisperSettings,
   PrivacySettings,
   RelayHealthStatus,
@@ -26,6 +27,7 @@ import QuantumFundingCard from "./components/QuantumFundingCard";
 import QuantumNodeHealth from "./components/QuantumNodeHealth";
 import AddressBadge from "./components/AddressBadge";
 import BillsPanel from "./components/BillsPanel";
+import HubDiscoveryPanel from "./components/HubDiscoveryPanel";
 import PaymentQrDisplay from "./components/PaymentQrDisplay";
 import PaymentQrScanner from "./components/PaymentQrScanner";
 import HacdSendPanel from "./components/HacdSendPanel";
@@ -148,6 +150,9 @@ export default function App() {
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
   const [backupJson, setBackupJson] = useState("");
   const [exportPassphrase, setExportPassphrase] = useState("");
+  const [privateKeyPass, setPrivateKeyPass] = useState("");
+  const [privateKey, setPrivateKey] = useState<string | null>(null);
+  const privateKeyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [hipTxType, setHipTxType] = useState("3");
   const [hipChainHeight, setHipChainHeight] = useState(String(ISTANBUL_HEIGHT));
@@ -487,6 +492,32 @@ export default function App() {
       setInfo("Fast Pay is ready — your next send can be instant.");
     } catch (e) {
       setError(formatInvokeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleApplyHub(entry: HubDiscoveryEntry) {
+    if (!settings || !entry.online) return;
+    setBusy(true);
+    clearMessages();
+    try {
+      const next: WalletSettings = {
+        ...settings,
+        l2_hub_url: entry.hub_url,
+        hub_right_address: entry.hub_address ?? settings.hub_right_address,
+      };
+      await api.updateSettings(next);
+      setSettings(next);
+      setHubUrl(entry.hub_url);
+      if (entry.hub_address) setHubAddress(entry.hub_address);
+      await refreshStatus();
+      await refreshFastPay();
+      setHubHealth(undefined);
+      setInfo(`Using ${entry.name}`);
+    } catch (e) {
+      setError(formatInvokeError(e));
+      throw e;
     } finally {
       setBusy(false);
     }
@@ -1283,6 +1314,25 @@ export default function App() {
               </ul>
             </div>
 
+            <div className="fast-pay-card">
+              <h3>Find a hub</h3>
+              <p className="muted small">
+                Scan for online Fast Pay providers, then pick one to use.
+              </p>
+              <HubDiscoveryPanel
+                settings={settings}
+                activeHubUrl={hubUrl}
+                busy={busy}
+                setBusy={setBusy}
+                onApplyHub={handleApplyHub}
+                onToast={(msg, kind) => {
+                  clearMessages();
+                  if (kind === "error") setError(msg);
+                  else setInfo(msg);
+                }}
+              />
+            </div>
+
             <BillsPanel
               hideAddresses={hideAddresses}
               onError={(msg) => setError(msg)}
@@ -2014,6 +2064,69 @@ export default function App() {
                 aria-label="Exported backup JSON"
               />
             )}
+
+            <hr className="divider" />
+
+            <h3>Private key</h3>
+            <p className="muted">
+              Advanced: view your wallet private key. Anyone with this key controls your funds.
+              Never share it.
+            </p>
+            <label>Passphrase</label>
+            <input
+              type="password"
+              value={privateKeyPass}
+              onChange={(e) => setPrivateKeyPass(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={busy || status?.watch_only || !privateKeyPass}
+              onClick={() => {
+                setBusy(true);
+                clearMessages();
+                void api
+                  .exportPrivateKey(privateKeyPass)
+                  .then((hex) => {
+                    setPrivateKey(hex);
+                    setPrivateKeyPass("");
+                    setInfo("Private key revealed. It will hide in 60s.");
+                    if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
+                    privateKeyTimer.current = setTimeout(() => setPrivateKey(null), 60_000);
+                  })
+                  .catch((e) => setError(formatInvokeError(e)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Reveal private key
+            </button>
+            {privateKey && (
+              <>
+                <p className="mono small" style={{ wordBreak: "break-all", marginTop: "0.75rem" }}>
+                  {privateKey}
+                </p>
+                <div className="actions-row" style={{ marginTop: "0.5rem" }}>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copyWithPrivacyClear(privateKey, privacy.clipboard_clear_secs).then(() =>
+                        setInfo("Private key copied."),
+                      )
+                    }
+                  >
+                    Copy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPrivateKey(null);
+                      if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
+                    }}
+                  >
+                    Hide
+                  </button>
+                </div>
+              </>
+            )}
           </section>
         )}
 
@@ -2215,6 +2328,25 @@ export default function App() {
                   {status?.webauthn_enabled ? " Registered." : " Not registered yet."}
                 </p>
               </div>
+            </div>
+
+            <div className="info-box">
+              <strong>Enable YubiKey or Windows Hello</strong>
+              <ol style={{ margin: "0.5rem 0 0", paddingLeft: "1.25rem" }}>
+                <li>Plug in your YubiKey (or use built-in Windows Hello).</li>
+                <li>
+                  Click <strong>Register WebAuthn</strong> below and follow the browser prompt
+                  (touch the key or use PIN/biometric).
+                </li>
+                <li>
+                  Optional: choose <strong>Paranoid profile</strong> for stricter timeouts and
+                  WebAuthn on high-value sends.
+                </li>
+                <li>
+                  Optional: set <strong>WebAuthn gate (all signs)</strong> to require hardware
+                  verification before every transaction.
+                </li>
+              </ol>
             </div>
 
             <div className="actions-row">

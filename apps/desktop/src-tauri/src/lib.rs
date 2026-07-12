@@ -259,6 +259,7 @@ pub fn run() {
             wallet_tauri_common::commands::wallet_enable_fast_pay,
             wallet_tauri_common::commands::wallet_hub_health,
             wallet_tauri_common::commands::wallet_discover_hubs,
+            wallet_tauri_common::commands::wallet_export_private_key,
             wallet_tauri_common::commands::wallet_list_bill_summaries,
             wallet_tauri_common::commands::wallet_export_bill_json,
             wallet_tauri_common::commands::wallet_export_all_bills_json,
