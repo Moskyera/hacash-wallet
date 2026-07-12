@@ -120,28 +120,103 @@ pub struct DiscoveredHub {
     pub hub_address: Option<String>,
 }
 
-pub async fn discover_healthy_hub() -> Option<DiscoveredHub> {
-    for preset in CSP_PRESETS {
-        let client = L2HubClient::new(preset.hub_url);
-        let health = client.health().await.ok()?;
-        if !health.ok {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubDiscoveryEntry {
+    pub id: String,
+    pub name: String,
+    pub hub_url: String,
+    pub online: bool,
+    pub hub_address: Option<String>,
+    pub hub_fee_mei: Option<f64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubDiscoveryReport {
+    pub hubs: Vec<HubDiscoveryEntry>,
+    pub online_count: usize,
+}
+
+pub async fn discover_all_hubs(extra_urls: &[String]) -> HubDiscoveryReport {
+    let mut candidates: Vec<(String, String, String)> = CSP_PRESETS
+        .iter()
+        .map(|preset| {
+            (
+                preset.id.to_string(),
+                preset.name.to_string(),
+                preset.hub_url.to_string(),
+            )
+        })
+        .collect();
+
+    for raw in extra_urls {
+        let url = raw.trim().trim_end_matches('/').to_string();
+        if url.is_empty() || candidates.iter().any(|(_, _, u)| u == &url) {
             continue;
         }
-        let hub_address = health
-            .hub_address
-            .clone()
-            .filter(|a| !a.is_empty())
-            .or_else(|| {
-                (!preset.hub_address.is_empty()).then(|| preset.hub_address.to_string())
-            });
-        return Some(DiscoveredHub {
-            preset_id: preset.id.to_string(),
-            name: health.name.unwrap_or_else(|| preset.name.to_string()),
-            hub_url: preset.hub_url.to_string(),
-            hub_address,
-        });
+        candidates.push(("custom".into(), "Configured hub".into(), url));
     }
-    None
+
+    let mut hubs = Vec::with_capacity(candidates.len());
+    for (id, name, hub_url) in candidates {
+        hubs.push(probe_hub_entry(id, name, hub_url).await);
+    }
+
+    let online_count = hubs.iter().filter(|h| h.online).count();
+    HubDiscoveryReport { hubs, online_count }
+}
+
+async fn probe_hub_entry(id: String, fallback_name: String, hub_url: String) -> HubDiscoveryEntry {
+    let preset = CSP_PRESETS.iter().find(|p| p.id == id);
+    let client = L2HubClient::new(&hub_url);
+    match client.health().await {
+        Ok(health) if health.ok => HubDiscoveryEntry {
+            id,
+            name: health
+                .name
+                .filter(|n| !n.is_empty())
+                .unwrap_or(fallback_name),
+            hub_url,
+            online: true,
+            hub_address: health
+                .hub_address
+                .filter(|a| !a.is_empty())
+                .or_else(|| {
+                    preset
+                        .and_then(|p| (!p.hub_address.is_empty()).then(|| p.hub_address.to_string()))
+                }),
+            hub_fee_mei: health.hub_fee_mei,
+            error: None,
+        },
+        Ok(_) => HubDiscoveryEntry {
+            id,
+            name: fallback_name,
+            hub_url,
+            online: false,
+            hub_address: None,
+            hub_fee_mei: None,
+            error: Some("Hub returned ok=false".into()),
+        },
+        Err(e) => HubDiscoveryEntry {
+            id,
+            name: fallback_name,
+            hub_url,
+            online: false,
+            hub_address: None,
+            hub_fee_mei: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+pub async fn discover_healthy_hub() -> Option<DiscoveredHub> {
+    let report = discover_all_hubs(&[]).await;
+    report.hubs.into_iter().find(|h| h.online).map(|h| DiscoveredHub {
+        preset_id: h.id,
+        name: h.name,
+        hub_url: h.hub_url,
+        hub_address: h.hub_address,
+    })
 }
 
 pub async fn evaluate_fast_pay(

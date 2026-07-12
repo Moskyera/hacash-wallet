@@ -98,7 +98,7 @@ where
     #[cfg(not(target_os = "android"))]
     {
         shared_http_client()
-            .post(url)
+            .post(&url)
             .json(&payload)
             .send()
             .await
@@ -131,7 +131,7 @@ where
     #[cfg(not(target_os = "android"))]
     {
         shared_http_client()
-            .post(url)
+            .post(&url)
             .header("content-type", "text/plain")
             .body(body)
             .send()

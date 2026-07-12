@@ -512,6 +512,37 @@ button.small {
   border-color: rgba(245, 166, 35, 0.35);
 }
 
+.hub-discovery-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 0.75rem;
+}
+
+.hub-discovery-item {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.hub-discovery-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.hub-discovery-url {
+  word-break: break-all;
+  margin: 0.35rem 0 0;
+}
+
+.hub-discovery-item > button {
+  margin-top: 0.65rem;
+  width: 100%;
+}
+
 .badge {
   display: inline-block;
   padding: 4px 10px;

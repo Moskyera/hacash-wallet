@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type ChannelInfo, type ChannelSetupPreview, type FastPayStatus } from "../api";
+import HubDiscoveryPanel from "../components/HubDiscoveryPanel";
+import {
+  api,
+  type ChannelInfo,
+  type ChannelSetupPreview,
+  type FastPayStatus,
+  type HubDiscoveryEntry,
+  type WalletSettings,
+} from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import {
   fastPayHowItWorks,
@@ -11,6 +19,7 @@ import { maskAddress } from "../privacy";
 
 type Props = {
   fastPay: FastPayStatus | null;
+  settings: WalletSettings | null;
   hubUrl: string;
   hubAddress: string;
   userAddress: string | null | undefined;
@@ -19,11 +28,13 @@ type Props = {
   busy: boolean;
   setBusy: (b: boolean) => void;
   onRefresh: () => Promise<void>;
+  onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
 };
 
 export default function FastPayChannelScreen({
   fastPay,
+  settings,
   hubUrl,
   hubAddress,
   userAddress,
@@ -32,6 +43,7 @@ export default function FastPayChannelScreen({
   busy,
   setBusy,
   onRefresh,
+  onApplyHub,
   onToast,
 }: Props) {
   const [channel, setChannel] = useState<ChannelInfo | null>(null);
@@ -168,6 +180,22 @@ export default function FastPayChannelScreen({
           </>
         )}
         {hubUrl && <p className="muted small">Hub: {hubUrl}</p>}
+      </div>
+
+      <div className="card">
+        <h2>Find a hub</h2>
+        <p className="muted small">Scan for online Fast Pay providers, then pick one to use.</p>
+        <HubDiscoveryPanel
+          settings={settings}
+          activeHubUrl={hubUrl}
+          busy={busy}
+          setBusy={setBusy}
+          onApplyHub={async (entry) => {
+            await onApplyHub(entry);
+            await onRefresh();
+          }}
+          onToast={onToast}
+        />
       </div>
 
       {channel && (

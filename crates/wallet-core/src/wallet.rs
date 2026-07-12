@@ -23,7 +23,8 @@ use crate::hip23::{
 };
 
 use crate::fast_pay::{
-    apply_discovered_hub, discover_healthy_hub, evaluate_fast_pay, FastPayStatus,
+    apply_discovered_hub, discover_all_hubs, discover_healthy_hub, evaluate_fast_pay,
+    FastPayStatus, HubDiscoveryReport,
     DEFAULT_CHANNEL_DEPOSIT_MEI,
 };
 use crate::history::{TxHistory, TxRecord};
@@ -769,6 +770,16 @@ impl WalletService {
     pub async fn fast_pay_status(&self) -> WalletResult<FastPayStatus> {
         let user = self.unlocked.as_ref().map(|s| s.address.as_str());
         evaluate_fast_pay(&self.node, &self.settings, user).await
+    }
+
+    pub async fn discover_hubs(&self) -> WalletResult<HubDiscoveryReport> {
+        let extra = self
+            .settings
+            .l2_hub_url
+            .clone()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(discover_all_hubs(&extra).await)
     }
 
     async fn maybe_discover_hub(&mut self) -> WalletResult<()> {

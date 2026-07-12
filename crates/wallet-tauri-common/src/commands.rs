@@ -128,6 +128,15 @@ pub async fn wallet_hub_health(
 }
 
 #[tauri::command]
+pub async fn wallet_discover_hubs(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let report = svc.discover_hubs().await.map_err(|e| e.to_string())?;
+    serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn wallet_export_backup(
     passphrase: String,
     state: State<'_, AppState>,

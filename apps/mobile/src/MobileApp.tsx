@@ -312,6 +312,28 @@ export default function MobileApp() {
     }
   };
 
+  const handleApplyHub = async (entry: import("./api").HubDiscoveryEntry) => {
+    if (!session.settings || !entry.online) return;
+    session.setBusy(true);
+    try {
+      const next = {
+        ...session.settings,
+        l2_hub_url: entry.hub_url,
+        hub_right_address: entry.hub_address ?? session.settings.hub_right_address,
+      };
+      await api.updateSettings(next);
+      session.setSettings(next);
+      setSettingsHubUrl(entry.hub_url);
+      await session.refresh();
+      showToast(`Using ${entry.name}`, "success");
+    } catch (e) {
+      showToast(formatInvokeError(e), "error");
+      throw e;
+    } finally {
+      session.setBusy(false);
+    }
+  };
+
   const handleExportBackup = async () => {
     session.setBusy(true);
     try {
@@ -533,6 +555,7 @@ export default function MobileApp() {
             setContactAddress={setContactAddress}
             onClearHistory={() => void session.handleClearHistory()}
             onSaveSettings={() => void handleSaveSettings()}
+            onApplyHub={(entry) => handleApplyHub(entry)}
             onSaveWalletName={session.handleSaveWalletName}
             onExportBackup={() => void handleExportBackup()}
             onChangePassphrase={() => void handleChangePassphrase()}

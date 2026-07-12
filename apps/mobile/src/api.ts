@@ -106,6 +106,21 @@ export type HubHealth = {
   hub_fee_mei?: number;
 };
 
+export type HubDiscoveryEntry = {
+  id: string;
+  name: string;
+  hub_url: string;
+  online: boolean;
+  hub_address: string | null;
+  hub_fee_mei: number | null;
+  error: string | null;
+};
+
+export type HubDiscoveryReport = {
+  hubs: HubDiscoveryEntry[];
+  online_count: number;
+};
+
 export type Hip23Check = {
   ok: boolean;
   warnings: string[];
@@ -352,6 +367,7 @@ export const api = {
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
+  discoverHubs: () => invoke<HubDiscoveryReport>("wallet_discover_hubs"),
   previewSend: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<SendPreview>("wallet_preview_send", { to, amountMei, sendOptions }),
   sendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>

@@ -40,7 +40,9 @@ pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillS
 pub use error::{WalletError, WalletResult};
 pub use history::TxRecord;
 pub use hip23::{Hip23PatternCheck, Type3CheckInput, HeightScopeInput, BalanceFloorInput};
-pub use fast_pay::{FastPayState, FastPayStatus, DEFAULT_CHANNEL_DEPOSIT_MEI};
+pub use fast_pay::{
+    FastPayState, FastPayStatus, HubDiscoveryEntry, HubDiscoveryReport, DEFAULT_CHANNEL_DEPOSIT_MEI,
+};
 pub use hacd_send::{HacdSendPreview, DIAMOND_TRANSFER_FEE_WIRE};
 pub use btc_send::{BtcSendPreview, btc_to_satoshi, satoshi_to_btc};
 pub use l2_hub::HubHealth;

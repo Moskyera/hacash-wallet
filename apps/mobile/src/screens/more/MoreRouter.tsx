@@ -22,6 +22,7 @@ import { maskAddress } from "../../privacy";
 import { MIN_WALLET_PASS } from "../../quantumMeta";
 import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
 import { formatInvokeError } from "../../formatInvokeError";
+import HubDiscoveryPanel from "../../components/HubDiscoveryPanel";
 import { fastPayMenuBadge } from "../../fastPayUi";
 import { downloadJson } from "../../utils/downloadJson";
 import { runWebAuthnAuth, runWebAuthnRegister, webAuthnAvailable } from "../../webauthn";
@@ -78,6 +79,7 @@ type Props = {
   setContactAddress: (v: string) => void;
   onClearHistory: () => void;
   onSaveSettings: () => void;
+  onApplyHub: (entry: import("../../api").HubDiscoveryEntry) => Promise<void>;
   onSaveWalletName: () => void;
   onExportBackup: () => void;
   onChangePassphrase: () => void;
@@ -131,6 +133,7 @@ export default function MoreRouter(props: Props) {
     setContactAddress,
     onClearHistory,
     onSaveSettings,
+    onApplyHub,
     onSaveWalletName,
     onExportBackup,
     onChangePassphrase,
@@ -336,6 +339,14 @@ export default function MoreRouter(props: Props) {
               {hubHealth.hub_fee_mei != null && ` · fee ${hubHealth.hub_fee_mei} HAC`}
             </p>
           )}
+          <HubDiscoveryPanel
+            settings={settings}
+            activeHubUrl={settingsHubUrl}
+            busy={busy}
+            setBusy={setBusy}
+            onApplyHub={onApplyHub}
+            onToast={onToast}
+          />
           <div className="row-btns">
             <button className="primary" disabled={busy} onClick={() => void onSaveSettings()}>
               Save settings
@@ -536,6 +547,7 @@ export default function MoreRouter(props: Props) {
       {page === "fastpay" && (
         <FastPayChannelScreen
           fastPay={fastPay}
+          settings={settings}
           hubUrl={settingsHubUrl}
           hubAddress={settings?.hub_right_address ?? ""}
           userAddress={statusAddress}
@@ -544,6 +556,7 @@ export default function MoreRouter(props: Props) {
           busy={busy}
           setBusy={setBusy}
           onRefresh={onRefresh}
+          onApplyHub={onApplyHub}
           onToast={onToast}
         />
       )}
