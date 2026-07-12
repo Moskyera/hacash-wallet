@@ -10,7 +10,8 @@ if (Test-Path $tauriConf) {
     $conf = Get-Content $tauriConf -Raw | ConvertFrom-Json
     if ($conf.version -ne $ver) {
         $conf.version = $ver
-        $conf | ConvertTo-Json -Depth 20 | Set-Content -Path $tauriConf -Encoding UTF8
+        $json = $conf | ConvertTo-Json -Depth 20
+        [System.IO.File]::WriteAllText($tauriConf, $json + "`n", [System.Text.UTF8Encoding]::new($false))
         Write-Host "Synced tauri.conf.json version -> $ver" -ForegroundColor Green
     } else {
         Write-Host "tauri.conf.json already at $ver" -ForegroundColor Green
