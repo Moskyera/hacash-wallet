@@ -989,7 +989,6 @@ export default function App() {
         <div className="brand">
           <WalletLogo size="sm" />
           <div>
-            <div className="brand-title">Hacash Wallet</div>
             <div className="brand-sub">Secure Smart Send</div>
           </div>
         </div>

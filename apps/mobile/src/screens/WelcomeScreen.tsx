@@ -42,7 +42,6 @@ export default function WelcomeScreen({
     <div className="auth-screen">
       <div className="auth-hero">
         <WalletLogo size="lg" />
-        <h1>Hacash Wallet</h1>
         <p className="muted">Fast QR payments · L2 Fast Pay · Quantum-ready</p>
       </div>
 

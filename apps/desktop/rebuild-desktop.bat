@@ -3,11 +3,14 @@ setlocal
 set "ROOT=C:\Users\KQHEX\Documents\moskyera-quantum-wallet"
 set "DESKTOP=%ROOT%\apps\desktop"
 set "LOG=%DESKTOP%\rebuild-desktop.log"
-set "VER=0.1.18"
+set "VER=0.1.20"
 
 echo === desktop v%VER% rebuild started %DATE% %TIME% === > "%LOG%"
 
 cd /d "%DESKTOP%"
+powershell -ExecutionPolicy Bypass -File "%DESKTOP%\generate-app-icons.ps1" >> "%LOG%" 2>&1
+if errorlevel 1 goto fail
+
 call yarn build >> "%LOG%" 2>&1
 if errorlevel 1 goto fail
 

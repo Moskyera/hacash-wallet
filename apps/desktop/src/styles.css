@@ -53,16 +53,16 @@ body {
 .wallet-logo-sm {
   width: auto;
   height: auto;
-  max-width: 160px;
-  max-height: 42px;
+  max-width: 200px;
+  max-height: 64px;
   image-rendering: auto;
 }
 
 .wallet-logo-lg {
-  width: auto;
+  width: min(400px, 42vw);
   height: auto;
-  max-width: min(280px, 40vw);
-  max-height: 120px;
+  max-width: min(400px, 42vw);
+  max-height: none;
   margin: 0 auto 16px;
   image-rendering: auto;
 }

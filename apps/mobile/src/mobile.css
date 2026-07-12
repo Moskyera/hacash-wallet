@@ -76,10 +76,10 @@ body {
 }
 
 .wallet-logo-lg {
-  width: auto;
+  width: min(360px, 92vw);
   height: auto;
-  max-width: min(240px, 88vw);
-  max-height: 112px;
+  max-width: min(360px, 92vw);
+  max-height: none;
   margin: 0 auto 12px;
   padding: 0;
   border-radius: 0;
@@ -89,8 +89,8 @@ body {
 .wallet-logo-sm {
   width: auto;
   height: auto;
-  max-width: 120px;
-  max-height: 36px;
+  max-width: 168px;
+  max-height: 56px;
   flex-shrink: 0;
   padding: 0;
   border-radius: 0;
@@ -98,10 +98,10 @@ body {
 }
 
 .wallet-logo-splash {
-  width: auto;
+  width: min(320px, 88vw);
   height: auto;
-  max-width: 200px;
-  max-height: 140px;
+  max-width: min(320px, 88vw);
+  max-height: none;
   margin: 0;
   padding: 0;
   border-radius: 0;
