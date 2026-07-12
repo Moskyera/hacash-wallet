@@ -164,13 +164,13 @@ impl NodeClient {
     }
 
     pub async fn ping(&self) -> WalletResult<serde_json::Value> {
-        // /query/metrics returns 404 on the public node; any JSON response proves reachability.
-        let url = format!("{}/query/balance?unit=mei&address=1", self.base_url);
-        let body: BalanceResponse = http_get_json(url).await?;
+        // Public nodeapi has no /query/metrics (404). /query/latest is always JSON with ret=0.
+        let url = format!("{}/query/latest", self.base_url);
+        let latest: serde_json::Value = http_get_json(url).await?;
         Ok(serde_json::json!({
             "reachable": true,
             "node": self.base_url,
-            "ret": body.ret
+            "latest": latest
         }))
     }
 

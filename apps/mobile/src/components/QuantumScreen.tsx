@@ -541,8 +541,19 @@ export default function QuantumScreen({
               Refresh
             </button>
           </div>
+          {nodeUrl && (
+            <p className="muted small">
+              Node: <code>{nodeUrl}</code>
+            </p>
+          )}
           <p className={`quantum-node-status ${nodeMetrics && !nodeErr ? "ok" : "bad"}`}>
-            {nodeMetrics && !nodeErr ? "Node reachable" : "Node unreachable"}
+            {nodeMetrics && !nodeErr
+              ? (() => {
+                  const latest = nodeMetrics.latest as { height?: number } | undefined;
+                  const h = latest?.height;
+                  return h != null ? `Node reachable · height ${h}` : "Node reachable";
+                })()
+              : "Node unreachable"}
           </p>
           {nodeMetrics && (
             <pre className="quantum-metrics">{JSON.stringify(nodeMetrics, null, 2)}</pre>
