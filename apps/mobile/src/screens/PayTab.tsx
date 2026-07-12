@@ -1,10 +1,18 @@
 import { useState } from "react";
 import AssetSelector from "../components/AssetSelector";
+import DustWhisperPayOptions from "../components/DustWhisperPayOptions";
 import HacdDiamondVisual from "../components/HacdDiamondVisual";
 import PaymentQrScanner from "../components/PaymentQrScanner";
 import { useHacdSend } from "../hooks/useHacdSend";
 import { useBtcSend } from "../hooks/useBtcSend";
-import type { HubFeePayer, PlatformSecurityStatus, SendPreview, WalletSettings } from "../api";
+import type {
+  DustWhisperSettings,
+  HubFeePayer,
+  PlatformSecurityStatus,
+  SendPreview,
+  WalletSettings,
+} from "../api";
+import { resolveDustWhisper } from "../dustWhisper";
 import type { SavedContact } from "../contacts";
 import { maskAddress } from "../privacy";
 import { BIOMETRIC_THRESHOLD_MEI } from "../utils/appConstants";
@@ -34,7 +42,9 @@ type Props = {
   settings: WalletSettings | null;
   platformSec: PlatformSecurityStatus | null;
   busy: boolean;
+  dustWhisper?: DustWhisperSettings | null;
   onPersistSendPrefs: (hubFee: HubFeePayer, forceL1: boolean) => void;
+  onPersistDustWhisper: (patch: Partial<DustWhisperSettings>) => void | Promise<void>;
   onResetPreview: () => void;
   onPreviewSend: () => void;
   onConfirmSend: () => void;
@@ -63,7 +73,9 @@ export default function PayTab({
   settings,
   platformSec,
   busy,
+  dustWhisper,
   onPersistSendPrefs,
+  onPersistDustWhisper,
   onResetPreview,
   onPreviewSend,
   onConfirmSend,
@@ -94,6 +106,8 @@ export default function PayTab({
   });
 
   const primaryHacd = hacd.selected[0] ?? normalizeHacdName(manualHacd);
+  const whisper = resolveDustWhisper(dustWhisper);
+  const whisperActive = whisper.enabled && whisper.relay_urls.some((u) => u.trim().length > 0);
 
   const applyManualHacd = (raw: string) => {
     const norm = normalizeHacdName(raw);
@@ -211,6 +225,13 @@ export default function PayTab({
               />
               Force on-chain (L1)
             </label>
+            <p className="muted small">Fee payer applies to Fast Pay only. L1 fees are always paid by you.</p>
+            <DustWhisperPayOptions
+              dustWhisper={whisper}
+              onPersist={onPersistDustWhisper}
+              disabled={busy}
+              showFastPayNote
+            />
           </div>
           <button className="primary" disabled={busy || !sendTo || !sendAmount} onClick={() => void onPreviewSend()}>
             Preview payment
@@ -227,6 +248,9 @@ export default function PayTab({
                 {preview.plan.fee_breakdown.recipient_credit_mei.toFixed(3)} HAC
               </p>
               {!preview.hip23.ok && <p className="error">{preview.hip23.errors.join("; ")}</p>}
+              {preview.plan.rail === "L1OnChain" && whisperActive ? (
+                <p className="muted small">Broadcast via DUST Whisper relay.</p>
+              ) : null}
               {platformSec?.native_biometric_available && preview.amount_mei >= BIOMETRIC_THRESHOLD_MEI && (
                 <p className="muted">Biometric confirmation required.</p>
               )}
@@ -353,6 +377,13 @@ export default function PayTab({
           <p className="muted small">
             On chain L1. Network fee is estimated from the node at preview. For stack tokens use Launchpad.
           </p>
+          <div className="option-block">
+            <DustWhisperPayOptions
+              dustWhisper={whisper}
+              onPersist={onPersistDustWhisper}
+              disabled={busy}
+            />
+          </div>
 
           <button
             className="primary"
@@ -382,6 +413,7 @@ export default function PayTab({
                 → <code>{maskAddress(hacd.preview.to, hideAddresses)}</code>
               </p>
               <p className="muted">Network fee: {hacd.preview.fee_mei.toFixed(3)} HAC</p>
+              {whisperActive ? <p className="muted small">Broadcast via DUST Whisper relay.</p> : null}
               {!hacd.preview.hip23.ok && <p className="error">{hacd.preview.hip23.errors.join("; ")}</p>}
               {platformSec?.native_biometric_available && (
                 <p className="muted">Biometric confirmation will be required.</p>
@@ -424,6 +456,13 @@ export default function PayTab({
               btc.resetPreview();
             }}
           />
+          <div className="option-block">
+            <DustWhisperPayOptions
+              dustWhisper={whisper}
+              onPersist={onPersistDustWhisper}
+              disabled={busy}
+            />
+          </div>
           <button
             className="primary"
             disabled={
@@ -444,6 +483,7 @@ export default function PayTab({
                 <code>{maskAddress(btc.preview.to, hideAddresses)}</code>
               </p>
               <p className="muted">Network fee: {btc.preview.fee_mei.toFixed(3)} HAC</p>
+              {whisperActive ? <p className="muted small">Broadcast via DUST Whisper relay.</p> : null}
               {!btc.preview.hip23.ok && (
                 <p className="error">{btc.preview.hip23.errors.join("; ")}</p>
               )}

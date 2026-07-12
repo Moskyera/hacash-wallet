@@ -76,8 +76,9 @@ export default function SecurityScreen({
     }
     setBusy(true);
     try {
-      const options = await api.webauthnRegisterBegin(webAuthnClientOrigin());
-      const cred = await runWebAuthnRegister(options);
+      const origin = webAuthnClientOrigin();
+      const options = await api.webauthnRegisterBegin(origin);
+      const cred = await runWebAuthnRegister(options, origin);
       await api.webauthnRegisterFinish(cred);
       await onRefresh();
       onToast("WebAuthn passkey registered.", "success");
@@ -92,8 +93,9 @@ export default function SecurityScreen({
     if (!webauthnReady || !settings?.webauthn_enabled) return;
     setBusy(true);
     try {
-      const options = await api.webauthnAuthBegin(webAuthnClientOrigin());
-      const assertion = await runWebAuthnAuth(options);
+      const origin = webAuthnClientOrigin();
+      const options = await api.webauthnAuthBegin(origin);
+      const assertion = await runWebAuthnAuth(options, origin);
       await api.webauthnAuthFinish(assertion);
       onToast("WebAuthn verification OK.", "success");
     } catch (e) {
@@ -377,7 +379,7 @@ export default function SecurityScreen({
           </button>
         </div>
         {!webauthnReady ? (
-          <p className="muted small">Passkey not available in this WebView. Update the app if this persists.</p>
+          <p className="muted small">Passkey not available on this device.</p>
         ) : null}
       </div>
       <button type="button" onClick={() => void onLock()}>

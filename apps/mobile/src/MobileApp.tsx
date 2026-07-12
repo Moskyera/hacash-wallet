@@ -547,7 +547,9 @@ export default function MobileApp() {
             settings={session.settings}
             platformSec={session.platformSec}
             busy={session.busy}
+            dustWhisper={session.dustWhisper}
             onPersistSendPrefs={(h, f) => void payment.persistSendPrefs(h, f)}
+            onPersistDustWhisper={(patch) => void session.persistDustWhisper(patch)}
             onResetPreview={payment.resetPreview}
             onPreviewSend={() => void payment.handlePreviewSend()}
             onConfirmSend={() => void payment.handleConfirmSend()}

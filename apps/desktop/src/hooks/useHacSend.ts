@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, HubFeePayer, SendOptions, SendPreview, WalletSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
-import { runWebAuthnAuth } from "../webauthn";
+import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 import { sendSuccessMessage } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
 import type { Screen } from "../screens/types";
@@ -141,7 +141,8 @@ export function useHacSend(opts: {
         (status?.security_profile !== "paranoid" && amount >= 100);
       if (needs2fa && status?.webauthn_enabled) {
         onInfo("Complete WebAuthn (YubiKey / Windows Hello) in the system prompt…");
-        const options = await api.webauthnAuthBegin();
+        const origin = webAuthnClientOrigin();
+        const options = await api.webauthnAuthBegin(origin);
         const assertion = await runWebAuthnAuth(options);
         await api.webauthnAuthFinish(assertion);
       } else if (needs2fa) {
@@ -151,7 +152,8 @@ export function useHacSend(opts: {
           );
           await api.confirmBiometricNative();
         } else if (status?.webauthn_enabled) {
-          const options = await api.webauthnAuthBegin();
+          const origin = webAuthnClientOrigin();
+          const options = await api.webauthnAuthBegin(origin);
           const assertion = await runWebAuthnAuth(options);
           await api.webauthnAuthFinish(assertion);
         } else {

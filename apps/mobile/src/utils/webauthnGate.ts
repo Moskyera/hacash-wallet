@@ -31,8 +31,9 @@ export async function maybeWebAuthnGate(opts: {
   if (!needsSecondFactor(amountMei, securityProfile)) return;
 
   if (webauthnEnabled) {
-    const options = await api.webauthnAuthBegin(clientOrigin);
-    const assertion = await runWebAuthnAuth(options);
+    const origin = clientOrigin;
+    const options = await api.webauthnAuthBegin(origin);
+    const assertion = await runWebAuthnAuth(options, origin);
     await api.webauthnAuthFinish(assertion);
     return;
   }

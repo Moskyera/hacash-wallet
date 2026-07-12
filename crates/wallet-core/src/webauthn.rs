@@ -55,7 +55,10 @@ fn origin_to_rp_id(origin: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    Some(host)
+    Some(match host.as_str() {
+        "127.0.0.1" | "0.0.0.0" => "localhost".to_string(),
+        other => other.to_string(),
+    })
 }
 
 fn prefer_platform_authenticator(origin: &str) -> bool {
@@ -87,7 +90,7 @@ impl WebAuthnGate {
             json!({
                 "authenticatorAttachment": "platform",
                 "userVerification": "required",
-                "residentKey": "required"
+                "residentKey": "preferred"
             })
         } else {
             json!({
@@ -294,13 +297,45 @@ fn verify_client_data_bytes(
     if parsed.challenge != expected_challenge {
         return Err(WalletError::Policy("WebAuthn challenge mismatch".into()));
     }
-    if parsed.origin != expected_origin {
+    if !origins_match(&parsed.origin, expected_origin) {
         return Err(WalletError::Policy(format!(
             "unexpected origin: {} (expected {})",
             parsed.origin, expected_origin
         )));
     }
     Ok(())
+}
+
+fn origins_match(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    normalize_origin(actual) == normalize_origin(expected)
+}
+
+fn normalize_origin(origin: &str) -> String {
+    let Ok(url) = url::Url::parse(origin) else {
+        return origin.to_string();
+    };
+    let host = url.host_str().unwrap_or("");
+    let normalized_host = match host {
+        "127.0.0.1" => "localhost",
+        "0.0.0.0" => "localhost",
+        other => other,
+    };
+    format!(
+        "{}://{}{}",
+        url.scheme(),
+        normalized_host,
+        url.port()
+            .filter(|port| match url.scheme() {
+                "http" => *port != 80,
+                "https" => *port != 443,
+                _ => true,
+            })
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default()
+    )
 }
 
 fn verify_authenticator_data(auth_data: &[u8], rp_id: &str) -> WalletResult<()> {
@@ -447,6 +482,31 @@ mod tests {
         assert!(!stored.is_empty());
         let cred_id = credential_id_from_store(&stored).unwrap();
         assert_eq!(cred_id, "dGVzdA");
+    }
+
+    #[test]
+    fn accepts_localhost_origin_alias() {
+        let gate = WebAuthnGate::new().unwrap();
+        let options_json = gate
+            .begin_register("1TestAddr", Some("http://127.0.0.1:1420"))
+            .unwrap();
+        let challenge = serde_json::from_str::<serde_json::Value>(&options_json).unwrap()
+            ["publicKey"]["challenge"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let client_data = json!({
+            "type": "webauthn.create",
+            "challenge": challenge,
+            "origin": "http://localhost:1420"
+        });
+        let client_data_b64 = URL_SAFE_NO_PAD.encode(client_data.to_string().as_bytes());
+        let cred_json = json!({
+            "rawId": "dGVzdA",
+            "response": { "clientDataJSON": client_data_b64, "publicKey": null }
+        })
+        .to_string();
+        assert!(gate.finish_register(&cred_json).is_ok());
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   BillSummary,
+  DustWhisperSettings,
   FastPayStatus,
   HubHealth,
   PlatformSecurityStatus,
@@ -10,6 +11,7 @@ import {
   WalletSettings,
   WalletStatus,
 } from "../api";
+import { hasWhisperRelays, resolveDustWhisper } from "../dustWhisper";
 import { formatInvokeError } from "../formatInvokeError";
 import { DEFAULT_PRIVACY } from "../privacy";
 import { loadWalletName, saveWalletName } from "../walletName";
@@ -201,6 +203,29 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     [privacy, settings, showToast],
   );
 
+  const persistDustWhisper = useCallback(
+    async (patch: Partial<DustWhisperSettings>) => {
+      const current = resolveDustWhisper(settings?.dust_whisper, status?.dust_whisper);
+      const next: DustWhisperSettings = { ...current, ...patch };
+      if (next.enabled && !hasWhisperRelays(next)) {
+        showToast("Add a relay URL in More → DUST Whisper first.", "error");
+        return;
+      }
+      try {
+        await api.updateDustWhisper(next);
+        if (settings) setSettings({ ...settings, dust_whisper: next });
+        if (status) setStatus({ ...status, dust_whisper: next });
+        showToast(
+          next.enabled ? "DUST Whisper on for on-chain sends." : "DUST Whisper off.",
+          "success",
+        );
+      } catch (e) {
+        showToast(formatInvokeError(e), "error");
+      }
+    },
+    [settings, status, showToast],
+  );
+
   return {
     authScreen,
     setAuthScreen,
@@ -233,5 +258,6 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     handleClearHistory,
     handleSaveWalletName,
     persistPrivacy,
+    persistDustWhisper,
   };
 }

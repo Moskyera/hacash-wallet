@@ -81,6 +81,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init());
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.plugin(tauri_plugin_biometric::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_webauthn::init());
     builder
         .setup(|app| {
             // Android/iOS: dirs::data_dir() is not app-writable; use internal app storage.

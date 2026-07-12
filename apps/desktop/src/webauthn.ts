@@ -74,6 +74,10 @@ export async function runWebAuthnAuth(optionsJson: string): Promise<string> {
   return serializeCredential(cred);
 }
 
+export function webAuthnClientOrigin(): string {
+  return typeof window !== "undefined" ? window.location.origin : "";
+}
+
 export function webAuthnAvailable(): boolean {
   return typeof window !== "undefined" && !!window.PublicKeyCredential;
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, quantumApi, QuantumAccountSummary, QuantumPreflight } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { canSendType4, PQC_TYPE4_HINT } from "../quantumMeta";
-import { runWebAuthnAuth } from "../webauthn";
+import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 import AddressBadge from "./AddressBadge";
 
 const DEFAULT_TO = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
@@ -27,7 +27,8 @@ async function maybeWebAuthnGate(
     securityProfile === "paranoid" || (securityProfile !== "paranoid" && amount >= 100);
   if (!needs2fa) return;
   if (webauthnEnabled) {
-    const options = await api.webauthnAuthBegin();
+    const origin = webAuthnClientOrigin();
+    const options = await api.webauthnAuthBegin(origin);
     const assertion = await runWebAuthnAuth(options);
     await api.webauthnAuthFinish(assertion);
     return;

@@ -15,7 +15,12 @@ import {
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { DEFAULT_DUST_WHISPER, DEFAULT_PRIVACY, copyWithPrivacyClear } from "../privacy";
-import { runWebAuthnAuth, runWebAuthnRegister, webAuthnAvailable } from "../webauthn";
+import {
+  runWebAuthnAuth,
+  runWebAuthnRegister,
+  webAuthnAvailable,
+  webAuthnClientOrigin,
+} from "../webauthn";
 import type { ToastKind } from "./useToast";
 import type { Screen } from "../screens/types";
 import type { FastPayStatus } from "../fastPayUi";
@@ -524,7 +529,8 @@ export function useDesktopWallet(
     setBusy(true);
     clearMessages();
     try {
-      const options = await api.webauthnRegisterBegin();
+      const origin = webAuthnClientOrigin();
+      const options = await api.webauthnRegisterBegin(origin);
       const cred = await runWebAuthnRegister(options);
       await api.webauthnRegisterFinish(cred);
       await refreshStatus();
@@ -541,7 +547,8 @@ export function useDesktopWallet(
     setBusy(true);
     clearMessages();
     try {
-      const options = await api.webauthnAuthBegin();
+      const origin = webAuthnClientOrigin();
+      const options = await api.webauthnAuthBegin(origin);
       const assertion = await runWebAuthnAuth(options);
       await api.webauthnAuthFinish(assertion);
       await refreshStatus();
