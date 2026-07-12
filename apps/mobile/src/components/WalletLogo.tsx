@@ -1,4 +1,3 @@
-import fullLogoSrc from "../assets/hb-full.png";
 import iconLogoSrc from "../assets/hb-icon.png";
 
 type Props = {
@@ -7,10 +6,9 @@ type Props = {
 };
 
 export default function WalletLogo({ size = "lg", alt = "Hacash Wallet" }: Props) {
-  const src = size === "sm" ? iconLogoSrc : fullLogoSrc;
   return (
     <img
-      src={src}
+      src={iconLogoSrc}
       alt={alt}
       className={`wallet-logo wallet-logo-${size}`}
       draggable={false}

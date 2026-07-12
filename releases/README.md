@@ -29,11 +29,11 @@ chmod +x hacash-wallet-desktop-v0.1.12-x64.AppImage
 sudo dpkg -i hacash-wallet-desktop-v0.1.12-x64.deb
 ```
 
-### Mobile (Android arm64) — v0.1.14
+### Mobile (Android arm64) — v0.1.15
 
 | File | Link |
 |------|------|
-| APK | [hacash-wallet-mobile-v0.1.14-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.14-mobile/hacash-wallet-mobile-v0.1.14-arm64.apk) |
+| APK | [hacash-wallet-mobile-v0.1.15-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.15-mobile/hacash-wallet-mobile-v0.1.15-arm64.apk) |
 
 App display name: **Hacash Wallet**
 
@@ -52,10 +52,10 @@ App display name: **Hacash Wallet**
 Or via adb:
 
 ```bash
-adb install hacash-wallet-mobile-v0.1.14-arm64.apk
+adb install hacash-wallet-mobile-v0.1.15-arm64.apk
 ```
 
 ## Release notes
 
 - Desktop: `v0.1.12-desktop-notes.md`
-- Mobile: `v0.1.14-mobile-notes.md`
+- Mobile: `v0.1.15-mobile-notes.md`

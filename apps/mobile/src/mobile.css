@@ -50,8 +50,8 @@ body {
 
 .app-header-row {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
 }
 
 .app-header h1 {
@@ -71,22 +71,21 @@ body {
 .wallet-logo {
   display: block;
   object-fit: contain;
-  background: #000000;
+  object-position: center;
+  background: transparent;
 }
 
 .wallet-logo-lg {
-  width: 120px;
-  height: auto;
-  max-height: 100px;
-  margin: 0 auto 12px;
-  padding: 4px;
+  width: 168px;
+  height: 168px;
+  margin: 0 auto 16px;
+  padding: 0;
   border-radius: 0;
 }
 
 .wallet-logo-sm {
-  width: auto;
-  height: 42px;
-  max-width: 56px;
+  width: 52px;
+  height: 52px;
   flex-shrink: 0;
   padding: 0;
   border-radius: 0;
@@ -265,13 +264,16 @@ svg.dvhip5 .st16 {
 }
 
 .auth-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
   margin-bottom: 28px;
   background: #000000;
 }
 
 .auth-hero .wallet-logo-lg {
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .auth-hero h1 {
