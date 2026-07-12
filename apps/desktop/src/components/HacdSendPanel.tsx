@@ -69,39 +69,39 @@ export default function HacdSendPanel({
         </div>
       </div>
 
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={hacd.batchMode}
-          onChange={(e) => {
-            hacd.setBatchMode(e.target.checked);
-            if (!e.target.checked && hacd.selected.length > 1) {
-              hacd.setSingleDiamond(hacd.selected[0] ?? "");
-            }
-            hacd.resetPreview();
-          }}
-        />
-        Batch send multiple HACD
-      </label>
-
-      <div className="display-toggle">
-        <button
-          type="button"
-          className={hacdDisplay === "name" ? "selected" : ""}
-          onClick={() => setHacdDisplay("name")}
-        >
-          Name
-        </button>
-        <button
-          type="button"
-          className={hacdDisplay === "visual" ? "selected" : ""}
-          onClick={() => setHacdDisplay("visual")}
-        >
-          Visual
-        </button>
-      </div>
-
       <div className="send-section">
+        <div className="display-toggle">
+          <button
+            type="button"
+            className={hacdDisplay === "name" ? "selected" : ""}
+            onClick={() => setHacdDisplay("name")}
+          >
+            Name
+          </button>
+          <button
+            type="button"
+            className={hacdDisplay === "visual" ? "selected" : ""}
+            onClick={() => setHacdDisplay("visual")}
+          >
+            Visual
+          </button>
+        </div>
+
+        <label className="check-row hacd-batch-row">
+          <input
+            type="checkbox"
+            checked={hacd.batchMode}
+            onChange={(e) => {
+              hacd.setBatchMode(e.target.checked);
+              if (!e.target.checked && hacd.selected.length > 1) {
+                hacd.setSingleDiamond(hacd.selected[0] ?? "");
+              }
+              hacd.resetPreview();
+            }}
+          />
+          Batch send multiple HACD
+        </label>
+
         <label>{hacd.batchMode ? "Select HACD to send" : "HACD to send"}</label>
         {hacd.owned.length > 0 && (
           <div className="chip-row">
