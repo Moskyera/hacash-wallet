@@ -147,6 +147,8 @@ export default function App() {
       },
       onCreate: (p: string) => void wallet.handleCreate(p),
       onImport: (s: string, p: string) => void wallet.handleImport(s, p),
+      onImportBackup: (j: string, p: string, d?: string | null) =>
+        void wallet.handleImportBackup(j, p, d),
       onWatchOnly: (a: string) => void wallet.handleWatchOnlyImport(a),
       onUnlock: (p: string) => void wallet.handleUnlock(p),
       onLock: handleLock,

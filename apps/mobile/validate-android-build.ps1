@@ -62,7 +62,7 @@ if (Test-Path $filePaths) {
 
 if (Test-Path $proguard) {
     $pg = Get-Content $proguard -Raw
-    foreach ($keep in @("ApkInstaller", "app.tauri.opener.OpenerPlugin", "app.tauri.deep_link", "app.tauri.biometric")) {
+    foreach ($keep in @("ApkInstaller", "BackupFileHelper", "app.tauri.opener.OpenerPlugin", "app.tauri.deep_link", "app.tauri.biometric")) {
         if ($pg -notmatch [regex]::Escape($keep)) {
             $errors += "proguard-rules.pro missing keep rule for $keep"
         }

@@ -140,9 +140,30 @@ impl EncryptedVault {
         serde_json::to_string_pretty(&blob).map_err(|e| WalletError::Vault(e.to_string()))
     }
 
+    /// Parse an exported backup JSON blob (same format as [`Self::export_json`]).
+    pub fn from_export_json(raw: &str) -> WalletResult<Self> {
+        let blob: VaultBlob =
+            serde_json::from_str(raw).map_err(|e| WalletError::Vault(format!("invalid backup JSON: {e}")))?;
+        Self::from_vault_blob(blob)
+    }
+
+    /// Read wallet address from backup metadata without decrypting (for UI preview).
+    pub fn backup_address_from_json(raw: &str) -> WalletResult<String> {
+        let blob: VaultBlob =
+            serde_json::from_str(raw).map_err(|e| WalletError::Vault(format!("invalid backup JSON: {e}")))?;
+        if blob.metadata.address.trim().is_empty() {
+            return Err(WalletError::Vault("backup missing address metadata".into()));
+        }
+        Ok(blob.metadata.address)
+    }
+
     pub fn load(path: &PathBuf) -> WalletResult<Self> {
         let raw = fs::read_to_string(path).map_err(|e| WalletError::Vault(e.to_string()))?;
         let blob: VaultBlob = serde_json::from_str(&raw).map_err(|e| WalletError::Vault(e.to_string()))?;
+        Self::from_vault_blob(blob)
+    }
+
+    fn from_vault_blob(blob: VaultBlob) -> WalletResult<Self> {
         if blob.metadata.version == 0 || blob.metadata.version > VAULT_VERSION_LATEST {
             return Err(WalletError::Vault(format!(
                 "unsupported vault version {} (supported 1..={VAULT_VERSION_LATEST})",

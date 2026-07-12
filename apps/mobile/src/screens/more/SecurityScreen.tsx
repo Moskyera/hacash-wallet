@@ -116,7 +116,10 @@ export default function SecurityScreen({
       </div>
       <div className="card">
         <h2>Backup</h2>
-        <p className="muted">Export encrypted wallet backup (requires passphrase).</p>
+        <p className="muted">
+          Export encrypted JSON backup. Restore it on a new device via Welcome → Restore backup
+          (same passphrase). Delete the file from Downloads after restoring.
+        </p>
         <label className="label">Passphrase</label>
         <input type="password" value={backupPass} onChange={(e) => setBackupPass(e.target.value)} />
         <button

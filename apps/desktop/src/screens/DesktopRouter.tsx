@@ -59,6 +59,7 @@ export type DesktopActions = {
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
   onCreate: (passphrase: string) => void;
   onImport: (seed: string, passphrase: string) => void;
+  onImportBackup: (json: string, passphrase: string, deleteSource?: string | null) => void;
   onWatchOnly: (address: string) => void;
   onUnlock: (passphrase: string) => void;
   onLock: () => void;
@@ -152,6 +153,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     onNotify,
     onCreate,
     onImport,
+    onImportBackup,
     onWatchOnly,
     onUnlock,
     onLock,
@@ -196,6 +198,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           busy={busy}
           onCreate={onCreate}
           onImport={onImport}
+          onImportBackup={onImportBackup}
           onWatchOnly={onWatchOnly}
         />
       );

@@ -81,7 +81,8 @@ export default function SecurityScreen({
 
       <h3>Export backup</h3>
       <p className="muted">
-        Export an encrypted JSON backup. You will need your passphrase to restore it.
+        Export an encrypted JSON backup. Restore via Welcome → Restore backup (same passphrase).
+        Delete the backup file after a one-time restore.
       </p>
       <label>Passphrase to decrypt vault for export</label>
       <input

@@ -13,7 +13,7 @@ export type Screen =
   | "airgap"
   | "quantum";
 
-export type WelcomeTab = "create" | "import" | "watch";
+export type WelcomeTab = "create" | "import" | "backup" | "watch";
 
 export const NAV_ITEMS: { id: Screen; label: string }[] = [
   { id: "home", label: "Home" },

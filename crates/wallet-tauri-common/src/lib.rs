@@ -10,6 +10,9 @@ pub mod update_commands;
 
 #[cfg(target_os = "android")]
 pub mod update_android;
+#[cfg(target_os = "android")]
+pub mod backup_android;
+pub mod backup_commands;
 
 #[cfg(feature = "desktop")]
 pub mod desktop_relay;

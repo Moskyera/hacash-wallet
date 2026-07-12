@@ -232,6 +232,7 @@ $proguardPath = Join-Path $android "app\proguard-rules.pro"
 $proguardKeeps = @'
 # In-app APK installer (JNI entry from Rust)
 -keep class org.hacash.wallet.mobile.ApkInstaller { *; }
+-keep class org.hacash.wallet.mobile.BackupFileHelper { *; }
 -keep class androidx.core.content.FileProvider { *; }
 # Tauri Android plugins (loaded by class name at runtime)
 -keep class app.tauri.opener.OpenerPlugin { *; }

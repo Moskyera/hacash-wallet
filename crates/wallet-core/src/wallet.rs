@@ -341,6 +341,31 @@ impl WalletService {
         vault.export_json()
     }
 
+    /// Restore wallet from an encrypted backup JSON export (same passphrase as at export time).
+    pub fn import_backup(&mut self, json: &str, passphrase: &str) -> WalletResult<String> {
+        if self.vault_path.exists() {
+            return Err(WalletError::Vault("wallet already exists — remove vault first".into()));
+        }
+        if json.trim().is_empty() || passphrase.len() < 8 {
+            return Err(WalletError::Vault(
+                "backup JSON and passphrase (min 8 chars) required".into(),
+            ));
+        }
+        let vault = EncryptedVault::from_export_json(json.trim())?;
+        let mut secret = vault
+            .decrypt(passphrase)
+            .map_err(|_| WalletError::InvalidPassphrase)?;
+        secret.zeroize();
+        let snap = vault.meta_snapshot();
+        let address = snap.address.clone();
+        self.profile = SecurityProfile::from_name(&snap.security_profile);
+        self.settings.security_profile = snap.security_profile;
+        self.persist_vault(vault)?;
+        self.settings.save()?;
+        self.unlock(passphrase)?;
+        Ok(address)
+    }
+
     /// Reveal the wallet private key after passphrase verification.
     pub fn export_private_key(&self, passphrase: &str) -> WalletResult<String> {
         if !self.vault_path.exists() {

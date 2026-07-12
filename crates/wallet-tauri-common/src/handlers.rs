@@ -23,6 +23,8 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::commands::wallet_discover_hubs,
             wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_export_backup,
+            wallet_tauri_common::backup_commands::wallet_preview_backup,
+            wallet_tauri_common::backup_commands::wallet_import_backup,
             wallet_tauri_common::commands::wallet_export_private_key,
             wallet_tauri_common::commands::wallet_change_passphrase,
             wallet_tauri_common::commands::wallet_list_bill_summaries,

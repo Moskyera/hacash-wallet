@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Toast from "../components/Toast";
 import WalletLogo from "../components/WalletLogo";
+import { api } from "../api";
 import type { ToastKind } from "../hooks/useToast";
+import { readBackupJsonFile } from "../utils/readBackupFile";
 
-type WelcomeTab = "create" | "import" | "watch";
+type WelcomeTab = "create" | "import" | "backup" | "watch";
 
 type Props = {
   walletNameDraft: string;
@@ -17,6 +19,7 @@ type Props = {
   busy: boolean;
   onCreate: () => void;
   onImport: () => void;
+  onImportBackup: (json: string, passphrase: string, deleteSource?: string | null) => void;
   onWatchOnly: () => void;
   toast: { msg: string; kind: ToastKind } | null;
 };
@@ -33,10 +36,31 @@ export default function WelcomeScreen({
   busy,
   onCreate,
   onImport,
+  onImportBackup,
   onWatchOnly,
   toast,
 }: Props) {
   const [tab, setTab] = useState<WelcomeTab>("create");
+  const [backupJson, setBackupJson] = useState("");
+  const [backupPass, setBackupPass] = useState("");
+  const [backupDeleteSource, setBackupDeleteSource] = useState<string | undefined>();
+  const [backupFileName, setBackupFileName] = useState<string | null>(null);
+  const [backupPreview, setBackupPreview] = useState<string | null>(null);
+  const backupInputRef = useRef<HTMLInputElement>(null);
+
+  const loadBackupFile = async (file: File) => {
+    const payload = await readBackupJsonFile(file);
+    setBackupJson(payload.json);
+    setBackupDeleteSource(payload.deleteSource);
+    setBackupFileName(file.name);
+    setBackupPreview(null);
+    try {
+      const addr = await api.previewBackup(payload.json);
+      setBackupPreview(addr);
+    } catch {
+      setBackupPreview(null);
+    }
+  };
 
   return (
     <div className="auth-screen">
@@ -51,6 +75,9 @@ export default function WelcomeScreen({
         </button>
         <button type="button" className={tab === "import" ? "selected" : ""} onClick={() => setTab("import")}>
           Import
+        </button>
+        <button type="button" className={tab === "backup" ? "selected" : ""} onClick={() => setTab("backup")}>
+          Restore
         </button>
         <button type="button" className={tab === "watch" ? "selected" : ""} onClick={() => setTab("watch")}>
           Watch-only
@@ -108,6 +135,58 @@ export default function WelcomeScreen({
           />
           <button className="primary" disabled={busy || !seed || !passphrase} onClick={() => void onImport()}>
             Import
+          </button>
+        </div>
+      )}
+
+      {tab === "backup" && (
+        <div className="card">
+          <h2>Restore backup</h2>
+          <p className="muted">
+            Use the encrypted JSON from More → Security → Download backup. Passphrase must match the
+            one used at export. The file is deleted after restore when possible.
+          </p>
+          <input
+            ref={backupInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void loadBackupFile(file).catch(() => undefined);
+              e.target.value = "";
+            }}
+          />
+          <button type="button" className="primary" disabled={busy} onClick={() => backupInputRef.current?.click()}>
+            Choose backup file
+          </button>
+          {backupFileName ? <p className="muted small">Selected: {backupFileName}</p> : null}
+          {backupPreview ? <p className="muted small">Wallet: {backupPreview}</p> : null}
+          <label className="label">Or paste backup JSON</label>
+          <textarea
+            value={backupJson}
+            onChange={(e) => {
+              setBackupJson(e.target.value);
+              setBackupDeleteSource(undefined);
+              setBackupFileName(null);
+              setBackupPreview(null);
+            }}
+            placeholder='{"metadata":{...},"ciphertext":"..."}'
+          />
+          <label className="label">Backup passphrase</label>
+          <input
+            type="password"
+            placeholder="Same passphrase as when you exported"
+            value={backupPass}
+            onChange={(e) => setBackupPass(e.target.value)}
+          />
+          <button
+            type="button"
+            className="primary"
+            disabled={busy || !backupJson.trim() || backupPass.length < 8}
+            onClick={() => onImportBackup(backupJson, backupPass, backupDeleteSource ?? null)}
+          >
+            Restore wallet
           </button>
         </div>
       )}

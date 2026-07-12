@@ -41,6 +41,37 @@ pub fn biometric_unlock_path() -> PathBuf {
 }
 
 /// Atomic write with restrictive permissions (0o600 on Unix).
+/// Delete a user-owned backup `.json` after one-time import. Never deletes wallet data under [`wallet_data_root`].
+pub fn secure_delete_backup_file(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("backup file not found".into());
+    }
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "json" {
+        return Err("only .json backup files can be deleted".into());
+    }
+    if path.file_name().and_then(|s| s.to_str()) == Some("vault.json") {
+        return Err("refusing to delete active wallet vault".into());
+    }
+
+    let wallet_root = wallet_data_root()
+        .canonicalize()
+        .unwrap_or_else(|_| wallet_data_root());
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("backup path: {e}"))?;
+    if canonical.starts_with(&wallet_root) {
+        return Err("refusing to delete files inside wallet data directory".into());
+    }
+
+    std::fs::remove_file(&canonical).map_err(|e| format!("failed to delete backup file: {e}"))?;
+    Ok(())
+}
+
 pub fn secure_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

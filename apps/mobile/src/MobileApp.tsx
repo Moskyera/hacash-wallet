@@ -225,6 +225,30 @@ export default function MobileApp() {
     }
   };
 
+  const handleImportBackup = async (
+    json: string,
+    backupPassphrase: string,
+    deleteSource?: string | null,
+  ) => {
+    session.setBusy(true);
+    try {
+      const address = await api.importBackup(json, backupPassphrase, deleteSource);
+      if (session.walletNameDraft.trim()) {
+        saveWalletName(address, session.walletNameDraft);
+      }
+      await session.refresh();
+      showToast(
+        "Wallet restored. Backup file removed when possible — check Downloads if needed.",
+        "success",
+      );
+      hapticSuccess();
+    } catch (e) {
+      showToast(formatInvokeError(e), "error");
+    } finally {
+      session.setBusy(false);
+    }
+  };
+
   const handleUnlock = async () => {
     session.setBusy(true);
     try {
@@ -430,6 +454,7 @@ export default function MobileApp() {
         busy={session.busy}
         onCreate={() => void handleCreate()}
         onImport={() => void handleImport()}
+        onImportBackup={(j, p, d) => void handleImportBackup(j, p, d)}
         onWatchOnly={() => void handleWatchOnly()}
         toast={toast}
       />

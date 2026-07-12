@@ -301,6 +301,25 @@ export function useDesktopWallet(
     [clearMessages, refreshStatus, onInfo, onError],
   );
 
+  const handleImportBackup = useCallback(
+    async (json: string, passphrase: string, deleteSource?: string | null) => {
+      setBusy(true);
+      clearMessages();
+      try {
+        await api.importBackup(json.trim(), passphrase, deleteSource);
+        await refreshStatus();
+        onInfo(
+          "Wallet restored from backup. The backup file was removed when possible — check Downloads if you imported from there.",
+        );
+      } catch (e) {
+        onError(String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [clearMessages, refreshStatus, onInfo, onError],
+  );
+
   const handleUnlock = useCallback(
     async (passphrase: string) => {
       setBusy(true);
@@ -793,6 +812,7 @@ export function useDesktopWallet(
     refreshRelayHealth,
     handleCreate,
     handleImport,
+    handleImportBackup,
     handleWatchOnlyImport,
     handleUnlock,
     handleLock,

@@ -385,6 +385,13 @@ export const api = {
     invoke<SendResult>("wallet_send_hac", { to, amountMei, sendOptions }),
   exportBackup: (passphrase: string) =>
     invoke<string>("wallet_export_backup", { passphrase }),
+  previewBackup: (json: string) => invoke<string>("wallet_preview_backup", { json }),
+  importBackup: (json: string, passphrase: string, deleteSource?: string | null) =>
+    invoke<string>("wallet_import_backup", {
+      json,
+      passphrase,
+      deleteSource: deleteSource ?? null,
+    }),
   exportPrivateKey: (passphrase: string) =>
     invoke<string>("wallet_export_private_key", { passphrase }),
   changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
