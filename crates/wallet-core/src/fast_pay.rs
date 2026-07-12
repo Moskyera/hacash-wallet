@@ -68,7 +68,7 @@ impl FastPayStatus {
     pub fn ready(provider: impl Into<String>) -> Self {
         Self {
             state: FastPayState::Ready,
-            message: "Fast Pay is ready — sends use instant low-fee routing.".into(),
+            message: "Sends settle in seconds with a low fee.".into(),
             provider_name: Some(provider.into()),
             hub_url: None,
             can_enable: false,
@@ -80,7 +80,7 @@ impl FastPayStatus {
         Self {
             state: FastPayState::NeedsChannel,
             message: format!(
-                "One-time setup ({deposit} HAC deposit) unlocks instant Fast Pay. On-chain still works until then."
+                "Deposit {deposit} HAC once to turn on. Blockchain pays still work."
             ),
             provider_name: Some(provider.into()),
             hub_url: None,
@@ -92,8 +92,7 @@ impl FastPayStatus {
     pub fn no_provider() -> Self {
         Self {
             state: FastPayState::NoProvider,
-            message: "No Fast Pay provider online — your send will use the standard on-chain route."
-                .into(),
+            message: "Not set up yet. Sends use the blockchain.".into(),
             provider_name: None,
             hub_url: None,
             can_enable: false,
@@ -104,7 +103,7 @@ impl FastPayStatus {
     pub fn hub_unreachable() -> Self {
         Self {
             state: FastPayState::HubUnreachable,
-            message: "Fast Pay provider is offline — using on-chain route for this send.".into(),
+            message: "Payment network offline. Sends use the blockchain for now.".into(),
             provider_name: None,
             hub_url: None,
             can_enable: false,
@@ -209,8 +208,8 @@ fn channel_ready(channel: &crate::channel::ChannelInfo, user_address: &str) -> b
 
 pub fn rail_label(rail: crate::payment::PaymentRail) -> &'static str {
     match rail {
-        crate::payment::PaymentRail::L2Fast => "Instant (Fast Pay)",
-        crate::payment::PaymentRail::L1OnChain => "Standard (on-chain)",
+        crate::payment::PaymentRail::L2Fast => "Instant Fast Pay",
+        crate::payment::PaymentRail::L1OnChain => "Blockchain",
         crate::payment::PaymentRail::QuantumType4 => "Quantum",
     }
 }
@@ -218,11 +217,11 @@ pub fn rail_label(rail: crate::payment::PaymentRail) -> &'static str {
 pub fn rail_detail(rail: crate::payment::PaymentRail) -> &'static str {
     match rail {
         crate::payment::PaymentRail::L2Fast => {
-            "Settles in seconds with a very low fee via the payment network."
+            "Settles in seconds with a low fee on the payment network."
         }
         crate::payment::PaymentRail::L1OnChain => {
-            "Broadcast to the Hacash mainnet — typically confirmed in a few minutes."
+            "Broadcast to Hacash mainnet. Usually confirmed in a few minutes."
         }
-        crate::payment::PaymentRail::QuantumType4 => "Post-quantum Type-4 transaction.",
+        crate::payment::PaymentRail::QuantumType4 => "Post quantum Type 4 transaction.",
     }
 }

@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type ChannelInfo, type ChannelSetupPreview, type FastPayStatus } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import {
+  fastPayHowItWorks,
+  fastPayMenuBadge,
+  fastPayStatusLine,
+  fastPayStatusTitle,
+} from "../fastPayUi";
 import { maskAddress } from "../privacy";
 
 type Props = {
@@ -98,8 +104,8 @@ export default function FastPayChannelScreen({
   if (watchOnly) {
     return (
       <div className="card">
-        <h2>Fast Pay channel</h2>
-        <p className="muted">Watch-only mode cannot open or close channels.</p>
+        <h2>Fast Pay</h2>
+        <p className="muted">Watch-only mode cannot set up or change Fast Pay.</p>
       </div>
     );
   }
@@ -107,8 +113,23 @@ export default function FastPayChannelScreen({
   return (
     <>
       <div className="card">
-        <h2>Fast Pay status</h2>
-        <p>{fastPay?.message ?? "Loading…"}</p>
+        <h2>Fast Pay</h2>
+        <p className="muted small">{fastPayHowItWorks()}</p>
+        <div className="toggle-row" style={{ marginTop: "0.75rem" }}>
+          <strong>{fastPay ? fastPayStatusTitle(fastPay.state) : "Loading…"}</strong>
+          <span
+            className={
+              fastPay?.state === "ready" ? "badge badge-ok" : "badge badge-warn"
+            }
+          >
+            {fastPay ? fastPayMenuBadge(fastPay.state) : "…"}
+          </span>
+        </div>
+        {fastPay && (
+          <p className="muted" style={{ marginTop: "0.5rem" }}>
+            {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
+          </p>
+        )}
         {hubUrl && <p className="muted small">Hub: {hubUrl}</p>}
       </div>
 
@@ -153,9 +174,9 @@ export default function FastPayChannelScreen({
 
       {!channel && (
         <div className="card">
-          <h2>Open channel</h2>
+          <h2>Setup</h2>
           <p className="muted small">
-            Deposit HAC into a payment channel with your Fast Pay hub for instant L2 sends.
+            Deposit HAC once to turn on instant sends. You can change the amount below.
           </p>
           <label className="label">Your deposit (HAC)</label>
           <input
@@ -188,7 +209,7 @@ export default function FastPayChannelScreen({
                 Channel <code>{preview.channel_id.slice(0, 16)}…</code>
               </p>
               <p className="muted small">
-                Left {preview.left_deposit} · Right {preview.right_deposit}
+                You {preview.left_deposit} HAC, hub {preview.right_deposit} HAC
               </p>
               <button type="button" className="primary" disabled={busy} onClick={() => void handleOpenChannel()}>
                 Confirm open channel

@@ -22,6 +22,7 @@ import { maskAddress } from "../../privacy";
 import { MIN_WALLET_PASS } from "../../quantumMeta";
 import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
 import { formatInvokeError } from "../../formatInvokeError";
+import { fastPayMenuBadge } from "../../fastPayUi";
 import { downloadJson } from "../../utils/downloadJson";
 import { runWebAuthnAuth, runWebAuthnRegister, webAuthnAvailable } from "../../webauthn";
 
@@ -199,8 +200,8 @@ export default function MoreRouter(props: Props) {
           <span>{bills.length}</span>
         </button>
         <button type="button" onClick={() => onNavigate("fastpay")}>
-          <span>Fast Pay channel</span>
-          <span>{fastPay?.state === "ready" ? "on" : "off"}</span>
+          <span>Fast Pay</span>
+          <span>{fastPayMenuBadge(fastPay?.state)}</span>
         </button>
         <button type="button" onClick={() => onNavigate("contacts")}>
           <span>Contacts</span>

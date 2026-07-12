@@ -738,7 +738,7 @@ impl WalletService {
                             addr
                         } else {
                             return Err(WalletError::L2(
-                                "Fast Pay provider found but hub address is missing — set it in Advanced → Fast Pay"
+                                "Hub address missing. Set it in More → Fast Pay → Network settings."
                                     .into(),
                             ));
                         }

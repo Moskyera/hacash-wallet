@@ -1,5 +1,6 @@
 import type { AssetSummary, FastPayStatus, TxRecord } from "../api";
 import HacdLaunchpadIcon from "../components/HacdLaunchpadIcon";
+import { fastPayStatusLine, fastPayStatusTitle } from "../fastPayUi";
 import { formatBtcFromSatoshi, maskAssetCount, maskBalance, maskBtcFromSatoshi } from "../privacy";
 
 type Props = {
@@ -80,8 +81,10 @@ export default function HomeTab({
       {fastPay && fastPay.state !== "ready" && fastPay.can_enable && !watchOnly && (
         <div className="fp-banner">
           <div>
-            <strong>Enable Fast Pay</strong>
-            <p className="muted">{fastPay.message}</p>
+            <strong>{fastPayStatusTitle(fastPay.state)}</strong>
+            <p className="muted">
+              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
+            </p>
           </div>
           <button type="button" className="primary small" disabled={busy} onClick={() => void onEnableFastPay()}>
             Enable
@@ -92,8 +95,21 @@ export default function HomeTab({
       {fastPay?.state === "ready" && (
         <div className="fp-banner on">
           <div>
-            <span className="badge badge-ok">Fast Pay</span>
-            <p className="muted">{fastPay.message}</p>
+            <span className="badge badge-ok">Fast Pay on</span>
+            <p className="muted">
+              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {fastPay && fastPay.state !== "ready" && !fastPay.can_enable && (
+        <div className="fp-banner">
+          <div>
+            <strong>{fastPayStatusTitle(fastPay.state)}</strong>
+            <p className="muted">
+              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
+            </p>
           </div>
         </div>
       )}
