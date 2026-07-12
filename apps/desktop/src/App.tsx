@@ -32,6 +32,7 @@ import HubDiscoveryPanel from "./components/HubDiscoveryPanel";
 import PaymentQrScanner from "./components/PaymentQrScanner";
 import HacdSendPanel from "./components/HacdSendPanel";
 import ReceivePanel from "./components/ReceivePanel";
+import BalanceOverview from "./components/BalanceOverview";
 import BtcSendPanel from "./components/BtcSendPanel";
 import type { PaymentQrPayload } from "./paymentQr";
 import type { PaymentAsset } from "./utils/paymentAssets";
@@ -1175,27 +1176,7 @@ export default function App() {
         {screen === "home" && (
           <section className="panel">
             <div className="balance-card">
-              <span className="label">Available balance</span>
-              <div className="balance-value">
-                {maskBalance(balance, hideBalances)} <small>HAC</small>
-              </div>
-              <div className="balance-assets-row">
-                <div className="balance-asset-pill">
-                  <span className="label">HACD</span>
-                  <span className="value">{maskAssetCount(assets?.hacd_count ?? null, hideBalances)}</span>
-                </div>
-                <div className="balance-asset-pill">
-                  <span className="label">BTC</span>
-                  <span className="value">
-                    {maskBtcFromSatoshi(assets?.btc_wallet_satoshi ?? null, hideBalances)}
-                  </span>
-                  {!hideBalances && (assets?.btc_channel_satoshi ?? 0) > 0 && (
-                    <span className="hint">
-                      + {formatBtcFromSatoshi(assets!.btc_channel_satoshi)} in Fast Pay
-                    </span>
-                  )}
-                </div>
-              </div>
+              <BalanceOverview assets={assets} hideBalances={hideBalances} />
               <div className="chips">
                 {status?.seconds_until_lock != null && (
                   <span className="chip chip-accent">

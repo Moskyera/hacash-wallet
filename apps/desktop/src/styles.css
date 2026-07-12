@@ -8,6 +8,7 @@
   --muted: #8fa3b8;
   --accent: #3dd6c6;
   --accent-2: #6ea8ff;
+  --gold: #e8a838;
   --danger: #ff6b6b;
   --radius: 16px;
   font-family: Inter, Segoe UI, system-ui, sans-serif;
@@ -691,39 +692,125 @@ input {
   letter-spacing: 0.12em;
 }
 
-.balance-assets-row {
+.balance-portfolio-header {
   display: flex;
-  gap: 16px;
-  margin: 12px 0 8px;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
 }
 
-.balance-asset-pill {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg-elevated);
-  min-width: 120px;
-}
-
-.balance-asset-pill .label {
-  font-size: 0.75rem;
-  color: var(--muted);
+.balance-portfolio-header .label {
+  margin: 0;
+  font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  color: var(--muted);
 }
 
-.balance-asset-pill .value {
+.wallet-version {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--gold, #e8a838);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(232, 168, 56, 0.35);
+  background: rgba(232, 168, 56, 0.08);
+  white-space: nowrap;
+}
+
+.balance-portfolio-total {
+  margin: 8px 0 18px;
+}
+
+.balance-primary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.balance-primary-value {
+  font-size: 2.75rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.balance-primary-unit {
   font-size: 1rem;
+  color: var(--muted);
   font-weight: 600;
 }
 
-.balance-asset-pill .hint {
-  font-size: 0.72rem;
+.balance-total-usd {
+  margin: 8px 0 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--accent-2);
+}
+
+.balance-assets-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.balance-asset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+  padding: 14px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #0a0a0a;
+  min-height: 108px;
+}
+
+.balance-asset-card .symbol {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   color: var(--muted);
+}
+
+.balance-asset-card .amount {
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.2;
+  word-break: break-word;
+}
+
+.balance-asset-card .hint {
+  font-size: 0.65rem;
+  color: var(--muted);
+  line-height: 1.25;
+  max-width: 100%;
+}
+
+.balance-asset-card .usd {
+  margin-top: auto;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent-2);
+}
+
+.balance-asset-card-hac {
+  border-color: rgba(61, 214, 198, 0.25);
+}
+
+.balance-asset-card-hacd {
+  border-color: rgba(232, 168, 56, 0.25);
+}
+
+.balance-asset-card-btc {
+  border-color: rgba(110, 168, 255, 0.25);
+}
+
+.balance-usd-note {
+  margin-top: 12px;
 }
 
 .badge-rail {

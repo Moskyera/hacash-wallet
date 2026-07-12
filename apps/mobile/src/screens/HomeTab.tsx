@@ -1,7 +1,8 @@
+import type { TouchEvent } from "react";
 import type { AssetSummary, FastPayStatus, TxRecord } from "../api";
+import BalanceOverview from "../components/BalanceOverview";
 import HacdLaunchpadIcon from "../components/HacdLaunchpadIcon";
 import { fastPayStatusLine, fastPayStatusTitle } from "../fastPayUi";
-import { formatBtcFromSatoshi, maskAssetCount, maskBalance, maskBtcFromSatoshi } from "../privacy";
 
 type Props = {
   assets: AssetSummary | null;
@@ -11,8 +12,8 @@ type Props = {
   watchOnly: boolean;
   busy: boolean;
   history: TxRecord[];
-  onPullStart: (e: React.TouchEvent) => void;
-  onPullMove: (e: React.TouchEvent) => void;
+  onPullStart: (e: TouchEvent) => void;
+  onPullMove: (e: TouchEvent) => void;
   onPullEnd: () => void;
   onEnableFastPay: () => void;
   onDisableFastPay: () => void;
@@ -44,17 +45,6 @@ export default function HomeTab({
   onQuantum,
   onLaunchpad,
 }: Props) {
-  const hacdCount = assets?.hacd_count ?? null;
-  const hacdHint =
-    !hideBalances && assets && assets.hacd_count > 0 && assets.hacd_names.length > 0
-      ? assets.hacd_names.slice(0, 3).join(", ") + (assets.hacd_count > 3 ? "…" : "")
-      : null;
-  const btcChannelSatoshi = assets?.btc_channel_satoshi ?? 0;
-  const btcHint =
-    !hideBalances && btcChannelSatoshi > 0
-      ? `+ ${formatBtcFromSatoshi(btcChannelSatoshi)} BTC in Fast Pay`
-      : null;
-
   return (
     <>
       <div
@@ -63,21 +53,11 @@ export default function HomeTab({
         onTouchMove={onPullMove}
         onTouchEnd={onPullEnd}
       >
-        <p className="muted">{refreshing ? "Refreshing…" : "Pull down to refresh"}</p>
-        <div className="amount">{maskBalance(assets?.hac_mei ?? null, hideBalances)}</div>
-        <div className="unit">HAC</div>
-        <div className="balance-assets">
-          <div className="balance-asset">
-            <span className="label">HACD</span>
-            <span className="value">{maskAssetCount(hacdCount, hideBalances)}</span>
-            {hacdHint && <span className="hint">{hacdHint}</span>}
-          </div>
-          <div className="balance-asset">
-            <span className="label">BTC</span>
-            <span className="value">{maskBtcFromSatoshi(assets?.btc_wallet_satoshi ?? null, hideBalances)}</span>
-            {btcHint ? <span className="hint">{btcHint}</span> : <span className="hint">Wallet balance</span>}
-          </div>
-        </div>
+        <BalanceOverview
+          assets={assets}
+          hideBalances={hideBalances}
+          topHint={<p className="muted pull-hint">{refreshing ? "Refreshing…" : "Pull down to refresh"}</p>}
+        />
       </div>
 
       {fastPay && (
