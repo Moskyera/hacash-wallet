@@ -87,6 +87,12 @@ Set-Content -Path $gradle -Value $gradleContent -NoNewline
 # Sync branded launcher icons into generated Android res (gen/ uses Tauri placeholder by default).
 $iconSrcRoot = Join-Path $mobile "src-tauri\icons\android"
 $iconDstRoot = Join-Path $android "app\src\main\res"
+$mipmapProbe = Join-Path $iconSrcRoot "mipmap-xxxhdpi\ic_launcher_foreground.png"
+if (-not (Test-Path $mipmapProbe)) {
+    Write-Host "Regenerating Android launcher mipmaps (missing or stale)..." -ForegroundColor Yellow
+    & (Join-Path $mobile "generate-app-icons.ps1")
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 if (Test-Path $iconSrcRoot) {
     Get-ChildItem -Path $iconSrcRoot -Recurse -File | ForEach-Object {
         $rel = $_.FullName.Substring($iconSrcRoot.Length).TrimStart('\')

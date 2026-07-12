@@ -49,4 +49,4 @@ Write-Host "Wrote $appIcon" -ForegroundColor Green
 Set-Location $desktop
 yarn tauri icon "src-tauri/icons/icon-manifest.json"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Write-Host "Desktop launcher icon set generated." -ForegroundColor Green
+Write-Host "Desktop launcher icon set generated (icon.ico / icon.icns / icon.png)." -ForegroundColor Green
