@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, type AppUpdateInfo } from "../api";
 import { WALLET_VERSION } from "../walletVersion";
@@ -27,10 +27,6 @@ export default function AppUpdateSection({ onToast }: Props) {
       setChecking(false);
     }
   }, [onToast]);
-
-  useEffect(() => {
-    void check();
-  }, [check]);
 
   const openBrowserDownload = async () => {
     const url = info?.download_url ?? info?.release_page;

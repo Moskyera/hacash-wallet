@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod handlers;
 pub mod dapp_commands;
 pub mod quantum_commands;
 pub mod security_commands;

@@ -40,13 +40,6 @@ export default function MobileApp() {
   const [watchAddress, setWatchAddress] = useState("");
   const [receiveAmount, setReceiveAmount] = useState("");
   const [selectedBill, setSelectedBill] = useState<BillSummary | null>(null);
-  const [settingsNodeUrl, setSettingsNodeUrl] = useState("");
-  const [settingsHubUrl, setSettingsHubUrl] = useState("");
-  const [oldPass, setOldPass] = useState("");
-  const [newPass, setNewPass] = useState("");
-  const [backupPass, setBackupPass] = useState("");
-  const [contactLabel, setContactLabel] = useState("");
-  const [contactAddress, setContactAddress] = useState("");
   const [payCameraIntent, setPayCameraIntent] = useState(false);
 
   const pullStartY = useRef(0);
@@ -76,8 +69,6 @@ export default function MobileApp() {
   useEffect(() => {
     if (session.settings) {
       syncSendPrefsFromSettings(session.settings);
-      setSettingsNodeUrl(session.settings.node_url);
-      setSettingsHubUrl(session.settings.l2_hub_url ?? "");
     }
   }, [session.settings, syncSendPrefsFromSettings]);
 
@@ -336,14 +327,14 @@ export default function MobileApp() {
     }
   };
 
-  const handleSaveSettings = async () => {
+  const handleSaveSettings = async (nodeUrl: string, hubUrl: string) => {
     if (!session.settings) return;
     session.setBusy(true);
     try {
       const next = {
         ...session.settings,
-        node_url: settingsNodeUrl.trim(),
-        l2_hub_url: settingsHubUrl.trim() || null,
+        node_url: nodeUrl.trim(),
+        l2_hub_url: hubUrl.trim() || null,
       };
       await api.updateSettings(next);
       session.setSettings(next);
@@ -367,7 +358,6 @@ export default function MobileApp() {
       };
       await api.updateSettings(next);
       session.setSettings(next);
-      setSettingsHubUrl(entry.hub_url);
       await session.refresh();
       showToast(`Using ${entry.name}`, "success");
     } catch (e) {
@@ -378,12 +368,11 @@ export default function MobileApp() {
     }
   };
 
-  const handleExportBackup = async () => {
+  const handleExportBackup = async (passphrase: string) => {
     session.setBusy(true);
     try {
-      const json = await api.exportBackup(backupPass);
+      const json = await api.exportBackup(passphrase);
       downloadJson(`hacash-backup-${Date.now()}.json`, json);
-      setBackupPass("");
       showToast("Backup downloaded.", "success");
     } catch (e) {
       showToast(formatInvokeError(e), "error");
@@ -392,7 +381,7 @@ export default function MobileApp() {
     }
   };
 
-  const handleChangePassphrase = async () => {
+  const handleChangePassphrase = async (oldPass: string, newPass: string) => {
     if (newPass.length < MIN_WALLET_PASS) {
       showToast(`New passphrase must be at least ${MIN_WALLET_PASS} characters.`, "error");
       return;
@@ -400,8 +389,6 @@ export default function MobileApp() {
     session.setBusy(true);
     try {
       await api.changePassphrase(oldPass, newPass);
-      setOldPass("");
-      setNewPass("");
       showToast("Passphrase changed.", "success");
     } catch (e) {
       showToast(formatInvokeError(e), "error");
@@ -572,65 +559,55 @@ export default function MobileApp() {
         {tab === "more" && (
           <MoreRouter
             page={morePage}
-            onBack={() => setMorePage("menu")}
-            onNavigate={setMorePage}
-            history={session.history}
-            bills={session.bills}
-            contacts={contacts}
-            setContacts={setContacts}
-            dustWhisper={session.dustWhisper}
-            privacy={session.privacy}
-            settings={session.settings}
-            hubHealth={session.hubHealth}
-            platformSec={session.platformSec}
-            status={session.status}
-            fastPay={session.fastPay}
-            watchOnly={session.watchOnly}
-            statusAddress={session.status?.address}
-            clipboardSecs={clipboardSecs}
-            busy={session.busy}
-            settingsNodeUrl={settingsNodeUrl}
-            setSettingsNodeUrl={setSettingsNodeUrl}
-            settingsHubUrl={settingsHubUrl}
-            setSettingsHubUrl={setSettingsHubUrl}
-            walletNameDraft={session.walletNameDraft}
-            setWalletNameDraft={session.setWalletNameDraft}
-            backupPass={backupPass}
-            setBackupPass={setBackupPass}
-            oldPass={oldPass}
-            setOldPass={setOldPass}
-            newPass={newPass}
-            setNewPass={setNewPass}
-            contactLabel={contactLabel}
-            setContactLabel={setContactLabel}
-            contactAddress={contactAddress}
-            setContactAddress={setContactAddress}
-            onClearHistory={() => void session.handleClearHistory()}
-            onSaveSettings={() => void handleSaveSettings()}
-            onApplyHub={(entry) => handleApplyHub(entry)}
-            onSaveWalletName={session.handleSaveWalletName}
-            onExportBackup={() => void handleExportBackup()}
-            onChangePassphrase={() => void handleChangePassphrase()}
-            onResetWallet={() => void handleResetWallet()}
-            onLock={() => void session.handleLock()}
-            onPersistPrivacy={(p) => void session.persistPrivacy(p)}
-            onSelectContact={(c) => {
-              payment.goToPayContact(c.address, c.label);
-              navigateToPay();
+            data={{
+              history: session.history,
+              bills: session.bills,
+              contacts,
+              dustWhisper: session.dustWhisper,
+              privacy: session.privacy,
+              settings: session.settings,
+              hubHealth: session.hubHealth,
+              platformSec: session.platformSec,
+              status: session.status,
+              fastPay: session.fastPay,
+              watchOnly: session.watchOnly,
+              statusAddress: session.status?.address,
+              clipboardSecs,
+              busy: session.busy,
             }}
-            onGoPayPeer={(peer) => {
-              payment.goToPayContact(peer);
-              navigateToPay();
-              setMorePage("menu");
+            actions={{
+              onBack: () => setMorePage("menu"),
+              onNavigate: setMorePage,
+              onClearHistory: () => void session.handleClearHistory(),
+              onSaveSettings: (nodeUrl, hubUrl) => void handleSaveSettings(nodeUrl, hubUrl),
+              onApplyHub: (entry) => handleApplyHub(entry),
+              onSaveWalletName: session.handleSaveWalletName,
+              onExportBackup: (pass) => void handleExportBackup(pass),
+              onChangePassphrase: (old, neu) => void handleChangePassphrase(old, neu),
+              onResetWallet: () => void handleResetWallet(),
+              onLock: () => void session.handleLock(),
+              onPersistPrivacy: (p) => void session.persistPrivacy(p),
+              onSelectContact: (c) => {
+                payment.goToPayContact(c.address, c.label);
+                navigateToPay();
+              },
+              onGoPayPeer: (peer) => {
+                payment.goToPayContact(peer);
+                navigateToPay();
+                setMorePage("menu");
+              },
+              onGoLegacySend: () => {
+                navigateToPay();
+                setMorePage("menu");
+              },
+              onToast: showToast,
+              onSelectBill: setSelectedBill,
+              onRefresh: session.refresh,
+              setBusy: session.setBusy,
+              setContacts,
+              walletNameDraft: session.walletNameDraft,
+              setWalletNameDraft: session.setWalletNameDraft,
             }}
-            onGoLegacySend={() => {
-              navigateToPay();
-              setMorePage("menu");
-            }}
-            onToast={showToast}
-            onSelectBill={setSelectedBill}
-            onRefresh={session.refresh}
-            setBusy={session.setBusy}
           />
         )}
       </main>

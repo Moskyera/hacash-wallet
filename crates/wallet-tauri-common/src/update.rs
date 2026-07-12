@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-const GITHUB_REPO: &str = "Moskyera/hacash-wallet";
+/// GitHub releases source for in-app updates (desktop + mobile).
+pub const GITHUB_REPO: &str = "Moskyera/hacash-wallet";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppUpdateInfo {
