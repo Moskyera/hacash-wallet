@@ -3,10 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
-use crate::hip23::{is_valid_hacash_address, Hip23SendCheck, L1_DEFAULT_FEE_MEI};
+use crate::hip23::{is_valid_hacash_address, Hip23SendCheck};
+use crate::l1_fee::estimate_hacd_l1_fee;
 use crate::node::NodeClient;
 
-/// Network fee for L1 diamond transfer (same minimum tier as HAC L1 sends).
+/// Legacy minimum L1 fee wire (fallback when node is unreachable).
 pub const DIAMOND_TRANSFER_FEE_WIRE: &str = "1:244";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,8 +111,8 @@ pub async fn preview_hacd_send(
 
     let first_info = node.query_diamond_by_name(&names[0]).await?;
     let balance = node.balance_mei(from).await.unwrap_or(0.0);
-    let fee_wire = crate::hip23::wire_mei_for_node(DIAMOND_TRANSFER_FEE_WIRE);
-    let hip23 = validate_diamond_l1_send(to, balance, L1_DEFAULT_FEE_MEI)?;
+    let fee_est = estimate_hacd_l1_fee(node, from, to, &names).await?;
+    let hip23 = validate_diamond_l1_send(to, balance, fee_est.fee_mei)?;
 
     let summary = if names.len() == 1 {
         format!(
@@ -136,8 +137,8 @@ pub async fn preview_hacd_send(
         diamond_names: names.clone(),
         diamond_count: names.len(),
         diamond_number: first_info.number,
-        fee_mei: L1_DEFAULT_FEE_MEI,
-        fee_wire,
+        fee_mei: fee_est.fee_mei,
+        fee_wire: fee_est.fee_node,
         hip23,
         summary,
     })

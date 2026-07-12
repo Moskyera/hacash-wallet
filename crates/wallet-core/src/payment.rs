@@ -6,6 +6,8 @@ use crate::channel::{query_channel, ChannelInfo, CHANNEL_STATUS_OPENING};
 use crate::error::{WalletError, WalletResult};
 use crate::l2_hub::{FastPayRequest, L2HubClient};
 use crate::node::NodeClient;
+use crate::hip23::format_mei_for_node;
+use crate::l1_fee::{estimate_hac_l1_fee, format_l1_fee_label};
 use crate::send_options::{
     fast_pay_fee_breakdown, HubFeePayer, SendFeeBreakdown, SendOptions, DEFAULT_HUB_FEE_MEI,
 };
@@ -81,18 +83,19 @@ impl PaymentRouter {
             }
         }
         let _ = self.node.balance_mei(from).await?;
-        let l1_fee = crate::hip23::wire_mei_for_node("1:244");
+        let amount_wire = format_mei_for_node(amount_mei);
+        let fee_est = estimate_hac_l1_fee(&self.node, from, to, &amount_wire).await?;
         let fee_breakdown = SendFeeBreakdown {
-            payer_debit_mei: amount_mei + crate::hip23::L1_DEFAULT_FEE_MEI,
+            payer_debit_mei: amount_mei + fee_est.fee_mei,
             recipient_credit_mei: amount_mei,
             hub_fee_mei: None,
             hub_fee_payer: options.hub_fee_payer,
-            l1_fee_wire: Some(l1_fee.clone()),
+            l1_fee_wire: Some(fee_est.fee_wire.clone()),
         };
         Ok(PaymentPlan {
             rail: PaymentRail::L1OnChain,
             summary: format!("Send {amount_mei} HAC to {to}"),
-            estimated_fee: "~1:244 HAC".into(),
+            estimated_fee: format_l1_fee_label(&fee_est),
             channel_id: None,
             rail_label: crate::fast_pay::rail_label(PaymentRail::L1OnChain).into(),
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L1OnChain).into(),

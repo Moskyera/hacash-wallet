@@ -1111,19 +1111,41 @@ impl WalletService {
         let from = self.require_address()?;
         let amount_wire = format_amount_mei(amount_mei);
         let balance = self.node.balance_mei(&from).await.unwrap_or(0.0);
-        let hip23 = validate_simple_l1_send(to, amount_mei, balance, crate::hip23::L1_DEFAULT_FEE_MEI)?;
         let fast_pay = evaluate_fast_pay(&self.node, &self.settings, Some(&from)).await?;
         let plan = self
             .router
             .plan_send(&from, to, amount_mei, options)
             .await?;
+        let fee_for_hip23 = match plan.rail {
+            PaymentRail::L1OnChain => plan
+                .fee_breakdown
+                .l1_fee_wire
+                .as_ref()
+                .map(|w| crate::type4_fee::fee_mei_from_wire(w))
+                .unwrap_or(crate::hip23::L1_DEFAULT_FEE_MEI),
+            PaymentRail::L2Fast => match plan.fee_breakdown.hub_fee_payer {
+                crate::send_options::HubFeePayer::Sender => plan
+                    .fee_breakdown
+                    .hub_fee_mei
+                    .unwrap_or(crate::send_options::DEFAULT_HUB_FEE_MEI),
+                crate::send_options::HubFeePayer::Recipient => 0.0,
+            },
+            PaymentRail::QuantumType4 => crate::hip23::L1_DEFAULT_FEE_MEI,
+        };
+        let hip23 = validate_simple_l1_send(to, amount_mei, balance, fee_for_hip23)?;
+        let fee = plan
+            .fee_breakdown
+            .l1_fee_wire
+            .as_ref()
+            .map(|w| crate::hip23::wire_mei_for_node(w))
+            .unwrap_or_else(|| crate::hip23::wire_mei_for_node("1:244"));
         Ok(SendPreview {
             plan,
             from,
             to: to.to_owned(),
             amount_mei,
             amount_wire: amount_wire.clone(),
-            fee: crate::hip23::wire_mei_for_node("1:244"),
+            fee,
             hip23,
             fast_pay,
             send_options: options,

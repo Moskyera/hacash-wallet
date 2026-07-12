@@ -1290,7 +1290,7 @@ export default function App() {
                   <strong>Fast Pay ON:</strong> Send tab uses instant routing (~0.001 HAC fee).
                 </li>
                 <li>
-                  <strong>Fast Pay OFF:</strong> Send tab uses on-chain (~1.244 HAC fee).
+                  <strong>Fast Pay OFF:</strong> Send tab uses on-chain (dynamic L1 fee from node).
                 </li>
                 <li>You always see which route is used before you confirm a payment.</li>
               </ul>

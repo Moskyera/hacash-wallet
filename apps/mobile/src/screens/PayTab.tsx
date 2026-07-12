@@ -351,7 +351,7 @@ export default function PayTab({
           />
 
           <p className="muted small">
-            On chain L1. Network fee ~1.244 HAC. For stack tokens use Launchpad.
+            On chain L1. Network fee is estimated from the node at preview. For stack tokens use Launchpad.
           </p>
 
           <button
@@ -401,7 +401,7 @@ export default function PayTab({
       {asset === "BTC" && (
         <>
           <p className="muted small">
-            On-chain BTC on the Hacash network. Recipient is a Hacash address (1…). Fee paid in HAC.
+            On-chain BTC on the Hacash network. Recipient is a Hacash address (1…). Fee paid in HAC (estimated at preview).
           </p>
           <label className="label">Recipient Hacash address</label>
           <input

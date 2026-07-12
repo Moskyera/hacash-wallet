@@ -161,7 +161,7 @@ export default function HacdSendPanel({
             hacd.resetPreview();
           }}
         />
-        <p className="muted small-note">On-chain L1. Network fee ~1.244 HAC.</p>
+        <p className="muted small-note">On-chain L1. Network fee is estimated from the node at preview.</p>
         <button
           className="primary"
           disabled={busy || hacd.selected.length === 0 || !hacd.recipient.trim()}

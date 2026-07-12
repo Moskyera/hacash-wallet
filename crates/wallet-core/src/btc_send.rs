@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
-use crate::hip23::{is_valid_hacash_address, Hip23SendCheck, L1_DEFAULT_FEE_MEI};
+use crate::hip23::{is_valid_hacash_address, Hip23SendCheck};
+use crate::l1_fee::estimate_btc_l1_fee;
 use crate::node::NodeClient;
 
 pub const BTC_TRANSFER_FEE_WIRE: &str = "1:244";
@@ -63,8 +64,8 @@ pub async fn preview_btc_send(
     }
 
     let hac_mei = balance_entry.hacash_mei()?;
-    let fee_wire = crate::hip23::wire_mei_for_node(BTC_TRANSFER_FEE_WIRE);
-    let hip23 = validate_btc_l1_send(to, hac_mei, L1_DEFAULT_FEE_MEI)?;
+    let fee_est = estimate_btc_l1_fee(node, from, to, satoshi).await?;
+    let hip23 = validate_btc_l1_send(to, hac_mei, fee_est.fee_mei)?;
     let btc_amount = satoshi_to_btc(satoshi);
 
     let summary = format!(
@@ -79,8 +80,8 @@ pub async fn preview_btc_send(
         to: to.to_owned(),
         satoshi,
         btc_amount,
-        fee_mei: L1_DEFAULT_FEE_MEI,
-        fee_wire,
+        fee_mei: fee_est.fee_mei,
+        fee_wire: fee_est.fee_node,
         hip23,
         summary,
     })

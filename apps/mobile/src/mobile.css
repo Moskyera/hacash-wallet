@@ -76,16 +76,16 @@ body {
 }
 
 .wallet-logo-lg {
-  width: 168px;
-  height: 168px;
-  margin: 0 auto 16px;
+  width: 112px;
+  height: 112px;
+  margin: 0 auto 12px;
   padding: 0;
   border-radius: 0;
 }
 
 .wallet-logo-sm {
-  width: 52px;
-  height: 52px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
   padding: 0;
   border-radius: 0;

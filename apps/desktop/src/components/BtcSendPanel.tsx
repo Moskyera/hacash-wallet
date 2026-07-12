@@ -57,7 +57,7 @@ export default function BtcSendPanel({
 
       <p className="muted small-note">
         On-chain BTC on the Hacash network. Recipient must be a Hacash address (1…). Network fee is
-        paid in HAC.
+        paid in HAC (estimated at preview).
       </p>
 
       <div className="send-section">

@@ -2,38 +2,38 @@
 
 ## Latest downloads
 
-### Desktop — v0.1.17
+### Desktop — v0.1.18
 
 #### Windows x64
 
 | File | Link |
 |------|------|
-| **Setup (recommended)** | [setup.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-desktop/hacash-wallet-desktop-v0.1.17-x64-setup.exe) |
-| MSI installer | [msi](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-desktop/hacash-wallet-desktop-v0.1.17-x64.msi) |
-| Portable EXE | [portable.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-desktop/hacash-wallet-desktop-v0.1.17-x64-portable.exe) |
+| **Setup (recommended)** | [setup.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64-setup.exe) |
+| MSI installer | [msi](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64.msi) |
+| Portable EXE | [portable.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64-portable.exe) |
 
 #### Linux x64
 
 | File | Link |
 |------|------|
-| **AppImage (recommended)** | [AppImage](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-desktop/hacash-wallet-desktop-v0.1.17-x64.AppImage) |
-| Debian/Ubuntu (.deb) | [deb](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-desktop/hacash-wallet-desktop-v0.1.17-x64.deb) |
-| Portable binary | [portable](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-desktop/hacash-wallet-desktop-v0.1.17-x64-portable) |
+| **AppImage (recommended)** | [AppImage](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64.AppImage) |
+| Debian/Ubuntu (.deb) | [deb](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64.deb) |
+| Portable binary | [portable](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64-portable) |
 
 ```bash
 # AppImage
-chmod +x hacash-wallet-desktop-v0.1.17-x64.AppImage
-./hacash-wallet-desktop-v0.1.17-x64.AppImage
+chmod +x hacash-wallet-desktop-v0.1.18-x64.AppImage
+./hacash-wallet-desktop-v0.1.18-x64.AppImage
 
 # Debian/Ubuntu
-sudo dpkg -i hacash-wallet-desktop-v0.1.17-x64.deb
+sudo dpkg -i hacash-wallet-desktop-v0.1.18-x64.deb
 ```
 
-### Mobile (Android arm64) — v0.1.16
+### Mobile (Android arm64) — v0.1.17
 
 | File | Link |
 |------|------|
-| APK | [hacash-wallet-mobile-v0.1.16-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.16-mobile/hacash-wallet-mobile-v0.1.16-arm64.apk) |
+| APK | [hacash-wallet-mobile-v0.1.17-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-mobile/hacash-wallet-mobile-v0.1.17-arm64.apk) |
 
 App display name: **Hacash Wallet**
 

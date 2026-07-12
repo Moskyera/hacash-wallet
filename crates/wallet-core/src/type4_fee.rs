@@ -5,8 +5,11 @@ use field::{Amount, UNIT_MEI};
 use crate::error::{WalletError, WalletResult};
 use crate::hip23::{format_mei_for_node, parse_hacash_wire_mei};
 
-/// Node default: ~1:244 on a 166-byte simple tx → purity ≈ 6024.
-pub const TYPE4_DEFAULT_LOWEST_FEE_PURITY: u64 = 10_000_00 / 166;
+/// Node default: ~1:244 on a 166-byte simple L1 tx → purity ≈ 6024.
+pub const L1_DEFAULT_LOWEST_FEE_PURITY: u64 = 10_000_00 / 166;
+
+/// Alias kept for Type 4 local fallback (same purity constant as L1 minimum tier).
+pub const TYPE4_DEFAULT_LOWEST_FEE_PURITY: u64 = L1_DEFAULT_LOWEST_FEE_PURITY;
 
 /// Mempool minimum signed wire (~5 KB ML-DSA signature payload).
 pub const TYPE4_MIN_SIGNED_WIRE_BYTES: usize = 512;

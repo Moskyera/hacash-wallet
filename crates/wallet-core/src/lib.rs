@@ -26,6 +26,7 @@ pub mod privacy;
 pub mod security;
 pub mod settings;
 pub mod quantum;
+pub mod l1_fee;
 pub mod type4_fee;
 pub mod quantum_vault;
 pub mod unlock_guard;
