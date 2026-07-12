@@ -6,6 +6,7 @@ export type PrivacySettings = {
   screen_privacy: boolean;
   store_tx_history: boolean;
   clipboard_clear_secs: number;
+  pause_auto_lock_dapp: boolean;
 };
 
 export type HubFeePayer = "sender" | "recipient";
@@ -403,6 +404,17 @@ export const api = {
   disableBiometricUnlock: () => invoke<void>("wallet_disable_biometric_unlock"),
   unlockBiometric: () => invoke<string>("wallet_unlock_biometric"),
   platformInfo: () => invoke<{ platform: string; mobile: boolean }>("wallet_platform_info"),
+  bumpActivity: () => invoke<void>("wallet_bump_activity"),
+  dappConnect: (origin: string) =>
+    invoke<{ address?: string; err?: string }>("wallet_dapp_connect", { origin }),
+  dappHeartbeat: (origin: string) =>
+    invoke<{ ok?: boolean; err?: string }>("wallet_dapp_heartbeat", { origin }),
+  dappWallet: (origin: string) =>
+    invoke<{ address?: string; err?: string }>("wallet_dapp_wallet", { origin }),
+  dappTransfer: (origin: string, txobj: string) =>
+    invoke<Record<string, unknown>>("wallet_dapp_transfer", { origin, txobj }),
+  webviewEval: (label: string, script: string) =>
+    invoke<void>("wallet_webview_eval", { label, script }),
   updateDustWhisper: (dustWhisper: DustWhisperSettings) =>
     invoke<void>("wallet_update_dust_whisper_settings", { dustWhisper }),
   whisperRelayHealth: () => invoke<RelayHealthStatus[]>("wallet_whisper_relay_health"),

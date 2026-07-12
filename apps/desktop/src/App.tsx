@@ -33,6 +33,7 @@ import PaymentQrScanner from "./components/PaymentQrScanner";
 import HacdSendPanel from "./components/HacdSendPanel";
 import ReceivePanel from "./components/ReceivePanel";
 import BalanceOverview from "./components/BalanceOverview";
+import HacdDappConnect from "./components/HacdDappConnect";
 import BtcSendPanel from "./components/BtcSendPanel";
 import type { PaymentQrPayload } from "./paymentQr";
 import type { PaymentAsset } from "./utils/paymentAssets";
@@ -474,6 +475,11 @@ export default function App() {
   }
 
   async function handleLock() {
+    try {
+      await api.dappBridgeStop();
+    } catch {
+      /* bridge may not be running */
+    }
     clearMessages();
     await api.lock();
     setBalance(null);
@@ -1216,6 +1222,15 @@ export default function App() {
                 Last transaction: <code>{maskHash(lastTx, hideAddresses)}</code>
               </div>
             )}
+            <HacdDappConnect
+              watchOnly={status?.watch_only}
+              pauseAutoLockDapp={privacy.pause_auto_lock_dapp ?? true}
+              onNotify={(msg, kind) => {
+                clearMessages();
+                if (kind === "error") setError(msg);
+                else setInfo(msg);
+              }}
+            />
           </section>
         )}
 
@@ -2157,6 +2172,16 @@ export default function App() {
                 }
               />
               Store transaction history locally
+            </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={privacyDraft.pause_auto_lock_dapp ?? true}
+                onChange={(e) =>
+                  setPrivacyDraft((p) => ({ ...p, pause_auto_lock_dapp: e.target.checked }))
+                }
+              />
+              Pause auto-lock during HACD session (hacd.it)
             </label>
 
             <label>Clipboard auto-clear (seconds, 0 = off)</label>

@@ -29,11 +29,11 @@ chmod +x hacash-wallet-desktop-v0.1.18-x64.AppImage
 sudo dpkg -i hacash-wallet-desktop-v0.1.18-x64.deb
 ```
 
-### Mobile (Android arm64) — v0.1.17
+### Mobile (Android arm64) — v0.1.18
 
 | File | Link |
 |------|------|
-| APK | [hacash-wallet-mobile-v0.1.17-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.17-mobile/hacash-wallet-mobile-v0.1.17-arm64.apk) |
+| APK | [hacash-wallet-mobile-v0.1.18-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-mobile/hacash-wallet-mobile-v0.1.18-arm64.apk) |
 
 App display name: **Hacash Wallet**
 

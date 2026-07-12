@@ -3,6 +3,7 @@ pub mod biometric_unlock;
 pub mod airgap;
 pub mod bills;
 pub mod channel;
+pub mod dapp;
 pub mod fast_pay;
 pub mod hacd_send;
 pub mod btc_send;

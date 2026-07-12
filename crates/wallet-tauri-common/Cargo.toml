@@ -7,13 +7,15 @@ license.workspace = true
 
 [dependencies]
 hacash-wallet-core = { path = "../wallet-core" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["unstable"] }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, features = ["cors"], optional = true }
 
 [features]
 default = []
-desktop = []
+desktop = ["dep:axum", "dep:tower-http"]
 desktop-platform = []

@@ -19,6 +19,9 @@ pub struct PrivacySettings {
     /// Auto-clear clipboard N seconds after copy (0 = disabled).
     #[serde(default = "default_clipboard_clear_secs")]
     pub clipboard_clear_secs: u64,
+    /// While connected to HACD Launchpad (hacd.it), reset the auto-lock idle timer.
+    #[serde(default = "default_true")]
+    pub pause_auto_lock_dapp: bool,
 }
 
 fn default_screen_privacy() -> bool {
@@ -41,6 +44,7 @@ impl Default for PrivacySettings {
             screen_privacy: default_screen_privacy(),
             store_tx_history: default_true(),
             clipboard_clear_secs: default_clipboard_clear_secs(),
+            pause_auto_lock_dapp: default_true(),
         }
     }
 }
@@ -94,5 +98,6 @@ mod tests {
         assert!(p.screen_privacy);
         assert!(p.store_tx_history);
         assert_eq!(p.clipboard_clear_secs, 30);
+        assert!(p.pause_auto_lock_dapp);
     }
 }

@@ -51,18 +51,66 @@ body {
 }
 
 .wallet-logo-sm {
-  width: 42px;
-  height: 42px;
+  width: auto;
+  height: auto;
+  max-width: 160px;
+  max-height: 42px;
+  image-rendering: auto;
 }
 
 .wallet-logo-lg {
-  width: 88px;
-  height: 88px;
+  width: auto;
+  height: auto;
+  max-width: min(280px, 40vw);
+  max-height: 120px;
   margin: 0 auto 16px;
+  image-rendering: auto;
 }
 
 .brand-title { font-weight: 700; }
 .brand-sub { color: var(--muted); font-size: 12px; }
+
+.hacd-dapp-connect {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.hacd-dapp-connect-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.hacd-dapp-connect-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.hacd-dapp-connect-copy strong {
+  font-size: 0.95rem;
+}
+
+.hacd-dapp-connect-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.hacd-dapp-connect-actions button {
+  width: auto;
+  margin: 0;
+}
 
 nav { display: flex; flex-direction: column; gap: 8px; }
 nav button, .actions-row button, .panel button {

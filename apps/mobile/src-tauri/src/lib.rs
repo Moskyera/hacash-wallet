@@ -173,6 +173,14 @@ pub fn run() {
             wallet_tauri_common::whisper_commands::messenger_mark_read,
             wallet_tauri_common::whisper_commands::messenger_send,
             wallet_tauri_common::whisper_commands::messenger_poll_inbox,
+            wallet_tauri_common::dapp_commands::wallet_bump_activity,
+            wallet_tauri_common::dapp_commands::wallet_dapp_connect,
+            wallet_tauri_common::dapp_commands::wallet_dapp_wallet,
+            wallet_tauri_common::dapp_commands::wallet_dapp_heartbeat,
+            wallet_tauri_common::dapp_commands::wallet_dapp_transfer,
+            wallet_tauri_common::dapp_commands::wallet_dapp_sign_tx,
+            wallet_tauri_common::dapp_commands::wallet_dapp_chain,
+            wallet_tauri_common::dapp_commands::wallet_webview_eval,
         ])
         .run(tauri::generate_context!())
         .expect("error while building mobile tauri application");

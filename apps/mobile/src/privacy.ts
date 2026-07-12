@@ -47,4 +47,5 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
   screen_privacy: true,
   store_tx_history: true,
   clipboard_clear_secs: 30,
+  pause_auto_lock_dapp: true,
 };

@@ -317,6 +317,17 @@ pub fn run() {
             commands::quantum_create_hybrid_from_privakey,
             commands::quantum_prepare_airgap_type4,
             commands::quantum_airgap_sign_type4,
+            wallet_tauri_common::dapp_commands::wallet_bump_activity,
+            wallet_tauri_common::dapp_commands::wallet_dapp_connect,
+            wallet_tauri_common::dapp_commands::wallet_dapp_wallet,
+            wallet_tauri_common::dapp_commands::wallet_dapp_heartbeat,
+            wallet_tauri_common::dapp_commands::wallet_dapp_transfer,
+            wallet_tauri_common::dapp_commands::wallet_dapp_sign_tx,
+            wallet_tauri_common::dapp_commands::wallet_dapp_chain,
+            wallet_tauri_common::dapp_commands::wallet_webview_eval,
+            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_start,
+            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_stop,
+            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -324,6 +335,9 @@ pub fn run() {
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
                     let _ = wallet_tauri_common::desktop_relay::stop_managed_relay(&state);
+                    tauri::async_runtime::block_on(async {
+                        let _ = wallet_tauri_common::dapp_bridge::stop_dapp_bridge(&state).await;
+                    });
                 }
             }
         });

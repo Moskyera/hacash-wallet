@@ -5664,11 +5664,13 @@ dependencies = [
 name = "wallet-tauri-common"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "hacash-wallet-core",
  "serde",
  "serde_json",
  "tauri",
  "tokio",
+ "tower-http",
  "tracing",
 ]
 

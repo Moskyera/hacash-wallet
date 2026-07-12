@@ -722,6 +722,16 @@ export default function MoreRouter(props: Props) {
               onChange={(e) => void onPersistPrivacy({ store_tx_history: e.target.checked })}
             />
           </div>
+          <div className="toggle-row">
+            <span>Pause auto-lock on HACD</span>
+            <input
+              type="checkbox"
+              checked={privacy.pause_auto_lock_dapp ?? true}
+              onChange={(e) =>
+                void onPersistPrivacy({ pause_auto_lock_dapp: e.target.checked })
+              }
+            />
+          </div>
           <label className="label">Clipboard clear (seconds)</label>
           <input
             type="number"
@@ -783,7 +793,9 @@ export default function MoreRouter(props: Props) {
           onBroadcast={() => void onRefresh()}
         />
       )}
-      {page === "launchpad" && <LaunchpadScreen />}
+      {page === "launchpad" && (
+        <LaunchpadScreen pauseAutoLockDapp={privacy.pause_auto_lock_dapp ?? true} />
+      )}
       {page === "contacts" && (
         <div className="card">
           <h2>Contacts</h2>

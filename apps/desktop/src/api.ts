@@ -6,6 +6,7 @@ export type PrivacySettings = {
   screen_privacy: boolean;
   store_tx_history: boolean;
   clipboard_clear_secs: number;
+  pause_auto_lock_dapp: boolean;
 };
 
 export type DustWhisperSettings = {
@@ -480,4 +481,15 @@ export const api = {
     invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
   sendBtc: (to: string, satoshi: number) =>
     invoke<SendResult>("wallet_send_btc", { to, satoshi }),
+  bumpActivity: () => invoke<void>("wallet_bump_activity"),
+  dappConnect: (origin: string) =>
+    invoke<{ address?: string; err?: string }>("wallet_dapp_connect", { origin }),
+  dappWallet: (origin: string) =>
+    invoke<{ address?: string; err?: string }>("wallet_dapp_wallet", { origin }),
+  dappBridgeStart: () => invoke<number>("wallet_dapp_bridge_start"),
+  dappBridgeStop: () => invoke<void>("wallet_dapp_bridge_stop"),
+  dappBridgeStatus: () =>
+    invoke<{ running: boolean; port: number; url: string; wallet_locked: boolean; address?: string }>(
+      "wallet_dapp_bridge_status",
+    ),
 };

@@ -76,27 +76,36 @@ body {
 }
 
 .wallet-logo-lg {
-  width: 112px;
-  height: 112px;
+  width: auto;
+  height: auto;
+  max-width: min(240px, 88vw);
+  max-height: 112px;
   margin: 0 auto 12px;
   padding: 0;
   border-radius: 0;
+  image-rendering: auto;
 }
 
 .wallet-logo-sm {
-  width: 36px;
-  height: 36px;
+  width: auto;
+  height: auto;
+  max-width: 120px;
+  max-height: 36px;
   flex-shrink: 0;
   padding: 0;
   border-radius: 0;
+  image-rendering: auto;
 }
 
 .wallet-logo-splash {
-  width: 140px;
-  height: 140px;
+  width: auto;
+  height: auto;
+  max-width: 200px;
+  max-height: 140px;
   margin: 0;
   padding: 0;
   border-radius: 0;
+  image-rendering: auto;
 }
 
 .splash-screen {
@@ -249,12 +258,57 @@ svg.dvhip5 .st16 {
   height: 1.25rem;
 }
 
-.launchpad-shell {
+.launchpad-wrap {
   margin: 0 -16px;
-  height: calc(100dvh - var(--nav-h) - 120px);
-  min-height: 480px;
+}
+
+.launchpad-connect-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.launchpad-connect-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.launchpad-connect-copy strong {
+  font-size: 0.9rem;
+}
+
+.launchpad-connect-copy span {
+  font-size: 0.72rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+.launchpad-connect-btn {
+  width: auto;
+  margin: 0;
+  padding: 10px 16px;
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
+.launchpad-shell {
+  height: calc(100dvh - var(--nav-h) - 168px);
+  min-height: 420px;
   background: #000;
   overflow: hidden;
+  position: relative;
+}
+
+.launchpad-webview-placeholder {
+  width: 100%;
+  height: 100%;
+  background: #000;
 }
 
 .launchpad-mobile-stage {
