@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Hacash Wallet Mobile",
+  "productName": "Hacash Wallet",
   "version": "0.1.12",
   "identifier": "org.hacash.wallet.mobile",
   "build": {
