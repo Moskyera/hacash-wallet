@@ -25,6 +25,54 @@ fn wallet_confirm_biometric_native(
         .map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+struct BiometricUnlockStatus {
+    enabled: bool,
+    configured: bool,
+}
+
+#[tauri::command]
+fn wallet_biometric_unlock_status(state: tauri::State<'_, AppState>) -> Result<BiometricUnlockStatus, String> {
+    let svc = state.inner.blocking_lock();
+    Ok(BiometricUnlockStatus {
+        enabled: svc.get_settings().biometric_unlock_enabled,
+        configured: svc.biometric_unlock_configured(),
+    })
+}
+
+#[tauri::command]
+fn wallet_enable_biometric_unlock(
+    app: tauri::AppHandle,
+    passphrase: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    platform::verify_native_biometric(&app, "Enable biometric unlock for Hacash Wallet")?;
+    let mut svc = state.inner.blocking_lock();
+    svc.enable_biometric_unlock(&passphrase)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_disable_biometric_unlock(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.disable_biometric_unlock().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn wallet_unlock_biometric(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    platform::verify_native_biometric(&app, "Unlock Hacash Wallet")?;
+    let passphrase = {
+        let svc = state.inner.blocking_lock();
+        svc.unlock_passphrase_for_biometric()
+            .map_err(|e| e.to_string())?
+    };
+    let mut svc = state.inner.blocking_lock();
+    svc.unlock(&passphrase).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
@@ -64,6 +112,7 @@ pub fn run() {
             wallet_tauri_common::commands::wallet_discover_hubs,
             wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_export_backup,
+            wallet_tauri_common::commands::wallet_export_private_key,
             wallet_tauri_common::commands::wallet_change_passphrase,
             wallet_tauri_common::commands::wallet_clear_tx_history,
             wallet_tauri_common::commands::wallet_list_bill_summaries,
@@ -99,6 +148,10 @@ pub fn run() {
             wallet_tauri_common::security_commands::wallet_airgap_parse_qr_batch,
             wallet_platform_security_status,
             wallet_confirm_biometric_native,
+            wallet_biometric_unlock_status,
+            wallet_enable_biometric_unlock,
+            wallet_disable_biometric_unlock,
+            wallet_unlock_biometric,
             wallet_tauri_common::quantum_commands::quantum_get_settings,
             wallet_tauri_common::quantum_commands::quantum_set_mode,
             wallet_tauri_common::quantum_commands::quantum_create_pqc,

@@ -257,6 +257,7 @@ impl WalletService {
             crate::paths::history_path(),
             crate::paths::messenger_path(),
             crate::paths::quantum_keystore_path(),
+            crate::paths::biometric_unlock_path(),
         ];
         for path in paths {
             if path.exists() {
@@ -332,6 +333,49 @@ impl WalletService {
         vault.export_json()
     }
 
+    /// Reveal the wallet private key after passphrase verification.
+    pub fn export_private_key(&self, passphrase: &str) -> WalletResult<String> {
+        if !self.vault_path.exists() {
+            return Err(WalletError::NoWallet);
+        }
+        let vault = self.read_vault()?;
+        let mut secret = vault.decrypt(passphrase)?;
+        let hex = secret.clone();
+        secret.zeroize();
+        Ok(hex)
+    }
+
+    pub fn biometric_unlock_configured(&self) -> bool {
+        crate::biometric_unlock::is_configured()
+    }
+
+    pub fn enable_biometric_unlock(&mut self, passphrase: &str) -> WalletResult<()> {
+        if !self.vault_path.exists() {
+            return Err(WalletError::NoWallet);
+        }
+        let vault = self.vault_snapshot()?;
+        let mut secret = vault.decrypt(passphrase)?;
+        secret.zeroize();
+        crate::biometric_unlock::save_encrypted_passphrase(passphrase)?;
+        self.settings.biometric_unlock_enabled = true;
+        self.settings.save()?;
+        Ok(())
+    }
+
+    pub fn disable_biometric_unlock(&mut self) -> WalletResult<()> {
+        crate::biometric_unlock::clear()?;
+        self.settings.biometric_unlock_enabled = false;
+        self.settings.save()?;
+        Ok(())
+    }
+
+    pub fn unlock_passphrase_for_biometric(&self) -> WalletResult<String> {
+        if !self.settings.biometric_unlock_enabled || !crate::biometric_unlock::is_configured() {
+            return Err(WalletError::Vault("biometric unlock is not enabled".into()));
+        }
+        crate::biometric_unlock::load_encrypted_passphrase()
+    }
+
     pub fn change_passphrase(&mut self, old_passphrase: &str, new_passphrase: &str) -> WalletResult<()> {
         if new_passphrase.len() < 8 {
             return Err(WalletError::Vault("new passphrase must be at least 8 characters".into()));
@@ -350,6 +394,9 @@ impl WalletService {
             }
         }
         self.persist_vault(vault)?;
+        if self.settings.biometric_unlock_enabled && crate::biometric_unlock::is_configured() {
+            crate::biometric_unlock::save_encrypted_passphrase(new_passphrase)?;
+        }
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   BillSummary,
@@ -18,7 +18,7 @@ import MessengerScreen from "../../components/MessengerScreen";
 import QuantumScreen from "../../components/QuantumScreen";
 import WhisperScreen from "../../components/WhisperScreen";
 import { addContact, removeContact, type SavedContact } from "../../contacts";
-import { maskAddress } from "../../privacy";
+import { copyWithPrivacyClear, maskAddress } from "../../privacy";
 import { MIN_WALLET_PASS } from "../../quantumMeta";
 import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
 import { formatInvokeError } from "../../formatInvokeError";
@@ -101,6 +101,14 @@ type Props = {
 };
 
 export default function MoreRouter(props: Props) {
+  const [bioUnlockPass, setBioUnlockPass] = useState("");
+  const [bioUnlockStatus, setBioUnlockStatus] = useState<{ enabled: boolean; configured: boolean } | null>(
+    null,
+  );
+  const [privateKeyPass, setPrivateKeyPass] = useState("");
+  const [privateKey, setPrivateKey] = useState<string | null>(null);
+  const privateKeyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const {
     page,
     onBack,
@@ -153,6 +161,20 @@ export default function MoreRouter(props: Props) {
     onRefresh,
     setBusy,
   } = props;
+
+  useEffect(() => {
+    if (page !== "security") return;
+    void api
+      .biometricUnlockStatus()
+      .then(setBioUnlockStatus)
+      .catch(() => setBioUnlockStatus(null));
+  }, [page, settings?.biometric_unlock_enabled]);
+
+  useEffect(() => {
+    return () => {
+      if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
+    };
+  }, []);
 
   const [webauthnReady, setWebauthnReady] = useState(false);
   const [nodeTestMsg, setNodeTestMsg] = useState<string | null>(null);
@@ -410,6 +432,67 @@ export default function MoreRouter(props: Props) {
             </button>
           </div>
           <div className="card">
+            <h2>Private key</h2>
+            <p className="muted small">
+              Advanced: view your wallet private key. Anyone with this key controls your funds. Never share it.
+            </p>
+            <label className="label">Passphrase</label>
+            <input
+              type="password"
+              value={privateKeyPass}
+              onChange={(e) => setPrivateKeyPass(e.target.value)}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || watchOnly || !privateKeyPass}
+              onClick={() => {
+                setBusy(true);
+                void api
+                  .exportPrivateKey(privateKeyPass)
+                  .then((hex) => {
+                    setPrivateKey(hex);
+                    setPrivateKeyPass("");
+                    onToast("Private key revealed. It will hide in 60s.", "info");
+                    if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
+                    privateKeyTimer.current = setTimeout(() => setPrivateKey(null), 60_000);
+                  })
+                  .catch((err) => onToast(formatInvokeError(err), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Reveal private key
+            </button>
+            {privateKey ? (
+              <>
+                <p className="mono small" style={{ wordBreak: "break-all", marginTop: "0.75rem" }}>
+                  {privateKey}
+                </p>
+                <button
+                  type="button"
+                  style={{ marginTop: "0.5rem" }}
+                  onClick={() =>
+                    void copyWithPrivacyClear(privateKey, clipboardSecs).then(() =>
+                      onToast("Private key copied.", "success"),
+                    )
+                  }
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  style={{ marginTop: "0.5rem", marginLeft: "0.5rem" }}
+                  onClick={() => {
+                    setPrivateKey(null);
+                    if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
+                  }}
+                >
+                  Hide
+                </button>
+              </>
+            ) : null}
+          </div>
+          <div className="card">
             <h2>Delete wallet</h2>
             <p className="muted">
               Removes this wallet from the phone so you can create or import a different one. Export a
@@ -470,10 +553,76 @@ export default function MoreRouter(props: Props) {
             <p className="muted small">Current: {status?.security_profile ?? "balanced"}</p>
           </div>
           <div className="card">
+            <h2>Biometric unlock</h2>
+            <p className="muted small">
+              {platformSec?.native_biometric_available
+                ? `Open the wallet with ${platformSec.biometric_kind ?? "biometric"} instead of typing your passphrase.`
+                : "No biometric sensor on this device."}
+            </p>
+            {bioUnlockStatus?.enabled && bioUnlockStatus.configured ? (
+              <p className="muted small">Biometric unlock is active.</p>
+            ) : null}
+            {!bioUnlockStatus?.configured && platformSec?.native_biometric_available ? (
+              <>
+                <label className="label">Passphrase (to enable)</label>
+                <input
+                  type="password"
+                  value={bioUnlockPass}
+                  onChange={(e) => setBioUnlockPass(e.target.value)}
+                  placeholder="Enter wallet passphrase"
+                />
+                <button
+                  type="button"
+                  className="primary"
+                  style={{ marginTop: "0.75rem", width: "100%" }}
+                  disabled={busy || watchOnly || !bioUnlockPass}
+                  onClick={() => {
+                    setBusy(true);
+                    void api
+                      .enableBiometricUnlock(bioUnlockPass)
+                      .then(() => onRefresh())
+                      .then(() => api.biometricUnlockStatus())
+                      .then((s) => {
+                        setBioUnlockStatus(s);
+                        setBioUnlockPass("");
+                        onToast("Biometric unlock enabled.", "success");
+                      })
+                      .catch((err) => onToast(formatInvokeError(err), "error"))
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  Enable biometric unlock
+                </button>
+              </>
+            ) : null}
+            {bioUnlockStatus?.configured ? (
+              <button
+                type="button"
+                style={{ marginTop: "0.75rem", width: "100%" }}
+                disabled={busy || watchOnly}
+                onClick={() => {
+                  setBusy(true);
+                  void api
+                    .disableBiometricUnlock()
+                    .then(() => onRefresh())
+                    .then(() => api.biometricUnlockStatus())
+                    .then((s) => {
+                      setBioUnlockStatus(s);
+                      onToast("Biometric unlock disabled.", "success");
+                    })
+                    .catch((err) => onToast(formatInvokeError(err), "error"))
+                    .finally(() => setBusy(false));
+                }}
+              >
+                Disable biometric unlock
+              </button>
+            ) : null}
+          </div>
+          <div className="card">
             <h2>Biometric confirm</h2>
             <p className="muted small">
               {platformSec?.native_biometric_available
-                ? `Device supports ${platformSec.biometric_kind ?? "biometric"} unlock. Used for sends ≥ ${BIOMETRIC_THRESHOLD_MEI} HAC.`
+                ? `Confirm sends ≥ ${BIOMETRIC_THRESHOLD_MEI} HAC with ${platformSec.biometric_kind ?? "biometric"}.`
                 : "No biometric sensor detected. Use a passkey instead, or keep sends below the limit."}
             </p>
             <div className="toggle-row">

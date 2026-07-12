@@ -132,8 +132,7 @@ export default function ReceiveTab({
             </p>
           )}
           <p className="muted small">
-            Share your HACD name (or code <code>hacd:{hacdNorm || "NAME"}</code>) to receive stack assets or a
-            whole diamond. Each mined HACD has a unique HIP-5 visual.
+            Share your name or <code>hacd:{hacdNorm || "NAME"}</code> to receive HACD. Visual is unique per diamond.
           </p>
           <button type="button" className="primary" disabled={!isValidHacdName(hacdNorm)} onClick={() => void copyHacd()}>
             Copy HACD code
@@ -149,7 +148,7 @@ export default function ReceiveTab({
             value={btcAddress}
             onChange={(e) => setBtcAddress(e.target.value)}
           />
-          <p className="muted small">Used for BTC legs on Fast Pay channel bills.</p>
+          <p className="muted small">Receive on-chain BTC to this wallet address.</p>
           <button type="button" className="primary" disabled={!isValidBtcAddress(btcAddress)} onClick={() => void copyBtc()}>
             Copy BTC address
           </button>

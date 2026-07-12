@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, BillSummary } from "./api";
+import { api, BillSummary, type BiometricUnlockStatus } from "./api";
 import BottomNav, { type TabId } from "./components/BottomNav";
 import BillDetailModal from "./components/BillDetailModal";
 import MessengerScreen from "./components/MessengerScreen";
@@ -52,6 +52,7 @@ export default function MobileApp() {
   const pullOffset = useRef(0);
   const deepLinkHandled = useRef(false);
   const [deepLinkTick, setDeepLinkTick] = useState(0);
+  const [biometricUnlock, setBiometricUnlock] = useState<BiometricUnlockStatus | null>(null);
 
   const clipboardSecs = session.privacy.clipboard_clear_secs;
   const displayName = walletDisplayName(session.status?.address, session.walletName);
@@ -244,6 +245,31 @@ export default function MobileApp() {
     }
   };
 
+  const handleBiometricUnlock = async () => {
+    session.setBusy(true);
+    try {
+      await api.unlockBiometric();
+      setPassphrase("");
+      setPrivacyHidden(false);
+      session.setAuthScreen("app");
+      await session.refresh();
+      setTab("home");
+      hapticSuccess();
+    } catch (e) {
+      showToast(formatInvokeError(e), "error");
+    } finally {
+      session.setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (session.authScreen !== "unlock") return;
+    void api
+      .biometricUnlockStatus()
+      .then(setBiometricUnlock)
+      .catch(() => setBiometricUnlock(null));
+  }, [session.authScreen]);
+
   const handleShareReceive = async () => {
     if (!session.status?.address) return;
     const amount =
@@ -399,6 +425,10 @@ export default function MobileApp() {
   }
 
   if (session.authScreen === "unlock") {
+    const bioReady =
+      !!session.platformSec?.native_biometric_available &&
+      !!biometricUnlock?.enabled &&
+      !!biometricUnlock?.configured;
     return (
       <UnlockScreen
         displayName={displayName}
@@ -407,6 +437,9 @@ export default function MobileApp() {
         setPassphrase={setPassphrase}
         busy={session.busy}
         onUnlock={() => void handleUnlock()}
+        biometricUnlockAvailable={bioReady}
+        biometricKind={session.platformSec?.biometric_kind}
+        onBiometricUnlock={() => void handleBiometricUnlock()}
         toast={toast}
       />
     );

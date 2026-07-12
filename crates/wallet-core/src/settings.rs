@@ -21,6 +21,10 @@ fn default_biometric_send_enabled() -> bool {
     true
 }
 
+fn default_biometric_unlock_enabled() -> bool {
+    false
+}
+
 /// Public Hacash L1 node (HTTP only — no valid TLS cert).
 pub const DEFAULT_NODE_URL: &str = "http://nodeapi.hacash.org";
 
@@ -61,6 +65,8 @@ pub struct WalletSettings {
     pub webauthn_enabled: bool,
     #[serde(default = "default_biometric_send_enabled")]
     pub biometric_send_enabled: bool,
+    #[serde(default = "default_biometric_unlock_enabled")]
+    pub biometric_unlock_enabled: bool,
     #[serde(default = "default_security_profile")]
     pub security_profile: String,
     #[serde(default = "default_hardware_mode")]
@@ -91,6 +97,7 @@ impl Default for WalletSettings {
             channel_id_hex: None,
             webauthn_enabled: false,
             biometric_send_enabled: true,
+            biometric_unlock_enabled: false,
             security_profile: default_security_profile(),
             hardware_signing_mode: default_hardware_mode(),
             watch_only_address: None,

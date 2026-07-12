@@ -36,6 +36,10 @@ pub fn quantum_keystore_path() -> PathBuf {
     wallet_data_root().join("quantum.keystore.enc")
 }
 
+pub fn biometric_unlock_path() -> PathBuf {
+    wallet_data_root().join("biometric_unlock.enc")
+}
+
 /// Atomic write with restrictive permissions (0o600 on Unix).
 pub fn secure_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {

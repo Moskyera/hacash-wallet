@@ -1,4 +1,5 @@
 pub mod account;
+pub mod biometric_unlock;
 pub mod airgap;
 pub mod bills;
 pub mod channel;

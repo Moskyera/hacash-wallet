@@ -50,6 +50,7 @@ export type WalletSettings = {
   channel_id_hex: string | null;
   webauthn_enabled: boolean;
   biometric_send_enabled?: boolean;
+  biometric_unlock_enabled?: boolean;
   security_profile: string;
   privacy: PrivacySettings;
   dust_whisper?: DustWhisperSettings;
@@ -172,6 +173,11 @@ export type PlatformSecurityStatus = {
   native_biometric_available: boolean;
   platform: string;
   biometric_kind?: string | null;
+};
+
+export type BiometricUnlockStatus = {
+  enabled: boolean;
+  configured: boolean;
 };
 
 export type AssetSummary = {
@@ -376,6 +382,8 @@ export const api = {
     invoke<SendResult>("wallet_send_hac", { to, amountMei, sendOptions }),
   exportBackup: (passphrase: string) =>
     invoke<string>("wallet_export_backup", { passphrase }),
+  exportPrivateKey: (passphrase: string) =>
+    invoke<string>("wallet_export_private_key", { passphrase }),
   changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
     invoke<void>("wallet_change_passphrase", { oldPassphrase, newPassphrase }),
   listBillSummaries: () => invoke<BillSummary[]>("wallet_list_bill_summaries"),
@@ -386,6 +394,12 @@ export const api = {
   platformSecurity: () =>
     invoke<PlatformSecurityStatus>("wallet_platform_security_status"),
   confirmBiometric: () => invoke<void>("wallet_confirm_biometric_native"),
+  biometricUnlockStatus: () =>
+    invoke<BiometricUnlockStatus>("wallet_biometric_unlock_status"),
+  enableBiometricUnlock: (passphrase: string) =>
+    invoke<void>("wallet_enable_biometric_unlock", { passphrase }),
+  disableBiometricUnlock: () => invoke<void>("wallet_disable_biometric_unlock"),
+  unlockBiometric: () => invoke<string>("wallet_unlock_biometric"),
   platformInfo: () => invoke<{ platform: string; mobile: boolean }>("wallet_platform_info"),
   updateDustWhisper: (dustWhisper: DustWhisperSettings) =>
     invoke<void>("wallet_update_dust_whisper_settings", { dustWhisper }),

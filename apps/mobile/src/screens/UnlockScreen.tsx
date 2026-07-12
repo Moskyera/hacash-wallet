@@ -9,6 +9,9 @@ type Props = {
   setPassphrase: (v: string) => void;
   busy: boolean;
   onUnlock: () => void;
+  biometricUnlockAvailable?: boolean;
+  biometricKind?: string | null;
+  onBiometricUnlock?: () => void;
   toast: { msg: string; kind: ToastKind } | null;
 };
 
@@ -19,8 +22,13 @@ export default function UnlockScreen({
   setPassphrase,
   busy,
   onUnlock,
+  biometricUnlockAvailable,
+  biometricKind,
+  onBiometricUnlock,
   toast,
 }: Props) {
+  const bioLabel = biometricKind ?? "Biometric";
+
   return (
     <div className="auth-screen">
       <div className="auth-hero">
@@ -30,6 +38,22 @@ export default function UnlockScreen({
         <p className="muted">Enter passphrase to unlock</p>
       </div>
       <div className="card">
+        {biometricUnlockAvailable && onBiometricUnlock ? (
+          <>
+            <button
+              type="button"
+              className="primary"
+              style={{ width: "100%", marginBottom: "0.75rem" }}
+              disabled={busy}
+              onClick={() => void onBiometricUnlock()}
+            >
+              Unlock with {bioLabel}
+            </button>
+            <p className="muted small" style={{ textAlign: "center", margin: "0 0 0.75rem" }}>
+              or use passphrase
+            </p>
+          </>
+        ) : null}
         <label className="label">Passphrase</label>
         <input
           type="password"

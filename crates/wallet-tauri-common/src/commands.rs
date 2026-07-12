@@ -146,6 +146,15 @@ pub fn wallet_export_backup(
 }
 
 #[tauri::command]
+pub fn wallet_export_private_key(
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let svc = state.inner.blocking_lock();
+    svc.export_private_key(&passphrase).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn wallet_change_passphrase(
     old_passphrase: String,
     new_passphrase: String,
