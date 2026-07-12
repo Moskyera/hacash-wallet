@@ -35,7 +35,9 @@ export default function UnlockScreen({
         <WalletLogo size="lg" />
         <h1>{displayName}</h1>
         {addressHint ? <p className="muted mono">{addressHint}</p> : null}
-        <p className="muted">Enter passphrase to unlock</p>
+        <p className="muted">
+          {biometricUnlockAvailable ? "Unlock with biometric or passphrase" : "Enter passphrase to unlock"}
+        </p>
       </div>
       <div className="card">
         {biometricUnlockAvailable && onBiometricUnlock ? (

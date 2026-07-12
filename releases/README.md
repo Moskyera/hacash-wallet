@@ -2,23 +2,42 @@
 
 ## Latest downloads
 
-### Desktop (Windows x64) — v0.1.12
+### Desktop — v0.1.12
+
+#### Windows x64
 
 | File | Link |
 |------|------|
-| **Setup (recommended)** | [hacash-wallet-desktop-v0.1.12-x64-setup.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64-setup.exe) |
-| MSI installer | [hacash-wallet-desktop-v0.1.12-x64.msi](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64.msi) |
-| Portable EXE | [hacash-wallet-desktop-v0.1.12-x64-portable.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64-portable.exe) |
+| **Setup (recommended)** | [setup.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64-setup.exe) |
+| MSI installer | [msi](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64.msi) |
+| Portable EXE | [portable.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64-portable.exe) |
 
-### Mobile (Android arm64) — v0.1.13
+#### Linux x64
 
 | File | Link |
 |------|------|
-| APK | [hacash-wallet-mobile-v0.1.13-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.13-mobile/hacash-wallet-mobile-v0.1.13-arm64.apk) |
+| **AppImage (recommended)** | [AppImage](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64.AppImage) |
+| Debian/Ubuntu (.deb) | [deb](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64.deb) |
+| Portable binary | [portable](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.12-desktop/hacash-wallet-desktop-v0.1.12-x64-portable) |
 
-> App display name is **Hacash Wallet** (was "Hacash Wallet Mobile" in v0.1.12 and earlier).
+```bash
+# AppImage
+chmod +x hacash-wallet-desktop-v0.1.12-x64.AppImage
+./hacash-wallet-desktop-v0.1.12-x64.AppImage
 
-## Install — Desktop
+# Debian/Ubuntu
+sudo dpkg -i hacash-wallet-desktop-v0.1.12-x64.deb
+```
+
+### Mobile (Android arm64) — v0.1.14
+
+| File | Link |
+|------|------|
+| APK | [hacash-wallet-mobile-v0.1.14-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.14-mobile/hacash-wallet-mobile-v0.1.14-arm64.apk) |
+
+App display name: **Hacash Wallet**
+
+## Install — Windows
 
 1. Download `hacash-wallet-desktop-v0.1.12-x64-setup.exe`
 2. Run installer → open **Hacash Wallet** from Start menu
@@ -33,18 +52,10 @@
 Or via adb:
 
 ```bash
-adb install hacash-wallet-mobile-v0.1.13-arm64.apk
+adb install hacash-wallet-mobile-v0.1.14-arm64.apk
 ```
-
-## Verify checksum (optional)
-
-```powershell
-Get-FileHash releases\hacash-wallet-desktop-v0.1.12-x64-setup.exe -Algorithm SHA256
-```
-
-Expected: `ABF0B5624E0CD81E06A5F22C7A04C8C2299F7D0303D060F55E92503963ECEBC0`
 
 ## Release notes
 
 - Desktop: `v0.1.12-desktop-notes.md`
-- Mobile: `v0.1.13-mobile-notes.md`
+- Mobile: `v0.1.14-mobile-notes.md`

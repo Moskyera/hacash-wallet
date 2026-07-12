@@ -51,6 +51,7 @@ export default function MobileApp() {
   const pullStartY = useRef(0);
   const pullOffset = useRef(0);
   const deepLinkHandled = useRef(false);
+  const bioUnlockPrompted = useRef(false);
   const [deepLinkTick, setDeepLinkTick] = useState(0);
   const [biometricUnlock, setBiometricUnlock] = useState<BiometricUnlockStatus | null>(null);
 
@@ -263,12 +264,28 @@ export default function MobileApp() {
   };
 
   useEffect(() => {
-    if (session.authScreen !== "unlock") return;
+    if (session.authScreen !== "unlock") {
+      bioUnlockPrompted.current = false;
+      return;
+    }
     void api
       .biometricUnlockStatus()
       .then(setBiometricUnlock)
       .catch(() => setBiometricUnlock(null));
   }, [session.authScreen]);
+
+  const bioUnlockReady =
+    session.authScreen === "unlock" &&
+    !!session.platformSec?.native_biometric_available &&
+    !!biometricUnlock?.enabled &&
+    !!biometricUnlock?.configured;
+
+  useEffect(() => {
+    if (!bioUnlockReady || bioUnlockPrompted.current || session.busy) return;
+    bioUnlockPrompted.current = true;
+    const t = window.setTimeout(() => void handleBiometricUnlock(), 400);
+    return () => window.clearTimeout(t);
+  }, [bioUnlockReady, session.busy]);
 
   const handleShareReceive = async () => {
     if (!session.status?.address) return;
@@ -425,10 +442,7 @@ export default function MobileApp() {
   }
 
   if (session.authScreen === "unlock") {
-    const bioReady =
-      !!session.platformSec?.native_biometric_available &&
-      !!biometricUnlock?.enabled &&
-      !!biometricUnlock?.configured;
+    const bioReady = bioUnlockReady;
     return (
       <UnlockScreen
         displayName={displayName}

@@ -95,8 +95,12 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
       setAssets(null);
       setFastPay(null);
       try {
-        const cfg = await api.getSettings();
+        const [cfg, plat] = await Promise.all([
+          api.getSettings(),
+          api.platformSecurity().catch(() => null),
+        ]);
         setSettings(cfg);
+        if (plat) setPlatformSec(plat);
       } catch {
         /* settings readable while locked */
       }
