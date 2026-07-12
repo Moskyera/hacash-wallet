@@ -127,6 +127,45 @@ if (-not (Test-Path (Split-Path -Parent $bgColorXml))) {
 </resources>
 '@ | Set-Content -Path $bgColorXml -Encoding UTF8 -NoNewline
 
+# In-app APK updates: FileProvider + Kotlin installer helper.
+$providerPathsSrc = Join-Path $mobile "src-tauri\android-file-provider-paths.xml"
+$providerPathsDst = Join-Path $netDstDir "file_provider_paths.xml"
+if (Test-Path $providerPathsSrc) {
+    Copy-Item $providerPathsSrc $providerPathsDst -Force
+    Write-Host "Copied file_provider_paths.xml for APK updates" -ForegroundColor Green
+}
+
+$kotlinSrcRoot = Join-Path $mobile "src-tauri\android-src"
+$kotlinDstRoot = Join-Path $android "app\src\main\java"
+if (Test-Path $kotlinSrcRoot) {
+    Get-ChildItem -Path $kotlinSrcRoot -Recurse -Filter "*.kt" | ForEach-Object {
+        $rel = $_.FullName.Substring($kotlinSrcRoot.Length).TrimStart('\')
+        $dst = Join-Path $kotlinDstRoot $rel
+        $parent = Split-Path -Parent $dst
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        Copy-Item $_.FullName $dst -Force
+    }
+    Write-Host "Synced Kotlin helpers (ApkInstaller)" -ForegroundColor Green
+}
+
+$manifestContent = Get-Content $manifest -Raw
+if ($manifestContent -notmatch 'android:name=".fileprovider"') {
+    $providerBlock = @'
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
+'@
+    $manifestContent = $manifestContent -replace '</application>', ($providerBlock + "`r`n    </application>")
+    Set-Content -Path $manifest -Value $manifestContent -NoNewline
+    Write-Host "Added FileProvider for in-app APK install" -ForegroundColor Green
+}
+
 $distIndex = Join-Path $mobile "dist\index.html"
 if (Test-Path $distIndex) {
     & (Join-Path $mobile "sync-android-frontend.ps1")

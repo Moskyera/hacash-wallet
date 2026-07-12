@@ -463,6 +463,20 @@ export const api = {
   airgapParseQr: (text: string) => invoke<AirgapParseResult>("wallet_airgap_parse_qr", { text }),
   airgapParseQrBatch: (parts: string[]) =>
     invoke<AirgapParseResult>("wallet_airgap_parse_qr_batch", { parts }),
+  checkAppUpdate: (channel: "mobile" | "desktop", currentVersion: string) =>
+    invoke<AppUpdateInfo>("wallet_check_app_update", { channel, currentVersion }),
+  downloadAppUpdate: (url: string, filename: string) =>
+    invoke<string>("wallet_download_app_update", { url, filename }),
+  installMobileUpdate: (path: string) => invoke<void>("wallet_install_mobile_update", { path }),
+};
+
+export type AppUpdateInfo = {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  download_url: string | null;
+  release_notes: string | null;
+  release_page: string | null;
 };
 
 export const messengerApi = {

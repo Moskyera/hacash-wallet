@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import AppUpdateSection from "./components/AppUpdateSection";
 import WalletLogo from "./components/WalletLogo";
 import {
   api,
@@ -1977,6 +1978,10 @@ export default function App() {
         {screen === "settings" && (
           <section className="panel">
             <h2>Settings</h2>
+
+            <AppUpdateSection onInfo={setInfo} onError={setError} />
+
+            <hr className="divider" />
 
             <h3>Node</h3>
             <label>Node API URL</label>

@@ -181,6 +181,9 @@ pub fn run() {
             wallet_tauri_common::dapp_commands::wallet_dapp_sign_tx,
             wallet_tauri_common::dapp_commands::wallet_dapp_chain,
             wallet_tauri_common::dapp_commands::wallet_webview_eval,
+            wallet_tauri_common::update_commands::wallet_check_app_update,
+            wallet_tauri_common::update_commands::wallet_download_app_update,
+            wallet_tauri_common::update_commands::wallet_install_mobile_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while building mobile tauri application");

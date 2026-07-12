@@ -355,6 +355,18 @@ svg.dvhip5 .st16 {
   font-size: 1.5rem;
 }
 
+.app-update-section .update-available {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.app-update-section .update-notes pre {
+  white-space: pre-wrap;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 8px 0 0;
+}
+
 .card {
   background: var(--panel);
   border: 1px solid var(--border);

@@ -328,6 +328,9 @@ pub fn run() {
             wallet_tauri_common::desktop_commands::wallet_dapp_bridge_start,
             wallet_tauri_common::desktop_commands::wallet_dapp_bridge_stop,
             wallet_tauri_common::desktop_commands::wallet_dapp_bridge_status,
+            wallet_tauri_common::update_commands::wallet_check_app_update,
+            wallet_tauri_common::update_commands::wallet_download_app_update,
+            wallet_tauri_common::update_commands::wallet_install_desktop_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

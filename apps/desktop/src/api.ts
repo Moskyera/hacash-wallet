@@ -492,4 +492,18 @@ export const api = {
     invoke<{ running: boolean; port: number; url: string; wallet_locked: boolean; address?: string }>(
       "wallet_dapp_bridge_status",
     ),
+  checkAppUpdate: (channel: "mobile" | "desktop", currentVersion: string) =>
+    invoke<AppUpdateInfo>("wallet_check_app_update", { channel, currentVersion }),
+  downloadAppUpdate: (url: string, filename: string) =>
+    invoke<string>("wallet_download_app_update", { url, filename }),
+  installDesktopUpdate: (path: string) => invoke<void>("wallet_install_desktop_update", { path }),
+};
+
+export type AppUpdateInfo = {
+  current_version: string;
+  latest_version: string;
+  update_available: boolean;
+  download_url: string | null;
+  release_notes: string | null;
+  release_page: string | null;
 };

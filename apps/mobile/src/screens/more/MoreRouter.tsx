@@ -22,6 +22,7 @@ import { copyWithPrivacyClear, maskAddress } from "../../privacy";
 import { MIN_WALLET_PASS } from "../../quantumMeta";
 import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
 import { formatInvokeError } from "../../formatInvokeError";
+import AppUpdateSection from "../../components/AppUpdateSection";
 import HubDiscoveryPanel from "../../components/HubDiscoveryPanel";
 import { fastPayMenuBadge } from "../../fastPayUi";
 import { downloadJson } from "../../utils/downloadJson";
@@ -337,6 +338,8 @@ export default function MoreRouter(props: Props) {
         </div>
       )}
       {page === "settings" && (
+        <>
+        <AppUpdateSection onToast={onToast} />
         <div className="card">
           <h2>Network</h2>
           {status?.node_url && (
@@ -406,6 +409,7 @@ export default function MoreRouter(props: Props) {
             GrapheneOS: Settings → Apps → Hacash Wallet → Permissions → Network → Allow
           </p>
         </div>
+        </>
       )}
       {page === "security" && (
         <>
