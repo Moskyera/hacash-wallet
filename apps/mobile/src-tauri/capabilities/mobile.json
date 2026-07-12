@@ -9,6 +9,7 @@
   ],
   "permissions": [
     "biometric:default",
-    "deep-link:default"
+    "deep-link:default",
+    "opener:default"
   ]
 }

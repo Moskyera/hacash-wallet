@@ -197,6 +197,55 @@ tauri.android.versionCode=$versionCode
     }
 }
 
+# Rust registers tauri-plugin-opener but generated Gradle often omits it — link Android module.
+$repoRoot = Split-Path -Parent (Split-Path -Parent $mobile)
+$cargoLock = Join-Path $repoRoot "Cargo.lock"
+$openerVer = "2.5.4"
+if (Test-Path $cargoLock) {
+    $lockText = Get-Content $cargoLock -Raw
+    if ($lockText -match 'name = "tauri-plugin-opener"\r?\nversion = "([^"]+)"') {
+        $openerVer = $Matches[1]
+    }
+}
+$registryRoots = Get-ChildItem (Join-Path $env:USERPROFILE ".cargo\registry\src") -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "index.crates.io-*" }
+$openerAndroid = $null
+foreach ($root in $registryRoots) {
+    $candidate = Join-Path $root.FullName "tauri-plugin-opener-$openerVer\android"
+    if (Test-Path $candidate) {
+        $openerAndroid = $candidate
+        break
+    }
+}
+if ($openerAndroid) {
+    $openerGradlePath = ($openerAndroid -replace '\\', '\\')
+    $settingsGradle = Join-Path $android "tauri.settings.gradle"
+    if (Test-Path $settingsGradle) {
+        $sg = Get-Content $settingsGradle -Raw
+        if ($sg -notmatch "tauri-plugin-opener") {
+            Add-Content -Path $settingsGradle -Value @"
+
+include ':tauri-plugin-opener'
+project(':tauri-plugin-opener').projectDir = new File("$openerGradlePath")
+"@ -Encoding UTF8
+            Write-Host "Added tauri-plugin-opener to tauri.settings.gradle" -ForegroundColor Green
+        }
+    }
+    $tauriBuildGradle = Join-Path $android "app\tauri.build.gradle.kts"
+    if (Test-Path $tauriBuildGradle) {
+        $bg = Get-Content $tauriBuildGradle -Raw
+        if ($bg -notmatch "tauri-plugin-opener") {
+            $bg = $bg.Replace(
+                'implementation(project(":tauri-plugin-deep-link"))',
+                "implementation(project(`":tauri-plugin-deep-link`"))`r`n  implementation(project(`":tauri-plugin-opener`"))"
+            )
+            Set-Content -Path $tauriBuildGradle -Value $bg -NoNewline
+            Write-Host "Added tauri-plugin-opener dependency to tauri.build.gradle.kts" -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Host "WARN: tauri-plugin-opener android module not found in cargo registry" -ForegroundColor Yellow
+}
+
 $proguardPath = Join-Path $android "app\proguard-rules.pro"
 if (Test-Path $proguardPath) {
     $proguard = Get-Content $proguardPath -Raw
@@ -205,10 +254,16 @@ if (Test-Path $proguardPath) {
 # In-app APK installer (JNI entry from Rust)
 -keep class org.hacash.wallet.mobile.ApkInstaller { *; }
 -keep class androidx.core.content.FileProvider { *; }
+# Tauri Android plugins (loaded by class name at runtime)
+-keep class app.tauri.** { *; }
 '@
-    if ($proguard -notmatch "org\.hacash\.wallet\.mobile\.ApkInstaller") {
-        Add-Content -Path $proguardPath -Value $keepBlock -Encoding UTF8
-        Write-Host "Added ProGuard keep rules for ApkInstaller" -ForegroundColor Green
+    if ($proguard -notmatch "app\.tauri\.\*\*") {
+        if ($proguard -notmatch "org\.hacash\.wallet\.mobile\.ApkInstaller") {
+            Add-Content -Path $proguardPath -Value $keepBlock -Encoding UTF8
+        } else {
+            Add-Content -Path $proguardPath -Value "`r`n# Tauri Android plugins (loaded by class name at runtime)`r`n-keep class app.tauri.** { *; }`r`n" -Encoding UTF8
+        }
+        Write-Host "Added ProGuard keep rules for Tauri plugins" -ForegroundColor Green
     }
 }
 
