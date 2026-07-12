@@ -1,0 +1,7 @@
+@echo off
+cd /d "%~dp0.."
+gh release create v0.1.19-mobile ^
+  --title "Hacash Wallet Mobile v0.1.19" ^
+  --notes-file releases\v0.1.19-mobile-release-body.md ^
+  --target main ^
+  releases\hacash-wallet-mobile-v0.1.19-arm64.apk
