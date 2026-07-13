@@ -21,7 +21,11 @@ pub async fn wallet_download_app_update(
         .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
         .collect::<String>();
     let safe_name = if safe_name.is_empty() {
-        "hacash-wallet-update.apk".to_string()
+        #[cfg(target_os = "android")]
+        let default = "hacash-wallet-update.apk";
+        #[cfg(not(target_os = "android"))]
+        let default = "hacash-wallet-update.exe";
+        default.to_string()
     } else {
         safe_name
     };

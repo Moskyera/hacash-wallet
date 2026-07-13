@@ -103,18 +103,32 @@ pub async fn check_app_update(channel: &str, current_version: &str) -> Result<Ap
     } else {
         "hacash-wallet-desktop"
     };
-    let download_url = release
-        .assets
-        .iter()
-        .find(|a| a.name.contains(asset_hint) && (a.name.ends_with(".apk") || a.name.ends_with(".exe")))
-        .map(|a| a.browser_download_url.clone())
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|a| a.name.ends_with(".msi"))
-                .map(|a| a.browser_download_url.clone())
-        });
+    let download_url = if channel == "mobile" {
+        release
+            .assets
+            .iter()
+            .find(|a| a.name.contains(asset_hint) && a.name.ends_with(".apk"))
+            .map(|a| a.browser_download_url.clone())
+    } else {
+        release
+            .assets
+            .iter()
+            .find(|a| {
+                a.name.contains(asset_hint)
+                    && a.name.ends_with("-setup.exe")
+            })
+            .or_else(|| {
+                release.assets.iter().find(|a| {
+                    a.name.contains(asset_hint) && a.name.ends_with(".exe")
+                })
+            })
+            .or_else(|| {
+                release.assets.iter().find(|a| {
+                    a.name.contains(asset_hint) && a.name.ends_with(".msi")
+                })
+            })
+            .map(|a| a.browser_download_url.clone())
+    };
 
     Ok(AppUpdateInfo {
         current_version: current_version.to_string(),
@@ -150,6 +164,68 @@ pub fn validate_apk_file(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_windows_exe(path: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+
+    let meta = std::fs::metadata(path).map_err(|e| format!("exe metadata: {e}"))?;
+    if !meta.is_file() {
+        return Err("download is not a file".into());
+    }
+    if meta.len() < 500_000 {
+        return Err(format!(
+            "downloaded installer too small ({} bytes) — download may have failed",
+            meta.len()
+        ));
+    }
+    let mut magic = [0u8; 2];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map_err(|e| format!("exe read: {e}"))?;
+    if magic != [0x4D, 0x5A] {
+        return Err("downloaded file is not a valid Windows installer (EXE)".into());
+    }
+    Ok(())
+}
+
+pub fn validate_windows_msi(path: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+
+    let meta = std::fs::metadata(path).map_err(|e| format!("msi metadata: {e}"))?;
+    if !meta.is_file() {
+        return Err("download is not a file".into());
+    }
+    if meta.len() < 500_000 {
+        return Err(format!(
+            "downloaded MSI too small ({} bytes) — download may have failed",
+            meta.len()
+        ));
+    }
+    let mut magic = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map_err(|e| format!("msi read: {e}"))?;
+    // OLE compound document header (standard MSI container).
+    if magic != [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] {
+        return Err("downloaded file is not a valid Windows installer (MSI)".into());
+    }
+    Ok(())
+}
+
+pub fn validate_downloaded_update(path: &std::path::Path) -> Result<(), String> {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "apk" => validate_apk_file(path),
+        "exe" => validate_windows_exe(path),
+        "msi" => validate_windows_msi(path),
+        other => Err(format!("unsupported update file type: .{other}")),
+    }
+}
+
 pub async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -169,7 +245,7 @@ pub async fn download_update_file(url: &str, dest: &std::path::Path) -> Result<(
         .await
         .map_err(|e| e.to_string())?;
     std::fs::write(dest, &bytes).map_err(|e| e.to_string())?;
-    validate_apk_file(dest)?;
+    validate_downloaded_update(dest)?;
     Ok(())
 }
 
@@ -223,6 +299,32 @@ mod tests {
         f.write_all(&[0x50, 0x4B, 0x03, 0x04]).unwrap();
         f.write_all(&vec![0u8; 200_000]).unwrap();
         assert!(validate_apk_file(&ok).is_ok());
+    }
+
+    #[test]
+    fn validate_windows_exe_accepts_mz_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("setup.exe");
+        let mut f = std::fs::File::create(&ok).unwrap();
+        f.write_all(b"MZ").unwrap();
+        f.write_all(&vec![0u8; 600_000]).unwrap();
+        assert!(validate_windows_exe(&ok).is_ok());
+    }
+
+    #[test]
+    fn validate_downloaded_update_routes_by_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("u.exe");
+        let mut f = std::fs::File::create(&exe).unwrap();
+        f.write_all(b"MZ").unwrap();
+        f.write_all(&vec![0u8; 600_000]).unwrap();
+        assert!(validate_downloaded_update(&exe).is_ok());
+
+        let apk = dir.path().join("u.apk");
+        let mut f = std::fs::File::create(&apk).unwrap();
+        f.write_all(&[0x50, 0x4B, 0x03, 0x04]).unwrap();
+        f.write_all(&vec![0u8; 200_000]).unwrap();
+        assert!(validate_downloaded_update(&apk).is_ok());
     }
 
     #[test]
