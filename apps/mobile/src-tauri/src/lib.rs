@@ -93,12 +93,9 @@ pub fn run() {
             }
             let mut svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
             if svc.status().has_wallet {
-                svc.warm_vault_cache().map_err(|e| {
-                    format!(
-                        "Wallet data on this device could not be read ({e}). \
-                         Reinstall the app or restore from backup."
-                    )
-                })?;
+                if let Err(e) = svc.warm_vault_cache() {
+                    tracing::warn!("vault cache warm skipped: {e}");
+                }
             }
             app.manage(AppState::new(svc));
             Ok(())

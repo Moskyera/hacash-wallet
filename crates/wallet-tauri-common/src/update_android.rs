@@ -34,16 +34,9 @@ fn install_apk_on_main(path: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "android")]
-pub fn install_apk(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
-    use std::sync::mpsc::sync_channel;
-
-    let path = path.to_string();
-    let (tx, rx) = sync_channel(1);
-    app.run_on_main_thread(move || {
-        let _ = tx.send(install_apk_on_main(&path));
-    })
-    .map_err(|e| e.to_string())?;
-    rx.recv().map_err(|e| e.to_string())?
+pub fn install_apk(_app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+    // ApkInstaller.install() marshals to the UI thread internally (see Kotlin).
+    install_apk_on_main(path)
 }
 
 #[cfg(not(target_os = "android"))]

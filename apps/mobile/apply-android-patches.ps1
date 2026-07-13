@@ -16,6 +16,17 @@ if (-not (Test-Path $gradle)) {
 
 & (Join-Path $mobile "merge-android-permissions.ps1")
 
+$queriesSrc = Join-Path $mobile "src-tauri\android-queries.xml"
+if (Test-Path $queriesSrc) {
+    $queriesBlock = Get-Content $queriesSrc -Raw
+    $manifestContent = Get-Content $manifest -Raw
+    if ($manifestContent -notmatch "<queries>") {
+        $manifestContent = $manifestContent -replace "</manifest>", ($queriesBlock.Trim() + "`r`n</manifest>")
+        Set-Content -Path $manifest -Value $manifestContent -NoNewline
+        Write-Host "Merged package-installer queries into AndroidManifest" -ForegroundColor Green
+    }
+}
+
 if (-not (Test-Path $netDstDir)) { New-Item -ItemType Directory -Path $netDstDir -Force | Out-Null }
 Copy-Item $netSrc $netDst -Force
 Copy-Item $rulesSrc $rulesDst -Force

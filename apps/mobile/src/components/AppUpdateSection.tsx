@@ -53,7 +53,7 @@ export default function AppUpdateSection({ onToast }: Props) {
       onToast("Opening system installer…", "info");
       await api.installMobileUpdate(path);
       onToast(
-        "Tap Install on the system screen. This app stays on the current version until you confirm.",
+        "Choose a package installer if prompted, then tap Install. This app stays on the current version until you confirm.",
         "success",
       );
     } catch (e) {

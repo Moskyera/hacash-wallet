@@ -1,0 +1,7 @@
+<!-- Merge into AndroidManifest.xml — required for package installer visibility (API 30+). -->
+<queries>
+    <intent>
+        <action android:name="android.intent.action.VIEW" />
+        <data android:mimeType="application/vnd.android.package-archive" />
+    </intent>
+</queries>

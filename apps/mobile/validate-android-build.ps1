@@ -17,6 +17,13 @@ if (-not (Test-Path $manifest)) {
 
 if (Test-Path $manifest) {
     $mc = Get-Content $manifest -Raw
+    if ($mc -notmatch "<queries>") {
+        $errors += "AndroidManifest must declare <queries> for APK installer visibility (API 30+)"
+    }
+}
+
+if (Test-Path $manifest) {
+    $mc = Get-Content $manifest -Raw
     $providerCount = ([regex]::Matches($mc, 'android:name="androidx\.core\.content\.FileProvider"')).Count
     if ($providerCount -ne 1) {
         $errors += "AndroidManifest must contain exactly one FileProvider (found $providerCount)"
