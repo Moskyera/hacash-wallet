@@ -2,8 +2,7 @@ import { useCallback, useState } from "react";
 import { api, type BtcSendPreview, type PlatformSecurityStatus, type WalletSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { hapticSuccess } from "../utils/haptic";
-import { webAuthnClientOrigin } from "../webauthn";
-import { maybeWebAuthnGate } from "../utils/webauthnGate";
+import { maybeSecondFactorGate } from "../utils/secondFactorGate";
 
 export function useBtcSend(opts: {
   active: boolean;
@@ -47,13 +46,11 @@ export function useBtcSend(opts: {
   const handleConfirm = useCallback(async () => {
     if (!preview) return;
     try {
-      await maybeWebAuthnGate({
+      await maybeSecondFactorGate({
         amountMei: preview.fee_mei,
         securityProfile: settings?.security_profile,
-        webauthnEnabled: settings?.webauthn_enabled,
         biometricSendEnabled: settings?.biometric_send_enabled ?? true,
         nativeBiometricAvailable: platformSec?.native_biometric_available,
-        clientOrigin: webAuthnClientOrigin(),
       });
     } catch (e) {
       showToast(formatInvokeError(e), "error");
@@ -61,6 +58,7 @@ export function useBtcSend(opts: {
     }
     setBusy(true);
     try {
+      void refresh();
       const result = await api.sendBtc(preview.to, preview.satoshi);
       setPreview(null);
       setRecipient("");

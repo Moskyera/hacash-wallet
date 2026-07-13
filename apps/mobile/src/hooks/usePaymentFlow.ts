@@ -1,10 +1,10 @@
 import { useCallback, useState } from "react";
-import { api, HubFeePayer, SendOptions, SendPreview, WalletSettings } from "../api";
+import { api, HubFeePayer, type L1FeeSpeed, SendOptions, SendPreview, WalletSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { applyPaymentPayload } from "../utils/applyPaymentPayload";
+import { DEFAULT_SERVICE_FEE_RATE } from "../fastPayUi";
 import { hapticSuccess } from "../utils/haptic";
-import { webAuthnClientOrigin } from "../webauthn";
-import { maybeWebAuthnGate } from "../utils/webauthnGate";
+import { maybeSecondFactorGate } from "../utils/secondFactorGate";
 import type { PaymentQrPayload } from "../paymentQr";
 import type { PlatformSecurityStatus } from "../api";
 
@@ -25,33 +25,53 @@ export function usePaymentFlow(opts: {
   const [sendAmount, setSendAmount] = useState("");
   const [sendHubFeePayer, setSendHubFeePayer] = useState<HubFeePayer>("sender");
   const [sendForceL1, setSendForceL1] = useState(false);
+  const [sendL1FeeSpeed, setSendL1FeeSpeed] = useState<L1FeeSpeed>("normal");
+  const [sendServiceFeeEnabled, setSendServiceFeeEnabled] = useState(true);
   const [preview, setPreview] = useState<SendPreview | null>(null);
   const [payScanMode, setPayScanMode] = useState(false);
+
+  const serviceFeeRate = settings?.send?.service_fee_rate ?? DEFAULT_SERVICE_FEE_RATE;
 
   const sendOptions = useCallback(
     (): SendOptions => ({
       hub_fee_payer: sendHubFeePayer,
       force_l1: sendForceL1,
+      l1_fee_speed: sendL1FeeSpeed,
+      service_fee_enabled: sendServiceFeeEnabled,
+      service_fee_rate: serviceFeeRate,
     }),
-    [sendHubFeePayer, sendForceL1],
+    [sendHubFeePayer, sendForceL1, sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate],
   );
 
   const syncSendPrefsFromSettings = useCallback((cfg: WalletSettings) => {
     setSendHubFeePayer(cfg.send?.hub_fee_payer ?? "sender");
     setSendForceL1(!(cfg.send?.prefer_fast_pay ?? true));
+    setSendL1FeeSpeed(cfg.send?.l1_fee_speed ?? "normal");
+    setSendServiceFeeEnabled(cfg.send?.service_fee_enabled ?? true);
   }, []);
 
   const persistSendPrefs = useCallback(
-    async (hubFee: HubFeePayer, forceL1: boolean) => {
+    async (
+      hubFee: HubFeePayer,
+      forceL1: boolean,
+      l1FeeSpeed: L1FeeSpeed = sendL1FeeSpeed,
+      serviceFeeEnabled: boolean = sendServiceFeeEnabled,
+    ) => {
       if (!settings) return;
       const next: WalletSettings = {
         ...settings,
-        send: { hub_fee_payer: hubFee, prefer_fast_pay: !forceL1 },
+        send: {
+          hub_fee_payer: hubFee,
+          prefer_fast_pay: !forceL1,
+          l1_fee_speed: l1FeeSpeed,
+          service_fee_enabled: serviceFeeEnabled,
+          service_fee_rate: serviceFeeRate,
+        },
       };
       await api.updateSettings(next);
       setSettings(next);
     },
-    [settings, setSettings],
+    [sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate, settings, setSettings],
   );
 
   const loadPaymentPayload = useCallback(
@@ -84,34 +104,41 @@ export function usePaymentFlow(opts: {
     return n;
   };
 
-  const handlePreviewSend = useCallback(async () => {
-    const amountMei = parseAmountMei(sendAmount);
-    if (!sendTo.trim() || amountMei == null) {
-      showToast("Enter a valid recipient and amount.", "error");
-      return;
-    }
-    setBusy(true);
-    setPreview(null);
-    try {
-      const p = await api.previewSend(sendTo.trim(), amountMei, sendOptions());
-      setPreview(p);
-    } catch (e) {
-      showToast(formatInvokeError(e), "error");
-    } finally {
-      setBusy(false);
-    }
-  }, [sendAmount, sendTo, sendOptions, setBusy, showToast]);
+  const handlePreviewSend = useCallback(
+    async (speedOverride?: L1FeeSpeed) => {
+      const amountMei = parseAmountMei(sendAmount);
+      if (!sendTo.trim() || amountMei == null) {
+        showToast("Enter a valid recipient and amount.", "error");
+        return;
+      }
+      if (speedOverride) {
+        setSendL1FeeSpeed(speedOverride);
+      }
+      setBusy(true);
+      setPreview(null);
+      try {
+        const p = await api.previewSend(sendTo.trim(), amountMei, {
+          ...sendOptions(),
+          l1_fee_speed: speedOverride ?? sendL1FeeSpeed,
+        });
+        setPreview(p);
+      } catch (e) {
+        showToast(formatInvokeError(e), "error");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [sendAmount, sendL1FeeSpeed, sendTo, sendOptions, setBusy, showToast],
+  );
 
   const maybeSecondFactor = useCallback(
     async (amountMei: number): Promise<boolean> => {
       try {
-        await maybeWebAuthnGate({
+        await maybeSecondFactorGate({
           amountMei,
           securityProfile: settings?.security_profile,
-          webauthnEnabled: settings?.webauthn_enabled,
           biometricSendEnabled: settings?.biometric_send_enabled ?? true,
           nativeBiometricAvailable: platformSec?.native_biometric_available,
-          clientOrigin: webAuthnClientOrigin(),
         });
         return true;
       } catch (e) {
@@ -128,6 +155,7 @@ export function usePaymentFlow(opts: {
     if (!ok) return;
     setBusy(true);
     try {
+      void refresh();
       const result = await api.sendHac(preview.to, preview.amount_mei, sendOptions());
       setPreview(null);
       setSendTo("");
@@ -162,6 +190,11 @@ export function usePaymentFlow(opts: {
     setSendHubFeePayer,
     sendForceL1,
     setSendForceL1,
+    sendL1FeeSpeed,
+    setSendL1FeeSpeed,
+    sendServiceFeeEnabled,
+    setSendServiceFeeEnabled,
+    serviceFeeRate,
     preview,
     setPreview,
     payScanMode,

@@ -32,7 +32,7 @@ fn main() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(45.0);
         let preview = svc
-            .preview_send(&quantum, fund_amount, Default::default())
+            .preview_send(&quantum, fund_amount, &Default::default())
             .await
             .expect("preview");
         println!(

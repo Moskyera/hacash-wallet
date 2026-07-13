@@ -81,8 +81,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init());
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let builder = builder.plugin(tauri_plugin_biometric::init());
-    #[cfg(target_os = "android")]
-    let builder = builder.plugin(tauri_plugin_webauthn::init());
     builder
         .setup(|app| {
             // Android/iOS: dirs::data_dir() is not app-writable; use internal app storage.
@@ -105,7 +103,7 @@ pub fn run() {
             app.manage(AppState::new(svc));
             Ok(())
         })
-        .invoke_handler(wallet_tauri_common::wallet_invoke_handler![
+        .invoke_handler(wallet_tauri_common::wallet_invoke_handler_mobile![
             wallet_platform_security_status,
             wallet_confirm_biometric_native,
             wallet_biometric_unlock_status,

@@ -204,9 +204,32 @@ fn verify_hacash_address(addr: &str) -> bool {
     Address::from_readable(addr).is_ok()
 }
 
+/// Fee mei aligned with node decimal `unit=mei` (ceil to micro-mei; sub-milli allowed).
+pub fn normalize_l1_fee_mei(raw_mei: f64) -> f64 {
+    if raw_mei <= 0.0 {
+        return 0.0;
+    }
+    (raw_mei * 1_000_000.0).ceil() / 1_000_000.0
+}
+
+/// Decimal mei string for L1 fee fields on the node (preserves sub-milli).
+pub fn format_l1_fee_mei_for_node(fee_mei: f64) -> String {
+    let n = normalize_l1_fee_mei(fee_mei);
+    if n <= 0.0 {
+        return "0.001".to_string();
+    }
+    let s = format!("{:.6}", n);
+    s.trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
 /// Serialize mei for node `Amount::from` (decimal mei). Colon form is fin `value:unit` on-chain.
 pub fn format_mei_for_node(amount_mei: f64) -> String {
-    let rounded = (amount_mei * 1000.0).round() / 1000.0;
+    let rounded = (amount_mei * 1000.0).ceil() / 1000.0;
+    if rounded <= 0.0 {
+        return "0.001".to_string();
+    }
     let s = format!("{:.3}", rounded);
     s.trim_end_matches('0')
         .trim_end_matches('.')

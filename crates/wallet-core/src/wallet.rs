@@ -27,7 +27,7 @@ use crate::fast_pay::{
     FastPayStatus, HubDiscoveryReport,
     DEFAULT_CHANNEL_DEPOSIT_MEI,
 };
-use crate::history::{TxHistory, TxRecord};
+use crate::history::{TxHistory, TxRecord, TxStatus};
 use crate::l2_hub::{HubHealth, L2HubClient};
 use crate::dust_whisper::{
     relay_health as whisper_relay_health, submit_tx_hex as whisper_submit_tx_hex,
@@ -699,33 +699,44 @@ impl WalletService {
         if !preview.hip23.ok {
             return Err(WalletError::Policy(preview.hip23.errors.join("; ")));
         }
-        let built = self
-            .node
-            .build_send_btc_tx(&from, to, preview.satoshi, &preview.fee_wire)
-            .await?;
-        let body_hex = built
-            .body
-            .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
-        let signed_hex = self.sign_tx_hex(&body_hex)?;
-        let submitted = self.submit_signed_tx(&signed_hex).await?;
-        let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
-        let hash = submitted
-            .hash
-            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-        let result = SendResult {
-            rail: PaymentRail::L1OnChain,
-            tx_hash: hash,
-            summary,
-        };
-        self.append_history_if_enabled(
-            result.rail,
-            &result.tx_hash,
-            &from,
-            to,
-            0.0,
-            &result.summary,
-        )?;
-        Ok(result)
+        let pending_key =
+            self.begin_pending_history(PaymentRail::L1OnChain, &from, to, 0.0)?;
+        let send_result: WalletResult<SendResult> = async {
+            let built = self
+                .node
+                .build_send_btc_tx(&from, to, preview.satoshi, &preview.fee_wire)
+                .await?;
+            let body_hex = built
+                .body
+                .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+            let signed_hex = self.sign_tx_hex(&body_hex)?;
+            let submitted = self.submit_signed_tx(&signed_hex).await?;
+            let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
+            let hash = submitted
+                .hash
+                .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
+            Ok(SendResult {
+                rail: PaymentRail::L1OnChain,
+                tx_hash: hash,
+                summary,
+            })
+        }
+        .await;
+        match send_result {
+            Ok(result) => {
+                self.resolve_pending_history(
+                    pending_key,
+                    &result.tx_hash,
+                    &result.summary,
+                    TxStatus::Confirmed,
+                )?;
+                Ok(result)
+            }
+            Err(e) => {
+                let _ = self.fail_pending_history(pending_key);
+                Err(e)
+            }
+        }
     }
 
     pub async fn send_hacd(&mut self, to: &str, diamond_names: &[String]) -> WalletResult<SendResult> {
@@ -746,33 +757,44 @@ impl WalletService {
         if !preview.hip23.ok {
             return Err(WalletError::Policy(preview.hip23.errors.join("; ")));
         }
-        let built = self
-            .node
-            .build_send_diamond_tx(&from, to, &preview.diamond_names, &preview.fee_wire)
-            .await?;
-        let body_hex = built
-            .body
-            .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
-        let signed_hex = self.sign_tx_hex(&body_hex)?;
-        let submitted = self.submit_signed_tx(&signed_hex).await?;
-        let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
-        let hash = submitted
-            .hash
-            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-        let result = SendResult {
-            rail: PaymentRail::L1OnChain,
-            tx_hash: hash,
-            summary,
-        };
-        self.append_history_if_enabled(
-            result.rail,
-            &result.tx_hash,
-            &from,
-            to,
-            0.0,
-            &result.summary,
-        )?;
-        Ok(result)
+        let pending_key =
+            self.begin_pending_history(PaymentRail::L1OnChain, &from, to, 0.0)?;
+        let send_result: WalletResult<SendResult> = async {
+            let built = self
+                .node
+                .build_send_diamond_tx(&from, to, &preview.diamond_names, &preview.fee_wire)
+                .await?;
+            let body_hex = built
+                .body
+                .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+            let signed_hex = self.sign_tx_hex(&body_hex)?;
+            let submitted = self.submit_signed_tx(&signed_hex).await?;
+            let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
+            let hash = submitted
+                .hash
+                .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
+            Ok(SendResult {
+                rail: PaymentRail::L1OnChain,
+                tx_hash: hash,
+                summary,
+            })
+        }
+        .await;
+        match send_result {
+            Ok(result) => {
+                self.resolve_pending_history(
+                    pending_key,
+                    &result.tx_hash,
+                    &result.summary,
+                    TxStatus::Confirmed,
+                )?;
+                Ok(result)
+            }
+            Err(e) => {
+                let _ = self.fail_pending_history(pending_key);
+                Err(e)
+            }
+        }
     }
 
     pub async fn query_diamond(&self, name: &str) -> WalletResult<crate::node::DiamondInfo> {
@@ -1138,7 +1160,7 @@ impl WalletService {
         &mut self,
         to: &str,
         amount_mei: f64,
-        options: crate::send_options::SendOptions,
+        options: &crate::send_options::SendOptions,
     ) -> WalletResult<SendPreview> {
         self.touch_auto_lock();
         self.maybe_discover_hub().await?;
@@ -1150,28 +1172,19 @@ impl WalletService {
             .router
             .plan_send(&from, to, amount_mei, options)
             .await?;
-        let fee_for_hip23 = match plan.rail {
-            PaymentRail::L1OnChain => plan
-                .fee_breakdown
-                .l1_fee_wire
-                .as_ref()
-                .map(|w| crate::type4_fee::fee_mei_from_wire(w))
-                .unwrap_or(crate::hip23::L1_DEFAULT_FEE_MEI),
-            PaymentRail::L2Fast => match plan.fee_breakdown.hub_fee_payer {
-                crate::send_options::HubFeePayer::Sender => plan
-                    .fee_breakdown
-                    .hub_fee_mei
-                    .unwrap_or(crate::send_options::DEFAULT_HUB_FEE_MEI),
-                crate::send_options::HubFeePayer::Recipient => 0.0,
-            },
-            PaymentRail::QuantumType4 => crate::hip23::L1_DEFAULT_FEE_MEI,
-        };
+        let fee_for_hip23 =
+            plan.fee_breakdown.payer_debit_mei - plan.fee_breakdown.recipient_credit_mei;
         let hip23 = validate_simple_l1_send(to, amount_mei, balance, fee_for_hip23)?;
         let fee = plan
             .fee_breakdown
-            .l1_fee_wire
-            .as_ref()
-            .map(|w| crate::hip23::wire_mei_for_node(w))
+            .l1_fee_mei
+            .map(crate::hip23::format_l1_fee_mei_for_node)
+            .or_else(|| {
+                plan.fee_breakdown
+                    .l1_fee_wire
+                    .as_ref()
+                    .map(|w| crate::hip23::wire_mei_for_node(w))
+            })
             .unwrap_or_else(|| crate::hip23::wire_mei_for_node("1:244"));
         Ok(SendPreview {
             plan,
@@ -1182,7 +1195,7 @@ impl WalletService {
             fee,
             hip23,
             fast_pay,
-            send_options: options,
+            send_options: options.clone(),
         })
     }
 
@@ -1195,7 +1208,7 @@ impl WalletService {
         self.touch_auto_lock();
         let from = self.require_address()?;
         let preview = self
-            .preview_send(to, amount_mei, crate::send_options::SendOptions::default())
+            .preview_send(to, amount_mei, &crate::send_options::SendOptions::default())
             .await?;
         if preview.plan.rail != PaymentRail::L1OnChain {
             return Err(WalletError::Policy(
@@ -1355,40 +1368,69 @@ impl WalletService {
         // Single-use second factor: consumed before signing (enterprise per-tx model).
         self.clear_second_factor();
         let from = self.require_address()?;
-        let preview = self.preview_send(to, amount_mei, options).await?;
+        let preview = self.preview_send(to, amount_mei, &options).await?;
+        let pending_key = self.begin_pending_history(preview.plan.rail, &from, to, amount_mei)?;
 
-        let result = match preview.plan.rail {
+        let send_result: WalletResult<SendResult> = match preview.plan.rail {
             PaymentRail::L2Fast => {
-                let account = match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
-                    SessionKey::Signing(acc) => acc.clone(),
-                    SessionKey::WatchOnly => {
-                        return Err(WalletError::Policy(
-                            "watch-only wallet cannot sign L2 bills".into(),
-                        ));
+                match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
+                    SessionKey::Signing(acc) => {
+                        let payment_id = self
+                            .router
+                            .execute_l2(
+                                &from,
+                                to,
+                                amount_mei,
+                                &preview.amount_wire,
+                                acc,
+                                options.hub_fee_payer,
+                            )
+                            .await?;
+                        if let Some(svc_mei) = preview.plan.fee_breakdown.service_fee_mei {
+                            if svc_mei > 0.0
+                                && preview.plan.fee_breakdown.service_fee_treasury.is_some()
+                            {
+                                let svc_wire = crate::send_options::format_service_fee_amount_wire(
+                                    svc_mei,
+                                );
+                                let _treasury_id = self
+                                    .router
+                                    .execute_l2(
+                                        &from,
+                                        crate::send_options::WALLET_TREASURY_ADDRESS,
+                                        svc_mei,
+                                        &svc_wire,
+                                        acc,
+                                        crate::send_options::HubFeePayer::Sender,
+                                    )
+                                    .await?;
+                            }
+                        }
+                        self.bills = self.router.bills().clone();
+                        Ok(SendResult {
+                            rail: PaymentRail::L2Fast,
+                            tx_hash: payment_id,
+                            summary: preview.plan.summary,
+                        })
                     }
-                };
-                let payment_id = self
-                    .router
-                    .execute_l2(
-                        &from,
-                        to,
-                        amount_mei,
-                        &preview.amount_wire,
-                        &account,
-                        options.hub_fee_payer,
-                    )
-                    .await?;
-                self.bills = self.router.bills().clone();
-                SendResult {
-                    rail: PaymentRail::L2Fast,
-                    tx_hash: payment_id,
-                    summary: preview.plan.summary,
+                    SessionKey::WatchOnly => Err(WalletError::Policy(
+                        "watch-only wallet cannot sign L2 bills".into(),
+                    )),
                 }
             }
             PaymentRail::L1OnChain => {
+                let transfer_pairs = crate::send_options::hac_send_transfer_pairs(
+                    to,
+                    &preview.amount_wire,
+                    &preview.plan.fee_breakdown,
+                );
+                let transfers: Vec<(&str, &str)> = transfer_pairs
+                    .iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect();
                 let built = self
                     .node
-                    .build_send_hac_tx(&from, to, &preview.amount_wire, &preview.fee)
+                    .build_send_hac_tx_actions(&from, &preview.fee, &transfers)
                     .await?;
                 let body_hex = built
                     .body
@@ -1400,28 +1442,32 @@ impl WalletService {
                 let hash = submitted
                     .hash
                     .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-                SendResult {
+                Ok(SendResult {
                     rail: PaymentRail::L1OnChain,
                     tx_hash: hash,
                     summary,
-                }
+                })
             }
-            PaymentRail::QuantumType4 => {
-                return Err(WalletError::Policy(
-                    "Type 4 quantum sends use the Quantum tab — not legacy Send".into(),
-                ));
-            }
+            PaymentRail::QuantumType4 => Err(WalletError::Policy(
+                "Type 4 quantum sends use the Quantum tab — not legacy Send".into(),
+            )),
         };
 
-        self.append_history_if_enabled(
-            result.rail,
-            &result.tx_hash,
-            &from,
-            to,
-            amount_mei,
-            &result.summary,
-        )?;
-        Ok(result)
+        match send_result {
+            Ok(result) => {
+                self.resolve_pending_history(
+                    pending_key,
+                    &result.tx_hash,
+                    &result.summary,
+                    TxStatus::Confirmed,
+                )?;
+                Ok(result)
+            }
+            Err(e) => {
+                let _ = self.fail_pending_history(pending_key);
+                Err(e)
+            }
+        }
     }
 
     pub fn set_security_profile(&mut self, profile: SecurityProfile) -> WalletResult<()> {
@@ -1508,11 +1554,65 @@ impl WalletService {
         amount_mei: f64,
         summary: &str,
     ) -> WalletResult<()> {
+        self.append_history_with_status_if_enabled(
+            rail,
+            tx_hash,
+            from,
+            to,
+            amount_mei,
+            summary,
+            TxStatus::Confirmed,
+        )
+    }
+
+    fn append_history_with_status_if_enabled(
+        &mut self,
+        rail: PaymentRail,
+        tx_hash: &str,
+        from: &str,
+        to: &str,
+        amount_mei: f64,
+        summary: &str,
+        status: TxStatus,
+    ) -> WalletResult<()> {
         if !self.settings.privacy.store_tx_history {
             return Ok(());
         }
         self.history
-            .append(rail, tx_hash, from, to, amount_mei, summary)
+            .append_with_status(rail, tx_hash, from, to, amount_mei, summary, status)
+    }
+
+    fn begin_pending_history(
+        &mut self,
+        rail: PaymentRail,
+        from: &str,
+        to: &str,
+        amount_mei: f64,
+    ) -> WalletResult<Option<String>> {
+        if !self.settings.privacy.store_tx_history {
+            return Ok(None);
+        }
+        Ok(Some(self.history.begin_pending(rail, from, to, amount_mei)?))
+    }
+
+    fn resolve_pending_history(
+        &mut self,
+        pending_key: Option<String>,
+        tx_hash: &str,
+        summary: &str,
+        status: TxStatus,
+    ) -> WalletResult<()> {
+        let Some(key) = pending_key else {
+            return Ok(());
+        };
+        self.history.resolve_pending(&key, tx_hash, summary, status)
+    }
+
+    fn fail_pending_history(&mut self, pending_key: Option<String>) -> WalletResult<()> {
+        let Some(key) = pending_key else {
+            return Ok(());
+        };
+        self.history.mark_failed(&key)
     }
 
     fn redact_history(&self, rows: Vec<TxRecord>) -> Vec<TxRecord> {

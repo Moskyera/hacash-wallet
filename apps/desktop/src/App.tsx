@@ -98,6 +98,9 @@ export default function App() {
       sendAmount: hacSend.sendAmount,
       sendHubFeePayer: hacSend.sendHubFeePayer,
       sendForceL1: hacSend.sendForceL1,
+      sendL1FeeSpeed: hacSend.sendL1FeeSpeed,
+      sendServiceFeeEnabled: hacSend.sendServiceFeeEnabled,
+      serviceFeeRate: hacSend.serviceFeeRate,
       showSendOptions: hacSend.showSendOptions,
       sendQrScanOpen: hacSend.sendQrScanOpen,
       preview: hacSend.preview,
@@ -127,6 +130,9 @@ export default function App() {
       hacSend.sendAmount,
       hacSend.sendHubFeePayer,
       hacSend.sendForceL1,
+      hacSend.sendL1FeeSpeed,
+      hacSend.sendServiceFeeEnabled,
+      hacSend.serviceFeeRate,
       hacSend.showSendOptions,
       hacSend.sendQrScanOpen,
       hacSend.preview,
@@ -183,12 +189,14 @@ export default function App() {
       setSendAmount: hacSend.setSendAmount,
       setSendHubFeePayer: hacSend.setSendHubFeePayer,
       setSendForceL1: hacSend.setSendForceL1,
+      setSendL1FeeSpeed: hacSend.setSendL1FeeSpeed,
+      setSendServiceFeeEnabled: hacSend.setSendServiceFeeEnabled,
       setShowSendOptions: hacSend.setShowSendOptions,
       setSendQrScanOpen: hacSend.setSendQrScanOpen,
       clearPreview: hacSend.clearPreview,
       persistSendPreferences: hacSend.persistSendPreferences,
       onPaymentQr: (p: import("./paymentQr").PaymentQrPayload) => void hacSend.handlePaymentQr(p),
-      onPreviewSend: () => void hacSend.handlePreviewSend(),
+      onPreviewSend: (speed?: import("./api").L1FeeSpeed) => void hacSend.handlePreviewSend(speed),
       onConfirmSend: () => void hacSend.handleConfirmSend(),
     }),
     [
@@ -200,8 +208,10 @@ export default function App() {
     ],
   );
 
+  const isAuthScreen = screen === "welcome" || screen === "unlock";
+
   return (
-    <div className="app">
+    <div className={`app${isAuthScreen ? " app-auth" : ""}`}>
       {privacyShield && (
         <div className="privacy-shield" aria-hidden="true">
           <div className="privacy-shield-inner">
@@ -210,6 +220,7 @@ export default function App() {
           </div>
         </div>
       )}
+      {!isAuthScreen && (
       <aside className="sidebar">
         <div className="brand">
           <WalletLogo size="sm" />
@@ -287,6 +298,7 @@ export default function App() {
           )}
         </div>
       </aside>
+      )}
 
       <main className="content">
         {wallet.error && <div className="alert">{wallet.error}</div>}

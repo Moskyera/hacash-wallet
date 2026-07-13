@@ -92,7 +92,7 @@ pub(crate) async fn estimate_fee_for_payload(
     let built = match node.post_create_transaction(build_payload).await {
         Ok(resp) if resp.ret == 0 => resp,
         _ => {
-            return estimate_l1_fee(node, L1_DEFAULT_WIRE_BYTES)
+            return estimate_l1_fee(node, L1_DEFAULT_WIRE_BYTES, crate::send_options::L1FeeSpeed::Normal)
                 .await
                 .map(|e| e.fee_wire);
         }
@@ -106,7 +106,7 @@ pub(crate) async fn estimate_fee_for_payload(
     } else {
         L1_DEFAULT_WIRE_BYTES
     };
-    let est = estimate_l1_fee(node, wire_bytes).await?;
+    let est = estimate_l1_fee(node, wire_bytes, crate::send_options::L1FeeSpeed::Normal).await?;
     Ok(est.fee_wire)
 }
 

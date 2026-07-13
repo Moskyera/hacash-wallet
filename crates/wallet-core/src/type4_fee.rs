@@ -31,7 +31,7 @@ pub struct Type4FeeEstimate {
 }
 
 pub fn mei_to_fee_wire(mei: f64) -> String {
-    let rounded = (mei * 1000.0).round() / 1000.0;
+    let rounded = (mei * 1000.0).ceil() / 1000.0;
     let mut whole = rounded.floor();
     let mut frac = ((rounded - whole) * 1000.0).round();
     if frac >= 1000.0 {

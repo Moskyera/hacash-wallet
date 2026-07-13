@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, HubFeePayer, SendOptions, SendPreview, WalletSettings } from "../api";
+import { api, HubFeePayer, type L1FeeSpeed, SendOptions, SendPreview, WalletSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
-import { sendSuccessMessage } from "../fastPayUi";
+import { DEFAULT_SERVICE_FEE_RATE, sendSuccessMessage } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
 import type { Screen } from "../screens/types";
 import type { WalletStatus } from "../api";
@@ -44,6 +44,8 @@ export function useHacSend(opts: {
   const [sendAmount, setSendAmount] = useState("");
   const [sendHubFeePayer, setSendHubFeePayer] = useState<HubFeePayer>("sender");
   const [sendForceL1, setSendForceL1] = useState(false);
+  const [sendL1FeeSpeed, setSendL1FeeSpeed] = useState<L1FeeSpeed>("normal");
+  const [sendServiceFeeEnabled, setSendServiceFeeEnabled] = useState(true);
   const [showSendOptions, setShowSendOptions] = useState(false);
   const [sendQrScanOpen, setSendQrScanOpen] = useState(false);
   const [preview, setPreview] = useState<SendPreview | null>(null);
@@ -52,30 +54,51 @@ export function useHacSend(opts: {
     if (!settings) return;
     setSendHubFeePayer(settings.send?.hub_fee_payer ?? "sender");
     setSendForceL1(!(settings.send?.prefer_fast_pay ?? true));
-  }, [settings?.send?.hub_fee_payer, settings?.send?.prefer_fast_pay, settings]);
+    setSendL1FeeSpeed(settings.send?.l1_fee_speed ?? "normal");
+    setSendServiceFeeEnabled(settings.send?.service_fee_enabled ?? true);
+  }, [
+    settings?.send?.hub_fee_payer,
+    settings?.send?.prefer_fast_pay,
+    settings?.send?.l1_fee_speed,
+    settings?.send?.service_fee_enabled,
+    settings,
+  ]);
+
+  const serviceFeeRate = settings?.send?.service_fee_rate ?? DEFAULT_SERVICE_FEE_RATE;
 
   const currentSendOptions = useCallback(
     (): SendOptions => ({
       hub_fee_payer: sendHubFeePayer,
       force_l1: sendForceL1,
+      l1_fee_speed: sendL1FeeSpeed,
+      service_fee_enabled: sendServiceFeeEnabled,
+      service_fee_rate: serviceFeeRate,
     }),
-    [sendHubFeePayer, sendForceL1],
+    [sendHubFeePayer, sendForceL1, sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate],
   );
 
   const persistSendPreferences = useCallback(
-    async (hubFeePayer: HubFeePayer, forceL1: boolean) => {
+    async (
+      hubFeePayer: HubFeePayer,
+      forceL1: boolean,
+      l1FeeSpeed: L1FeeSpeed = sendL1FeeSpeed,
+      serviceFeeEnabled: boolean = sendServiceFeeEnabled,
+    ) => {
       if (!settings) return;
       const next = {
         ...settings,
         send: {
           hub_fee_payer: hubFeePayer,
           prefer_fast_pay: !forceL1,
+          l1_fee_speed: l1FeeSpeed,
+          service_fee_enabled: serviceFeeEnabled,
+          service_fee_rate: serviceFeeRate,
         },
       };
       await api.updateSettings(next);
       await refreshSettings();
     },
-    [settings, refreshSettings],
+    [sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate, settings, refreshSettings],
   );
 
   const openQrPay = useCallback(() => {
@@ -117,23 +140,31 @@ export function useHacSend(opts: {
     [clearMessages, currentSendOptions, setScreen, setBusy, onInfo, onError],
   );
 
-  const handlePreviewSend = useCallback(async () => {
-    setBusy(true);
-    clearMessages();
-    setPreview(null);
-    try {
-      const p = await api.previewSend(sendTo.trim(), Number(sendAmount), currentSendOptions());
-      setPreview(p);
-    } catch (e) {
-      onError(formatInvokeError(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [sendTo, sendAmount, currentSendOptions, clearMessages, setBusy, onError]);
+  const handlePreviewSend = useCallback(
+    async (speedOverride?: L1FeeSpeed) => {
+      setBusy(true);
+      clearMessages();
+      setPreview(null);
+      if (speedOverride) setSendL1FeeSpeed(speedOverride);
+      try {
+        const p = await api.previewSend(sendTo.trim(), Number(sendAmount), {
+          ...currentSendOptions(),
+          l1_fee_speed: speedOverride ?? sendL1FeeSpeed,
+        });
+        setPreview(p);
+      } catch (e) {
+        onError(formatInvokeError(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [sendTo, sendAmount, currentSendOptions, sendL1FeeSpeed, clearMessages, setBusy, onError],
+  );
 
   const handleConfirmSend = useCallback(async () => {
     setBusy(true);
     clearMessages();
+    void refreshHistory();
     try {
       const amount = Number(sendAmount);
       const needs2fa =
@@ -201,6 +232,11 @@ export function useHacSend(opts: {
     setSendHubFeePayer,
     sendForceL1,
     setSendForceL1,
+    sendL1FeeSpeed,
+    setSendL1FeeSpeed,
+    sendServiceFeeEnabled,
+    setSendServiceFeeEnabled,
+    serviceFeeRate,
     showSendOptions,
     setShowSendOptions,
     sendQrScanOpen,

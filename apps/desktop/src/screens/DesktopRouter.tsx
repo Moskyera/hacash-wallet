@@ -1,6 +1,6 @@
 import AirgapScreen from "../AirgapScreen";
 import { AssetSummary, HubDiscoveryEntry, TxRecord, WalletSettings, WalletStatus } from "../api";
-import { HubFeePayer, SendPreview } from "../api";
+import { HubFeePayer, L1FeeSpeed, SendPreview } from "../api";
 import { DustWhisperSettings, PrivacySettings, RelayHealthStatus } from "../api";
 import { ChannelInfo, HubHealth } from "../api";
 import type { FastPayStatus } from "../fastPayUi";
@@ -45,6 +45,9 @@ export type DesktopData = {
   sendAmount: string;
   sendHubFeePayer: HubFeePayer;
   sendForceL1: boolean;
+  sendL1FeeSpeed: L1FeeSpeed;
+  sendServiceFeeEnabled: boolean;
+  serviceFeeRate: number;
   showSendOptions: boolean;
   sendQrScanOpen: boolean;
   preview: SendPreview | null;
@@ -98,12 +101,19 @@ export type DesktopActions = {
   setSendAmount: (v: string) => void;
   setSendHubFeePayer: (v: HubFeePayer) => void;
   setSendForceL1: (v: boolean) => void;
+  setSendL1FeeSpeed: (v: L1FeeSpeed) => void;
+  setSendServiceFeeEnabled: (v: boolean) => void;
   setShowSendOptions: (v: boolean | ((prev: boolean) => boolean)) => void;
   setSendQrScanOpen: (v: boolean | ((prev: boolean) => boolean)) => void;
   clearPreview: () => void;
-  persistSendPreferences: (hubFeePayer: HubFeePayer, forceL1: boolean) => Promise<void>;
+  persistSendPreferences: (
+    hubFeePayer: HubFeePayer,
+    forceL1: boolean,
+    l1FeeSpeed?: L1FeeSpeed,
+    serviceFeeEnabled?: boolean,
+  ) => Promise<void>;
   onPaymentQr: (payload: PaymentQrPayload) => void;
-  onPreviewSend: () => void;
+  onPreviewSend: (speedOverride?: L1FeeSpeed) => void;
   onConfirmSend: () => void;
 };
 
@@ -139,6 +149,9 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     sendAmount,
     sendHubFeePayer,
     sendForceL1,
+    sendL1FeeSpeed,
+    sendServiceFeeEnabled,
+    serviceFeeRate,
     showSendOptions,
     sendQrScanOpen,
     preview,
@@ -182,6 +195,8 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     setSendAmount,
     setSendHubFeePayer,
     setSendForceL1,
+    setSendL1FeeSpeed,
+    setSendServiceFeeEnabled,
     setShowSendOptions,
     setSendQrScanOpen,
     clearPreview,
@@ -276,6 +291,11 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           setSendHubFeePayer={setSendHubFeePayer}
           sendForceL1={sendForceL1}
           setSendForceL1={setSendForceL1}
+          sendL1FeeSpeed={sendL1FeeSpeed}
+          setSendL1FeeSpeed={setSendL1FeeSpeed}
+          sendServiceFeeEnabled={sendServiceFeeEnabled}
+          setSendServiceFeeEnabled={setSendServiceFeeEnabled}
+          serviceFeeRate={serviceFeeRate}
           showSendOptions={showSendOptions}
           setShowSendOptions={setShowSendOptions}
           sendQrScanOpen={sendQrScanOpen}
@@ -309,6 +329,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           txHistory={txHistory}
           hideAddresses={hideAddresses}
           hideBalances={hideBalances}
+          onNotify={onNotify}
         />
       );
     case "advanced":

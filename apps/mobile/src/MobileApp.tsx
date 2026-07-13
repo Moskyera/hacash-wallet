@@ -23,7 +23,6 @@ import { copyWithPrivacyClear, maskAddress } from "./privacy";
 import { clearAllWalletNames, saveWalletName, walletDisplayName } from "./walletName";
 import { MIN_WALLET_PASS } from "./quantumMeta";
 import { clearDeepLink, parseDeepLinkPay, stashDeepLinkUrl } from "./utils/deepLink";
-import { downloadJson } from "./utils/downloadJson";
 import { hapticSuccess } from "./utils/haptic";
 import { PULL_THRESHOLD } from "./utils/appConstants";
 
@@ -225,30 +224,6 @@ export default function MobileApp() {
     }
   };
 
-  const handleImportBackup = async (
-    json: string,
-    backupPassphrase: string,
-    deleteSource?: string | null,
-  ) => {
-    session.setBusy(true);
-    try {
-      const address = await api.importBackup(json, backupPassphrase, deleteSource);
-      if (session.walletNameDraft.trim()) {
-        saveWalletName(address, session.walletNameDraft);
-      }
-      await session.refresh();
-      showToast(
-        "Wallet restored. Backup file removed when possible — check Downloads if needed.",
-        "success",
-      );
-      hapticSuccess();
-    } catch (e) {
-      showToast(formatInvokeError(e), "error");
-    } finally {
-      session.setBusy(false);
-    }
-  };
-
   const handleUnlock = async () => {
     session.setBusy(true);
     try {
@@ -334,7 +309,7 @@ export default function MobileApp() {
 
   const handleResetWallet = async () => {
     const ok1 = window.confirm(
-      "Delete this wallet from the phone? You will need your seed/backup to recover funds.",
+      "Delete this wallet from the phone? You will need your private key to recover funds.",
     );
     if (!ok1) return;
     const ok2 = window.confirm("This cannot be undone. Delete wallet now?");
@@ -395,19 +370,6 @@ export default function MobileApp() {
     }
   };
 
-  const handleExportBackup = async (passphrase: string) => {
-    session.setBusy(true);
-    try {
-      const json = await api.exportBackup(passphrase);
-      downloadJson(`hacash-backup-${Date.now()}.json`, json);
-      showToast("Backup downloaded.", "success");
-    } catch (e) {
-      showToast(formatInvokeError(e), "error");
-    } finally {
-      session.setBusy(false);
-    }
-  };
-
   const handleChangePassphrase = async (oldPass: string, newPass: string) => {
     if (newPass.length < MIN_WALLET_PASS) {
       showToast(`New passphrase must be at least ${MIN_WALLET_PASS} characters.`, "error");
@@ -454,7 +416,6 @@ export default function MobileApp() {
         busy={session.busy}
         onCreate={() => void handleCreate()}
         onImport={() => void handleImport()}
-        onImportBackup={(j, p, d) => void handleImportBackup(j, p, d)}
         onWatchOnly={() => void handleWatchOnly()}
         toast={toast}
       />
@@ -524,6 +485,7 @@ export default function MobileApp() {
               setMorePage("launchpad");
               setTab("more");
             }}
+            onToast={showToast}
           />
         )}
 
@@ -538,6 +500,11 @@ export default function MobileApp() {
             setSendHubFeePayer={payment.setSendHubFeePayer}
             sendForceL1={payment.sendForceL1}
             setSendForceL1={payment.setSendForceL1}
+            sendL1FeeSpeed={payment.sendL1FeeSpeed}
+            setSendL1FeeSpeed={payment.setSendL1FeeSpeed}
+            sendServiceFeeEnabled={payment.sendServiceFeeEnabled}
+            setSendServiceFeeEnabled={payment.setSendServiceFeeEnabled}
+            serviceFeeRate={payment.serviceFeeRate}
             preview={payment.preview}
             payScanMode={payment.payScanMode}
             setPayScanMode={payment.setPayScanMode}
@@ -548,10 +515,10 @@ export default function MobileApp() {
             platformSec={session.platformSec}
             busy={session.busy}
             dustWhisper={session.dustWhisper}
-            onPersistSendPrefs={(h, f) => void payment.persistSendPrefs(h, f)}
+            onPersistSendPrefs={(h, f, s, svc) => void payment.persistSendPrefs(h, f, s, svc)}
             onPersistDustWhisper={(patch) => void session.persistDustWhisper(patch)}
             onResetPreview={payment.resetPreview}
-            onPreviewSend={() => void payment.handlePreviewSend()}
+            onPreviewSend={(speed) => void payment.handlePreviewSend(speed)}
             onConfirmSend={() => void payment.handleConfirmSend()}
             onPaymentQr={(p) => void payment.loadPaymentPayload(p, "qr")}
             onToast={showToast}
@@ -612,7 +579,6 @@ export default function MobileApp() {
               onSaveSettings: (nodeUrl, hubUrl) => void handleSaveSettings(nodeUrl, hubUrl),
               onApplyHub: (entry) => handleApplyHub(entry),
               onSaveWalletName: session.handleSaveWalletName,
-              onExportBackup: (pass) => void handleExportBackup(pass),
               onChangePassphrase: (old, neu) => void handleChangePassphrase(old, neu),
               onResetWallet: () => void handleResetWallet(),
               onLock: () => void session.handleLock(),

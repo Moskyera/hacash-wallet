@@ -1,4 +1,8 @@
 import { api } from "../../api";
+import TxStatusMark from "../../components/TxStatusMark";
+import { formatHacMei } from "../../privacy";
+import { openTxInExplorer } from "../../txHistory";
+import { canOpenTxInExplorer } from "../../explorer";
 import AirgapScreen from "../../components/AirgapScreen";
 import HacdLaunchpadIcon from "../../components/HacdLaunchpadIcon";
 import LaunchpadScreen from "../../components/LaunchpadScreen";
@@ -47,7 +51,6 @@ export default function MoreRouter({ page, data, actions }: Props) {
     onSaveSettings,
     onApplyHub,
     onSaveWalletName,
-    onExportBackup,
     onChangePassphrase,
     onResetWallet,
     onLock,
@@ -112,7 +115,7 @@ export default function MoreRouter({ page, data, actions }: Props) {
           <span>→</span>
         </button>
         <button type="button" onClick={() => onNavigate("security")}>
-          <span>Security & backup</span>
+          <span>Security</span>
           <span>→</span>
         </button>
       </div>
@@ -130,15 +133,30 @@ export default function MoreRouter({ page, data, actions }: Props) {
           {history.length === 0 ? (
             <p className="muted">No transactions yet.</p>
           ) : (
-            history.map((row) => (
-              <div key={row.tx_hash} className="list-item">
-                <div>
-                  <span className="badge badge-rail">{row.rail}</span> {row.amount_mei} HAC
+            history.map((row) => {
+              const showExplorer = canOpenTxInExplorer(row.rail, row.tx_hash);
+              return (
+                <div key={`${row.tx_hash}-${row.timestamp}`} className="list-item list-item-row">
+                  <TxStatusMark status={row.status} />
+                  <div className="list-item-body">
+                    <div>
+                      <span className="badge badge-rail">{row.rail}</span> {formatHacMei(row.amount_mei)} HAC
+                    </div>
+                    <div className="muted">{row.summary}</div>
+                    <div className="muted">{row.timestamp}</div>
+                  </div>
+                  {showExplorer ? (
+                    <button
+                      type="button"
+                      className="ghost small"
+                      onClick={() => void openTxInExplorer(row, onToast)}
+                    >
+                      Explorer
+                    </button>
+                  ) : null}
                 </div>
-                <div className="muted">{row.summary}</div>
-                <div className="muted">{row.timestamp}</div>
-              </div>
-            ))
+              );
+            })
           )}
           {history.length > 0 && (
             <button type="button" disabled={busy} onClick={() => void onClearHistory()}>
@@ -207,7 +225,6 @@ export default function MoreRouter({ page, data, actions }: Props) {
           walletNameDraft={walletNameDraft}
           setWalletNameDraft={setWalletNameDraft}
           onSaveWalletName={onSaveWalletName}
-          onExportBackup={onExportBackup}
           onChangePassphrase={onChangePassphrase}
           onResetWallet={onResetWallet}
           onLock={onLock}
@@ -251,7 +268,6 @@ export default function MoreRouter({ page, data, actions }: Props) {
           clipboardClearSecs={clipboardSecs}
           platformSec={platformSec}
           securityProfile={settings?.security_profile}
-          webauthnEnabled={settings?.webauthn_enabled}
           biometricSendEnabled={settings?.biometric_send_enabled ?? true}
           onToast={onToast}
           onGoLegacySend={onGoLegacySend}

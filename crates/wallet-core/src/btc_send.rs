@@ -64,7 +64,7 @@ pub async fn preview_btc_send(
     }
 
     let hac_mei = balance_entry.hacash_mei()?;
-    let fee_est = estimate_btc_l1_fee(node, from, to, satoshi).await?;
+    let fee_est = estimate_btc_l1_fee(node, from, to, satoshi, crate::send_options::L1FeeSpeed::Normal).await?;
     let hip23 = validate_btc_l1_send(to, hac_mei, fee_est.fee_mei)?;
     let btc_amount = satoshi_to_btc(satoshi);
 

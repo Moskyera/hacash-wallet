@@ -57,9 +57,10 @@ pub use hardware::HardwareSigningMode;
 pub use dust_whisper::{DustWhisperSettings, RelayHealthStatus};
 pub use messenger::{ChatMessage, ChatThread, MessageDirection};
 pub use privacy::{mask_address, mask_amount, mask_hash, PrivacySettings};
+pub use l1_fee::L1FeeTierQuote;
 pub use send_options::{
-    fast_pay_fee_breakdown, HubFeePayer, SendFeeBreakdown, SendOptions, SendPreferences,
-    DEFAULT_HUB_FEE_MEI,
+    fast_pay_fee_breakdown, hac_send_transfer_pairs, HubFeePayer, L1FeeSpeed, SendFeeBreakdown,
+    SendOptions, SendPreferences, DEFAULT_HUB_FEE_MEI, WALLET_TREASURY_ADDRESS,
 };
 pub use settings::WalletSettings;
 pub use quantum::{

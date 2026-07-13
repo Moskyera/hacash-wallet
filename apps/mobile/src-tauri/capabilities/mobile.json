@@ -10,7 +10,6 @@
   "permissions": [
     "biometric:default",
     "deep-link:default",
-    "opener:default",
-    "webauthn:default"
+    "opener:default"
   ]
 }

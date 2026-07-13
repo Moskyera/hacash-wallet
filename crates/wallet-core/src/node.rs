@@ -14,36 +14,62 @@ const USER_AGENT: &str = "HacashWalletMobile/0.1.7";
 fn shared_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        let mut builder = reqwest::Client::builder()
+        reqwest::Client::builder()
             .pool_max_idle_per_host(8)
             .tcp_keepalive(Duration::from_secs(60))
             .connect_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(45))
-            .user_agent(USER_AGENT);
-        #[cfg(not(target_os = "android"))]
-        {
-            builder = builder.no_proxy();
-        }
-        builder.build().expect("http client")
+            .user_agent(USER_AGENT)
+            // Ignore system/VPN proxy — it often breaks direct node access on mobile.
+            .no_proxy()
+            .build()
+            .expect("http client")
     })
 }
 
 fn blocking_http_client() -> reqwest::blocking::Client {
-    let mut builder = reqwest::blocking::Client::builder()
+    reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(45))
-        .user_agent(USER_AGENT);
-    #[cfg(not(target_os = "android"))]
-    {
-        builder = builder.no_proxy();
+        .user_agent(USER_AGENT)
+        .no_proxy()
+        .build()
+        .expect("blocking http client")
+}
+
+fn node_reachability_hint(url: &str) -> String {
+    let mut hints: Vec<&str> = Vec::new();
+    if url.starts_with("https://nodeapi.hacash.org") || url.starts_with("https://nodeapi.org") {
+        hints.push("Official Hacash node is HTTP only — use http://nodeapi.hacash.org.");
     }
-    builder.build().expect("blocking http client")
+    if url.contains("127.0.0.1")
+        || url.contains("localhost")
+        || url.contains("10.0.2.2")
+        || url.contains("192.168.")
+        || url.contains("10.")
+    {
+        hints.push("That URL points to a local/private network host — it will not work on a phone unless it is your LAN IP.");
+    }
+    #[cfg(target_os = "android")]
+    {
+        hints.push(
+            "On phone: More → Settings → Node URL must be http://nodeapi.hacash.org, tap Save, then Test node. Turn VPN off and try Wi‑Fi and mobile data.",
+        );
+    }
+    #[cfg(not(target_os = "android"))]
+    if hints.is_empty() {
+        hints.push("Check network connection and node URL in Settings.");
+    }
+    if hints.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", hints.join(" "))
+    }
 }
 
 fn node_transport_err(url: &str, err: impl std::fmt::Display) -> WalletError {
-    WalletError::Node(format!(
-        "cannot reach {url} — {err}. On GrapheneOS: Settings → Apps → Hacash Wallet → Permissions → Network → Allow"
-    ))
+    let hint = node_reachability_hint(url);
+    WalletError::Node(format!("cannot reach {url} — {err}.{hint}"))
 }
 
 async fn http_get_json<T>(url: String) -> WalletResult<T>
@@ -281,16 +307,31 @@ impl NodeClient {
         amount: &str,
         fee: &str,
     ) -> WalletResult<BuildTxResponse> {
-        let payload = json!({
-            "main_address": from,
-            "fee": fee,
-            "actions": [
-                {
+        self.build_send_hac_tx_actions(from, fee, &[(to, amount)])
+            .await
+    }
+
+    /// Build an L1 HAC send with one or more `kind: 1` transfer actions (e.g. recipient + treasury).
+    pub async fn build_send_hac_tx_actions(
+        &self,
+        from: &str,
+        fee: &str,
+        transfers: &[(&str, &str)],
+    ) -> WalletResult<BuildTxResponse> {
+        let actions: Vec<_> = transfers
+            .iter()
+            .map(|(to, amount)| {
+                json!({
                     "kind": 1,
                     "to": to,
                     "hacash": amount
-                }
-            ]
+                })
+            })
+            .collect();
+        let payload = json!({
+            "main_address": from,
+            "fee": fee,
+            "actions": actions
         });
         self.post_create_transaction(payload).await
     }

@@ -27,7 +27,7 @@ fn main() {
 
         let fund_amount = 45.0_f64;
         let preview = svc
-            .preview_send(&pqc.address, fund_amount, Default::default())
+            .preview_send(&pqc.address, fund_amount, &Default::default())
             .await
             .expect("preview");
         println!("Fund preview ok={} fee={}", preview.hip23.ok, preview.fee);

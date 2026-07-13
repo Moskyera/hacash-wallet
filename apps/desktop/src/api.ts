@@ -61,14 +61,30 @@ export type PlatformSecurityStatus = {
 
 export type HubFeePayer = "sender" | "recipient";
 
+export type L1FeeSpeed = "slow" | "normal" | "fast" | "ultra";
+
 export type SendPreferences = {
   hub_fee_payer: HubFeePayer;
   prefer_fast_pay: boolean;
+  l1_fee_speed?: L1FeeSpeed;
+  service_fee_enabled?: boolean;
+  service_fee_rate?: number;
 };
 
 export type SendOptions = {
   hub_fee_payer: HubFeePayer;
   force_l1: boolean;
+  l1_fee_speed?: L1FeeSpeed;
+  service_fee_enabled?: boolean;
+  service_fee_rate?: number;
+};
+
+export type L1FeeTierQuote = {
+  speed: L1FeeSpeed;
+  label: string;
+  detail: string;
+  fee_mei: number;
+  fee_wire: string;
 };
 
 export type SendFeeBreakdown = {
@@ -77,6 +93,10 @@ export type SendFeeBreakdown = {
   hub_fee_mei: number | null;
   hub_fee_payer: HubFeePayer;
   l1_fee_wire: string | null;
+  l1_fee_mei: number | null;
+  service_fee_mei?: number | null;
+  service_fee_rate?: number | null;
+  service_fee_treasury?: string | null;
 };
 
 export type WalletSettings = {
@@ -110,6 +130,7 @@ export type SendPreview = {
     rail_label: string;
     rail_detail: string;
     fee_breakdown: SendFeeBreakdown;
+    l1_fee_tiers?: L1FeeTierQuote[];
   };
   from: string;
   to: string;
@@ -177,6 +198,8 @@ export type BillSummary = {
   dispute_ready: boolean;
 };
 
+export type TxStatus = "confirmed" | "pending" | "failed";
+
 export type TxRecord = {
   tx_hash: string;
   rail: string;
@@ -185,6 +208,7 @@ export type TxRecord = {
   amount_mei: number;
   summary: string;
   timestamp: string;
+  status?: TxStatus;
 };
 
 export type HubHealth = {

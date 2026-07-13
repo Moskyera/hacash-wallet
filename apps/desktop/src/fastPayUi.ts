@@ -1,3 +1,40 @@
+import type { L1FeeSpeed } from "./api";
+
+export const L1_FEE_SPEEDS: L1FeeSpeed[] = ["slow", "normal", "fast", "ultra"];
+
+export function l1FeeSpeedLabel(speed: L1FeeSpeed): string {
+  switch (speed) {
+    case "slow":
+      return "Slow";
+    case "fast":
+      return "Fast";
+    case "ultra":
+      return "Ultra";
+    default:
+      return "Normal";
+  }
+}
+
+export function l1FeeSpeedDetail(speed: L1FeeSpeed): string {
+  switch (speed) {
+    case "slow":
+      return "Network minimum fee.";
+    case "fast":
+      return "5× network average — higher mempool priority.";
+    case "ultra":
+      return "15× network average — highest priority.";
+    default:
+      return "1.2× network average — balanced.";
+  }
+}
+
+export const DEFAULT_SERVICE_FEE_RATE = 0.003;
+
+export function formatServiceFeeRate(rate: number | null | undefined): string {
+  if (rate == null) return "0.3%";
+  return `${(rate * 100).toFixed(1).replace(/\.0$/, "")}%`;
+}
+
 export type FastPayState =
   | "ready"
   | "needs_channel"

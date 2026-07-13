@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type HacdSendPreview, type PlatformSecurityStatus, type WalletSettings } from "../api";
-import { webAuthnClientOrigin } from "../webauthn";
-import { maybeWebAuthnGate } from "../utils/webauthnGate";
+import { maybeSecondFactorGate } from "../utils/secondFactorGate";
 import { formatInvokeError } from "../formatInvokeError";
 import { hapticSuccess } from "../utils/haptic";
 import { isValidHacdName, normalizeHacdName } from "../utils/paymentAssets";
@@ -93,13 +92,11 @@ export function useHacdSend(opts: {
   const handleConfirm = useCallback(async () => {
     if (!preview) return;
     try {
-      await maybeWebAuthnGate({
+      await maybeSecondFactorGate({
         amountMei: preview.fee_mei,
         securityProfile: settings?.security_profile,
-        webauthnEnabled: settings?.webauthn_enabled,
         biometricSendEnabled: settings?.biometric_send_enabled ?? true,
         nativeBiometricAvailable: platformSec?.native_biometric_available,
-        clientOrigin: webAuthnClientOrigin(),
       });
     } catch (e) {
       showToast(formatInvokeError(e), "error");
@@ -107,6 +104,7 @@ export function useHacdSend(opts: {
     }
     setBusy(true);
     try {
+      void refresh();
       const result = await api.sendHacd(preview.to, preview.diamond_names);
       setPreview(null);
       setSelected([]);

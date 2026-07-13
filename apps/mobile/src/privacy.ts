@@ -7,10 +7,25 @@ export function maskAddress(address: string | null | undefined, hide: boolean): 
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
+export function formatHacMei(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  if (value === 0) return "0";
+  if (value >= 0.001) {
+    return value
+      .toFixed(3)
+      .replace(/(\.\d*?)0+$/, "$1")
+      .replace(/\.$/, "");
+  }
+  return value
+    .toFixed(6)
+    .replace(/(\.\d*?)0+$/, "$1")
+    .replace(/\.$/, "");
+}
+
 export function maskBalance(value: number | null | undefined, hide: boolean): string {
   if (hide) return "••••";
   if (value == null) return "—";
-  return value.toFixed(3);
+  return formatHacMei(value);
 }
 
 export function formatBtcFromSatoshi(satoshi: number): string {

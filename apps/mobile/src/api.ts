@@ -11,14 +11,30 @@ export type PrivacySettings = {
 
 export type HubFeePayer = "sender" | "recipient";
 
+export type L1FeeSpeed = "slow" | "normal" | "fast" | "ultra";
+
 export type SendPreferences = {
   hub_fee_payer: HubFeePayer;
   prefer_fast_pay: boolean;
+  l1_fee_speed?: L1FeeSpeed;
+  service_fee_enabled?: boolean;
+  service_fee_rate?: number;
 };
 
 export type SendOptions = {
   hub_fee_payer: HubFeePayer;
   force_l1: boolean;
+  l1_fee_speed?: L1FeeSpeed;
+  service_fee_enabled?: boolean;
+  service_fee_rate?: number;
+};
+
+export type L1FeeTierQuote = {
+  speed: L1FeeSpeed;
+  label: string;
+  detail: string;
+  fee_mei: number;
+  fee_wire: string;
 };
 
 export type SendFeeBreakdown = {
@@ -27,6 +43,10 @@ export type SendFeeBreakdown = {
   hub_fee_mei: number | null;
   hub_fee_payer: HubFeePayer;
   l1_fee_wire: string | null;
+  l1_fee_mei: number | null;
+  service_fee_mei?: number | null;
+  service_fee_rate?: number | null;
+  service_fee_treasury?: string | null;
 };
 
 export type DustWhisperSettings = {
@@ -138,6 +158,7 @@ export type SendPreview = {
     rail_label: string;
     rail_detail: string;
     fee_breakdown: SendFeeBreakdown;
+    l1_fee_tiers?: L1FeeTierQuote[];
   };
   from: string;
   to: string;
@@ -151,6 +172,8 @@ export type SendResult = {
   summary: string;
 };
 
+export type TxStatus = "confirmed" | "pending" | "failed";
+
 export type TxRecord = {
   tx_hash: string;
   rail: string;
@@ -159,6 +182,7 @@ export type TxRecord = {
   amount_mei: number;
   summary: string;
   timestamp: string;
+  status?: TxStatus;
 };
 
 export type BillSummary = {
@@ -369,6 +393,8 @@ export const api = {
   updateSettings: (settings: WalletSettings) =>
     invoke<void>("wallet_update_settings", { settings }),
   pingNode: () => invoke<Record<string, unknown>>("wallet_ping_node"),
+  pingNodeUrl: (nodeUrl?: string) =>
+    invoke<Record<string, unknown>>("wallet_ping_node_url", { nodeUrl: nodeUrl ?? null }),
   resetWallet: () => invoke<void>("wallet_reset"),
   updatePrivacy: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
@@ -383,15 +409,6 @@ export const api = {
     invoke<SendPreview>("wallet_preview_send", { to, amountMei, sendOptions }),
   sendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<SendResult>("wallet_send_hac", { to, amountMei, sendOptions }),
-  exportBackup: (passphrase: string) =>
-    invoke<string>("wallet_export_backup", { passphrase }),
-  previewBackup: (json: string) => invoke<string>("wallet_preview_backup", { json }),
-  importBackup: (json: string, passphrase: string, deleteSource?: string | null) =>
-    invoke<string>("wallet_import_backup", {
-      json,
-      passphrase,
-      deleteSource: deleteSource ?? null,
-    }),
   exportPrivateKey: (passphrase: string) =>
     invoke<string>("wallet_export_private_key", { passphrase }),
   changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
@@ -449,18 +466,6 @@ export const api = {
     invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
   sendBtc: (to: string, satoshi: number) =>
     invoke<SendResult>("wallet_send_btc", { to, satoshi }),
-  webauthnRegisterBegin: (clientOrigin?: string) =>
-    invoke<string>("wallet_webauthn_register_begin", {
-      clientOrigin: clientOrigin ?? null,
-    }),
-  webauthnRegisterFinish: (credentialJson: string) =>
-    invoke<void>("wallet_webauthn_register_finish", { credentialJson }),
-  webauthnAuthBegin: (clientOrigin?: string) =>
-    invoke<string>("wallet_webauthn_auth_begin", {
-      clientOrigin: clientOrigin ?? null,
-    }),
-  webauthnAuthFinish: (assertionJson: string) =>
-    invoke<void>("wallet_webauthn_auth_finish", { assertionJson }),
   airgapPrepareSend: (to: string, amountMei: number) =>
     invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),
   airgapSignUnsigned: (unsigned: AirgapUnsigned) =>

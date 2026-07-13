@@ -111,7 +111,7 @@ pub async fn preview_hacd_send(
 
     let first_info = node.query_diamond_by_name(&names[0]).await?;
     let balance = node.balance_mei(from).await.unwrap_or(0.0);
-    let fee_est = estimate_hacd_l1_fee(node, from, to, &names).await?;
+    let fee_est = estimate_hacd_l1_fee(node, from, to, &names, crate::send_options::L1FeeSpeed::Normal).await?;
     let hip23 = validate_diamond_l1_send(to, balance, fee_est.fee_mei)?;
 
     let summary = if names.len() == 1 {

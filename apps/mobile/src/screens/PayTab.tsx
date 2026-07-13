@@ -12,9 +12,10 @@ import type {
   SendPreview,
   WalletSettings,
 } from "../api";
+import type { L1FeeSpeed } from "../api";
 import { resolveDustWhisper } from "../dustWhisper";
 import type { SavedContact } from "../contacts";
-import { maskAddress } from "../privacy";
+import { formatHacMei, maskAddress } from "../privacy";
 import { BIOMETRIC_THRESHOLD_MEI } from "../utils/appConstants";
 import {
   isValidHacdName,
@@ -22,6 +23,12 @@ import {
   type PaymentAsset,
 } from "../utils/paymentAssets";
 import type { PaymentQrPayload } from "../paymentQr";
+import {
+  formatServiceFeeRate,
+  L1_FEE_SPEEDS,
+  l1FeeSpeedDetail,
+  l1FeeSpeedLabel,
+} from "../fastPayUi";
 
 type Props = {
   contacts: SavedContact[];
@@ -33,6 +40,11 @@ type Props = {
   setSendHubFeePayer: (v: HubFeePayer) => void;
   sendForceL1: boolean;
   setSendForceL1: (v: boolean) => void;
+  sendL1FeeSpeed: L1FeeSpeed;
+  setSendL1FeeSpeed: (v: L1FeeSpeed) => void;
+  sendServiceFeeEnabled: boolean;
+  setSendServiceFeeEnabled: (v: boolean) => void;
+  serviceFeeRate: number;
   preview: SendPreview | null;
   payScanMode: boolean;
   setPayScanMode: (v: boolean) => void;
@@ -43,10 +55,15 @@ type Props = {
   platformSec: PlatformSecurityStatus | null;
   busy: boolean;
   dustWhisper?: DustWhisperSettings | null;
-  onPersistSendPrefs: (hubFee: HubFeePayer, forceL1: boolean) => void;
+  onPersistSendPrefs: (
+    hubFee: HubFeePayer,
+    forceL1: boolean,
+    l1FeeSpeed?: L1FeeSpeed,
+    serviceFeeEnabled?: boolean,
+  ) => void;
   onPersistDustWhisper: (patch: Partial<DustWhisperSettings>) => void | Promise<void>;
   onResetPreview: () => void;
-  onPreviewSend: () => void;
+  onPreviewSend: (speedOverride?: L1FeeSpeed) => void;
   onConfirmSend: () => void;
   onPaymentQr: (p: PaymentQrPayload) => void;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
@@ -64,6 +81,11 @@ export default function PayTab({
   setSendHubFeePayer,
   sendForceL1,
   setSendForceL1,
+  sendL1FeeSpeed,
+  setSendL1FeeSpeed,
+  sendServiceFeeEnabled,
+  setSendServiceFeeEnabled,
+  serviceFeeRate,
   preview,
   payScanMode,
   setPayScanMode,
@@ -108,6 +130,19 @@ export default function PayTab({
   const primaryHacd = hacd.selected[0] ?? normalizeHacdName(manualHacd);
   const whisper = resolveDustWhisper(dustWhisper);
   const whisperActive = whisper.enabled && whisper.relay_urls.some((u) => u.trim().length > 0);
+  const preferFastPay = settings?.send?.prefer_fast_pay ?? true;
+  const showL1FeeSpeed =
+    sendForceL1 || !preferFastPay || preview?.plan.rail === "L1OnChain";
+
+  const pickL1FeeSpeed = (speed: L1FeeSpeed) => {
+    setSendL1FeeSpeed(speed);
+    void onPersistSendPrefs(sendHubFeePayer, sendForceL1, speed);
+    if (preview && sendTo.trim() && sendAmount.trim()) {
+      void onPreviewSend(speed);
+      return;
+    }
+    onResetPreview();
+  };
 
   const applyManualHacd = (raw: string) => {
     const norm = normalizeHacdName(raw);
@@ -225,7 +260,43 @@ export default function PayTab({
               />
               Force on-chain (L1)
             </label>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={sendServiceFeeEnabled}
+                onChange={(e) => {
+                  const enabled = e.target.checked;
+                  setSendServiceFeeEnabled(enabled);
+                  void onPersistSendPrefs(sendHubFeePayer, sendForceL1, sendL1FeeSpeed, enabled);
+                  onResetPreview();
+                }}
+              />
+              Ecosystem service fee ({formatServiceFeeRate(serviceFeeRate)} of amount)
+            </label>
             <p className="muted small">Fee payer applies to Fast Pay only. L1 fees are always paid by you.</p>
+            {showL1FeeSpeed ? (
+              <div style={{ marginTop: "0.75rem" }}>
+                <p className="label">On-chain network fee</p>
+                <div className="display-toggle l1-fee-toggle">
+                  {L1_FEE_SPEEDS.map((speed) => {
+                    const tierFee = preview?.plan.l1_fee_tiers?.find((t) => t.speed === speed)?.fee_mei;
+                    const label = l1FeeSpeedLabel(speed);
+                    return (
+                      <button
+                        key={speed}
+                        type="button"
+                        className={sendL1FeeSpeed === speed ? "selected" : ""}
+                        disabled={busy}
+                        onClick={() => pickL1FeeSpeed(speed)}
+                      >
+                        {tierFee != null ? `${label} ~${formatHacMei(tierFee)}` : label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="muted small">{l1FeeSpeedDetail(sendL1FeeSpeed)}</p>
+              </div>
+            ) : null}
             <DustWhisperPayOptions
               dustWhisper={whisper}
               onPersist={onPersistDustWhisper}
@@ -239,14 +310,71 @@ export default function PayTab({
           {preview && (
             <div className="preview-box animate-in">
               <span className="badge badge-rail">{preview.plan.rail_label}</span>
+              <p className="muted small">{preview.plan.rail_detail}</p>
               <p>
                 <strong>{preview.amount_mei} HAC</strong> →{" "}
                 <code>{maskAddress(preview.to, hideAddresses)}</code>
               </p>
-              <p className="muted">
-                You pay {preview.plan.fee_breakdown.payer_debit_mei.toFixed(3)} HAC · Recipient gets{" "}
-                {preview.plan.fee_breakdown.recipient_credit_mei.toFixed(3)} HAC
-              </p>
+              <ul className="send-meta" style={{ margin: "0.75rem 0", paddingLeft: "1.1rem" }}>
+                <li>
+                  <strong>Amount:</strong> {formatHacMei(preview.amount_mei)} HAC
+                </li>
+                {preview.plan.rail === "L2Fast" ? (
+                  <li>
+                    <strong>Instant fee:</strong> ~{formatHacMei(preview.plan.fee_breakdown.hub_fee_mei ?? 0.001)} HAC
+                    {preview.plan.fee_breakdown.hub_fee_payer === "recipient" ? " (recipient pays)" : ""}
+                  </li>
+                ) : (
+                  <>
+                    <li>
+                      <strong>Network fee:</strong>{" "}
+                      {formatHacMei(preview.plan.fee_breakdown.l1_fee_mei ?? 0)} HAC (
+                      {l1FeeSpeedLabel(sendL1FeeSpeed)})
+                    </li>
+                    <li>
+                      <div className="display-toggle l1-fee-toggle" style={{ marginTop: 8 }}>
+                        {L1_FEE_SPEEDS.map((speed) => {
+                          const tier = preview.plan.l1_fee_tiers?.find((t) => t.speed === speed);
+                          const label = l1FeeSpeedLabel(speed);
+                          return (
+                            <button
+                              key={speed}
+                              type="button"
+                              className={sendL1FeeSpeed === speed ? "selected" : ""}
+                              disabled={busy}
+                              onClick={() => pickL1FeeSpeed(speed)}
+                            >
+                              {tier ? `${label} ~${formatHacMei(tier.fee_mei)}` : label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </li>
+                  </>
+                )}
+                {(preview.plan.fee_breakdown.service_fee_mei ?? 0) > 0 ? (
+                  <li>
+                    <strong>Service fee:</strong>{" "}
+                    {formatHacMei(preview.plan.fee_breakdown.service_fee_mei ?? 0)} HAC (
+                    {formatServiceFeeRate(preview.plan.fee_breakdown.service_fee_rate)})
+                    {preview.plan.fee_breakdown.service_fee_treasury ? (
+                      <>
+                        {" "}
+                        →{" "}
+                        <code>
+                          {maskAddress(preview.plan.fee_breakdown.service_fee_treasury, hideAddresses)}
+                        </code>
+                      </>
+                    ) : null}
+                  </li>
+                ) : null}
+                <li>
+                  <strong>You pay:</strong> {formatHacMei(preview.plan.fee_breakdown.payer_debit_mei)} HAC
+                </li>
+                <li>
+                  <strong>Recipient gets:</strong> {formatHacMei(preview.plan.fee_breakdown.recipient_credit_mei)} HAC
+                </li>
+              </ul>
               {!preview.hip23.ok && <p className="error">{preview.hip23.errors.join("; ")}</p>}
               {preview.plan.rail === "L1OnChain" && whisperActive ? (
                 <p className="muted small">Broadcast via DUST Whisper relay.</p>

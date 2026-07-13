@@ -2,12 +2,22 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{WalletError, WalletResult};
 use crate::paths::secure_write;
 use crate::payment::PaymentRail;
 
 const MAX_RECORDS: usize = 500;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TxStatus {
+    #[default]
+    Confirmed,
+    Pending,
+    Failed,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxRecord {
@@ -18,6 +28,8 @@ pub struct TxRecord {
     pub amount_mei: f64,
     pub summary: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub status: TxStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -53,20 +65,38 @@ impl TxHistory {
         amount_mei: f64,
         summary: &str,
     ) -> WalletResult<()> {
+        self.append_with_status(
+            rail,
+            tx_hash,
+            from,
+            to,
+            amount_mei,
+            summary,
+            TxStatus::Confirmed,
+        )
+    }
+
+    pub fn append_with_status(
+        &mut self,
+        rail: PaymentRail,
+        tx_hash: &str,
+        from: &str,
+        to: &str,
+        amount_mei: f64,
+        summary: &str,
+        status: TxStatus,
+    ) -> WalletResult<()> {
         self.records.insert(
             0,
             TxRecord {
                 tx_hash: tx_hash.to_owned(),
-                rail: match rail {
-                    PaymentRail::L2Fast => "L2Fast".into(),
-                    PaymentRail::L1OnChain => "L1OnChain".into(),
-                    PaymentRail::QuantumType4 => "QuantumType4".into(),
-                },
+                rail: rail_label(rail),
                 from: from.to_owned(),
                 to: to.to_owned(),
                 amount_mei,
                 summary: summary.to_owned(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
+                status,
             },
         );
         if self.records.len() > MAX_RECORDS {
@@ -75,8 +105,63 @@ impl TxHistory {
         self.save()
     }
 
+    pub fn begin_pending(
+        &mut self,
+        rail: PaymentRail,
+        from: &str,
+        to: &str,
+        amount_mei: f64,
+    ) -> WalletResult<String> {
+        let key = format!("pending:{}", Uuid::new_v4());
+        self.append_with_status(
+            rail,
+            &key,
+            from,
+            to,
+            amount_mei,
+            "Sending…",
+            TxStatus::Pending,
+        )?;
+        Ok(key)
+    }
+
+    pub fn resolve_pending(
+        &mut self,
+        pending_key: &str,
+        tx_hash: &str,
+        summary: &str,
+        status: TxStatus,
+    ) -> WalletResult<()> {
+        let Some(rec) = self.records.iter_mut().find(|r| r.tx_hash == pending_key) else {
+            return Ok(());
+        };
+        rec.tx_hash = tx_hash.to_owned();
+        rec.summary = summary.to_owned();
+        rec.status = status;
+        self.save()
+    }
+
+    pub fn mark_failed(&mut self, pending_key: &str) -> WalletResult<()> {
+        let Some(rec) = self.records.iter_mut().find(|r| r.tx_hash == pending_key) else {
+            return Ok(());
+        };
+        rec.status = TxStatus::Failed;
+        if rec.summary == "Sending…" {
+            rec.summary = "Failed".into();
+        }
+        self.save()
+    }
+
     pub fn list(&self) -> &[TxRecord] {
         &self.records
+    }
+}
+
+fn rail_label(rail: PaymentRail) -> String {
+    match rail {
+        PaymentRail::L2Fast => "L2Fast".into(),
+        PaymentRail::L1OnChain => "L1OnChain".into(),
+        PaymentRail::QuantumType4 => "QuantumType4".into(),
     }
 }
 
@@ -103,5 +188,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(h.list()[0].tx_hash, "abc");
+        assert_eq!(h.list()[0].status, TxStatus::Confirmed);
+    }
+
+    #[test]
+    fn pending_resolves_to_confirmed() {
+        let _iso = IsolatedWalletData::new();
+        let mut h = TxHistory::default();
+        let key = h
+            .begin_pending(PaymentRail::L1OnChain, "1From", "1To", 0.09)
+            .unwrap();
+        assert_eq!(h.list()[0].status, TxStatus::Pending);
+        h.resolve_pending(
+            &key,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "Sent 0.09 HAC",
+            TxStatus::Confirmed,
+        )
+        .unwrap();
+        assert_eq!(h.list()[0].status, TxStatus::Confirmed);
+        assert_eq!(h.list()[0].tx_hash.len(), 64);
+    }
+
+    #[test]
+    fn pending_marks_failed() {
+        let _iso = IsolatedWalletData::new();
+        let mut h = TxHistory::default();
+        let key = h
+            .begin_pending(PaymentRail::L2Fast, "1From", "1To", 1.0)
+            .unwrap();
+        h.mark_failed(&key).unwrap();
+        assert_eq!(h.list()[0].status, TxStatus::Failed);
     }
 }

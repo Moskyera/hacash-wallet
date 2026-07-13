@@ -233,6 +233,7 @@ $proguardKeeps = @'
 # In-app APK installer (JNI entry from Rust)
 -keep class org.hacash.wallet.mobile.ApkInstaller { *; }
 -keep class org.hacash.wallet.mobile.BackupFileHelper { *; }
+-keep class org.hacash.wallet.mobile.BackupExportHelper { *; }
 -keep class androidx.core.content.FileProvider { *; }
 # Tauri Android plugins (loaded by class name at runtime)
 -keep class app.tauri.opener.OpenerPlugin { *; }
@@ -241,7 +242,11 @@ $proguardKeeps = @'
 '@
 if (Test-Path $proguardPath) {
     $proguard = Get-Content $proguardPath -Raw
-    if ($proguard -notmatch "app\.tauri\.opener\.OpenerPlugin") {
+    if (
+        $proguard -notmatch "app\.tauri\.opener\.OpenerPlugin" -or
+        $proguard -notmatch "BackupFileHelper" -or
+        $proguard -notmatch "BackupExportHelper"
+    ) {
         Add-Content -Path $proguardPath -Value $proguardKeeps -Encoding UTF8
         Write-Host "Added per-plugin ProGuard keep rules" -ForegroundColor Green
     }

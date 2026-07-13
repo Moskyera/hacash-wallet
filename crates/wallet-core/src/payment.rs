@@ -7,9 +7,10 @@ use crate::error::{WalletError, WalletResult};
 use crate::l2_hub::{FastPayRequest, L2HubClient};
 use crate::node::NodeClient;
 use crate::hip23::format_mei_for_node;
-use crate::l1_fee::{estimate_hac_l1_fee, format_l1_fee_label};
+use crate::l1_fee::{estimate_hac_l1_fee_tiers, format_l1_fee_label, L1FeeTierQuote};
 use crate::send_options::{
-    fast_pay_fee_breakdown, HubFeePayer, SendFeeBreakdown, SendOptions, DEFAULT_HUB_FEE_MEI,
+    apply_service_fee, fast_pay_fee_breakdown, HubFeePayer, SendFeeBreakdown, SendOptions,
+    DEFAULT_HUB_FEE_MEI,
 };
 use crate::settings::WalletSettings;
 
@@ -31,6 +32,8 @@ pub struct PaymentPlan {
     /// One-line explanation shown under the label.
     pub rail_detail: String,
     pub fee_breakdown: SendFeeBreakdown,
+    #[serde(default)]
+    pub l1_fee_tiers: Vec<L1FeeTierQuote>,
 }
 
 pub struct PaymentRouter {
@@ -72,11 +75,11 @@ impl PaymentRouter {
         from: &str,
         to: &str,
         amount_mei: f64,
-        options: SendOptions,
+        options: &SendOptions,
     ) -> WalletResult<PaymentPlan> {
         if !options.force_l1 {
             if let Some(plan) = self
-                .try_l2_plan(from, to, amount_mei, options.hub_fee_payer)
+                .try_l2_plan(from, to, amount_mei, options)
                 .await?
             {
                 return Ok(plan);
@@ -84,14 +87,36 @@ impl PaymentRouter {
         }
         let _ = self.node.balance_mei(from).await?;
         let amount_wire = format_mei_for_node(amount_mei);
-        let fee_est = estimate_hac_l1_fee(&self.node, from, to, &amount_wire).await?;
-        let fee_breakdown = SendFeeBreakdown {
+        let tier_set = estimate_hac_l1_fee_tiers(
+            &self.node,
+            from,
+            to,
+            &amount_wire,
+            amount_mei,
+            options.l1_fee_speed,
+            options.service_fee_enabled,
+            options.service_fee_rate,
+        )
+        .await?;
+        let fee_est = tier_set.selected;
+        let mut fee_breakdown = SendFeeBreakdown {
             payer_debit_mei: amount_mei + fee_est.fee_mei,
             recipient_credit_mei: amount_mei,
             hub_fee_mei: None,
             hub_fee_payer: options.hub_fee_payer,
             l1_fee_wire: Some(fee_est.fee_wire.clone()),
+            l1_fee_mei: Some(fee_est.fee_mei),
+            service_fee_mei: None,
+            service_fee_rate: None,
+            service_fee_treasury: None,
         };
+        apply_service_fee(
+            &mut fee_breakdown,
+            amount_mei,
+            to,
+            options.service_fee_enabled,
+            options.service_fee_rate,
+        );
         Ok(PaymentPlan {
             rail: PaymentRail::L1OnChain,
             summary: format!("Send {amount_mei} HAC to {to}"),
@@ -100,6 +125,7 @@ impl PaymentRouter {
             rail_label: crate::fast_pay::rail_label(PaymentRail::L1OnChain).into(),
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L1OnChain).into(),
             fee_breakdown,
+            l1_fee_tiers: tier_set.tiers,
         })
     }
 
@@ -108,8 +134,9 @@ impl PaymentRouter {
         from: &str,
         to: &str,
         amount_mei: f64,
-        hub_fee_payer: HubFeePayer,
+        options: &SendOptions,
     ) -> WalletResult<Option<PaymentPlan>> {
+        let hub_fee_payer = options.hub_fee_payer;
         let hub_url = match &self.settings.l2_hub_url {
             Some(u) => u.clone(),
             None => return Ok(None),
@@ -131,7 +158,14 @@ impl PaymentRouter {
             return Ok(None);
         }
 
-        let fee_breakdown = fast_pay_fee_breakdown(amount_mei, hub_fee_mei, hub_fee_payer)?;
+        let mut fee_breakdown = fast_pay_fee_breakdown(amount_mei, hub_fee_mei, hub_fee_payer)?;
+        apply_service_fee(
+            &mut fee_breakdown,
+            amount_mei,
+            to,
+            options.service_fee_enabled,
+            options.service_fee_rate,
+        );
         let fee_label = match hub_fee_payer {
             HubFeePayer::Sender => format!("~{hub_fee_mei:.3} HAC (you pay)"),
             HubFeePayer::Recipient => format!("~{hub_fee_mei:.3} HAC (recipient pays)"),
@@ -144,6 +178,7 @@ impl PaymentRouter {
             rail_label: crate::fast_pay::rail_label(PaymentRail::L2Fast).into(),
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L2Fast).into(),
             fee_breakdown,
+            l1_fee_tiers: Vec::new(),
         }))
     }
 

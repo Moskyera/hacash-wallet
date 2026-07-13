@@ -2,7 +2,10 @@ import type { TouchEvent } from "react";
 import type { AssetSummary, FastPayStatus, TxRecord } from "../api";
 import BalanceOverview from "../components/BalanceOverview";
 import HacdLaunchpadIcon from "../components/HacdLaunchpadIcon";
+import TxStatusMark from "../components/TxStatusMark";
 import { fastPayStatusLine, fastPayStatusTitle } from "../fastPayUi";
+import { formatHacMei } from "../privacy";
+import { openTxInExplorer } from "../txHistory";
 
 type Props = {
   assets: AssetSummary | null;
@@ -23,6 +26,7 @@ type Props = {
   onHistory: () => void;
   onQuantum: () => void;
   onLaunchpad: () => void;
+  onToast: (msg: string, kind: "success" | "info" | "error") => void;
 };
 
 export default function HomeTab({
@@ -44,6 +48,7 @@ export default function HomeTab({
   onHistory,
   onQuantum,
   onLaunchpad,
+  onToast,
 }: Props) {
   return (
     <>
@@ -120,12 +125,20 @@ export default function HomeTab({
         <div className="card card-flat">
           <h2>Recent</h2>
           {history.slice(0, 3).map((row) => (
-            <div key={row.tx_hash} className="list-item">
-              <div>
-                {row.rail} · {row.amount_mei} HAC
+            <button
+              key={`${row.tx_hash}-${row.timestamp}`}
+              type="button"
+              className="list-item list-item-row list-item-tap"
+              onClick={() => void openTxInExplorer(row, onToast)}
+            >
+              <TxStatusMark status={row.status} />
+              <div className="list-item-body">
+                <div>
+                  {row.rail} · {formatHacMei(row.amount_mei)} HAC
+                </div>
+                <div className="muted">{row.summary}</div>
               </div>
-              <div className="muted">{row.summary}</div>
-            </div>
+            </button>
           ))}
         </div>
       )}

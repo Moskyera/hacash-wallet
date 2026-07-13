@@ -1,12 +1,17 @@
 import { useState } from "react";
-import { AssetSummary, SendPreview, WalletStatus } from "../api";
+import { AssetSummary, HubFeePayer, L1FeeSpeed, SendPreview, WalletStatus } from "../api";
 import type { PaymentQrPayload } from "../paymentQr";
 import BtcSendPanel from "../components/BtcSendPanel";
 import HacdSendPanel from "../components/HacdSendPanel";
 import PaymentQrScanner from "../components/PaymentQrScanner";
-import { HubFeePayer } from "../api";
-import { maskAddress } from "../privacy";
-import { railBadgeClass } from "../fastPayUi";
+import { maskAddress, formatHacMei } from "../privacy";
+import {
+  formatServiceFeeRate,
+  L1_FEE_SPEEDS,
+  l1FeeSpeedDetail,
+  l1FeeSpeedLabel,
+  railBadgeClass,
+} from "../fastPayUi";
 import type { PaymentAsset } from "../utils/paymentAssets";
 import type { Screen } from "./types";
 
@@ -28,15 +33,25 @@ type Props = {
   setSendHubFeePayer: (v: HubFeePayer) => void;
   sendForceL1: boolean;
   setSendForceL1: (v: boolean) => void;
+  sendL1FeeSpeed: L1FeeSpeed;
+  setSendL1FeeSpeed: (v: L1FeeSpeed) => void;
+  sendServiceFeeEnabled: boolean;
+  setSendServiceFeeEnabled: (v: boolean) => void;
+  serviceFeeRate: number;
   showSendOptions: boolean;
   setShowSendOptions: (v: boolean | ((prev: boolean) => boolean)) => void;
   sendQrScanOpen: boolean;
   setSendQrScanOpen: (v: boolean | ((prev: boolean) => boolean)) => void;
   preview: SendPreview | null;
   clearPreview: () => void;
-  persistSendPreferences: (hubFeePayer: HubFeePayer, forceL1: boolean) => Promise<void>;
+  persistSendPreferences: (
+    hubFeePayer: HubFeePayer,
+    forceL1: boolean,
+    l1FeeSpeed?: L1FeeSpeed,
+    serviceFeeEnabled?: boolean,
+  ) => Promise<void>;
   onPaymentQr: (payload: PaymentQrPayload) => void;
-  onPreviewSend: () => void;
+  onPreviewSend: (speedOverride?: L1FeeSpeed) => void;
   onConfirmSend: () => void;
   onNavigate: (screen: Screen) => void;
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
@@ -61,6 +76,11 @@ export default function SendScreen({
   setSendHubFeePayer,
   sendForceL1,
   setSendForceL1,
+  sendL1FeeSpeed,
+  setSendL1FeeSpeed,
+  sendServiceFeeEnabled,
+  setSendServiceFeeEnabled,
+  serviceFeeRate,
   showSendOptions,
   setShowSendOptions,
   sendQrScanOpen,
@@ -76,6 +96,18 @@ export default function SendScreen({
   onSent,
 }: Props) {
   const [sendAsset, setSendAsset] = useState<PaymentAsset>("HAC");
+  const showL1FeeSpeed =
+    sendForceL1 || !fastPayReady || preview?.plan.rail === "L1OnChain";
+
+  const pickL1FeeSpeed = (speed: L1FeeSpeed) => {
+    setSendL1FeeSpeed(speed);
+    void persistSendPreferences(sendHubFeePayer, sendForceL1, speed);
+    if (preview && sendTo.trim() && sendAmount.trim()) {
+      onPreviewSend(speed);
+      return;
+    }
+    clearPreview();
+  };
 
   return (
     <section className="panel">
@@ -204,9 +236,9 @@ export default function SendScreen({
           </button>
           {showSendOptions && (
             <div className="send-options-card">
-              <fieldset className="send-option-group">
-                <legend>Fast Pay network fee</legend>
-                <label className="radio-row">
+              <div className="send-options-section">
+                <h4 className="send-options-heading">Fast Pay network fee</h4>
+                <label className="option-choice">
                   <input
                     type="radio"
                     name="hubFeePayer"
@@ -214,12 +246,12 @@ export default function SendScreen({
                     onChange={() => {
                       setSendHubFeePayer("sender");
                       clearPreview();
-                      persistSendPreferences("sender", sendForceL1).catch(() => undefined);
+                      void persistSendPreferences("sender", sendForceL1);
                     }}
                   />
-                  I pay the fee (default)
+                  <span>I pay the fee</span>
                 </label>
-                <label className="radio-row">
+                <label className="option-choice">
                   <input
                     type="radio"
                     name="hubFeePayer"
@@ -227,16 +259,16 @@ export default function SendScreen({
                     onChange={() => {
                       setSendHubFeePayer("recipient");
                       clearPreview();
-                      persistSendPreferences("recipient", sendForceL1).catch(() => undefined);
+                      void persistSendPreferences("recipient", sendForceL1);
                     }}
                   />
-                  Recipient pays. Deducted from amount they receive.
+                  <span>Recipient pays (deducted from amount received)</span>
                 </label>
                 <p className="muted small-note">
                   Applies to Fast Pay only. On-chain L1 fees are always paid by the sender.
                 </p>
-              </fieldset>
-              <label className="checkbox-row">
+              </div>
+              <label className="option-choice">
                 <input
                   type="checkbox"
                   checked={sendForceL1}
@@ -244,18 +276,68 @@ export default function SendScreen({
                     const force = e.target.checked;
                     setSendForceL1(force);
                     clearPreview();
-                    persistSendPreferences(sendHubFeePayer, force).catch(() => undefined);
+                    void persistSendPreferences(sendHubFeePayer, force);
                   }}
                 />
-                Force on-chain (skip Fast Pay for this wallet)
+                <span>Force on-chain (skip Fast Pay)</span>
+              </label>
+              <label className="option-choice">
+                <input
+                  type="checkbox"
+                  checked={sendServiceFeeEnabled}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    setSendServiceFeeEnabled(enabled);
+                    clearPreview();
+                    void persistSendPreferences(
+                      sendHubFeePayer,
+                      sendForceL1,
+                      sendL1FeeSpeed,
+                      enabled,
+                    );
+                  }}
+                />
+                <span>
+                  Ecosystem service fee ({formatServiceFeeRate(serviceFeeRate)} of amount, for
+                  future DEX)
+                </span>
               </label>
             </div>
           )}
 
+          {showL1FeeSpeed ? (
+            <div className="l1-fee-section">
+              <h4>On-chain network fee</h4>
+              <div className="display-toggle l1-fee-toggle">
+                {L1_FEE_SPEEDS.map((speed) => {
+                  const tierFee = preview?.plan.l1_fee_tiers?.find((t) => t.speed === speed)?.fee_mei;
+                  const label = l1FeeSpeedLabel(speed);
+                  return (
+                    <button
+                      key={speed}
+                      type="button"
+                      className={sendL1FeeSpeed === speed ? "selected" : ""}
+                      disabled={busy}
+                      onClick={() => pickL1FeeSpeed(speed)}
+                    >
+                      {tierFee != null ? `${label} ~${formatHacMei(tierFee)}` : label}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="muted small-note">{l1FeeSpeedDetail(sendL1FeeSpeed)}</p>
+              {!sendForceL1 && fastPayReady && preview?.plan.rail !== "L1OnChain" ? (
+                <p className="muted small-note">
+                  Used when this payment routes on-chain instead of Fast Pay.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
           <button
             className="primary"
             disabled={busy || !sendTo || !sendAmount}
-            onClick={onPreviewSend}
+            onClick={() => onPreviewSend()}
           >
             Continue
           </button>
@@ -265,24 +347,74 @@ export default function SendScreen({
               <div className={railBadgeClass(preview.plan.rail)}>{preview.plan.rail_label}</div>
               <p className="muted">{preview.plan.rail_detail}</p>
               <p>
-                <strong>{preview.amount_mei} HAC</strong> →{" "}
+                <strong>{formatHacMei(preview.amount_mei)} HAC</strong> →{" "}
                 <code>{maskAddress(preview.to, hideAddresses)}</code>
               </p>
               <ul className="send-meta">
                 <li>
-                  <strong>You pay:</strong> {preview.plan.fee_breakdown.payer_debit_mei.toFixed(3)}{" "}
-                  HAC
+                  <strong>Amount:</strong> {formatHacMei(preview.amount_mei)} HAC
+                </li>
+                {preview.plan.rail === "L2Fast" ? (
+                  <li>
+                    <strong>Instant fee:</strong> ~{formatHacMei(preview.plan.fee_breakdown.hub_fee_mei ?? 0.001)} HAC
+                    {preview.plan.fee_breakdown.hub_fee_payer === "recipient" ? " (recipient pays)" : ""}
+                  </li>
+                ) : (
+                  <>
+                    <li>
+                      <strong>Network fee:</strong>{" "}
+                      {formatHacMei(preview.plan.fee_breakdown.l1_fee_mei ?? 0)} HAC (
+                      {l1FeeSpeedLabel(sendL1FeeSpeed)})
+                    </li>
+                    <li>
+                      <div className="display-toggle l1-fee-toggle" style={{ marginTop: 8 }}>
+                        {L1_FEE_SPEEDS.map((speed) => {
+                          const tier = preview.plan.l1_fee_tiers?.find((t) => t.speed === speed);
+                          const label = l1FeeSpeedLabel(speed);
+                          return (
+                            <button
+                              key={speed}
+                              type="button"
+                              className={sendL1FeeSpeed === speed ? "selected" : ""}
+                              disabled={busy}
+                              onClick={() => pickL1FeeSpeed(speed)}
+                            >
+                              {tier
+                                ? `${label} ~${formatHacMei(tier.fee_mei)}`
+                                : label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </li>
+                  </>
+                )}
+                {(preview.plan.fee_breakdown.service_fee_mei ?? 0) > 0 ? (
+                  <li>
+                    <strong>Service fee:</strong>{" "}
+                    {formatHacMei(preview.plan.fee_breakdown.service_fee_mei ?? 0)} HAC (
+                    {formatServiceFeeRate(preview.plan.fee_breakdown.service_fee_rate)})
+                    {preview.plan.fee_breakdown.service_fee_treasury ? (
+                      <>
+                        {" "}
+                        →{" "}
+                        <code>
+                          {maskAddress(preview.plan.fee_breakdown.service_fee_treasury, hideAddresses)}
+                        </code>
+                      </>
+                    ) : null}
+                  </li>
+                ) : null}
+                <li>
+                  <strong>You pay:</strong> {formatHacMei(preview.plan.fee_breakdown.payer_debit_mei)} HAC
                 </li>
                 <li>
                   <strong>Recipient receives:</strong>{" "}
-                  {preview.plan.fee_breakdown.recipient_credit_mei.toFixed(3)} HAC
-                </li>
-                <li>
-                  <strong>Network fee:</strong> {preview.plan.estimated_fee}
+                  {formatHacMei(preview.plan.fee_breakdown.recipient_credit_mei)} HAC
                 </li>
                 {preview.plan.rail === "L2Fast" &&
                   preview.plan.fee_breakdown.hub_fee_payer === "recipient" && (
-                    <li className="muted">
+                    <li className="muted small-note">
                       Hub fee is taken from the recipient&apos;s credit, not added to your debit.
                     </li>
                   )}

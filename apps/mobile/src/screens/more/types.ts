@@ -51,7 +51,6 @@ export type MoreActions = {
   onSaveSettings: (nodeUrl: string, hubUrl: string) => void;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
   onSaveWalletName: () => void;
-  onExportBackup: (passphrase: string) => void;
   onChangePassphrase: (oldPass: string, newPass: string) => void;
   onResetWallet: () => void;
   onLock: () => void;

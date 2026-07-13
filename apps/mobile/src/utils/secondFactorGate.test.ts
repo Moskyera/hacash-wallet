@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { needsSecondFactor } from "./webauthnGate";
+import { needsSecondFactor } from "./secondFactorGate";
 
 describe("needsSecondFactor", () => {
   it("always requires 2FA for paranoid profile", () => {

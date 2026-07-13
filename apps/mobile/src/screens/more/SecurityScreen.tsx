@@ -1,15 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type PlatformSecurityStatus, type WalletSettings, type WalletStatus } from "../../api";
+import PrivateKeyQrDisplay from "../../components/PrivateKeyQrDisplay";
 import { formatInvokeError } from "../../formatInvokeError";
 import { copyWithPrivacyClear } from "../../privacy";
 import { MIN_WALLET_PASS } from "../../quantumMeta";
 import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
-import {
-  runWebAuthnAuth,
-  runWebAuthnRegister,
-  webAuthnAvailable,
-  webAuthnClientOrigin,
-} from "../../webauthn";
 
 type Props = {
   status: WalletStatus | null;
@@ -21,7 +16,6 @@ type Props = {
   walletNameDraft: string;
   setWalletNameDraft: (v: string) => void;
   onSaveWalletName: () => void;
-  onExportBackup: (passphrase: string) => void;
   onChangePassphrase: (oldPass: string, newPass: string) => void;
   onResetWallet: () => void;
   onLock: () => void;
@@ -40,7 +34,6 @@ export default function SecurityScreen({
   walletNameDraft,
   setWalletNameDraft,
   onSaveWalletName,
-  onExportBackup,
   onChangePassphrase,
   onResetWallet,
   onLock,
@@ -48,62 +41,25 @@ export default function SecurityScreen({
   onToast,
   setBusy,
 }: Props) {
-  const [backupPass, setBackupPass] = useState("");
   const [oldPass, setOldPass] = useState("");
   const [newPass, setNewPass] = useState("");
   const [bioUnlockPass, setBioUnlockPass] = useState("");
   const [bioUnlockStatus, setBioUnlockStatus] = useState<{ enabled: boolean; configured: boolean } | null>(null);
   const [privateKeyPass, setPrivateKeyPass] = useState("");
   const [privateKey, setPrivateKey] = useState<string | null>(null);
-  const [webauthnReady, setWebauthnReady] = useState(false);
   const privateKeyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const hidePrivateKey = useCallback(() => {
+    setPrivateKey(null);
+    if (privateKeyTimer.current) {
+      clearTimeout(privateKeyTimer.current);
+      privateKeyTimer.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     void api.biometricUnlockStatus().then(setBioUnlockStatus).catch(() => setBioUnlockStatus(null));
   }, [settings?.biometric_unlock_enabled]);
-
-  useEffect(() => {
-    void webAuthnAvailable().then(setWebauthnReady);
-    return () => {
-      if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
-    };
-  }, []);
-
-  async function handleRegisterWebAuthn() {
-    if (!webauthnReady) {
-      onToast("WebAuthn is not available in this WebView.", "error");
-      return;
-    }
-    setBusy(true);
-    try {
-      const origin = webAuthnClientOrigin();
-      const options = await api.webauthnRegisterBegin(origin);
-      const cred = await runWebAuthnRegister(options, origin);
-      await api.webauthnRegisterFinish(cred);
-      await onRefresh();
-      onToast("WebAuthn passkey registered.", "success");
-    } catch (e) {
-      onToast(formatInvokeError(e), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleTestWebAuthn() {
-    if (!webauthnReady || !settings?.webauthn_enabled) return;
-    setBusy(true);
-    try {
-      const origin = webAuthnClientOrigin();
-      const options = await api.webauthnAuthBegin(origin);
-      const assertion = await runWebAuthnAuth(options, origin);
-      await api.webauthnAuthFinish(assertion);
-      onToast("WebAuthn verification OK.", "success");
-    } catch (e) {
-      onToast(formatInvokeError(e), "error");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <>
@@ -117,29 +73,10 @@ export default function SecurityScreen({
         </button>
       </div>
       <div className="card">
-        <h2>Backup</h2>
-        <p className="muted">
-          Export encrypted JSON backup. Restore it on a new device via Welcome → Restore backup
-          (same passphrase). Delete the file from Downloads after restoring.
-        </p>
-        <label className="label">Passphrase</label>
-        <input type="password" value={backupPass} onChange={(e) => setBackupPass(e.target.value)} />
-        <button
-          type="button"
-          className="primary"
-          disabled={busy || !backupPass}
-          onClick={() => {
-            onExportBackup(backupPass);
-            setBackupPass("");
-          }}
-        >
-          Download backup
-        </button>
-      </div>
-      <div className="card">
         <h2>Private key</h2>
         <p className="muted small">
-          Advanced: view your wallet private key. Anyone with this key controls your funds. Never share it.
+          Back up your wallet offline: reveal the key and scan the QR on a new phone (Welcome → Import → Scan QR).
+          Keep your screen private — anyone nearby can read the key.
         </p>
         <label className="label">Passphrase</label>
         <input type="password" value={privateKeyPass} onChange={(e) => setPrivateKeyPass(e.target.value)} />
@@ -154,9 +91,9 @@ export default function SecurityScreen({
               .then((hex) => {
                 setPrivateKey(hex);
                 setPrivateKeyPass("");
-                onToast("Private key revealed. It will hide in 60s.", "info");
+                onToast("Private key revealed. Hides in 60s.", "info");
                 if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
-                privateKeyTimer.current = setTimeout(() => setPrivateKey(null), 60_000);
+                privateKeyTimer.current = setTimeout(() => hidePrivateKey(), 60_000);
               })
               .catch((err) => onToast(formatInvokeError(err), "error"))
               .finally(() => setBusy(false));
@@ -169,6 +106,7 @@ export default function SecurityScreen({
             <p className="mono small" style={{ wordBreak: "break-all", marginTop: "0.75rem" }}>
               {privateKey}
             </p>
+            <PrivateKeyQrDisplay privateKeyHex={privateKey} />
             <button
               type="button"
               style={{ marginTop: "0.5rem" }}
@@ -178,14 +116,7 @@ export default function SecurityScreen({
             >
               Copy
             </button>
-            <button
-              type="button"
-              style={{ marginTop: "0.5rem", marginLeft: "0.5rem" }}
-              onClick={() => {
-                setPrivateKey(null);
-                if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
-              }}
-            >
+            <button type="button" style={{ marginTop: "0.5rem", marginLeft: "0.5rem" }} onClick={hidePrivateKey}>
               Hide
             </button>
           </>
@@ -194,8 +125,8 @@ export default function SecurityScreen({
       <div className="card">
         <h2>Delete wallet</h2>
         <p className="muted">
-          Removes this wallet from the phone so you can create or import a different one. Export a backup first if you
-          need to recover funds later.
+          Removes this wallet from the phone so you can create or import a different one. Export your private key
+          via QR first if you need to recover funds later.
         </p>
         <button type="button" disabled={busy} onClick={onResetWallet}>
           Delete wallet from device
@@ -225,7 +156,7 @@ export default function SecurityScreen({
       </div>
       <div className="card">
         <h2>Security profile</h2>
-        <p className="muted">Balanced is default. Paranoid requires WebAuthn or biometrics for large sends.</p>
+        <p className="muted">Balanced is default. Paranoid requires biometric confirmation for every send.</p>
         <div className="display-toggle">
           <button
             type="button"
@@ -327,7 +258,7 @@ export default function SecurityScreen({
         <p className="muted small">
           {platformSec?.native_biometric_available
             ? `Confirm sends ≥ ${BIOMETRIC_THRESHOLD_MEI} HAC with ${platformSec.biometric_kind ?? "biometric"}.`
-            : "No biometric sensor detected. Use a passkey instead, or keep sends below the limit."}
+            : "No biometric sensor detected. Large sends may fail without fingerprint confirmation."}
         </p>
         <div className="toggle-row">
           <span>Use biometric for sends</span>
@@ -361,26 +292,6 @@ export default function SecurityScreen({
         >
           Test biometric
         </button>
-      </div>
-      <div className="card">
-        <h2>Passkey</h2>
-        <p className="muted small">
-          {settings?.webauthn_enabled
-            ? "Registered. Used for paranoid profile and large sends when enabled."
-            : "Register once to confirm large sends with your device passkey."}
-        </p>
-        <p className="muted small">App origin: {webAuthnClientOrigin() || "unknown"}</p>
-        <div className="row-btns">
-          <button type="button" className="primary" disabled={busy || !webauthnReady} onClick={() => void handleRegisterWebAuthn()}>
-            Register passkey
-          </button>
-          <button type="button" disabled={busy || !settings?.webauthn_enabled} onClick={() => void handleTestWebAuthn()}>
-            Test passkey
-          </button>
-        </div>
-        {!webauthnReady ? (
-          <p className="muted small">Passkey not available on this device.</p>
-        ) : null}
       </div>
       <button type="button" onClick={() => void onLock()}>
         Lock wallet

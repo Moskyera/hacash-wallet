@@ -55,7 +55,17 @@ export default function SettingsScreen({
           autoCorrect="off"
           spellCheck={false}
         />
-        <p className="muted">Official Hacash node uses HTTP (not HTTPS). Tap Save after editing.</p>
+        <p className="muted">
+          Official Hacash node uses <strong>http://</strong> (not https). Tap Save after editing.
+        </p>
+        <button
+          type="button"
+          className="small"
+          disabled={busy}
+          onClick={() => setNodeUrl("http://nodeapi.hacash.org")}
+        >
+          Use official node
+        </button>
         <label className="label">L2 Hub URL</label>
         <input
           value={hubUrl}
@@ -87,7 +97,7 @@ export default function SettingsScreen({
               setNodeTestMsg(null);
               setBusy(true);
               void api
-                .pingNode()
+                .pingNodeUrl(nodeUrl.trim() || undefined)
                 .then((r) => {
                   setNodeTestMsg(`Node OK (${String(r.reachable ?? "true")})`);
                   onToast("Node connection OK.", "success");
@@ -105,7 +115,8 @@ export default function SettingsScreen({
         </div>
         {nodeTestMsg ? <p className="muted small">{nodeTestMsg}</p> : null}
         <p className="muted small">
-          GrapheneOS: Settings → Apps → Hacash Wallet → Permissions → Network → Allow
+          If Test node fails: turn VPN off, try Wi‑Fi and mobile data, open{" "}
+          <code>http://nodeapi.hacash.org/query/latest</code> in Chrome on the phone.
         </p>
       </div>
     </>

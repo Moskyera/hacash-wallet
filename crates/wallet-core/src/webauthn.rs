@@ -39,8 +39,14 @@ struct CeremonyState {
 
 fn resolve_webauthn_context(client_origin: Option<&str>) -> (String, String) {
     if let Some(origin) = client_origin.map(str::trim).filter(|o| !o.is_empty()) {
-        if let Some(rp_id) = origin_to_rp_id(origin) {
-            return (origin.to_string(), rp_id);
+        // Android Credential Manager rejects WebView origins like https://tauri.localhost.
+        let normalized = if origin.contains("tauri.localhost") || origin.contains("localhost") {
+            "https://127.0.0.1".to_string()
+        } else {
+            origin.to_string()
+        };
+        if let Some(rp_id) = origin_to_rp_id(&normalized) {
+            return (normalized, rp_id);
         }
     }
     (
@@ -90,12 +96,14 @@ impl WebAuthnGate {
             json!({
                 "authenticatorAttachment": "platform",
                 "userVerification": "required",
-                "residentKey": "preferred"
+                "residentKey": "preferred",
+                "requireResidentKey": false
             })
         } else {
             json!({
                 "userVerification": "preferred",
-                "residentKey": "preferred"
+                "residentKey": "preferred",
+                "requireResidentKey": false
             })
         };
         let options = json!({
@@ -450,6 +458,18 @@ mod tests {
         assert!(!c.contains('+'));
         assert!(!c.contains('/'));
         assert_eq!(c.len(), 43);
+    }
+
+    #[test]
+    fn register_options_include_require_resident_key() {
+        let gate = WebAuthnGate::new().unwrap();
+        let options_json = gate
+            .begin_register("1TestAddr", Some("https://tauri.localhost"))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&options_json).unwrap();
+        let sel = &parsed["publicKey"]["authenticatorSelection"];
+        assert_eq!(sel["requireResidentKey"], false);
+        assert_eq!(sel["residentKey"], "preferred");
     }
 
     #[test]

@@ -117,6 +117,27 @@ pub async fn wallet_ping_node(state: State<'_, AppState>) -> Result<serde_json::
 }
 
 #[tauri::command]
+pub async fn wallet_ping_node_url(
+    node_url: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    use hacash_wallet_core::node::NodeClient;
+    use hacash_wallet_core::settings::sanitize_node_url;
+
+    let url = node_url
+        .map(|u| sanitize_node_url(&u))
+        .unwrap_or_else(|| {
+            let svc = state.inner.blocking_lock();
+            svc.get_settings().node_url.clone()
+        });
+    NodeClient::new(url.clone())
+        .ping()
+        .await
+        .map_err(|e| format!("{e} (node: {url})"))
+        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
+}
+
+#[tauri::command]
 pub async fn wallet_hub_health(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
@@ -226,7 +247,7 @@ pub async fn wallet_preview_send(
         hacash_wallet_core::SendOptions::from_preferences(&svc.get_settings().send)
     });
     let preview = svc
-        .preview_send(&to, amount_mei, options)
+        .preview_send(&to, amount_mei, &options)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(preview).map_err(|e| e.to_string())
