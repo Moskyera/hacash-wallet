@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 
-use crate::api::{FastPayRequest, FastPayResponse, HubHealth};
+use crate::api::{ConfirmFastPayRequest, FastPayRequest, FastPayResponse, HubHealth};
 use crate::error::HubError;
 use crate::state::HubState;
 
@@ -22,8 +22,22 @@ pub fn build_router(hub: Arc<HubState>) -> Router {
         .route("/v1/health", get(health_handler))
         .route("/v1/fast-pay", post(fast_pay_handler))
         .route("/v1/fast-pay/{payment_id}", get(payment_status_handler))
+        .route(
+            "/v1/fast-pay/{payment_id}/confirm",
+            post(confirm_fast_pay_handler),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(AppState { hub })
+}
+
+async fn confirm_fast_pay_handler(
+    State(state): State<AppState>,
+    Path(payment_id): Path<String>,
+    Json(req): Json<ConfirmFastPayRequest>,
+) -> Result<Json<FastPayResponse>, HubHttpError> {
+    Ok(Json(
+        state.hub.confirm_fast_pay(&payment_id, &req.bill_hex)?,
+    ))
 }
 
 pub async fn serve(addr: SocketAddr, hub: Arc<HubState>) -> std::io::Result<()> {
@@ -41,16 +55,9 @@ async fn fast_pay_handler(
     State(state): State<AppState>,
     Json(req): Json<FastPayRequest>,
 ) -> Result<Json<FastPayResponse>, HubHttpError> {
-    let fee_payer = crate::fee_payer::parse_fee_payer(req.fee_payer.as_deref())?;
     let resp = state
         .hub
-        .settle_fast_pay(
-            &req.payer,
-            &req.payee,
-            &req.amount,
-            &req.channel_id,
-            fee_payer,
-        )
+        .settle_fast_pay(&req.payer, &req.payee, &req.amount, &req.channel_id)
         .await?;
     Ok(Json(resp))
 }

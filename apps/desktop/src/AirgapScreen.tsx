@@ -113,8 +113,8 @@ export default function AirgapScreen({
       setPrepareResult(result);
       setInfo(
         result.qr_parts.length > 1
-          ? `Unsigned tx ready — scan ${result.qr_parts.length} QR codes on offline device.`
-          : "Unsigned tx ready — scan QR on offline device.",
+          ? `Unsigned tx ready. scan ${result.qr_parts.length} QR codes on offline device.`
+          : "Unsigned tx ready. scan QR on offline device.",
       );
     } catch (e) {
       setError(String(e));
@@ -132,7 +132,7 @@ export default function AirgapScreen({
       const result = await api.airgapParseQrBatch(nextParts);
       setParsed(result);
       if (result.needs_more_parts) {
-        setInfo(`Chunk ${result.received_parts}/${result.total_parts} captured — scan next QR.`);
+        setInfo(`Chunk ${result.received_parts}/${result.total_parts} captured. scan next QR.`);
         return;
       }
       if (!result.envelope) {
@@ -140,9 +140,9 @@ export default function AirgapScreen({
         return;
       }
       if (isUnsigned(result.envelope)) {
-        setInfo("Unsigned tx loaded — review and sign on offline device.");
+        setInfo("Unsigned tx loaded. review and sign on offline device.");
       } else if (isSigned(result.envelope)) {
-        setInfo("Signed tx loaded — ready to broadcast.");
+        setInfo("Signed tx loaded. ready to broadcast.");
       }
     } catch (e) {
       setError(String(e));
@@ -193,12 +193,14 @@ export default function AirgapScreen({
         amount_mei: parsed.envelope.amount_mei,
         amount_wire: parsed.envelope.amount_wire,
         fee: parsed.envelope.fee,
+        service_fee_mei: parsed.envelope.service_fee_mei,
+        service_fee_treasury: parsed.envelope.service_fee_treasury,
         body_hex: parsed.envelope.body_hex,
         summary: parsed.envelope.summary,
       };
       const result = await api.airgapSignUnsigned(unsigned);
       setSignResult(result);
-      setInfo("Signed — show QR(s) to online coordinator for broadcast.");
+      setInfo("Signed. show QR(s) to online coordinator for broadcast.");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -216,6 +218,10 @@ export default function AirgapScreen({
         from: parsed.envelope.from,
         to: parsed.envelope.to,
         amount_mei: parsed.envelope.amount_mei,
+        amount_wire: parsed.envelope.amount_wire,
+        fee: parsed.envelope.fee,
+        service_fee_mei: parsed.envelope.service_fee_mei,
+        service_fee_treasury: parsed.envelope.service_fee_treasury,
         signed_hex: parsed.envelope.signed_hex,
         summary: parsed.envelope.summary,
       };
@@ -327,7 +333,7 @@ export default function AirgapScreen({
           <h3>Scan unsigned QR</h3>
           <p className="muted">
             {status.watch_only
-              ? "Unlock a signing wallet on an offline machine — watch-only cannot sign."
+              ? "Unlock a signing wallet on an offline machine. watch-only cannot sign."
               : "Device should stay offline. Only L1 body is signed locally."}
           </p>
         </>
@@ -387,7 +393,7 @@ export default function AirgapScreen({
 
       {signResult && (
         <div className="preview-card">
-          <h4>Signed — show to coordinator</h4>
+          <h4>Signed. show to coordinator</h4>
           <div className="qr-grid">
             {signQrUrls.map((url, i) => (
               <div key={i} className="qr-card">

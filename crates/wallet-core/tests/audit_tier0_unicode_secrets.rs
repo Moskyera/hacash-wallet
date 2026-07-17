@@ -3,8 +3,8 @@
 mod common;
 
 use common::{tier0_gate, with_isolated_wallet_dir};
-use hacash_wallet_core::vault::EncryptedVault;
 use hacash_wallet_core::WalletService;
+use hacash_wallet_core::vault::EncryptedVault;
 
 #[test]
 fn tier0_passphrase_nfc_nfd_are_distinct_keys() {
@@ -13,10 +13,8 @@ fn tier0_passphrase_nfc_nfd_are_distinct_keys() {
         let nfc = "caf\u{00e9}-pass-12chars";
         let nfd = "caf\u{0065}\u{0301}-pass-12chars";
         assert_ne!(nfc, nfd);
-        let vault_nfc =
-            EncryptedVault::encrypt("secret01", "1Unicode", nfc, "balanced").unwrap();
-        let vault_nfd =
-            EncryptedVault::encrypt("secret01", "1Unicode", nfd, "balanced").unwrap();
+        let vault_nfc = EncryptedVault::encrypt("secret01", "1Unicode", nfc, "balanced").unwrap();
+        let vault_nfd = EncryptedVault::encrypt("secret01", "1Unicode", nfd, "balanced").unwrap();
         assert!(vault_nfc.decrypt(nfc).is_ok());
         assert!(vault_nfc.decrypt(nfd).is_err());
         assert!(vault_nfd.decrypt(nfd).is_ok());

@@ -22,9 +22,7 @@ pub fn parse_amount_mei(wire: &str) -> HubResult<f64> {
 pub fn format_amount_mei(amount_mei: f64) -> String {
     let rounded = (amount_mei * 1000.0).round() / 1000.0;
     let s = format!("{rounded:.3}");
-    s.trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 #[cfg(test)]

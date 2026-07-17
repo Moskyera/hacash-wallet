@@ -1,8 +1,8 @@
 use basis::method::verify_signature;
 use chrono::{TimeZone, Utc};
+use field::Hex;
 use l2_fast_pay_hub::wire::ChannelPayCompleteDocuments;
 use l2_fast_pay_hub::wire::{DIRECTION_LEFT_TO_RIGHT, DIRECTION_RIGHT_TO_LEFT};
-use field::Hex;
 use serde::{Deserialize, Serialize};
 use sys::Account;
 
@@ -53,7 +53,7 @@ pub struct BillSummary {
     pub signatures: Vec<BillSignatureStatus>,
     pub all_signatures_filled: bool,
     pub all_signatures_verified: bool,
-    /// True when every required signature verifies — safe for channel dispute submission.
+    /// True when every required signature verifies. safe for channel dispute submission.
     pub dispute_ready: bool,
 }
 
@@ -141,7 +141,7 @@ pub fn export_all_bills(entries: &[BillEntry]) -> WalletResult<BillExportBundle>
     Ok(BillExportBundle {
         export_version: EXPORT_VERSION,
         exported_at_utc: Utc::now().to_rfc3339(),
-        wallet_note: "Hacash L2 Fast Pay settlement bills — submit bill_hex with channel challenge if disputed.".into(),
+        wallet_note: "Hacash L2 Fast Pay settlement bills. submit bill_hex with channel challenge if disputed.".into(),
         bill_count: bills.len(),
         bills,
     })
@@ -168,7 +168,9 @@ fn verify_payer_sign(
 ) -> WalletResult<()> {
     let addr = field::Address::from(*account.address());
     if !verify_signature(hash, &addr, sign) {
-        return Err(WalletError::L2("payer bill signature verification failed".into()));
+        return Err(WalletError::L2(
+            "payer bill signature verification failed".into(),
+        ));
     }
     Ok(())
 }
@@ -193,7 +195,7 @@ mod tests {
     use super::*;
     use l2_fast_pay_hub::channel_id::derive_channel_id;
     use l2_fast_pay_hub::node::{ChannelInfo, ChannelPartyBalance};
-    use l2_fast_pay_hub::wire::{build_same_channel_bill, ChannelWireInput};
+    use l2_fast_pay_hub::wire::{ChannelWireInput, build_same_channel_bill};
     use sys::Account;
 
     fn sample_channel(id: &str, left: &str, right: &str, left_mei: &str) -> ChannelInfo {

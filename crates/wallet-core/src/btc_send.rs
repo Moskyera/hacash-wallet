@@ -3,9 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
-use crate::hip23::{is_valid_hacash_address, Hip23SendCheck};
+use crate::hip23::{Hip23SendCheck, is_valid_hacash_address};
 use crate::l1_fee::estimate_btc_l1_fee;
 use crate::node::NodeClient;
+use crate::send_options::{WALLET_TREASURY_ADDRESS, compute_btc_service_fee_satoshi};
 
 pub const BTC_TRANSFER_FEE_WIRE: &str = "1:244";
 
@@ -15,6 +16,10 @@ pub struct BtcSendPreview {
     pub to: String,
     pub satoshi: u64,
     pub btc_amount: f64,
+    pub service_fee_satoshi: u64,
+    pub service_fee_btc: f64,
+    pub total_debit_satoshi: u64,
+    pub service_fee_treasury: String,
     pub fee_mei: f64,
     pub fee_wire: String,
     pub hip23: Hip23SendCheck,
@@ -43,36 +48,52 @@ pub async fn preview_btc_send(
     satoshi: u64,
 ) -> WalletResult<BtcSendPreview> {
     if satoshi == 0 {
-        return Err(WalletError::Other("BTC amount must be greater than zero".into()));
+        return Err(WalletError::Other(
+            "BTC amount must be greater than zero".into(),
+        ));
     }
     if !is_valid_hacash_address(to) {
         return Err(WalletError::Other(
-            "Invalid recipient — use a Hacash address (1…)".into(),
+            "Invalid recipient. use a Hacash address (1…)".into(),
         ));
     }
     if from == to {
-        return Err(WalletError::Other("Cannot send BTC to your own address".into()));
+        return Err(WalletError::Other(
+            "Cannot send BTC to your own address".into(),
+        ));
     }
 
+    let service_fee_satoshi = compute_btc_service_fee_satoshi(satoshi);
+    let total_debit_satoshi = satoshi
+        .checked_add(service_fee_satoshi)
+        .ok_or_else(|| WalletError::Other("BTC amount plus wallet fee is out of range".into()))?;
     let balance_entry = node.query_balance_entry(from, false).await?;
     let wallet_satoshi = balance_entry.btc_satoshi();
-    if wallet_satoshi < satoshi {
+    if wallet_satoshi < total_debit_satoshi {
         return Err(WalletError::Other(format!(
-            "Insufficient BTC: need {} sat, have {} sat",
-            satoshi, wallet_satoshi
+            "Insufficient BTC: need {} sat including the 0.3% wallet fee, have {} sat",
+            total_debit_satoshi, wallet_satoshi
         )));
     }
 
     let hac_mei = balance_entry.hacash_mei()?;
-    let fee_est = estimate_btc_l1_fee(node, from, to, satoshi, crate::send_options::L1FeeSpeed::Normal).await?;
+    let fee_est = estimate_btc_l1_fee(
+        node,
+        from,
+        to,
+        satoshi,
+        crate::send_options::L1FeeSpeed::Normal,
+    )
+    .await?;
     let hip23 = validate_btc_l1_send(to, hac_mei, fee_est.fee_mei)?;
     let btc_amount = satoshi_to_btc(satoshi);
 
     let summary = format!(
-        "Transfer {:.8} BTC ({} sat) to {}",
+        "Transfer {:.8} BTC ({} sat) to {} + {:.8} BTC wallet fee",
         btc_amount,
         satoshi,
-        crate::privacy::mask_address(to)
+        crate::privacy::mask_address(to),
+        satoshi_to_btc(service_fee_satoshi)
     );
 
     Ok(BtcSendPreview {
@@ -80,6 +101,10 @@ pub async fn preview_btc_send(
         to: to.to_owned(),
         satoshi,
         btc_amount,
+        service_fee_satoshi,
+        service_fee_btc: satoshi_to_btc(service_fee_satoshi),
+        total_debit_satoshi,
+        service_fee_treasury: WALLET_TREASURY_ADDRESS.into(),
         fee_mei: fee_est.fee_mei,
         fee_wire: fee_est.fee_node,
         hip23,
@@ -104,7 +129,7 @@ fn validate_btc_l1_send(
             fee_mei, hac_balance_mei
         ));
     }
-    warnings.push("BTC transfer on Hacash is irreversible — confirm recipient".into());
+    warnings.push("BTC transfer on Hacash is irreversible. confirm recipient".into());
 
     let ok = errors.is_empty();
     if !ok {

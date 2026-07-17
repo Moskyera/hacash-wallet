@@ -80,12 +80,13 @@ pub async fn build_channel_open_tx(
     right_amount: &str,
     fee: &str,
 ) -> WalletResult<BuildTxResponse> {
+    let channel_id = encoded_channel_id(channel_id_hex)?;
     let payload = json!({
         "main_address": fee_payer,
         "fee": fee,
         "actions": [{
             "kind": 2,
-            "channel_id": channel_id_hex,
+            "channel_id": channel_id,
             "left_bill": { "address": left_address, "amount": left_amount },
             "right_bill": { "address": right_address, "amount": right_amount }
         }]
@@ -99,12 +100,29 @@ pub async fn build_channel_close_tx(
     channel_id_hex: &str,
     fee: &str,
 ) -> WalletResult<BuildTxResponse> {
+    let channel_id = encoded_channel_id(channel_id_hex)?;
     let payload = json!({
         "main_address": fee_payer,
         "fee": fee,
-        "actions": [{ "kind": 3, "channel_id": channel_id_hex }]
+        "actions": [{ "kind": 3, "channel_id": channel_id }]
     });
     node.post_create_transaction(payload).await
+}
+
+pub fn encoded_channel_id(channel_id_hex: &str) -> WalletResult<String> {
+    let clean = channel_id_hex
+        .trim()
+        .strip_prefix("0x")
+        .unwrap_or(channel_id_hex.trim());
+    let raw = hex::decode(clean).map_err(|_| {
+        WalletError::Transaction("channel id must be 32 hexadecimal characters".into())
+    })?;
+    if raw.len() != 16 {
+        return Err(WalletError::Transaction(
+            "channel id must encode exactly 16 bytes".into(),
+        ));
+    }
+    Ok(format!("0x{}", hex::encode(raw)))
 }
 
 #[cfg(test)]
@@ -117,4 +135,12 @@ mod tests {
         assert_eq!(id.len(), 32);
         assert_eq!(id, derive_channel_id("1Left", "1Right", 1));
     }
+}
+#[test]
+fn channel_id_is_encoded_for_fixed16_json() {
+    assert_eq!(
+        encoded_channel_id("00112233445566778899aabbccddeeff").unwrap(),
+        "0x00112233445566778899aabbccddeeff"
+    );
+    assert!(encoded_channel_id("0011").is_err());
 }

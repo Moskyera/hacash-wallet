@@ -30,25 +30,33 @@ export default function AppUpdateSection({ onToast }: Props) {
   }, [onToast]);
 
   const openBrowserDownload = async () => {
-    const url = info?.download_url ?? info?.release_page;
+    const url = info?.release_page;
     if (!url) return;
     try {
       await openUrl(url);
-      onToast("Download opened in browser. Install the APK when ready.", "info");
+      onToast("Release page opened. Install only through the wallet's verified updater.", "info");
     } catch (e) {
       onToast(String(e), "error");
     }
   };
 
   const handleUpdate = async () => {
-    if (!info?.download_url) return;
+    if (!info?.download_url || !info.asset_name || !info.sha256 || !info.download_size) {
+      onToast("This release has no trusted SHA-256 metadata, so automatic install is disabled.", "error");
+      return;
+    }
     setUpdating(true);
     setUpdatePhase("downloading");
     setLastError(null);
     try {
-      const name = info.download_url.split("/").pop() ?? "hacash-wallet-update.apk";
+      const name = info.asset_name;
       onToast("Downloading update…", "info");
-      const path = await api.downloadAppUpdate(info.download_url, name);
+      const path = await api.downloadAppUpdate(
+        info.download_url,
+        name,
+        info.sha256,
+        info.download_size,
+      );
       setUpdatePhase("installer");
       onToast("Opening system installer…", "info");
       await api.installMobileUpdate(path);
@@ -86,12 +94,15 @@ export default function AppUpdateSection({ onToast }: Props) {
       ) : (
         <p className="muted">You are on the latest release.</p>
       )}
+      {info?.update_available && !info.download_url ? (
+        <p className="update-error">Automatic install is blocked because this release has no trusted checksum.</p>
+      ) : null}
       {lastError ? <p className="update-error">{lastError}</p> : null}
       <div className="row-btns">
         <button type="button" disabled={checking || updating} onClick={() => void check()}>
           {checking ? "Checking…" : "Check again"}
         </button>
-        {info?.update_available && info.download_url ? (
+        {info?.update_available && info.download_url && info.asset_name && info.sha256 && info.download_size ? (
           <>
             <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
               {updatePhase === "downloading"
@@ -101,13 +112,13 @@ export default function AppUpdateSection({ onToast }: Props) {
                   : "Download & install"}
             </button>
             <button type="button" disabled={updating} onClick={() => void openBrowserDownload()}>
-              Open in browser
+              View release
             </button>
           </>
         ) : null}
       </div>
       <p className="muted small">
-        The app may go to the background while Android shows the install screen — that is normal. If install asks
+        The app may go to the background while Android shows the install screen. that is normal. If install asks
         for permission, enable &quot;Install unknown apps&quot; for Hacash Wallet, then try again.
       </p>
       {info?.release_notes ? (

@@ -2,7 +2,7 @@ type Props = {
   className?: string;
 };
 
-/** HACD Labs mark (gold swoosh) — transparent, scales like other quick-action icons. */
+/** HACD Labs mark (gold swoosh). transparent, scales like other quick-action icons. */
 export default function HacdLaunchpadIcon({ className = "hacd-launchpad-icon" }: Props) {
   return (
     <svg
@@ -14,9 +14,9 @@ export default function HacdLaunchpadIcon({ className = "hacd-launchpad-icon" }:
     >
       <defs>
         <linearGradient id="hacdMark" x1="4" y1="6" x2="26" y2="26" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#E8C872" />
-          <stop offset="45%" stopColor="#C9A04A" />
-          <stop offset="100%" stopColor="#8B6914" />
+          <stop offset="0%" stopColor="#f5a623" />
+          <stop offset="45%" stopColor="#c97b08" />
+          <stop offset="100%" stopColor="#8a5808" />
         </linearGradient>
       </defs>
       <path

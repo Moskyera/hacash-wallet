@@ -29,7 +29,7 @@ function renderHip23Result(check: Hip23PatternCheck) {
       className={`preview-card ${check.check.ok ? "result-ok" : "result-fail"}`}
     >
       <h4>
-        {check.pattern} — {check.check.ok ? "OK" : "Failed"}
+        {check.pattern}. {check.check.ok ? "OK" : "Failed"}
       </h4>
       {check.check.errors.length > 0 && (
         <div className="warn-box">

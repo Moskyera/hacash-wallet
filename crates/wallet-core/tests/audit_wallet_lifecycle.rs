@@ -3,10 +3,10 @@
 mod common;
 
 use common::{audit_gate, with_isolated_wallet_dir};
-use hacash_wallet_core::account::WalletAccount;
-use hacash_wallet_core::security::SecurityProfile;
 use hacash_wallet_core::WalletError;
 use hacash_wallet_core::WalletService;
+use hacash_wallet_core::account::WalletAccount;
+use hacash_wallet_core::security::SecurityProfile;
 
 #[test]
 fn audit_double_create_rejected() {
@@ -114,7 +114,11 @@ fn audit_locked_wallet_cannot_sign() {
             svc.lock();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let err = rt
-                .block_on(svc.send_hac("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 1.0, Default::default()))
+                .block_on(svc.send_hac(
+                    "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+                    1.0,
+                    Default::default(),
+                ))
                 .unwrap_err();
             assert!(matches!(err, WalletError::Locked));
         });
@@ -127,7 +131,8 @@ fn audit_paranoid_profile_persisted_across_reload() {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("passphrase1234").unwrap();
-            svc.set_security_profile(SecurityProfile::paranoid()).unwrap();
+            svc.set_security_profile(SecurityProfile::paranoid())
+                .unwrap();
             svc.lock();
             let mut svc2 = WalletService::new(None, None).unwrap();
             svc2.unlock("passphrase1234").unwrap();

@@ -7,6 +7,7 @@ type Props = {
   amountMei?: number;
   label?: string;
   hideAddress?: boolean;
+  caption?: string;
 };
 
 export default function PaymentQrDisplay({
@@ -14,6 +15,7 @@ export default function PaymentQrDisplay({
   amountMei,
   label,
   hideAddress = false,
+  caption,
 }: Props) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [uri, setUri] = useState("");
@@ -50,9 +52,9 @@ export default function PaymentQrDisplay({
       <div className="qr-card">
         <img src={dataUrl} alt="Hacash payment QR code" width={220} height={220} />
         <span className="muted small-note">
-          {amountMei != null && amountMei > 0
+          {caption ?? (amountMei != null && amountMei > 0
             ? `Request ${amountMei} HAC`
-            : "Address only — any amount"}
+            : "Address only. any amount")}
         </span>
       </div>
       <p className="muted small-note qr-uri-hint">

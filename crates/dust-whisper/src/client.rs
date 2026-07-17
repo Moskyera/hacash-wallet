@@ -5,8 +5,8 @@ use crate::crypto::encrypt_payload;
 use crate::error::{WhisperError, WhisperResult};
 use crate::http_util::ensure_success;
 use crate::protocol::{
-    WhisperInfo, WhisperInnerPayload, WhisperSettings, WhisperSubmitResponse, INFO_PATH,
-    SUBMIT_PATH,
+    INFO_PATH, SUBMIT_PATH, WhisperInfo, WhisperInnerPayload, WhisperSettings,
+    WhisperSubmitResponse,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -54,10 +54,7 @@ pub async fn check_relay_health(http: &Client, relay_url: &str) -> RelayHealthSt
     }
 }
 
-pub async fn check_relays_health(
-    http: &Client,
-    relay_urls: &[String],
-) -> Vec<RelayHealthStatus> {
+pub async fn check_relays_health(http: &Client, relay_urls: &[String]) -> Vec<RelayHealthStatus> {
     let mut out = Vec::new();
     for raw in relay_urls {
         let url = raw.trim().trim_end_matches('/').to_string();
@@ -107,12 +104,28 @@ pub async fn submit_tx(
 async fn submit_to_relay(
     http: &Client,
     relay_url: &str,
-    _wallet_node_url: &str,
+    wallet_node_url: &str,
     tx_hex: &str,
 ) -> WhisperResult<SubmitTxResult> {
     validate_relay_url(relay_url)?;
 
     let info = fetch_relay_info(http, relay_url).await?;
+    if info.v != crate::protocol::PROTOCOL_VERSION {
+        return Err(WhisperError::Protocol(format!(
+            "relay protocol version {} does not match wallet version {}",
+            info.v,
+            crate::protocol::PROTOCOL_VERSION
+        )));
+    }
+    let relay_node_url = info
+        .node_url
+        .as_deref()
+        .ok_or_else(|| WhisperError::Protocol("relay did not declare its target node".into()))?;
+    if !node_urls_match(relay_node_url, wallet_node_url) {
+        return Err(WhisperError::Protocol(format!(
+            "relay target node {relay_node_url} does not match wallet node {wallet_node_url}"
+        )));
+    }
     let pubkey = decode_relay_pubkey(&info.pubkey)?;
 
     let inner = WhisperInnerPayload {
@@ -147,6 +160,22 @@ async fn submit_to_relay(
         hash: body.hash,
         relay_url: relay_url.to_owned(),
     })
+}
+
+pub fn node_urls_match(left: &str, right: &str) -> bool {
+    fn normalized(raw: &str) -> Option<String> {
+        let mut url = Url::parse(raw.trim()).ok()?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return None;
+        }
+        url.set_fragment(None);
+        url.set_query(None);
+        let path = url.path().trim_end_matches('/').to_string();
+        url.set_path(if path.is_empty() { "/" } else { &path });
+        Some(url.to_string().trim_end_matches('/').to_ascii_lowercase())
+    }
+
+    matches!((normalized(left), normalized(right)), (Some(a), Some(b)) if a == b)
 }
 
 async fn fetch_relay_info(http: &Client, relay_url: &str) -> WhisperResult<WhisperInfo> {
@@ -196,7 +225,9 @@ fn decode_relay_pubkey(b64: &str) -> WhisperResult<[u8; 32]> {
 pub fn listen_addr_from_relay_url(relay_url: &str) -> Option<String> {
     let parsed = Url::parse(relay_url.trim()).ok()?;
     let host = parsed.host_str()?;
-    let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
     Some(format!("{host}:{port}"))
 }
 
@@ -238,5 +269,17 @@ mod tests {
             listen_addr_from_relay_url("http://127.0.0.1:8787").as_deref(),
             Some("127.0.0.1:8787")
         );
+    }
+
+    #[test]
+    fn compares_normalized_node_urls() {
+        assert!(node_urls_match(
+            "http://127.0.0.1:8080/",
+            "http://127.0.0.1:8080"
+        ));
+        assert!(!node_urls_match(
+            "http://nodeapi.hacash.org",
+            "http://127.0.0.1:8080"
+        ));
     }
 }

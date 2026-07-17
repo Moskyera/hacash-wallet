@@ -5,12 +5,13 @@ use std::sync::Mutex;
 use protocol::setup::{install_test_scope, new_standard_protocol_setup};
 use sys::calculate_hash;
 
-/// Serializes `HACASH_WALLET_DATA` overrides — env vars are process-global and race under parallel tests.
+/// Serializes `HACASH_WALLET_DATA` overrides. env vars are process-global and race under parallel tests.
 static WALLET_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Install scoped Hacash protocol registry (required for transaction signing in tests).
 pub fn with_protocol_setup<F: FnOnce()>(f: F) {
-    let setup = new_standard_protocol_setup(|_, stuff| calculate_hash(stuff));
+    let mut setup = new_standard_protocol_setup(|_, stuff| calculate_hash(stuff));
+    mint::action::register(&mut setup);
     let _guard = install_test_scope(setup);
     f();
 }
@@ -34,19 +35,19 @@ pub fn with_isolated_wallet_dir<F: FnOnce()>(f: F) {
     drop(dir);
 }
 
-/// Run a named audit gate — prints progress for CI logs.
+/// Run a named audit gate. prints progress for CI logs.
 pub fn audit_gate(name: &str, f: impl FnOnce()) {
     eprintln!("[AUDIT] {name}");
     f();
 }
 
-/// Run a named stress gate — prints progress for CI logs.
+/// Run a named stress gate. prints progress for CI logs.
 pub fn stress_gate(name: &str, f: impl FnOnce()) {
     eprintln!("[STRESS] {name}");
     f();
 }
 
-/// Run a named tier-0 (elite adversarial) gate — prints progress for CI logs.
+/// Run a named tier-0 (elite adversarial) gate. prints progress for CI logs.
 pub fn tier0_gate(name: &str, f: impl FnOnce()) {
     eprintln!("[TIER0] {name}");
     f();

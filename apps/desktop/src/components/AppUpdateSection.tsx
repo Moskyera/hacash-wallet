@@ -27,14 +27,22 @@ export default function AppUpdateSection({ onInfo, onError }: Props) {
   }, [onError]);
 
   const handleUpdate = async () => {
-    if (!info?.download_url) return;
+    if (!info?.download_url || !info.asset_name || !info.sha256 || !info.download_size) {
+      onError?.("This release has no trusted SHA-256 metadata, so automatic install is disabled.");
+      return;
+    }
     setUpdating(true);
     try {
-      const name = info.download_url.split("/").pop() ?? "hacash-wallet-update.exe";
+      const name = info.asset_name;
       onInfo?.("Downloading update…");
-      const path = await api.downloadAppUpdate(info.download_url, name);
+      const path = await api.downloadAppUpdate(
+        info.download_url,
+        name,
+        info.sha256,
+        info.download_size,
+      );
       await api.installDesktopUpdate(path);
-      onInfo?.("Installer started. Follow the prompts — your wallet data is kept.");
+      onInfo?.("Installer started. Follow the prompts. your wallet data is kept.");
     } catch (e) {
       onError?.(String(e));
     } finally {
@@ -63,7 +71,7 @@ export default function AppUpdateSection({ onInfo, onError }: Props) {
         <button type="button" disabled={checking || updating} onClick={() => void check()}>
           {checking ? "Checking…" : "Check again"}
         </button>
-        {info?.update_available && info.download_url ? (
+        {info?.update_available && info.download_url && info.asset_name && info.sha256 && info.download_size ? (
           <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
             {updating ? "Downloading…" : "Download & install"}
           </button>

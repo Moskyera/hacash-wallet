@@ -14,7 +14,7 @@ pub enum WalletError {
     NoWallet,
     #[error("invalid passphrase")]
     InvalidPassphrase,
-    #[error("unlock temporarily locked — retry in {0}s")]
+    #[error("unlock temporarily locked. retry in {0}s")]
     UnlockRateLimited(u64),
     #[error("node api: {0}")]
     Node(String),

@@ -1,7 +1,7 @@
 #[cfg(target_os = "android")]
 fn install_apk_on_main(path: &str) -> Result<(), String> {
-    use jni::objects::{JObject, JValue};
     use jni::JavaVM;
+    use jni::objects::{JObject, JValue};
 
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| format!("JavaVM: {e}"))?;
@@ -19,14 +19,16 @@ fn install_apk_on_main(path: &str) -> Result<(), String> {
         &[JValue::Object(&activity), JValue::Object(&path_j)],
     );
 
-    if env.exception_check().map_err(|e| format!("exception_check: {e}"))? {
-        env.exception_clear().map_err(|e| format!("exception_clear: {e}"))?;
-        return Err(
-            result
-                .err()
-                .map(|e| format!("ApkInstaller.install: {e}"))
-                .unwrap_or_else(|| "ApkInstaller.install failed".to_string()),
-        );
+    if env
+        .exception_check()
+        .map_err(|e| format!("exception_check: {e}"))?
+    {
+        env.exception_clear()
+            .map_err(|e| format!("exception_clear: {e}"))?;
+        return Err(result
+            .err()
+            .map(|e| format!("ApkInstaller.install: {e}"))
+            .unwrap_or_else(|| "ApkInstaller.install failed".to_string()));
     }
 
     result.map_err(|e| format!("ApkInstaller.install: {e}"))?;

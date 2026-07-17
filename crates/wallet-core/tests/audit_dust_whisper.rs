@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use axum::routing::post;
 use axum::{Json, Router};
 use dust_whisper::crypto::generate_relay_keypair;
-use dust_whisper::protocol::{WhisperInfo, INFO_PATH};
+use dust_whisper::protocol::{INFO_PATH, WhisperInfo};
 use dust_whisper::relay::{build_router, relay_state_from_secret};
-use hacash_wallet_core::dust_whisper::{submit_tx_hex, DustWhisperSettings};
+use hacash_wallet_core::dust_whisper::{DustWhisperSettings, submit_tx_hex};
 use hacash_wallet_core::node::NodeClient;
 use reqwest::Client;
 use serde_json::json;
@@ -45,9 +45,9 @@ async fn spawn_relay(node_url: String) -> (SocketAddr, JoinHandle<()>) {
 async fn whisper_enabled_routes_through_relay() {
     let (node_addr, node_handle) = spawn_mock_node("abc123").await;
     let node_url = format!("http://{node_addr}");
-    let (relay_addr, relay_handle) = spawn_relay(node_url).await;
+    let (relay_addr, relay_handle) = spawn_relay(node_url.clone()).await;
 
-    let node = NodeClient::new("https://wallet-configured-node.example");
+    let node = NodeClient::new(&node_url);
     let settings = DustWhisperSettings {
         enabled: true,
         relay_urls: vec![format!("http://{relay_addr}")],

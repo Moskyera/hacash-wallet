@@ -10,14 +10,19 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     rt.block_on(async {
-        let node_url = std::env::var("HACASH_NODE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8080".into());
-        let vault_pass = std::env::var("HACASH_DEV_PASSPHRASE")
-            .unwrap_or_else(|_| "HacashDev2026!".into());
+        let node_url =
+            std::env::var("HACASH_NODE_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+        let normalized = node_url.trim().trim_end_matches('/');
+        assert!(
+            normalized == "http://127.0.0.1:8080" || normalized == "http://localhost:8080",
+            "refusing quantum funding outside the local testnet"
+        );
+        let vault_pass =
+            std::env::var("HACASH_DEV_PASSPHRASE").expect("HACASH_DEV_PASSPHRASE is required");
 
         let mut svc = WalletService::new(Some(node_url), None).expect("wallet");
         let legacy = svc.unlock(&vault_pass).expect("unlock");
-        let legacy_bal = svc.balance_mei().await.unwrap_or(0.0);
+        let legacy_bal = svc.balance_mei().await.expect("legacy testnet balance");
         println!("Legacy: {legacy} balance={legacy_bal} HAC");
 
         let quantum = svc
@@ -30,7 +35,11 @@ fn main() {
         let fund_amount: f64 = std::env::var("FUND_AMOUNT")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(45.0);
+            .unwrap_or(0.01);
+        assert!(
+            fund_amount > 0.0 && fund_amount <= 0.01,
+            "quantum smoke funding must be at most 0.01 HAC"
+        );
         let preview = svc
             .preview_send(&quantum, fund_amount, &Default::default())
             .await
@@ -40,14 +49,19 @@ fn main() {
             preview.hip23.ok, preview.amount_wire, preview.fee
         );
 
-        match svc.send_hac(&quantum, fund_amount, Default::default()).await {
+        match svc
+            .send_hac(&quantum, fund_amount, Default::default())
+            .await
+        {
             Ok(r) => println!("Fund OK rail={:?} hash={}", r.rail, r.tx_hash),
             Err(e) => println!("Fund FAIL: {e}"),
         }
 
         println!(
             "Quantum balance: {} HAC",
-            svc.quantum_balance_mei().await.unwrap_or(0.0)
+            svc.quantum_balance_mei()
+                .await
+                .expect("quantum testnet balance")
         );
     });
 }

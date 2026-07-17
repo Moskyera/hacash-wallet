@@ -9,18 +9,20 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().expect("tokio");
     rt.block_on(async {
-        let node_url = std::env::var("HACASH_NODE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:8080".into());
-        let vault_pass = std::env::var("HACASH_DEV_PASSPHRASE")
-            .unwrap_or_else(|_| "HacashDev2026!".into());
-        let ks_pass = std::env::var("HACASH_DEV_KS_PASS")
-            .unwrap_or_else(|_| "quantum-ks-12345678".into());
+        let node_url =
+            std::env::var("HACASH_NODE_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+        let vault_pass =
+            std::env::var("HACASH_DEV_PASSPHRASE").expect("HACASH_DEV_PASSPHRASE is required");
+        let ks_pass =
+            std::env::var("HACASH_DEV_KS_PASS").expect("HACASH_DEV_KS_PASS is required");
 
-        let mut svc =
-            hacash_wallet_core::WalletService::new(Some(node_url), None).expect("wallet");
+        let mut svc = hacash_wallet_core::WalletService::new(Some(node_url), None).expect("wallet");
         let addr = svc.unlock(&vault_pass).expect("unlock");
         println!("Legacy: {addr}");
-        println!("Legacy balance: {} HAC", svc.balance_mei().await.unwrap_or(0.0));
+        println!(
+            "Legacy balance: {} HAC",
+            svc.balance_mei().await.unwrap_or(0.0)
+        );
 
         let pqc = svc.quantum_create_pqc(&ks_pass).expect("create PQC");
         println!("Quantum PQC: {} (v{})", pqc.address, pqc.address_version);
@@ -32,12 +34,18 @@ fn main() {
             .expect("preview");
         println!("Fund preview ok={} fee={}", preview.hip23.ok, preview.fee);
 
-        match svc.send_hac(&pqc.address, fund_amount, Default::default()).await {
+        match svc
+            .send_hac(&pqc.address, fund_amount, Default::default())
+            .await
+        {
             Ok(send) => println!("Funded quantum: {}", send.tx_hash),
             Err(e) => println!("Fund send failed: {e}"),
         }
 
-        println!("Quantum balance: {} HAC", svc.quantum_balance_mei().await.unwrap_or(0.0));
+        println!(
+            "Quantum balance: {} HAC",
+            svc.quantum_balance_mei().await.unwrap_or(0.0)
+        );
 
         let preflight = svc
             .quantum_preflight_type4("1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9", "0.1")

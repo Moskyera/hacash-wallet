@@ -15,27 +15,48 @@ export type Screen =
 
 export type WelcomeTab = "create" | "import" | "backup" | "watch";
 
-export const NAV_ITEMS: { id: Screen; label: string }[] = [
-  { id: "home", label: "Home" },
-  { id: "send", label: "Send" },
-  { id: "fastpay", label: "Fast Pay" },
-  { id: "quantum", label: "Quantum" },
-  { id: "receive", label: "Receive" },
-  { id: "history", label: "History" },
-  { id: "advanced", label: "Advanced" },
-  { id: "settings", label: "Settings" },
-  { id: "security", label: "Security" },
-  { id: "privacy", label: "Privacy" },
-  { id: "airgap", label: "Air-gap QR" },
+export type NavItem = {
+  id: Screen;
+  label: string;
+  mark: string;
+};
+
+export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+  {
+    label: "Wallet",
+    items: [
+      { id: "home", label: "Home", mark: "⌂" },
+      { id: "send", label: "Send assets", mark: "↑" },
+      { id: "receive", label: "Receive", mark: "↓" },
+      { id: "history", label: "History", mark: "≡" },
+      { id: "fastpay", label: "Fast Pay", mark: "⚡" },
+    ],
+  },
+  {
+    label: "Tools",
+    items: [
+      { id: "quantum", label: "Quantum", mark: "◇" },
+      { id: "airgap", label: "Air-gap QR", mark: "▣" },
+    ],
+  },
+  {
+    label: "Control",
+    items: [
+      { id: "security", label: "Security", mark: "⛨" },
+      { id: "privacy", label: "Privacy", mark: "◐" },
+      { id: "settings", label: "Settings", mark: "⚙" },
+      { id: "advanced", label: "Advanced", mark: "⋯" },
+    ],
+  },
 ];
 
 export const ISTANBUL_HEIGHT = 765_432;
 
 export function formatCountdown(secs: number | null | undefined): string {
   if (secs == null) return "n/a";
-  const m = Math.floor(secs / 60);
-  const s = secs % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  const minutes = Math.floor(secs / 60);
+  const seconds = secs % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 export function isValidImportSeed(seed: string): boolean {

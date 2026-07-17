@@ -21,9 +21,24 @@ impl ChannelPayCompleteDocuments {
     pub fn from_bill_hex(hex_str: &str) -> HubResult<Self> {
         let bytes = hex::decode(hex_str).map_err(|e| HubError::Payment(e.to_string()))?;
         let mut doc = Self::empty();
-        doc.parse(&bytes)
+        let used = doc
+            .parse(&bytes)
             .map_err(|e| HubError::Payment(e.to_string()))?;
+        if used != bytes.len() {
+            return Err(HubError::Payment(
+                "settlement bill contains trailing bytes".into(),
+            ));
+        }
         Ok(doc)
+    }
+
+    pub fn prove_bindings_valid(&self) -> bool {
+        self.prove_bodies.len() == self.chain_payment.prove_hash_checkers.len()
+            && self
+                .prove_bodies
+                .iter()
+                .zip(self.chain_payment.prove_hash_checkers.iter())
+                .all(|(body, checker)| body.hash_half_checker() == *checker)
     }
 
     fn empty() -> Self {

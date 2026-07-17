@@ -5,15 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::{header, Method};
+use axum::http::{Method, header};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use hacash_wallet_core::WalletService;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::dapp_approval::{ApprovalDecision, DappApprovalQueue};
 use crate::state::AppState;
 
 pub const DAPP_BRIDGE_PORT: u16 = 9477;
@@ -37,6 +38,7 @@ impl DappBridgeHandle {
 #[derive(Clone)]
 struct BridgeState {
     wallet: Arc<Mutex<WalletService>>,
+    approval: Arc<DappApprovalQueue>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,8 +79,10 @@ pub async fn start_dapp_bridge(state: &AppState) -> Result<u16, String> {
     }
 
     let wallet = state.inner.clone();
+    let approval = state.dapp_approval.clone();
     let bridge_state = BridgeState {
         wallet: wallet.clone(),
+        approval,
     };
 
     let cors = CorsLayer::new()
@@ -172,20 +176,14 @@ async fn heartbeat_route(
     }
 }
 
-async fn connect_route(
-    State(st): State<BridgeState>,
-    Json(body): Json<OriginBody>,
-) -> Json<Value> {
+async fn connect_route(State(st): State<BridgeState>, Json(body): Json<OriginBody>) -> Json<Value> {
     match bridge_connect(&st, &body.origin).await {
         Ok(v) => Json(v),
         Err(e) => Json(json!({ "err": e, "ret": 1 })),
     }
 }
 
-async fn wallet_route(
-    State(st): State<BridgeState>,
-    Json(body): Json<OriginBody>,
-) -> Json<Value> {
+async fn wallet_route(State(st): State<BridgeState>, Json(body): Json<OriginBody>) -> Json<Value> {
     match bridge_wallet(&st, &body.origin).await {
         Ok(v) => Json(v),
         Err(e) => Json(json!({ "err": e, "ret": 1 })),
@@ -209,10 +207,7 @@ async fn sign_route(State(st): State<BridgeState>, Json(body): Json<SignBody>) -
     }
 }
 
-async fn chain_route(
-    State(st): State<BridgeState>,
-    Json(body): Json<OriginBody>,
-) -> Json<Value> {
+async fn chain_route(State(st): State<BridgeState>, Json(body): Json<OriginBody>) -> Json<Value> {
     let mut svc = st.wallet.lock().await;
     if svc.dapp_session_is_authorized(&body.origin) {
         svc.dapp_keepalive_bump();
@@ -229,6 +224,15 @@ async fn bridge_heartbeat(st: &BridgeState, origin: &str) -> Result<Value, Strin
 }
 
 async fn bridge_connect(st: &BridgeState, origin: &str) -> Result<Value, String> {
+    await_user_approval(
+        &st.approval,
+        origin,
+        "connect",
+        "Connect to app",
+        &format!("{origin} wants to connect to your wallet."),
+        "The app can request transaction signatures after you accept.",
+    )
+    .await?;
     let mut svc = st.wallet.lock().await;
     svc.dapp_connect(origin).map_err(|e| e.to_string())
 }
@@ -239,6 +243,17 @@ async fn bridge_wallet(st: &BridgeState, origin: &str) -> Result<Value, String> 
 }
 
 async fn bridge_transfer(st: &BridgeState, origin: &str, txobj: &str) -> Result<Value, String> {
+    let detail =
+        hacash_wallet_core::dapp::describe_txobj_for_approval(txobj).map_err(|e| e.to_string())?;
+    await_user_approval(
+        &st.approval,
+        origin,
+        "transfer",
+        "Approve dApp transaction",
+        "Review every action before the wallet signs and broadcasts it.",
+        &detail,
+    )
+    .await?;
     let mut svc = st.wallet.lock().await;
     svc.dapp_transfer(origin, txobj)
         .await
@@ -251,8 +266,59 @@ async fn bridge_sign(
     txbody: &str,
     autosubmit: bool,
 ) -> Result<Value, String> {
+    let canonical =
+        hacash_wallet_core::tx_binding::decode_transaction(txbody).map_err(|e| e.to_string())?;
+    let title = if autosubmit {
+        "Approve signing and broadcast"
+    } else {
+        "Approve transaction signature"
+    };
+    await_user_approval(
+        &st.approval,
+        origin,
+        "sign",
+        title,
+        "The wallet will sign exactly the decoded transaction shown below.",
+        &canonical.approval_summary(),
+    )
+    .await?;
     let mut svc = st.wallet.lock().await;
     svc.dapp_sign_tx(origin, txbody, autosubmit)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[allow(dead_code)]
+fn truncate_detail(text: &str, max: usize) -> String {
+    let clean: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if clean.len() <= max {
+        clean
+    } else {
+        format!("{}…", &clean[..max])
+    }
+}
+
+async fn await_user_approval(
+    approval: &DappApprovalQueue,
+    origin: &str,
+    kind: &str,
+    title: &str,
+    summary: &str,
+    detail: &str,
+) -> Result<(), String> {
+    match approval
+        .request(
+            origin,
+            kind,
+            title,
+            summary,
+            detail,
+            Duration::from_secs(120),
+        )
+        .await
+    {
+        Ok(ApprovalDecision::Approved) => Ok(()),
+        Ok(ApprovalDecision::Rejected(reason)) => Err(format!("declined: {reason}")),
+        Err(e) => Err(e),
+    }
 }

@@ -76,7 +76,7 @@ export default function SecurityScreen({
         <h2>Private key</h2>
         <p className="muted small">
           Back up your wallet offline: reveal the key and scan the QR on a new phone (Welcome → Import → Scan QR).
-          Keep your screen private — anyone nearby can read the key.
+          Keep your screen private. anyone nearby can read the key.
         </p>
         <label className="label">Passphrase</label>
         <input type="password" value={privateKeyPass} onChange={(e) => setPrivateKeyPass(e.target.value)} />

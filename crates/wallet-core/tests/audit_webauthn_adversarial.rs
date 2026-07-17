@@ -2,7 +2,7 @@
 
 mod common;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::audit_gate;
 use hacash_wallet_core::webauthn::WebAuthnGate;
 use serde_json::json;
@@ -50,10 +50,11 @@ fn audit_webauthn_wrong_origin_rejected() {
     audit_gate("webauthn_wrong_origin", || {
         let gate = WebAuthnGate::new().unwrap();
         let options = gate.begin_register("1User", None).unwrap();
-        let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let challenge =
+            serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let cred = json!({
             "rawId": "dGVzdA",
             "response": {
@@ -84,10 +85,11 @@ fn audit_webauthn_auth_data_rp_id_hash_mismatch() {
     audit_gate("webauthn_rpid_hash", || {
         let gate = WebAuthnGate::new().unwrap();
         let options = gate.begin_auth("dGVzdA", None).unwrap();
-        let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let challenge =
+            serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let bad_auth_data = URL_SAFE_NO_PAD.encode([0u8; 37]);
         let cred = json!({
             "response": {
@@ -104,7 +106,7 @@ fn audit_webauthn_auth_data_rp_id_hash_mismatch() {
 fn audit_webauthn_challenge_entropy() {
     audit_gate("webauthn_challenge_entropy", || {
         let gate = WebAuthnGate::new().unwrap();
-let a = gate.begin_register("1A", None).unwrap();
+        let a = gate.begin_register("1A", None).unwrap();
         let b = gate.begin_register("1B", None).unwrap();
         let parsed_a: serde_json::Value = serde_json::from_str(&a).unwrap();
         let parsed_b: serde_json::Value = serde_json::from_str(&b).unwrap();

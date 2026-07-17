@@ -142,15 +142,15 @@ impl EncryptedVault {
 
     /// Parse an exported backup JSON blob (same format as [`Self::export_json`]).
     pub fn from_export_json(raw: &str) -> WalletResult<Self> {
-        let blob: VaultBlob =
-            serde_json::from_str(raw).map_err(|e| WalletError::Vault(format!("invalid backup JSON: {e}")))?;
+        let blob: VaultBlob = serde_json::from_str(raw)
+            .map_err(|e| WalletError::Vault(format!("invalid backup JSON: {e}")))?;
         Self::from_vault_blob(blob)
     }
 
     /// Read wallet address from backup metadata without decrypting (for UI preview).
     pub fn backup_address_from_json(raw: &str) -> WalletResult<String> {
-        let blob: VaultBlob =
-            serde_json::from_str(raw).map_err(|e| WalletError::Vault(format!("invalid backup JSON: {e}")))?;
+        let blob: VaultBlob = serde_json::from_str(raw)
+            .map_err(|e| WalletError::Vault(format!("invalid backup JSON: {e}")))?;
         if blob.metadata.address.trim().is_empty() {
             return Err(WalletError::Vault("backup missing address metadata".into()));
         }
@@ -159,7 +159,8 @@ impl EncryptedVault {
 
     pub fn load(path: &PathBuf) -> WalletResult<Self> {
         let raw = fs::read_to_string(path).map_err(|e| WalletError::Vault(e.to_string()))?;
-        let blob: VaultBlob = serde_json::from_str(&raw).map_err(|e| WalletError::Vault(e.to_string()))?;
+        let blob: VaultBlob =
+            serde_json::from_str(&raw).map_err(|e| WalletError::Vault(e.to_string()))?;
         Self::from_vault_blob(blob)
     }
 
@@ -219,7 +220,11 @@ fn vault_aad(metadata: &VaultMetadata) -> Vec<u8> {
     .into_bytes()
 }
 
-fn derive_key(passphrase: &[u8], salt: &[u8; SALT_LEN], kdf: &KdfParams) -> WalletResult<DerivedKey> {
+fn derive_key(
+    passphrase: &[u8],
+    salt: &[u8; SALT_LEN],
+    kdf: &KdfParams,
+) -> WalletResult<DerivedKey> {
     let params = Params::new(kdf.m_cost, kdf.t_cost, kdf.p_cost, Some(32))
         .map_err(|e| WalletError::Vault(e.to_string()))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -250,8 +255,7 @@ mod tests {
 
     #[test]
     fn vault_roundtrip_v2_aad() {
-        let vault =
-            EncryptedVault::encrypt("abc123", "1Test", "passphrase", "balanced").unwrap();
+        let vault = EncryptedVault::encrypt("abc123", "1Test", "passphrase", "balanced").unwrap();
         assert_eq!(vault.metadata.version, 2);
         let plain = vault.decrypt("passphrase").unwrap();
         assert_eq!(plain, "abc123");

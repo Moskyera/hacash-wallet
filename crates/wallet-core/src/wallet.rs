@@ -7,40 +7,39 @@ use zeroize::Zeroize;
 
 use crate::account::WalletAccount;
 use crate::airgap::{
-    encode_envelope_qr, parse_airgap_qr_parts, parse_airgap_qr_text, AirgapEnvelope,
-    AirgapParseResult, AirgapPrepareResult, AirgapSignResult, AirgapSigned, AirgapUnsigned,
-    AIRGAP_VERSION,
+    AIRGAP_VERSION, AirgapEnvelope, AirgapParseResult, AirgapPrepareResult, AirgapSignResult,
+    AirgapSigned, AirgapUnsigned, encode_envelope_qr, parse_airgap_qr_parts, parse_airgap_qr_text,
 };
 use crate::bills::{BillEntry, BillStore};
-use crate::hardware::{check_signing_allowed, HardwareSigningMode};
 use crate::channel::{
-    build_channel_close_tx, build_channel_open_tx, derive_channel_id, query_channel, ChannelInfo,
+    ChannelInfo, build_channel_close_tx, build_channel_open_tx, derive_channel_id, query_channel,
 };
 use crate::error::{WalletError, WalletResult};
+use crate::hardware::{HardwareSigningMode, check_signing_allowed};
 use crate::hip23::{
-    is_valid_hacash_address, validate_all_patterns, validate_simple_l1_send, BalanceFloorInput,
-    HeightScopeInput, Hip23PatternCheck, Hip23SendCheck, Type3CheckInput,
+    BalanceFloorInput, HeightScopeInput, Hip23PatternCheck, Hip23SendCheck, Type3CheckInput,
+    is_valid_hacash_address, validate_all_patterns, validate_simple_l1_send,
 };
 
+use crate::dapp::DappSession;
+use crate::dust_whisper::{
+    DustWhisperSettings, RelayHealthStatus, relay_health as whisper_relay_health,
+    submit_tx_hex as whisper_submit_tx_hex, whisper_fallback_notice,
+};
 use crate::fast_pay::{
-    apply_discovered_hub, discover_all_hubs, discover_healthy_hub, evaluate_fast_pay,
-    FastPayStatus, HubDiscoveryReport,
-    DEFAULT_CHANNEL_DEPOSIT_MEI,
+    DEFAULT_CHANNEL_DEPOSIT_MEI, FastPayStatus, HubDiscoveryReport, apply_discovered_hub,
+    discover_all_hubs, discover_healthy_hub, evaluate_fast_pay,
 };
 use crate::history::{TxHistory, TxRecord, TxStatus};
 use crate::l2_hub::{HubHealth, L2HubClient};
-use crate::dust_whisper::{
-    relay_health as whisper_relay_health, submit_tx_hex as whisper_submit_tx_hex,
-    whisper_fallback_notice, DustWhisperSettings, RelayHealthStatus,
-};
 use crate::node::NodeClient;
+use crate::node_discovery::{NodeDiscoveryReport, discover_node_candidates};
 use crate::payment::{PaymentPlan, PaymentRail, PaymentRouter};
-use crate::privacy::{mask_address, mask_amount, mask_hash, PrivacySettings};
-use crate::security::{check_send_policy, SecurityProfile, UnlockContext};
+use crate::privacy::{PrivacySettings, mask_address, mask_amount, mask_hash};
+use crate::security::{SecurityProfile, UnlockContext, check_send_policy};
 use crate::settings::WalletSettings;
 use crate::unlock_guard::UnlockGuard;
-use crate::vault::{default_vault_path, EncryptedVault, VaultMetaSnapshot};
-use crate::dapp::DappSession;
+use crate::vault::{EncryptedVault, VaultMetaSnapshot, default_vault_path};
 use crate::webauthn::WebAuthnGate;
 
 const BALANCE_CACHE_TTL: Duration = Duration::from_secs(12);
@@ -50,6 +49,7 @@ pub struct WalletService {
     vault_cache: Option<EncryptedVault>,
     vault_meta: Option<VaultMetaSnapshot>,
     node: NodeClient,
+    network_mode: String,
     router: PaymentRouter,
     profile: SecurityProfile,
     settings: WalletSettings,
@@ -72,7 +72,7 @@ struct UnlockedSession {
     address: String,
     key: SessionKey,
     unlocked_at: Instant,
-    /// Set only by `webauthn_auth_finish` — never trusted from IPC/UI flags.
+    /// Set only by `webauthn_auth_finish`. never trusted from IPC/UI flags.
     webauthn_verified: bool,
     /// Set only by `finish_native_biometric` after OS verification.
     biometric_verified: bool,
@@ -87,6 +87,7 @@ pub struct WalletStatus {
     pub address: Option<String>,
     pub security_profile: String,
     pub node_url: String,
+    pub network_mode: String,
     pub l2_enabled: bool,
     pub l2_hub_url: Option<String>,
     pub channel_id: Option<String>,
@@ -152,7 +153,11 @@ impl WalletService {
         if let Some(hub) = l2_hub_url {
             settings.l2_hub_url = Some(hub);
         }
-        settings.normalize();
+        settings.validate_and_normalize()?;
+        let network_mode = std::env::var("HACASH_WALLET_NETWORK")
+            .ok()
+            .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
+            .unwrap_or_else(|| settings.network_mode.clone());
         let profile = SecurityProfile::from_name(&settings.security_profile);
         let node = NodeClient::new(settings.node_url.clone());
         let bills = BillStore::load().unwrap_or_default();
@@ -163,6 +168,7 @@ impl WalletService {
             vault_cache: None,
             vault_meta: None,
             node,
+            network_mode,
             router,
             profile,
             settings,
@@ -178,8 +184,7 @@ impl WalletService {
     }
 
     pub fn status(&self) -> WalletStatus {
-        let has_wallet =
-            self.vault_path.exists() || self.settings.watch_only_address.is_some();
+        let has_wallet = self.vault_path.exists() || self.settings.watch_only_address.is_some();
         let watch_only = self.settings.hardware_mode() == HardwareSigningMode::WatchOnly
             || self.settings.watch_only_address.is_some();
         let meta = self
@@ -206,6 +211,7 @@ impl WalletService {
                 .or_else(|| self.settings.watch_only_address.clone()),
             security_profile: self.profile.name.clone(),
             node_url: self.node.base_url().to_string(),
+            network_mode: self.network_mode.clone(),
             l2_enabled: self.router.has_l2_hub(),
             l2_hub_url: self.settings.l2_hub_url.clone(),
             channel_id: self.settings.channel_id_hex.clone(),
@@ -223,11 +229,8 @@ impl WalletService {
     }
 
     fn fast_pay_status_sync(&self) -> FastPayStatus {
-        if self.settings.channel_id_hex.is_some() && self.settings.l2_hub_url.is_some() {
-            return FastPayStatus::ready("Fast Pay");
-        }
         if self.settings.l2_hub_url.is_some() {
-            return FastPayStatus::needs_channel("your provider", DEFAULT_CHANNEL_DEPOSIT_MEI);
+            return FastPayStatus::checking();
         }
         FastPayStatus::no_provider()
     }
@@ -240,12 +243,60 @@ impl WalletService {
         self.node.ping().await
     }
 
+    pub async fn discover_nodes(&self) -> NodeDiscoveryReport {
+        let mut settings = self.settings.clone();
+        settings.network_mode = self.network_mode.clone();
+        discover_node_candidates(&settings).await
+    }
+
+    /// Select a verified fallback only when the active node is unavailable or on the wrong chain.
+    pub async fn find_active_node(&mut self) -> WalletResult<NodeDiscoveryReport> {
+        let mut report = self.discover_nodes().await;
+        let current_ok = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.url == self.node.base_url())
+            .is_some_and(|candidate| candidate.online && candidate.network_match);
+        if current_ok || !self.settings.auto_node_failover {
+            return Ok(report);
+        }
+
+        let Some(next) = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.online && candidate.network_match)
+            .map(|candidate| candidate.url.clone())
+        else {
+            return Ok(report);
+        };
+        if next == self.node.base_url() {
+            return Ok(report);
+        }
+
+        let previous = self.settings.node_url.clone();
+        if !self.settings.node_fallback_urls.contains(&previous) {
+            self.settings.node_fallback_urls.insert(0, previous);
+            self.settings.node_fallback_urls.truncate(8);
+        }
+        self.settings.node_fallback_urls.retain(|url| url != &next);
+        self.settings.node_url = next.clone();
+        self.settings.save()?;
+        self.node = NodeClient::new(next.clone());
+        self.router.update_settings(self.settings.clone());
+        report.active_node = next;
+        report.switched = true;
+        Ok(report)
+    }
+
     pub fn update_settings(&mut self, mut settings: WalletSettings) -> WalletResult<()> {
-        settings.normalize();
+        settings.validate_and_normalize()?;
         settings.save()?;
         self.router.update_settings(settings.clone());
         self.node = NodeClient::new(settings.node_url.clone());
         self.profile = SecurityProfile::from_name(&settings.security_profile);
+        if std::env::var("HACASH_WALLET_NETWORK").is_err() {
+            self.network_mode = settings.network_mode.clone();
+        }
         self.settings = settings;
         Ok(())
     }
@@ -264,8 +315,9 @@ impl WalletService {
         ];
         for path in paths {
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .map_err(|e| WalletError::Vault(format!("failed to remove {}: {e}", path.display())))?;
+                std::fs::remove_file(&path).map_err(|e| {
+                    WalletError::Vault(format!("failed to remove {}: {e}", path.display()))
+                })?;
             }
         }
         self.vault_cache = None;
@@ -277,8 +329,13 @@ impl WalletService {
         self.bills = BillStore::default();
         self.history = TxHistory::default();
         self.node = NodeClient::new(self.settings.node_url.clone());
+        self.network_mode = std::env::var("HACASH_WALLET_NETWORK")
+            .ok()
+            .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
+            .unwrap_or_else(|| self.settings.network_mode.clone());
         self.profile = SecurityProfile::from_name(&self.settings.security_profile);
-        self.router = PaymentRouter::new(self.node.clone(), self.settings.clone(), self.bills.clone());
+        self.router =
+            PaymentRouter::new(self.node.clone(), self.settings.clone(), self.bills.clone());
         Ok(())
     }
 
@@ -304,7 +361,9 @@ impl WalletService {
 
     pub fn import_wallet(&mut self, seed: &str, passphrase: &str) -> WalletResult<String> {
         if self.vault_path.exists() {
-            return Err(WalletError::Vault("wallet already exists — remove vault first".into()));
+            return Err(WalletError::Vault(
+                "wallet already exists. remove vault first".into(),
+            ));
         }
         if seed.trim().is_empty() || passphrase.len() < 8 {
             return Err(WalletError::Vault(
@@ -344,7 +403,9 @@ impl WalletService {
     /// Restore wallet from an encrypted backup JSON export (same passphrase as at export time).
     pub fn import_backup(&mut self, json: &str, passphrase: &str) -> WalletResult<String> {
         if self.vault_path.exists() {
-            return Err(WalletError::Vault("wallet already exists — remove vault first".into()));
+            return Err(WalletError::Vault(
+                "wallet already exists. remove vault first".into(),
+            ));
         }
         if json.trim().is_empty() || passphrase.len() < 8 {
             return Err(WalletError::Vault(
@@ -382,17 +443,25 @@ impl WalletService {
         crate::biometric_unlock::is_configured()
     }
 
-    pub fn enable_biometric_unlock(&mut self, passphrase: &str) -> WalletResult<()> {
-        if !self.vault_path.exists() {
-            return Err(WalletError::NoWallet);
-        }
+    pub fn verify_wallet_passphrase(&mut self, passphrase: &str) -> WalletResult<()> {
         let vault = self.vault_snapshot()?;
         let mut secret = vault.decrypt(passphrase)?;
         secret.zeroize();
-        crate::biometric_unlock::save_encrypted_passphrase(passphrase)?;
-        self.settings.biometric_unlock_enabled = true;
-        self.settings.save()?;
         Ok(())
+    }
+
+    pub fn set_biometric_unlock_enabled(&mut self, enabled: bool) -> WalletResult<()> {
+        if !enabled {
+            crate::biometric_unlock::clear()?;
+        }
+        self.settings.biometric_unlock_enabled = enabled;
+        self.settings.save()
+    }
+
+    pub fn enable_biometric_unlock(&mut self, _passphrase: &str) -> WalletResult<()> {
+        Err(WalletError::Policy(
+            "biometric unlock secrets must be stored by the operating-system keystore".into(),
+        ))
     }
 
     pub fn disable_biometric_unlock(&mut self) -> WalletResult<()> {
@@ -403,15 +472,20 @@ impl WalletService {
     }
 
     pub fn unlock_passphrase_for_biometric(&self) -> WalletResult<String> {
-        if !self.settings.biometric_unlock_enabled || !crate::biometric_unlock::is_configured() {
-            return Err(WalletError::Vault("biometric unlock is not enabled".into()));
-        }
-        crate::biometric_unlock::load_encrypted_passphrase()
+        Err(WalletError::Policy(
+            "biometric unlock secrets must be loaded by the operating-system keystore".into(),
+        ))
     }
 
-    pub fn change_passphrase(&mut self, old_passphrase: &str, new_passphrase: &str) -> WalletResult<()> {
+    pub fn change_passphrase(
+        &mut self,
+        old_passphrase: &str,
+        new_passphrase: &str,
+    ) -> WalletResult<()> {
         if new_passphrase.len() < 8 {
-            return Err(WalletError::Vault("new passphrase must be at least 8 characters".into()));
+            return Err(WalletError::Vault(
+                "new passphrase must be at least 8 characters".into(),
+            ));
         }
         let mut vault = self.vault_snapshot()?;
         vault.reencrypt(old_passphrase, new_passphrase)?;
@@ -427,8 +501,10 @@ impl WalletService {
             }
         }
         self.persist_vault(vault)?;
-        if self.settings.biometric_unlock_enabled && crate::biometric_unlock::is_configured() {
-            crate::biometric_unlock::save_encrypted_passphrase(new_passphrase)?;
+        if self.settings.biometric_unlock_enabled {
+            crate::biometric_unlock::clear()?;
+            self.settings.biometric_unlock_enabled = false;
+            self.settings.save()?;
         }
         Ok(())
     }
@@ -476,7 +552,7 @@ impl WalletService {
         Ok(address)
     }
 
-    /// Import a watch-only wallet (Sparrow-style) — monitor balance, no local signing.
+    /// Import a watch-only wallet (Sparrow-style). monitor balance, no local signing.
     pub fn import_watch_only(&mut self, address: &str) -> WalletResult<String> {
         let addr = address.trim();
         if !is_valid_hacash_address(addr) {
@@ -484,7 +560,7 @@ impl WalletService {
         }
         if self.vault_path.exists() {
             return Err(WalletError::Vault(
-                "signing wallet exists — remove vault before watch-only import".into(),
+                "signing wallet exists. remove vault before watch-only import".into(),
             ));
         }
         self.settings.watch_only_address = Some(addr.to_owned());
@@ -554,7 +630,7 @@ impl WalletService {
         }
     }
 
-    /// Test-only bypass — production apps must use `finish_native_biometric`.
+    /// Test-only bypass. production apps must use `finish_native_biometric`.
     #[doc(hidden)]
     pub fn confirm_biometric_for_send(&mut self) -> WalletResult<()> {
         let session = self.unlocked.as_mut().ok_or(WalletError::Locked)?;
@@ -684,12 +760,18 @@ impl WalletService {
     pub async fn send_btc(&mut self, to: &str, satoshi: u64) -> WalletResult<SendResult> {
         self.touch_auto_lock();
         let unlock_ctx = self.second_factor_from_session()?;
-        check_send_policy(&self.profile, 0, &unlock_ctx)?;
+        // BTC has no HAC-denominated amount, so require the profile's second
+        // factor at the signing boundary for every bridged-BTC transfer.
+        check_send_policy(
+            &self.profile,
+            self.profile.require_second_factor_above_mei,
+            &unlock_ctx,
+        )?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {
                 return Err(WalletError::Policy(
-                    "WebAuthn (YubiKey/Windows Hello) required — complete ceremony first".into(),
+                    "WebAuthn (YubiKey/Windows Hello) required. complete ceremony first".into(),
                 ));
             }
         }
@@ -699,16 +781,28 @@ impl WalletService {
         if !preview.hip23.ok {
             return Err(WalletError::Policy(preview.hip23.errors.join("; ")));
         }
-        let pending_key =
-            self.begin_pending_history(PaymentRail::L1OnChain, &from, to, 0.0)?;
+        let pending_key = self.begin_pending_history(PaymentRail::L1OnChain, &from, to, 0.0)?;
         let send_result: WalletResult<SendResult> = async {
+            let transfers = [
+                (to, preview.satoshi),
+                (
+                    crate::send_options::WALLET_TREASURY_ADDRESS,
+                    preview.service_fee_satoshi,
+                ),
+            ];
             let built = self
                 .node
-                .build_send_btc_tx(&from, to, preview.satoshi, &preview.fee_wire)
+                .build_send_btc_tx_actions(&from, &preview.fee_wire, &transfers)
                 .await?;
             let body_hex = built
                 .body
                 .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+            crate::tx_binding::verify_satoshi_transfers(
+                &body_hex,
+                &from,
+                &preview.fee_wire,
+                &transfers,
+            )?;
             let signed_hex = self.sign_tx_hex(&body_hex)?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
@@ -739,15 +833,23 @@ impl WalletService {
         }
     }
 
-    pub async fn send_hacd(&mut self, to: &str, diamond_names: &[String]) -> WalletResult<SendResult> {
+    pub async fn send_hacd(
+        &mut self,
+        to: &str,
+        diamond_names: &[String],
+    ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
         let unlock_ctx = self.second_factor_from_session()?;
-        check_send_policy(&self.profile, 0, &unlock_ctx)?;
+        check_send_policy(
+            &self.profile,
+            self.profile.require_second_factor_above_mei,
+            &unlock_ctx,
+        )?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {
                 return Err(WalletError::Policy(
-                    "WebAuthn (YubiKey/Windows Hello) required — complete ceremony first".into(),
+                    "WebAuthn (YubiKey/Windows Hello) required. complete ceremony first".into(),
                 ));
             }
         }
@@ -757,16 +859,31 @@ impl WalletService {
         if !preview.hip23.ok {
             return Err(WalletError::Policy(preview.hip23.errors.join("; ")));
         }
-        let pending_key =
-            self.begin_pending_history(PaymentRail::L1OnChain, &from, to, 0.0)?;
+        let pending_key = self.begin_pending_history(PaymentRail::L1OnChain, &from, to, 0.0)?;
         let send_result: WalletResult<SendResult> = async {
+            let service_fee =
+                crate::send_options::format_service_fee_amount_wire(preview.service_fee_mei);
             let built = self
                 .node
-                .build_send_diamond_tx(&from, to, &preview.diamond_names, &preview.fee_wire)
+                .build_send_diamond_tx_with_service_fee(
+                    &from,
+                    to,
+                    &preview.diamond_names,
+                    &service_fee,
+                    &preview.fee_wire,
+                )
                 .await?;
             let body_hex = built
                 .body
                 .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+            crate::tx_binding::verify_hacd_transfer_with_service_fee(
+                &body_hex,
+                &from,
+                &preview.fee_wire,
+                to,
+                &preview.diamond_names,
+                &service_fee,
+            )?;
             let signed_hex = self.sign_tx_hex(&body_hex)?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
@@ -799,15 +916,27 @@ impl WalletService {
 
     pub async fn query_diamond(&self, name: &str) -> WalletResult<crate::node::DiamondInfo> {
         let normalized = name.trim().to_uppercase();
-        if normalized.len() < 4 || normalized.len() > 6 {
-            return Err(WalletError::Other("HACD name must be 4–6 letters".into()));
-        }
-        if !normalized.chars().all(|c| c.is_ascii_uppercase()) {
+        if !crate::hacd_send::is_valid_diamond_name(&normalized) {
             return Err(WalletError::Other(
-                "HACD name must contain only A–Z letters".into(),
+                "HACD name must use 4 to 6 letters from WTYUIAHXVMEKBSZN".into(),
             ));
         }
-        self.node.query_diamond_by_name(&normalized).await
+        match self.node.query_diamond_by_name(&normalized).await {
+            Ok(info) => Ok(info),
+            Err(configured_error)
+                if self.settings.node_url != crate::settings::DEFAULT_NODE_URL =>
+            {
+                let official = crate::node::NodeClient::new(crate::settings::DEFAULT_NODE_URL);
+                match official.query_diamond_by_name(&normalized).await {
+                    Ok(mut info) => {
+                        info.metadata_source = "mainnet".into();
+                        Ok(info)
+                    }
+                    Err(_) => Err(configured_error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn hub_health(&self) -> WalletResult<Option<HubHealth>> {
@@ -832,33 +961,38 @@ impl WalletService {
             }
         }
 
+        let hub_url = self
+            .settings
+            .l2_hub_url
+            .clone()
+            .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
+        let health = L2HubClient::new(hub_url).health().await?;
+        if !health.ok
+            || health.version < 3
+            || !health.settlement_ready
+            || !health.cross_channel_ready
+            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+        {
+            return Err(WalletError::L2(
+                "Provider is not ready for safe, fee-free routed Fast Pay. No channel was opened."
+                    .into(),
+            ));
+        }
+
         let hub_address = match self.settings.hub_right_address.clone() {
             Some(a) if !a.is_empty() => a,
-            _ => {
-                if let Some(url) = self.settings.l2_hub_url.clone() {
-                    if let Ok(health) = L2HubClient::new(url).health().await {
-                        if let Some(addr) = health.hub_address.filter(|a| !a.is_empty()) {
-                            self.settings.hub_right_address = Some(addr.clone());
-                            addr
-                        } else {
-                            return Err(WalletError::L2(
-                                "Hub address missing. Set it in More → Fast Pay → Network settings."
-                                    .into(),
-                            ));
-                        }
-                    } else {
-                        return Err(WalletError::L2(
-                            "No Fast Pay provider is online right now. Try again later or send on-chain."
-                                .into(),
-                        ));
-                    }
-                } else {
-                    return Err(WalletError::L2(
-                        "No Fast Pay provider is online right now. Your sends still work on-chain."
-                            .into(),
-                    ));
-                }
-            }
+            _ => health
+                .hub_address
+                .filter(|address| !address.is_empty())
+                .map(|address| {
+                    self.settings.hub_right_address = Some(address.clone());
+                    address
+                })
+                .ok_or_else(|| {
+                    WalletError::L2(
+                        "Hub address missing. Set it in the Fast Pay network settings.".into(),
+                    )
+                })?,
         };
 
         if self.settings.channel_id_hex.is_none() {
@@ -1035,7 +1169,7 @@ impl WalletService {
         submitted: &crate::node::SubmitTxResponse,
     ) -> String {
         match whisper_fallback_notice(&submitted.message) {
-            Some(notice) => format!("{summary} — {notice}"),
+            Some(notice) => format!("{summary}. {notice}"),
             None => summary,
         }
     }
@@ -1065,6 +1199,16 @@ impl WalletService {
         hub_deposit_mei: f64,
     ) -> WalletResult<ChannelSetupPreview> {
         self.touch_auto_lock();
+        crate::hip23::validate_hac_amount_mei(user_deposit_mei)?;
+        if !hub_deposit_mei.is_finite() || hub_deposit_mei < 0.0 {
+            return Err(WalletError::Policy(
+                "hub channel deposit must be a finite non-negative amount".into(),
+            ));
+        }
+        if !crate::hip23::is_valid_hacash_address(hub_address) {
+            return Err(WalletError::Policy("invalid Fast Pay hub address".into()));
+        }
+
         let user = self.require_address()?;
         let channel_id = derive_channel_id(&user, hub_address, 1);
         Ok(ChannelSetupPreview {
@@ -1084,6 +1228,8 @@ impl WalletService {
     ) -> WalletResult<String> {
         self.touch_auto_lock();
         let preview = self.preview_channel_open(hub_address, user_deposit_mei, hub_deposit_mei)?;
+        let fee = crate::hip23::wire_mei_for_node("1:244");
+        let encoded_channel_id = crate::channel::encoded_channel_id(&preview.channel_id)?;
         let built = build_channel_open_tx(
             &self.node,
             &preview.left_address,
@@ -1092,12 +1238,29 @@ impl WalletService {
             &preview.left_deposit,
             &preview.right_address,
             &preview.right_deposit,
-            &crate::hip23::wire_mei_for_node("1:244"),
+            &fee,
         )
         .await?;
         let body_hex = built
             .body
             .ok_or_else(|| WalletError::Transaction("missing channel open body".into()))?;
+        crate::tx_binding::verify_transaction_intent(
+            &body_hex,
+            &preview.left_address,
+            &fee,
+            &[serde_json::json!({
+                "kind": 2,
+                "channel_id": encoded_channel_id,
+                "left_bill": {
+                    "address": preview.left_address,
+                    "amount": preview.left_deposit
+                },
+                "right_bill": {
+                    "address": preview.right_address,
+                    "amount": preview.right_deposit
+                }
+            })],
+        )?;
         let signed_hex = self.sign_tx_hex(&body_hex)?;
         let submitted = self.submit_signed_tx(&signed_hex).await?;
         let hash = submitted
@@ -1127,16 +1290,21 @@ impl WalletService {
             .channel_id_hex
             .clone()
             .ok_or_else(|| WalletError::Transaction("no active channel configured".into()))?;
-        let built = build_channel_close_tx(
-            &self.node,
-            &from,
-            &channel_id,
-            &crate::hip23::wire_mei_for_node("1:244"),
-        )
-        .await?;
+        let fee = crate::hip23::wire_mei_for_node("1:244");
+        let encoded_channel_id = crate::channel::encoded_channel_id(&channel_id)?;
+        let built = build_channel_close_tx(&self.node, &from, &channel_id, &fee).await?;
         let body_hex = built
             .body
             .ok_or_else(|| WalletError::Transaction("missing channel close body".into()))?;
+        crate::tx_binding::verify_transaction_intent(
+            &body_hex,
+            &from,
+            &fee,
+            &[serde_json::json!({
+                "kind": 3,
+                "channel_id": encoded_channel_id
+            })],
+        )?;
         let signed_hex = self.sign_tx_hex(&body_hex)?;
         let submitted = self.submit_signed_tx(&signed_hex).await?;
         let hash = submitted
@@ -1163,14 +1331,18 @@ impl WalletService {
         options: &crate::send_options::SendOptions,
     ) -> WalletResult<SendPreview> {
         self.touch_auto_lock();
+        crate::hip23::validate_hac_amount_mei(amount_mei)?;
+        options.validate()?;
+        let mut options = options.clone();
+        options.enforce_mandatory_service_fee();
         self.maybe_discover_hub().await?;
         let from = self.require_address()?;
         let amount_wire = format_amount_mei(amount_mei);
-        let balance = self.node.balance_mei(&from).await.unwrap_or(0.0);
+        let balance = self.node.balance_mei(&from).await?;
         let fast_pay = evaluate_fast_pay(&self.node, &self.settings, Some(&from)).await?;
         let plan = self
             .router
-            .plan_send(&from, to, amount_mei, options)
+            .plan_send(&from, to, amount_mei, &options)
             .await?;
         let fee_for_hip23 =
             plan.fee_breakdown.payer_debit_mei - plan.fee_breakdown.recipient_credit_mei;
@@ -1195,7 +1367,7 @@ impl WalletService {
             fee,
             hip23,
             fast_pay,
-            send_options: options.clone(),
+            send_options: options,
         })
     }
 
@@ -1217,16 +1389,26 @@ impl WalletService {
         }
         if !preview.hip23.ok {
             return Err(WalletError::Policy(
-                "HIP-23 checks failed — cannot prepare air-gap send".into(),
+                "HIP-23 checks failed. cannot prepare air-gap send".into(),
             ));
         }
+        let transfer_pairs = crate::send_options::hac_send_transfer_pairs(
+            to,
+            &preview.amount_wire,
+            &preview.plan.fee_breakdown,
+        );
+        let transfers: Vec<(&str, &str)> = transfer_pairs
+            .iter()
+            .map(|(address, amount)| (address.as_str(), amount.as_str()))
+            .collect();
         let built = self
             .node
-            .build_send_hac_tx(&from, to, &preview.amount_wire, &preview.fee)
+            .build_send_hac_tx_actions(&from, &preview.fee, &transfers)
             .await?;
         let body_hex = built
             .body
             .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+        crate::tx_binding::verify_hac_transfers(&body_hex, &from, &preview.fee, &transfers)?;
         let unsigned = AirgapUnsigned {
             v: AIRGAP_VERSION,
             from: from.clone(),
@@ -1234,6 +1416,8 @@ impl WalletService {
             amount_mei: preview.amount_mei,
             amount_wire: preview.amount_wire,
             fee: preview.fee,
+            service_fee_mei: preview.plan.fee_breakdown.service_fee_mei.unwrap_or(0.0),
+            service_fee_treasury: preview.plan.fee_breakdown.service_fee_treasury,
             body_hex,
             summary: preview.plan.summary,
             tx_type: 1,
@@ -1259,13 +1443,55 @@ impl WalletService {
                 unsigned.from
             )));
         }
+        if self
+            .unlocked
+            .as_ref()
+            .is_some_and(|session| matches!(session.key, SessionKey::WatchOnly))
+        {
+            return Err(WalletError::Policy(
+                "watch-only wallet cannot sign transactions".into(),
+            ));
+        }
+        let unlock_ctx = self.second_factor_from_session()?;
+        let policy_amount = crate::hip23::policy_amount_mei_ceil(unsigned.amount_mei)?;
+        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
+        let expected_service_fee =
+            crate::send_options::compute_service_fee_mei(unsigned.amount_mei);
+        if (unsigned.service_fee_mei - expected_service_fee).abs() > 0.000_000_1
+            || unsigned.service_fee_treasury.as_deref()
+                != Some(crate::send_options::WALLET_TREASURY_ADDRESS)
+        {
+            return Err(WalletError::Policy(
+                "air-gap envelope has a missing or incorrect mandatory wallet fee".into(),
+            ));
+        }
+        let service_fee_wire =
+            crate::send_options::format_service_fee_amount_wire(expected_service_fee);
+        let transfers = [
+            (unsigned.to.as_str(), unsigned.amount_wire.as_str()),
+            (
+                crate::send_options::WALLET_TREASURY_ADDRESS,
+                service_fee_wire.as_str(),
+            ),
+        ];
+        crate::tx_binding::verify_hac_transfers(
+            &unsigned.body_hex,
+            &unsigned.from,
+            &unsigned.fee,
+            &transfers,
+        )?;
         let signed_hex = self.sign_tx_hex(&unsigned.body_hex)?;
+        self.clear_second_factor();
         let signed = AirgapSigned {
             v: AIRGAP_VERSION,
             tx_type: unsigned.tx_type,
             from: unsigned.from.clone(),
             to: unsigned.to.clone(),
             amount_mei: unsigned.amount_mei,
+            amount_wire: unsigned.amount_wire.clone(),
+            fee: unsigned.fee.clone(),
+            service_fee_mei: unsigned.service_fee_mei,
+            service_fee_treasury: unsigned.service_fee_treasury.clone(),
             signed_hex,
             summary: unsigned.summary.clone(),
         };
@@ -1283,6 +1509,36 @@ impl WalletService {
         signed: &AirgapSigned,
     ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
+        let expected_service_fee = crate::send_options::compute_service_fee_mei(signed.amount_mei);
+        if signed.amount_wire.is_empty()
+            || signed.fee.is_empty()
+            || (signed.service_fee_mei - expected_service_fee).abs() > 0.000_000_1
+            || signed.service_fee_treasury.as_deref()
+                != Some(crate::send_options::WALLET_TREASURY_ADDRESS)
+        {
+            return Err(WalletError::Policy(
+                "signed air-gap envelope is missing the mandatory wallet fee binding".into(),
+            ));
+        }
+        let service_fee_wire =
+            crate::send_options::format_service_fee_amount_wire(expected_service_fee);
+        let canonical = crate::tx_binding::verify_hac_transfers(
+            &signed.signed_hex,
+            &signed.from,
+            &signed.fee,
+            &[
+                (signed.to.as_str(), signed.amount_wire.as_str()),
+                (
+                    crate::send_options::WALLET_TREASURY_ADDRESS,
+                    service_fee_wire.as_str(),
+                ),
+            ],
+        )?;
+        if canonical.tx_type != signed.tx_type {
+            return Err(WalletError::Policy(
+                "air-gap transaction type mismatch".into(),
+            ));
+        }
         if signed.tx_type == 4 {
             let expected = self
                 .quantum_settings()
@@ -1356,12 +1612,13 @@ impl WalletService {
     ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
         let unlock_ctx = self.second_factor_from_session()?;
-        check_send_policy(&self.profile, amount_mei as u64, &unlock_ctx)?;
+        let policy_amount = crate::hip23::policy_amount_mei_ceil(amount_mei)?;
+        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {
                 return Err(WalletError::Policy(
-                    "WebAuthn (YubiKey/Windows Hello) required — complete ceremony first".into(),
+                    "WebAuthn (YubiKey/Windows Hello) required. complete ceremony first".into(),
                 ));
             }
         }
@@ -1372,52 +1629,23 @@ impl WalletService {
         let pending_key = self.begin_pending_history(preview.plan.rail, &from, to, amount_mei)?;
 
         let send_result: WalletResult<SendResult> = match preview.plan.rail {
-            PaymentRail::L2Fast => {
-                match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
-                    SessionKey::Signing(acc) => {
-                        let payment_id = self
-                            .router
-                            .execute_l2(
-                                &from,
-                                to,
-                                amount_mei,
-                                &preview.amount_wire,
-                                acc,
-                                options.hub_fee_payer,
-                            )
-                            .await?;
-                        if let Some(svc_mei) = preview.plan.fee_breakdown.service_fee_mei {
-                            if svc_mei > 0.0
-                                && preview.plan.fee_breakdown.service_fee_treasury.is_some()
-                            {
-                                let svc_wire = crate::send_options::format_service_fee_amount_wire(
-                                    svc_mei,
-                                );
-                                let _treasury_id = self
-                                    .router
-                                    .execute_l2(
-                                        &from,
-                                        crate::send_options::WALLET_TREASURY_ADDRESS,
-                                        svc_mei,
-                                        &svc_wire,
-                                        acc,
-                                        crate::send_options::HubFeePayer::Sender,
-                                    )
-                                    .await?;
-                            }
-                        }
-                        self.bills = self.router.bills().clone();
-                        Ok(SendResult {
-                            rail: PaymentRail::L2Fast,
-                            tx_hash: payment_id,
-                            summary: preview.plan.summary,
-                        })
-                    }
-                    SessionKey::WatchOnly => Err(WalletError::Policy(
-                        "watch-only wallet cannot sign L2 bills".into(),
-                    )),
+            PaymentRail::L2Fast => match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
+                SessionKey::Signing(acc) => {
+                    let payment_id = self
+                        .router
+                        .execute_l2(&from, to, &preview.amount_wire, acc)
+                        .await?;
+                    self.bills = self.router.bills().clone();
+                    Ok(SendResult {
+                        rail: PaymentRail::L2Fast,
+                        tx_hash: payment_id,
+                        summary: preview.plan.summary,
+                    })
                 }
-            }
+                SessionKey::WatchOnly => Err(WalletError::Policy(
+                    "watch-only wallet cannot sign L2 bills".into(),
+                )),
+            },
             PaymentRail::L1OnChain => {
                 let transfer_pairs = crate::send_options::hac_send_transfer_pairs(
                     to,
@@ -1435,10 +1663,15 @@ impl WalletService {
                 let body_hex = built
                     .body
                     .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+                crate::tx_binding::verify_hac_transfers(
+                    &body_hex,
+                    &from,
+                    &preview.fee,
+                    &transfers,
+                )?;
                 let signed_hex = self.sign_tx_hex(&body_hex)?;
                 let submitted = self.submit_signed_tx(&signed_hex).await?;
-                let summary =
-                    self.summary_with_whisper_notice(preview.plan.summary, &submitted);
+                let summary = self.summary_with_whisper_notice(preview.plan.summary, &submitted);
                 let hash = submitted
                     .hash
                     .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
@@ -1449,7 +1682,7 @@ impl WalletService {
                 })
             }
             PaymentRail::QuantumType4 => Err(WalletError::Policy(
-                "Type 4 quantum sends use the Quantum tab — not legacy Send".into(),
+                "Type 4 quantum sends use the Quantum tab. not legacy Send".into(),
             )),
         };
 
@@ -1475,7 +1708,7 @@ impl WalletService {
         self.profile = profile;
         self.settings.security_profile = name;
         self.settings.save()?;
-        // Policy lives in settings; vault AAD binds security_profile — never patch
+        // Policy lives in settings; vault AAD binds security_profile. never patch
         // metadata without full reencrypt (see vault_aad + change_passphrase).
         Ok(())
     }
@@ -1534,7 +1767,7 @@ impl WalletService {
             SessionKey::WatchOnly => {
                 return Err(WalletError::Policy(
                     "watch-only wallet cannot sign transactions".into(),
-                ))
+                ));
             }
         };
         let body = hex::decode(body_hex).map_err(|e| WalletError::Transaction(e.to_string()))?;
@@ -1592,7 +1825,9 @@ impl WalletService {
         if !self.settings.privacy.store_tx_history {
             return Ok(None);
         }
-        Ok(Some(self.history.begin_pending(rail, from, to, amount_mei)?))
+        Ok(Some(
+            self.history.begin_pending(rail, from, to, amount_mei)?,
+        ))
     }
 
     fn resolve_pending_history(
@@ -1731,7 +1966,7 @@ impl WalletService {
         self.settings.quantum_keystore_json.clone()
     }
 
-    pub(crate) fn ensure_quantum_signing_policy(&self) -> WalletResult<()> {
+    pub(crate) fn ensure_quantum_signing_policy(&self, amount_mei: f64) -> WalletResult<()> {
         let watch_only = self
             .unlocked
             .as_ref()
@@ -1747,11 +1982,14 @@ impl WalletService {
             watch_only,
             webauthn_verified,
         )?;
+        let unlock_ctx = self.second_factor_from_session()?;
+        let policy_amount = crate::hip23::policy_amount_mei_ceil(amount_mei)?;
+        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {
                 return Err(WalletError::Policy(
-                    "WebAuthn (YubiKey/Windows Hello) required — complete ceremony first".into(),
+                    "WebAuthn (YubiKey/Windows Hello) required. complete ceremony first".into(),
                 ));
             }
         }
@@ -1857,7 +2095,11 @@ impl WalletService {
         }
     }
 
-    pub async fn dapp_transfer(&mut self, origin: &str, txobj: &str) -> WalletResult<serde_json::Value> {
+    pub async fn dapp_transfer(
+        &mut self,
+        origin: &str,
+        txobj: &str,
+    ) -> WalletResult<serde_json::Value> {
         self.touch_auto_lock();
         crate::dapp::require_trusted_origin(origin)?;
         if !self.dapp_session.is_authorized(origin) {
@@ -1869,8 +2111,13 @@ impl WalletService {
             .get("actions")
             .and_then(|v| v.as_array())
             .ok_or_else(|| WalletError::Transaction("txobj missing actions".into()))?;
-        let actions = crate::dapp::normalize_actions(actions_val)?;
-        let fee = crate::dapp::estimate_fee_for_payload(self.node_client(), &from, &parsed).await?;
+        let mut actions = crate::dapp::normalize_actions(actions_val)?;
+        crate::dapp::append_mandatory_wallet_fee(&mut actions)?;
+        let mut fee_payload = parsed.clone();
+        fee_payload["main_address"] = serde_json::json!(from);
+        fee_payload["actions"] = serde_json::json!(actions.clone());
+        let fee =
+            crate::dapp::estimate_fee_for_payload(self.node_client(), &from, &fee_payload).await?;
         let payload = serde_json::json!({
             "main_address": from,
             "fee": fee,
@@ -1880,6 +2127,15 @@ impl WalletService {
         let body_hex = built
             .body
             .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+        let canonical =
+            crate::tx_binding::verify_transaction_intent(&body_hex, &from, &fee, &actions)?;
+        let unlock_ctx = self.second_factor_from_session()?;
+        check_send_policy(
+            &self.profile,
+            self.profile.require_second_factor_above_mei,
+            &unlock_ctx,
+        )?;
+        self.clear_second_factor();
         let signed_hex = self.sign_tx_hex(&body_hex)?;
         let submitted = self.submit_signed_tx(&signed_hex).await?;
         let txhash = submitted
@@ -1893,7 +2149,8 @@ impl WalletService {
             "txbody": signed_hex,
             "txhash": txhash,
             "txfee": fee,
-            "description": ["Hacash Wallet dApp transfer"]
+            "description": [canonical.approval_summary()],
+            "body_sha256": canonical.body_sha256
         }))
     }
 
@@ -1909,6 +2166,23 @@ impl WalletService {
             return Ok(serde_json::json!({ "err": "Wallet not connected", "ret": 1 }));
         }
         let address = self.require_address()?;
+        let canonical = crate::tx_binding::validate_signer_body(txbody, &address)?;
+        if canonical
+            .actions
+            .iter()
+            .any(|action| matches!(action.kind, 1 | 5 | 7 | 10))
+        {
+            return Err(WalletError::Policy(
+                "raw dApp signing cannot move HAC, BTC or HACD; use the transfer API so the mandatory wallet fee is bound before signing".into(),
+            ));
+        }
+        let unlock_ctx = self.second_factor_from_session()?;
+        check_send_policy(
+            &self.profile,
+            self.profile.require_second_factor_above_mei,
+            &unlock_ctx,
+        )?;
+        self.clear_second_factor();
         let signed_hex = self.sign_tx_hex(txbody)?;
         self.bump_unlock_activity();
         let mut result = serde_json::json!({
@@ -1916,6 +2190,8 @@ impl WalletService {
             "body": signed_hex,
             "address": address,
             "hash": crate::dapp::built_hash_hint(txbody),
+            "description": canonical.approval_summary(),
+            "body_sha256": canonical.body_sha256,
         });
         if autosubmit {
             let submitted = self.submit_signed_tx(&signed_hex).await?;
@@ -1943,5 +2219,4 @@ impl WalletService {
             "diff": false
         }))
     }
-
 }

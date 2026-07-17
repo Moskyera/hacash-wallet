@@ -3,20 +3,25 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
-use crate::hip23::{format_l1_fee_mei_for_node, wire_mei_for_node, L1_DEFAULT_FEE_MEI};
+use crate::hip23::{L1_DEFAULT_FEE_MEI, format_l1_fee_mei_for_node, wire_mei_for_node};
 use crate::node::{BuildTxResponse, NodeClient};
 use crate::send_options::{
-    format_service_fee_amount_wire, compute_service_fee_mei, L1FeeSpeed, WALLET_TREASURY_ADDRESS,
+    HACD_SERVICE_FEE_MEI, L1FeeSpeed, WALLET_TREASURY_ADDRESS, compute_btc_service_fee_satoshi,
+    compute_service_fee_mei, format_service_fee_amount_wire,
 };
 use crate::type4_fee::{
-    local_fee_from_wire_bytes, mei_to_fee_wire, parse_fee_mei_decimal, Type4FeeEstimate,
-    L1_DEFAULT_LOWEST_FEE_PURITY,
+    L1_DEFAULT_LOWEST_FEE_PURITY, Type4FeeEstimate, local_fee_from_wire_bytes, mei_to_fee_wire,
+    parse_fee_mei_decimal,
 };
 
 pub type L1FeeEstimate = Type4FeeEstimate;
 
 pub const L1_TX_TYPE: u8 = 1;
 pub const L1_DEFAULT_WIRE_BYTES: usize = 166;
+/// One legacy secp256k1 signature contains a 33-byte public key and a
+/// 64-byte signature. Node build responses are unsigned, while fee purity is
+/// checked against the signed transaction size.
+pub const L1_LEGACY_SIGNATURE_BYTES: usize = 97;
 /// Probe fee used only to build unsigned tx body for size measurement.
 pub const L1_PROBE_FEE_WIRE: &str = "1:244";
 /// Minimum spread between L1 tiers when multipliers collapse after rounding.
@@ -47,7 +52,11 @@ fn wire_bytes_from_build(built: &BuildTxResponse) -> WalletResult<usize> {
         .body
         .as_ref()
         .ok_or_else(|| WalletError::Transaction("missing tx body for fee estimate".into()))?;
-    Ok((body.len() / 2).max(1))
+    Ok(signed_l1_wire_bytes((body.len() / 2).max(1)))
+}
+
+pub fn signed_l1_wire_bytes(unsigned_wire_bytes: usize) -> usize {
+    unsigned_wire_bytes.saturating_add(L1_LEGACY_SIGNATURE_BYTES)
 }
 
 pub fn minimum_l1_fee_estimate(wire_bytes: usize) -> L1FeeEstimate {
@@ -93,26 +102,31 @@ fn enforce_distinct_l1_tiers(
     }
 }
 
-pub fn build_l1_fee_tiers(base_mei: f64, min_mei: f64, wire_bytes: usize, purity: u64) -> Vec<L1FeeTierQuote> {
+pub fn build_l1_fee_tiers(
+    base_mei: f64,
+    min_mei: f64,
+    wire_bytes: usize,
+    purity: u64,
+) -> Vec<L1FeeTierQuote> {
     let mut tiers: Vec<L1FeeTierQuote> = [
         L1FeeSpeed::Slow,
         L1FeeSpeed::Normal,
         L1FeeSpeed::Fast,
         L1FeeSpeed::Ultra,
     ]
-        .into_iter()
-        .map(|speed| {
-            let raw_mei = l1_fee_mei_for_speed(base_mei, min_mei, speed);
-            let est = estimate_from_mei(raw_mei, wire_bytes, purity, min_mei);
-            L1FeeTierQuote {
-                speed,
-                label: speed.label().into(),
-                detail: speed.detail().into(),
-                fee_mei: est.fee_mei,
-                fee_wire: est.fee_wire,
-            }
-        })
-        .collect();
+    .into_iter()
+    .map(|speed| {
+        let raw_mei = l1_fee_mei_for_speed(base_mei, min_mei, speed);
+        let est = estimate_from_mei(raw_mei, wire_bytes, purity, min_mei);
+        L1FeeTierQuote {
+            speed,
+            label: speed.label().into(),
+            detail: speed.detail().into(),
+            fee_mei: est.fee_mei,
+            fee_wire: est.fee_wire,
+        }
+    })
+    .collect();
     enforce_distinct_l1_tiers(&mut tiers, wire_bytes, purity, min_mei);
     tiers
 }
@@ -131,7 +145,11 @@ async fn base_fee_mei(node: &NodeClient, wire_bytes: usize) -> WalletResult<(f64
     }
 }
 
-pub async fn estimate_l1_fee(node: &NodeClient, wire_bytes: usize, speed: L1FeeSpeed) -> WalletResult<L1FeeEstimate> {
+pub async fn estimate_l1_fee(
+    node: &NodeClient,
+    wire_bytes: usize,
+    speed: L1FeeSpeed,
+) -> WalletResult<L1FeeEstimate> {
     let wire_bytes = wire_bytes.max(1);
     let (base_mei, purity) = base_fee_mei(node, wire_bytes).await?;
     let min_mei = minimum_l1_fee_estimate(wire_bytes).fee_mei;
@@ -161,13 +179,10 @@ pub async fn estimate_hac_l1_fee_tiers(
     amount_wire: &str,
     amount_mei: f64,
     speed: L1FeeSpeed,
-    service_fee_enabled: bool,
-    service_fee_rate: f64,
 ) -> WalletResult<L1FeeTierSet> {
     let probe = wire_mei_for_node(L1_PROBE_FEE_WIRE);
-    let service_fee_mei =
-        compute_service_fee_mei(amount_mei, service_fee_enabled, service_fee_rate);
-    let service_fee_wire = if service_fee_mei > 0.0 && to != WALLET_TREASURY_ADDRESS {
+    let service_fee_mei = compute_service_fee_mei(amount_mei);
+    let service_fee_wire = if service_fee_mei > 0.0 {
         Some(format_service_fee_amount_wire(service_fee_mei))
     } else {
         None
@@ -211,22 +226,11 @@ pub async fn estimate_hac_l1_fee(
     amount_wire: &str,
     amount_mei: f64,
     speed: L1FeeSpeed,
-    service_fee_enabled: bool,
-    service_fee_rate: f64,
 ) -> WalletResult<L1FeeEstimate> {
     Ok(
-        estimate_hac_l1_fee_tiers(
-            node,
-            from,
-            to,
-            amount_wire,
-            amount_mei,
-            speed,
-            service_fee_enabled,
-            service_fee_rate,
-        )
-        .await?
-        .selected,
+        estimate_hac_l1_fee_tiers(node, from, to, amount_wire, amount_mei, speed)
+            .await?
+            .selected,
     )
 }
 
@@ -238,8 +242,9 @@ pub async fn estimate_hacd_l1_fee(
     speed: L1FeeSpeed,
 ) -> WalletResult<L1FeeEstimate> {
     let probe = wire_mei_for_node(L1_PROBE_FEE_WIRE);
+    let service_fee = format_service_fee_amount_wire(HACD_SERVICE_FEE_MEI);
     let built = node
-        .build_send_diamond_tx(from, to, diamond_names, &probe)
+        .build_send_diamond_tx_with_service_fee(from, to, diamond_names, &service_fee, &probe)
         .await;
     let fallback = L1_DEFAULT_WIRE_BYTES.saturating_add(diamond_names.len().saturating_sub(1) * 24);
     estimate_from_build(node, built, fallback, speed).await
@@ -253,7 +258,14 @@ pub async fn estimate_btc_l1_fee(
     speed: L1FeeSpeed,
 ) -> WalletResult<L1FeeEstimate> {
     let probe = wire_mei_for_node(L1_PROBE_FEE_WIRE);
-    let built = node.build_send_btc_tx(from, to, satoshi, &probe).await;
+    let service_fee = compute_btc_service_fee_satoshi(satoshi);
+    let built = node
+        .build_send_btc_tx_actions(
+            from,
+            &probe,
+            &[(to, satoshi), (WALLET_TREASURY_ADDRESS, service_fee)],
+        )
+        .await;
     estimate_from_build(node, built, L1_DEFAULT_WIRE_BYTES, speed).await
 }
 
@@ -283,6 +295,11 @@ mod tests {
     }
 
     #[test]
+    fn signed_size_includes_legacy_signature() {
+        assert_eq!(signed_l1_wire_bytes(110), 207);
+    }
+
+    #[test]
     fn slow_never_below_minimum() {
         let min = minimum_l1_fee_estimate(166).fee_mei;
         let node_min = crate::hip23::normalize_l1_fee_mei(min);
@@ -309,7 +326,12 @@ mod tests {
         let min = minimum_l1_fee_estimate(L1_DEFAULT_WIRE_BYTES).fee_mei;
         assert!(min < 0.001, "raw dynamic min is sub-milli: {min}");
         let base = 0.00012;
-        let tiers = build_l1_fee_tiers(base, min, L1_DEFAULT_WIRE_BYTES, L1_DEFAULT_LOWEST_FEE_PURITY);
+        let tiers = build_l1_fee_tiers(
+            base,
+            min,
+            L1_DEFAULT_WIRE_BYTES,
+            L1_DEFAULT_LOWEST_FEE_PURITY,
+        );
         assert!(tiers[0].fee_mei >= min);
         assert!(tiers[1].fee_mei > tiers[0].fee_mei);
         assert!(tiers[2].fee_mei > tiers[1].fee_mei);

@@ -1,4 +1,4 @@
-//! AUDIT-GATE: Property-based tests (proptest) — 64 cases each
+//! AUDIT-GATE: Property-based tests (proptest). 64 cases each
 
 mod common;
 

@@ -178,15 +178,8 @@ mod tests {
     fn append_prepends_newest() {
         let _iso = IsolatedWalletData::new();
         let mut h = TxHistory::default();
-        h.append(
-            PaymentRail::L1OnChain,
-            "abc",
-            "1From",
-            "1To",
-            1.0,
-            "test",
-        )
-        .unwrap();
+        h.append(PaymentRail::L1OnChain, "abc", "1From", "1To", 1.0, "test")
+            .unwrap();
         assert_eq!(h.list()[0].tx_hash, "abc");
         assert_eq!(h.list()[0].status, TxStatus::Confirmed);
     }

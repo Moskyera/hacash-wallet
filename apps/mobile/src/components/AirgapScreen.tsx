@@ -102,8 +102,8 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
       setPrepareResult(result);
       onToast(
         result.qr_parts.length > 1
-          ? `Unsigned tx — scan ${result.qr_parts.length} QR codes offline.`
-          : "Unsigned tx ready — scan QR offline.",
+          ? `Unsigned tx. scan ${result.qr_parts.length} QR codes offline.`
+          : "Unsigned tx ready. scan QR offline.",
         "success",
       );
     } catch (e) {
@@ -122,7 +122,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
       const result = await api.airgapParseQrBatch(nextParts);
       setParsed(result);
       if (result.needs_more_parts) {
-        onToast(`Chunk ${result.received_parts}/${result.total_parts} — scan next QR.`, "info");
+        onToast(`Chunk ${result.received_parts}/${result.total_parts}. scan next QR.`, "info");
         return;
       }
       if (!result.envelope) {
@@ -132,7 +132,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
       if (isUnsigned(result.envelope)) {
         onToast("Unsigned tx loaded.", "success");
       } else if (isSigned(result.envelope)) {
-        onToast("Signed tx loaded — ready to broadcast.", "success");
+        onToast("Signed tx loaded. ready to broadcast.", "success");
       }
     } catch (e) {
       onToast(formatInvokeError(e), "error");
@@ -180,12 +180,14 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         amount_mei: parsed.envelope.amount_mei,
         amount_wire: parsed.envelope.amount_wire,
         fee: parsed.envelope.fee,
+        service_fee_mei: parsed.envelope.service_fee_mei,
+        service_fee_treasury: parsed.envelope.service_fee_treasury,
         body_hex: parsed.envelope.body_hex,
         summary: parsed.envelope.summary,
       };
       const result = await api.airgapSignUnsigned(unsigned);
       setSignResult(result);
-      onToast("Signed — show QR to coordinator.", "success");
+      onToast("Signed. show QR to coordinator.", "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -202,6 +204,10 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         from: parsed.envelope.from,
         to: parsed.envelope.to,
         amount_mei: parsed.envelope.amount_mei,
+        amount_wire: parsed.envelope.amount_wire,
+        fee: parsed.envelope.fee,
+        service_fee_mei: parsed.envelope.service_fee_mei,
+        service_fee_treasury: parsed.envelope.service_fee_treasury,
         signed_hex: parsed.envelope.signed_hex,
         summary: parsed.envelope.summary,
       };
@@ -283,7 +289,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         <h3>{mode === "coordinator" ? "Scan signed QR & broadcast" : "Scan unsigned QR"}</h3>
         <p className="muted">
           {mode === "signer" && watchOnly
-            ? "Watch-only cannot sign — use an offline signing wallet."
+            ? "Watch-only cannot sign. use an offline signing wallet."
             : mode === "signer"
               ? "Keep device offline while signing."
               : "Scan the signed QR from the offline device."}
@@ -327,7 +333,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
 
         {signResult && (
           <div className="preview-box">
-            <p>Signed — show to coordinator</p>
+            <p>Signed. show to coordinator</p>
             <div className="qr-grid">
               {signQrUrls.map((url, i) => (
                 <img key={i} src={url} alt={`Signed QR ${i + 1}`} className="qr-thumb" />

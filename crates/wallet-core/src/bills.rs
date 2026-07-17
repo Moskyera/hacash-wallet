@@ -30,7 +30,8 @@ impl BillStore {
     }
 
     pub fn store_bill(&mut self, payment_id: &str, bill_hex: &str) -> WalletResult<()> {
-        self.bills.insert(payment_id.to_owned(), bill_hex.to_owned());
+        self.bills
+            .insert(payment_id.to_owned(), bill_hex.to_owned());
         self.save()
     }
 

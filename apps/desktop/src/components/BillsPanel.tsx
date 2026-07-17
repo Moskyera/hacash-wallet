@@ -87,7 +87,7 @@ export default function BillsPanel({ hideAddresses, onError, onInfo }: Props) {
         <div>
           <h3>Dispute bills</h3>
           <p className="muted">
-            Signed Fast Pay receipts stored on this device. Export and keep them safe — you need
+            Signed Fast Pay receipts stored on this device. Export and keep them safe. you need
             them if a channel payment is disputed on-chain.
           </p>
         </div>
@@ -194,14 +194,14 @@ export default function BillsPanel({ hideAddresses, onError, onInfo }: Props) {
                             <ul className="bills-sig-list">
                               {bill.signatures.map((s) => (
                                 <li key={s.address}>
-                                  {maskAddr(s.address)} —{" "}
+                                  {maskAddr(s.address)} ·{" "}
                                   {s.verified ? "verified" : s.filled ? "invalid" : "missing"}
                                 </li>
                               ))}
                             </ul>
                             {!bill.dispute_ready && (
                               <p className="bill-warn-text">
-                                Missing or invalid signatures — this bill may not be accepted in a
+                                Missing or invalid signatures. this bill may not be accepted in a
                                 channel challenge. Re-export after hub co-sign is available.
                               </p>
                             )}

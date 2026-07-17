@@ -83,7 +83,7 @@ export default function HacdSendPanel({
             className={hacdDisplay === "visual" ? "selected" : ""}
             onClick={() => setHacdDisplay("visual")}
           >
-            Visual
+            Metadata card
           </button>
         </div>
 
@@ -131,7 +131,10 @@ export default function HacdSendPanel({
           <p className="muted small-note">Selected: {hacd.selected.join(", ")}</p>
         )}
         {hacd.owned.length === 0 && (
-          <p className="muted small-note">No HACD found in wallet. Enter a name you own on chain.</p>
+          <p className="muted small-note">
+            No verified HACD found on the configured node. Metadata search may still show read-only
+            mainnet information.
+          </p>
         )}
         {hacdDisplay === "visual" && primaryHacd && <HacdDiamondVisual name={primaryHacd} />}
       </div>
@@ -192,6 +195,10 @@ export default function HacdSendPanel({
             → <code>{maskAddress(hacd.preview.to, hideAddresses)}</code>
           </p>
           <p className="muted">Network fee: {hacd.preview.fee_mei.toFixed(3)} HAC</p>
+          <p className="muted">
+            Wallet fee: {hacd.preview.service_fee_mei.toFixed(3)} HAC · total HAC debit{" "}
+            {hacd.preview.total_hac_debit_mei.toFixed(3)}
+          </p>
           {hacd.preview.hip23.errors.length > 0 && (
             <div className="alert">
               <strong>HIP-23 errors</strong>

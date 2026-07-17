@@ -126,7 +126,7 @@ export default function MessengerScreen({
         <div className="card">
           <h2>Messages</h2>
           <p className="muted small">End-to-end encrypted with your wallet signing keys.</p>
-          <label className="label">New chat — Hacash address</label>
+          <label className="label">New chat. Hacash address</label>
           <div className="row-btns">
             <input
               placeholder="1…"
@@ -193,7 +193,7 @@ export default function MessengerScreen({
       )}
       <div className="messenger-list" ref={listRef}>
         {messages.length === 0 ? (
-          <p className="muted">No messages — say hello!</p>
+          <p className="muted">No messages. say hello!</p>
         ) : (
           messages.map((m) => (
             <div

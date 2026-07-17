@@ -1,4 +1,4 @@
-//! TIER-0: Signing binding — locked gate, garbage bodies, determinism, key isolation.
+//! TIER-0: Signing binding. locked gate, garbage bodies, determinism, key isolation.
 
 mod common;
 

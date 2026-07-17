@@ -8,8 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use common::tier0_gate;
-use hacash_wallet_core::vault::EncryptedVault;
 use hacash_wallet_core::WalletError;
+use hacash_wallet_core::vault::EncryptedVault;
 use serde_json::Value;
 
 fn temp_vault_path() -> (tempfile::TempDir, PathBuf) {
@@ -92,13 +92,9 @@ fn tier0_vault_cross_wallet_ciphertext_swap_fails() {
         let (_dir, path_a) = temp_vault_path();
         let (_dir2, path_b) = temp_vault_path();
         seed_vault(&path_a);
-        let vault_b = EncryptedVault::encrypt(
-            "cafebabe",
-            "1OtherAddr",
-            "other-passphrase",
-            "balanced",
-        )
-        .unwrap();
+        let vault_b =
+            EncryptedVault::encrypt("cafebabe", "1OtherAddr", "other-passphrase", "balanced")
+                .unwrap();
         vault_b.save(&path_b).unwrap();
 
         let mut ja = load_json(&path_a);
@@ -110,7 +106,7 @@ fn tier0_vault_cross_wallet_ciphertext_swap_fails() {
 
         let vault = EncryptedVault::load(&path_a).unwrap();
         assert!(vault.decrypt("mutation-pass-12").is_err());
-        // Vault v2 AAD binds ciphertext to metadata — swapped blob must not decrypt
+        // Vault v2 AAD binds ciphertext to metadata. swapped blob must not decrypt
         // under either wallet passphrase (cross-wallet swap attack blocked).
         assert!(vault.decrypt("other-passphrase").is_err());
     });

@@ -1,3 +1,4 @@
+use basis::method::verify_signature;
 use field::{Address, Sign};
 use sys::Account;
 
@@ -44,5 +45,17 @@ impl OffChainChannelTransfer {
         self.must_signs
             .iter()
             .all(|s| s.publickey.to_array() != empty.to_array())
+    }
+
+    /// True only when every required signature slot is filled and verifies for its address.
+    pub fn all_signatures_verified(&self) -> bool {
+        if !self.all_slots_filled() || self.must_sign_addresses.len() != self.must_signs.len() {
+            return false;
+        }
+        let hash = self.sign_stuff_hash();
+        self.must_sign_addresses
+            .iter()
+            .zip(self.must_signs.iter())
+            .all(|(address, signature)| verify_signature(&hash, address, signature))
     }
 }

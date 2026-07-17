@@ -13,7 +13,10 @@ fn audit_channel_id_collision_resistance_sample() {
             ("1LeftA", "1RightB", 2u64),
             ("1LeftB", "1RightA", 1u64),
         ];
-        let ids: Vec<_> = samples.iter().map(|(l, r, v)| derive_channel_id(l, r, *v)).collect();
+        let ids: Vec<_> = samples
+            .iter()
+            .map(|(l, r, v)| derive_channel_id(l, r, *v))
+            .collect();
         for i in 0..ids.len() {
             for j in i + 1..ids.len() {
                 assert_ne!(ids[i], ids[j]);

@@ -1,12 +1,12 @@
-//! Quantum / Type-4 IPC — shared by desktop and mobile Tauri apps.
+//! Quantum / Type-4 IPC. shared by desktop and mobile Tauri apps.
 
 use std::sync::Arc;
 
+use hacash_wallet_core::WalletService;
 use hacash_wallet_core::airgap::{AirgapPrepareResult, AirgapSignResult, AirgapUnsigned};
 use hacash_wallet_core::quantum::{
     QuantumAccountInfo, QuantumPreflight, QuantumSendResult, QuantumSettings, QuantumTestResult,
 };
-use hacash_wallet_core::WalletService;
 use tauri::State;
 use tokio::sync::Mutex;
 
@@ -96,7 +96,9 @@ pub async fn quantum_import_keystore_v3(
     state: State<'_, AppState>,
 ) -> Result<QuantumAccountInfo, String> {
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
-        with_unlocked(svc, |s| s.quantum_import_keystore(&json, &keystore_password))
+        with_unlocked(svc, |s| {
+            s.quantum_import_keystore(&json, &keystore_password)
+        })
     })
     .await
 }
@@ -210,7 +212,9 @@ pub async fn quantum_airgap_sign_type4(
     state: State<'_, AppState>,
 ) -> Result<AirgapSignResult, String> {
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
-        with_unlocked(svc, |s| s.quantum_airgap_sign_type4(&unsigned, &keystore_password))
+        with_unlocked(svc, |s| {
+            s.quantum_airgap_sign_type4(&unsigned, &keystore_password)
+        })
     })
     .await
 }

@@ -5,9 +5,9 @@ use crate::amount::format_amount_mei;
 use crate::error::{HubError, HubResult};
 use crate::node::ChannelInfo;
 
-use super::chain_payment::{clean_sort_addresses, OffChainChannelTransfer};
+use super::chain_payment::{OffChainChannelTransfer, clean_sort_addresses};
 use super::documents::ChannelPayCompleteDocuments;
-use super::prove_body::{TransferProveBody, DIRECTION_LEFT_TO_RIGHT, DIRECTION_RIGHT_TO_LEFT};
+use super::prove_body::{DIRECTION_LEFT_TO_RIGHT, DIRECTION_RIGHT_TO_LEFT, TransferProveBody};
 use super::satoshi_var::SatoshiVariation;
 
 /// Channel parties + balances after hub ledger settlement.

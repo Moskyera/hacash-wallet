@@ -1,4 +1,4 @@
-//! Hacash CSP / Fast Pay hub — Wallet Hub API v1 reference server.
+//! Hacash CSP / Fast Pay hub. Wallet Hub API v1 reference server.
 //!
 //! Endpoints:
 //! - `GET /v1/health`
@@ -17,11 +17,11 @@ pub mod server;
 pub mod state;
 pub mod wire;
 
-pub use api::{FastPayRequest, FastPayResponse, HubHealth, HUB_API_VERSION};
+pub use api::{ConfirmFastPayRequest, FastPayRequest, FastPayResponse, HUB_API_VERSION, HubHealth};
 pub use channel_id::derive_channel_id;
 pub use error::{HubError, HubResult};
 pub use hub_signer::HubSigner;
-pub use routing::{resolve_payee_route, PayeeRoute};
+pub use routing::{PayeeRoute, resolve_payee_route};
 pub use server::{build_router, serve};
 pub use state::HubState;
 pub use wire::ChannelPayCompleteDocuments;

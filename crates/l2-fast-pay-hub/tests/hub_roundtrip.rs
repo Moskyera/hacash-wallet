@@ -5,9 +5,10 @@ use axum::extract::Query;
 use axum::routing::get;
 use axum::{Json, Router};
 use l2_fast_pay_hub::channel_id::derive_channel_id;
-use l2_fast_pay_hub::{build_router, HubState};
+use l2_fast_pay_hub::{HubState, build_router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use sys::Account;
 use tempfile::tempdir;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -15,6 +16,63 @@ use tokio::task::JoinHandle;
 #[derive(Deserialize)]
 struct ChannelQuery {
     id: Option<String>,
+}
+
+fn test_account(seed: &str) -> Account {
+    Account::create_by(seed).unwrap()
+}
+
+fn account_secret_hex(account: &Account) -> String {
+    hex::encode(account.secret_key().serialize())
+}
+
+async fn prepare_and_confirm(
+    client: &reqwest::Client,
+    base: &str,
+    request: Value,
+    payer: &Account,
+) -> Value {
+    let pending: Value = client
+        .post(format!("{base}/v1/fast-pay"))
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending["status"], "pending", "prepare response: {pending}");
+    let payment_id = pending["payment_id"].as_str().unwrap();
+    let mut bill = l2_fast_pay_hub::wire::ChannelPayCompleteDocuments::from_bill_hex(
+        pending["bill_hex"].as_str().unwrap(),
+    )
+    .unwrap();
+    bill.chain_payment.fill_sign_by_account(payer).unwrap();
+    client
+        .post(format!("{base}/v1/fast-pay/{payment_id}/confirm"))
+        .json(&json!({ "bill_hex": bill.to_bill_hex() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[test]
+fn hub_rejects_any_fast_pay_fee() {
+    let err = match HubState::new(
+        "fee hub",
+        "1Hub",
+        "http://127.0.0.1:8080",
+        None,
+        0.001,
+        None,
+    ) {
+        Ok(_) => panic!("fee-charging hub must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("fee-free"));
 }
 
 async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandle<()>) {
@@ -47,14 +105,18 @@ async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandl
 
 #[tokio::test]
 async fn hub_health_and_same_channel_fast_pay() {
-    let ch_id = derive_channel_id("1Alice", "1Hub", 1);
+    let alice = test_account("alice-same-channel");
+    let hub_account = test_account("hub-same-channel");
+    let alice_address = alice.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let ch_id = derive_channel_id(&alice_address, &hub_address, 1);
     let channel = json!({
         "ret": 0,
         "id": ch_id,
         "status": 0,
         "reuse_version": 1,
-        "left": { "address": "1Alice", "hacash": "10", "satoshi": 0 },
-        "right": { "address": "1Hub", "hacash": "0", "satoshi": 0 }
+        "left": { "address": alice_address, "hacash": "10", "satoshi": 0 },
+        "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
     });
     let mut channels = HashMap::new();
     channels.insert(ch_id.clone(), channel);
@@ -63,7 +125,15 @@ async fn hub_health_and_same_channel_fast_pay() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("hub-state.json");
     let hub = Arc::new(
-        HubState::new("test hub", "1Hub", node_url, Some(state_path), 0.001, None).unwrap(),
+        HubState::new(
+            "test hub",
+            hub_address.clone(),
+            node_url,
+            Some(state_path),
+            0.0,
+            Some(account_secret_hex(&hub_account)),
+        )
+        .unwrap(),
     );
     let app = build_router(hub);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -84,38 +154,42 @@ async fn hub_health_and_same_channel_fast_pay() {
         .await
         .unwrap();
     assert_eq!(health["ok"], true);
-    assert_eq!(health["hub_address"], "1Hub");
-    assert_eq!(health["hub_fee_mei"], 0.001);
+    assert_eq!(health["hub_address"], hub_address);
+    assert_eq!(health["version"], 3);
+    assert_eq!(health["hub_fee_mei"], 0.0);
+    assert_eq!(health["settlement_ready"], true);
+    assert_eq!(health["cross_channel_ready"], false);
 
     // Pay hub (other party on same channel)
-    let pay: Value = client
-        .post(format!("{base}/v1/fast-pay"))
-        .json(&json!({
-            "payer": "1Alice",
-            "payee": "1Hub",
+    let pay = prepare_and_confirm(
+        &client,
+        &base,
+        json!({
+            "payer": alice_address,
+            "payee": hub_address,
             "amount": "1",
             "channel_id": ch_id
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+        }),
+        &alice,
+    )
+    .await;
     assert_eq!(pay["status"], "settled", "pay response: {pay}");
-    assert!(pay["summary"]
-        .as_str()
-        .unwrap()
-        .contains("on-channel"));
+    assert!(pay["summary"].as_str().unwrap().contains("on-channel"));
 
     hub_handle.abort();
     node_handle.abort();
 }
 
 #[tokio::test]
-async fn hub_routes_cross_channel_payment() {
-    let alice_ch_id = derive_channel_id("1Alice", "1Hub", 1);
-    let bob_ch_id = derive_channel_id("1Bob", "1Hub", 1);
+async fn hub_rejects_cross_channel_until_recipient_confirmation_exists() {
+    let alice = test_account("alice-cross-channel");
+    let bob = test_account("bob-cross-channel");
+    let hub_account = test_account("hub-cross-channel");
+    let alice_address = alice.readable().to_owned();
+    let bob_address = bob.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let alice_ch_id = derive_channel_id(&alice_address, &hub_address, 1);
+    let bob_ch_id = derive_channel_id(&bob_address, &hub_address, 1);
 
     let mut channels = HashMap::new();
     channels.insert(
@@ -125,8 +199,8 @@ async fn hub_routes_cross_channel_payment() {
             "id": alice_ch_id,
             "status": 0,
             "reuse_version": 1,
-            "left": { "address": "1Alice", "hacash": "10", "satoshi": 0 },
-            "right": { "address": "1Hub", "hacash": "0", "satoshi": 0 }
+            "left": { "address": alice_address, "hacash": "10", "satoshi": 0 },
+            "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
         }),
     );
     channels.insert(
@@ -136,13 +210,23 @@ async fn hub_routes_cross_channel_payment() {
             "id": bob_ch_id,
             "status": 0,
             "reuse_version": 1,
-            "left": { "address": "1Bob", "hacash": "2", "satoshi": 0 },
-            "right": { "address": "1Hub", "hacash": "0", "satoshi": 0 }
+            "left": { "address": bob_address, "hacash": "2", "satoshi": 0 },
+            "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
         }),
     );
     let (node_url, node_handle) = spawn_mock_node(channels).await;
 
-    let hub = Arc::new(HubState::new("test hub", "1Hub", node_url, None, 0.001, None).unwrap());
+    let hub = Arc::new(
+        HubState::new(
+            "test hub",
+            hub_address.clone(),
+            node_url,
+            None,
+            0.0,
+            Some(account_secret_hex(&hub_account)),
+        )
+        .unwrap(),
+    );
     let app = build_router(hub);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hub_addr = listener.local_addr().unwrap();
@@ -153,32 +237,25 @@ async fn hub_routes_cross_channel_payment() {
     let client = reqwest::Client::new();
     let base = format!("http://{hub_addr}");
 
-    let pay: Value = client
+    let response = client
         .post(format!("{base}/v1/fast-pay"))
         .json(&json!({
-            "payer": "1Alice",
-            "payee": "1Bob",
+            "payer": alice_address,
+            "payee": bob_address,
             "amount": "1.5",
             "channel_id": alice_ch_id
         }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
-    assert_eq!(pay["status"], "settled");
-    let summary = pay["summary"].as_str().unwrap();
-    assert!(summary.contains("routed"));
-    assert!(summary.contains(&bob_ch_id));
-
-    let bill_hex = pay["bill_hex"].as_str().unwrap();
-    let bill_bytes = hex::decode(bill_hex).unwrap();
-    assert!(!bill_bytes.is_empty());
-    assert_ne!(bill_bytes[0], b'{', "bill must be binary wire, not JSON");
-    let doc = l2_fast_pay_hub::wire::ChannelPayCompleteDocuments::from_bill_hex(bill_hex).unwrap();
-    assert_eq!(doc.prove_bodies.len(), 2);
-    assert_eq!(doc.chain_payment.prove_hash_checkers.len(), 2);
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("supports user-left to hub-right payments only")
+    );
 
     hub_handle.abort();
     node_handle.abort();
@@ -186,7 +263,11 @@ async fn hub_routes_cross_channel_payment() {
 
 #[tokio::test]
 async fn hub_rejects_insufficient_balance() {
-    let ch_id = derive_channel_id("1Alice", "1Hub", 1);
+    let alice = test_account("alice-insufficient");
+    let hub_account = test_account("hub-insufficient");
+    let alice_address = alice.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let ch_id = derive_channel_id(&alice_address, &hub_address, 1);
     let mut channels = HashMap::new();
     channels.insert(
         ch_id.clone(),
@@ -195,12 +276,22 @@ async fn hub_rejects_insufficient_balance() {
             "id": ch_id,
             "status": 0,
             "reuse_version": 1,
-            "left": { "address": "1Alice", "hacash": "0.5", "satoshi": 0 },
-            "right": { "address": "1Hub", "hacash": "0", "satoshi": 0 }
+            "left": { "address": alice_address, "hacash": "0.5", "satoshi": 0 },
+            "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
         }),
     );
     let (node_url, node_handle) = spawn_mock_node(channels).await;
-    let hub = Arc::new(HubState::new("t", "1Hub", node_url, None, 0.001, None).unwrap());
+    let hub = Arc::new(
+        HubState::new(
+            "t",
+            hub_address.clone(),
+            node_url,
+            None,
+            0.0,
+            Some(account_secret_hex(&hub_account)),
+        )
+        .unwrap(),
+    );
     let app = build_router(hub);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hub_addr = listener.local_addr().unwrap();
@@ -211,8 +302,8 @@ async fn hub_rejects_insufficient_balance() {
     let resp = reqwest::Client::new()
         .post(format!("http://{hub_addr}/v1/fast-pay"))
         .json(&json!({
-            "payer": "1Alice",
-            "payee": "1Hub",
+            "payer": alice_address,
+            "payee": hub_address,
             "amount": "1",
             "channel_id": ch_id
         }))
@@ -227,7 +318,13 @@ async fn hub_rejects_insufficient_balance() {
 
 #[tokio::test]
 async fn hub_rejects_payee_without_hub_channel() {
-    let alice_ch_id = derive_channel_id("1Alice", "1Hub", 1);
+    let alice = test_account("alice-no-payee-channel");
+    let bob = test_account("bob-no-payee-channel");
+    let hub_account = test_account("hub-no-payee-channel");
+    let alice_address = alice.readable().to_owned();
+    let bob_address = bob.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let alice_ch_id = derive_channel_id(&alice_address, &hub_address, 1);
     let mut channels = HashMap::new();
     channels.insert(
         alice_ch_id.clone(),
@@ -236,12 +333,22 @@ async fn hub_rejects_payee_without_hub_channel() {
             "id": alice_ch_id,
             "status": 0,
             "reuse_version": 1,
-            "left": { "address": "1Alice", "hacash": "10", "satoshi": 0 },
-            "right": { "address": "1Hub", "hacash": "0", "satoshi": 0 }
+            "left": { "address": alice_address, "hacash": "10", "satoshi": 0 },
+            "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
         }),
     );
     let (node_url, node_handle) = spawn_mock_node(channels).await;
-    let hub = Arc::new(HubState::new("t", "1Hub", node_url, None, 0.001, None).unwrap());
+    let hub = Arc::new(
+        HubState::new(
+            "t",
+            hub_address.clone(),
+            node_url,
+            None,
+            0.0,
+            Some(account_secret_hex(&hub_account)),
+        )
+        .unwrap(),
+    );
     let app = build_router(hub);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hub_addr = listener.local_addr().unwrap();
@@ -252,8 +359,8 @@ async fn hub_rejects_payee_without_hub_channel() {
     let resp = reqwest::Client::new()
         .post(format!("http://{hub_addr}/v1/fast-pay"))
         .json(&json!({
-            "payer": "1Alice",
-            "payee": "1Bob",
+            "payer": alice_address,
+            "payee": bob_address,
             "amount": "1",
             "channel_id": alice_ch_id
         }))
@@ -262,25 +369,31 @@ async fn hub_rejects_payee_without_hub_channel() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
-    assert!(body["error"]
-        .as_str()
-        .unwrap()
-        .contains("no open Fast Pay channel"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("supports user-left to hub-right payments only")
+    );
 
     hub_handle.abort();
     node_handle.abort();
 }
 
 #[tokio::test]
-async fn hub_recipient_pays_fast_pay_fee() {
-    let ch_id = derive_channel_id("1Alice", "1Hub", 1);
+async fn hub_ignores_legacy_fee_payer_and_remains_fee_free() {
+    let alice = test_account("alice-legacy-fee");
+    let hub_account = test_account("hub-legacy-fee");
+    let alice_address = alice.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let ch_id = derive_channel_id(&alice_address, &hub_address, 1);
     let channel = json!({
         "ret": 0,
         "id": ch_id,
         "status": 0,
         "reuse_version": 1,
-        "left": { "address": "1Alice", "hacash": "10", "satoshi": 0 },
-        "right": { "address": "1Hub", "hacash": "0", "satoshi": 0 }
+        "left": { "address": alice_address, "hacash": "10", "satoshi": 0 },
+        "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
     });
     let mut channels = HashMap::new();
     channels.insert(ch_id.clone(), channel);
@@ -289,7 +402,15 @@ async fn hub_recipient_pays_fast_pay_fee() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("hub-state-recipient-fee.json");
     let hub = Arc::new(
-        HubState::new("test hub", "1Hub", node_url, Some(state_path), 0.001, None).unwrap(),
+        HubState::new(
+            "test hub",
+            hub_address.clone(),
+            node_url,
+            Some(state_path),
+            0.0,
+            Some(account_secret_hex(&hub_account)),
+        )
+        .unwrap(),
     );
     let app = build_router(hub);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -301,26 +422,21 @@ async fn hub_recipient_pays_fast_pay_fee() {
     let client = reqwest::Client::new();
     let base = format!("http://{hub_addr}");
 
-    let pay: Value = client
-        .post(format!("{base}/v1/fast-pay"))
-        .json(&json!({
-            "payer": "1Alice",
-            "payee": "1Hub",
+    let pay = prepare_and_confirm(
+        &client,
+        &base,
+        json!({
+            "payer": alice_address,
+            "payee": hub_address,
             "amount": "2",
             "channel_id": ch_id,
             "fee_payer": "recipient"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+        }),
+        &alice,
+    )
+    .await;
     assert_eq!(pay["status"], "settled");
-    assert!(pay["summary"]
-        .as_str()
-        .unwrap()
-        .contains("deducted from recipient"));
+    assert!(pay["summary"].as_str().unwrap().contains("with no fee"));
 
     hub_handle.abort();
     node_handle.abort();

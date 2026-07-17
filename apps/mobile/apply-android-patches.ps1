@@ -84,14 +84,8 @@ if ($gradleContent -match 'getByName\("release"\)' -and $gradleContent -notmatch
     Write-Host "Linked release signingConfig" -ForegroundColor Green
 }
 
-# Release builds must allow HTTP to nodeapi.hacash.org (Rust reqwest, not only WebView).
-if ($gradleContent -match 'manifestPlaceholders\["usesCleartextTraffic"\] = "false"') {
-    $gradleContent = $gradleContent.Replace(
-        'manifestPlaceholders["usesCleartextTraffic"] = "false"',
-        'manifestPlaceholders["usesCleartextTraffic"] = "true"'
-    )
-    Write-Host "Enabled cleartext HTTP for release (Hacash node API)" -ForegroundColor Green
-}
+# Keep the manifest-wide cleartext flag disabled. The network security XML grants
+# an exact exception only to the official HTTP node and local development hosts.
 
 Set-Content -Path $gradle -Value $gradleContent -NoNewline
 
@@ -244,6 +238,7 @@ $proguardKeeps = @'
 # In-app APK installer (JNI entry from Rust)
 -keep class org.hacash.wallet.mobile.ApkInstaller { *; }
 -keep class org.hacash.wallet.mobile.BackupFileHelper { *; }
+-keep class org.hacash.wallet.mobile.BiometricSecretStore { *; }
 -keep class org.hacash.wallet.mobile.BackupExportHelper { *; }
 -keep class androidx.core.content.FileProvider { *; }
 # Tauri Android plugins (loaded by class name at runtime)
@@ -256,6 +251,7 @@ if (Test-Path $proguardPath) {
     if (
         $proguard -notmatch "app\.tauri\.opener\.OpenerPlugin" -or
         $proguard -notmatch "BackupFileHelper" -or
+        $proguard -notmatch "BiometricSecretStore" -or
         $proguard -notmatch "BackupExportHelper"
     ) {
         Add-Content -Path $proguardPath -Value $proguardKeeps -Encoding UTF8

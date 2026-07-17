@@ -3,8 +3,8 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use hkdf::Hkdf;
-use libsecp256k1::{PublicKey, SecretKey, SharedSecret};
 use rand::RngCore;
+use secp256k1::{PublicKey, SecretKey, ecdh::SharedSecret};
 use sha2::{Digest, Sha256};
 use sys::Account;
 
@@ -60,13 +60,11 @@ fn pair_key_v1(addr_a: &str, addr_b: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
-fn ecdh_shared(my_sk: &SecretKey, peer_pk: &[u8; 33]) -> WalletResult<[u8; 32]> {
-    let peer = PublicKey::parse_compressed(peer_pk).map_err(|e| WalletError::Other(e.to_string()))?;
-    let shared = SharedSecret::<sha2_v09::Sha256>::new(&peer, my_sk)
-        .map_err(|e| WalletError::Other(e.to_string()))?;
-    let mut out = [0u8; 32];
-    out.copy_from_slice(shared.as_ref());
-    Ok(out)
+fn ecdh_shared(my_sk: &[u8; 32], peer_pk: &[u8; 33]) -> WalletResult<[u8; 32]> {
+    let peer = PublicKey::from_slice(peer_pk).map_err(|e| WalletError::Other(e.to_string()))?;
+    let secret =
+        SecretKey::from_byte_array(*my_sk).map_err(|e| WalletError::Other(e.to_string()))?;
+    Ok(SharedSecret::new(&peer, &secret).secret_bytes())
 }
 
 fn derive_message_key(shared: &[u8; 32], addr_a: &str, addr_b: &str) -> [u8; 32] {
@@ -139,14 +137,21 @@ pub fn encrypt_body_v2(
     sent_at: &str,
 ) -> WalletResult<(String, String)> {
     if !verify_pubkey_address(peer_pubkey, peer_addr) {
-        return Err(WalletError::Other("peer pubkey does not match address".into()));
+        return Err(WalletError::Other(
+            "peer pubkey does not match address".into(),
+        ));
     }
-    let shared = ecdh_shared(my.secret_key(), peer_pubkey)?;
+    let shared = ecdh_shared(&my.secret_key().serialize(), peer_pubkey)?;
     let key = derive_message_key(&shared, my_addr, peer_addr);
     Ok(encrypt_with_key(&key, body, sent_at, MESSENGER_HKDF_INFO))
 }
 
-pub fn encrypt_body_v1(my_addr: &str, peer_addr: &str, body: &str, sent_at: &str) -> (String, String) {
+pub fn encrypt_body_v1(
+    my_addr: &str,
+    peer_addr: &str,
+    body: &str,
+    sent_at: &str,
+) -> (String, String) {
     let key = pair_key_v1(my_addr, peer_addr);
     encrypt_with_key(&key, body, sent_at, MESSENGER_V1_INFO)
 }
@@ -162,13 +167,12 @@ pub fn decrypt_body(
 ) -> WalletResult<PlainBody> {
     match crypto_v {
         MESSENGER_CRYPTO_V2 => {
-            let peer_pk = peer_pubkey.ok_or_else(|| {
-                WalletError::Other("v2 envelope missing peer pubkey".into())
-            })?;
+            let peer_pk = peer_pubkey
+                .ok_or_else(|| WalletError::Other("v2 envelope missing peer pubkey".into()))?;
             if !verify_pubkey_address(peer_pk, peer_addr) {
                 return Err(WalletError::Other("peer pubkey mismatch".into()));
             }
-            let shared = ecdh_shared(my.secret_key(), peer_pk)?;
+            let shared = ecdh_shared(&my.secret_key().serialize(), peer_pk)?;
             let key = derive_message_key(&shared, my_addr, peer_addr);
             decrypt_with_key(&key, nonce_hex, ciphertext_hex, MESSENGER_HKDF_INFO)
         }
@@ -176,7 +180,9 @@ pub fn decrypt_body(
             let key = pair_key_v1(my_addr, peer_addr);
             decrypt_with_key(&key, nonce_hex, ciphertext_hex, MESSENGER_V1_INFO)
         }
-        _ => Err(WalletError::Other(format!("unsupported messenger crypto v{crypto_v}"))),
+        _ => Err(WalletError::Other(format!(
+            "unsupported messenger crypto v{crypto_v}"
+        ))),
     }
 }
 
@@ -200,7 +206,9 @@ pub fn verify_inbox_auth(
     signature_hex: &str,
 ) -> WalletResult<()> {
     if !verify_pubkey_address(claimant_pubkey, to) {
-        return Err(WalletError::Other("claimant pubkey does not match address".into()));
+        return Err(WalletError::Other(
+            "claimant pubkey does not match address".into(),
+        ));
     }
     let sig_bytes = hex::decode(signature_hex).map_err(|e| WalletError::Other(e.to_string()))?;
     let sig: [u8; 64] = sig_bytes
@@ -269,8 +277,18 @@ mod tests {
         let a_addr = a.readable().to_string();
         let b_addr = b.readable().to_string();
         let b_pk = b.public_key().serialize_compressed();
-        let (n, c) = encrypt_body_v2(&a, &a_addr, &b_addr, &b_pk, "hello", "2026-01-01T00:00:00Z").unwrap();
-        let p = decrypt_body(&b, &b_addr, &a_addr, Some(&a.public_key().serialize_compressed()), MESSENGER_CRYPTO_V2, &n, &c).unwrap();
+        let (n, c) =
+            encrypt_body_v2(&a, &a_addr, &b_addr, &b_pk, "hello", "2026-01-01T00:00:00Z").unwrap();
+        let p = decrypt_body(
+            &b,
+            &b_addr,
+            &a_addr,
+            Some(&a.public_key().serialize_compressed()),
+            MESSENGER_CRYPTO_V2,
+            &n,
+            &c,
+        )
+        .unwrap();
         assert_eq!(p.body, "hello");
     }
 

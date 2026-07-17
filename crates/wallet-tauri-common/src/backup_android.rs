@@ -1,7 +1,7 @@
 #[cfg(target_os = "android")]
 fn copy_backup_file_jni(source_path: &str, display_name: &str) -> Result<String, String> {
-    use jni::objects::{JString, JValue};
     use jni::JavaVM;
+    use jni::objects::{JString, JValue};
 
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| format!("JavaVM: {e}"))?;
@@ -28,15 +28,16 @@ fn copy_backup_file_jni(source_path: &str, display_name: &str) -> Result<String,
         ],
     );
 
-    if env.exception_check().map_err(|e| format!("exception_check: {e}"))? {
+    if env
+        .exception_check()
+        .map_err(|e| format!("exception_check: {e}"))?
+    {
         env.exception_clear()
             .map_err(|e| format!("exception_clear: {e}"))?;
-        return Err(
-            result
-                .err()
-                .map(|e| format!("BackupExportHelper.copyFileToDownloads: {e}"))
-                .unwrap_or_else(|| "BackupExportHelper.copyFileToDownloads failed".to_string()),
-        );
+        return Err(result
+            .err()
+            .map(|e| format!("BackupExportHelper.copyFileToDownloads: {e}"))
+            .unwrap_or_else(|| "BackupExportHelper.copyFileToDownloads failed".to_string()));
     }
 
     let j_obj = result
@@ -61,8 +62,8 @@ pub fn copy_backup_file_to_downloads(
 
 #[cfg(target_os = "android")]
 fn delete_backup_source_jni(source: &str) -> Result<(), String> {
-    use jni::objects::JValue;
     use jni::JavaVM;
+    use jni::objects::JValue;
 
     let ctx = ndk_context::android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| format!("JavaVM: {e}"))?;
@@ -82,15 +83,16 @@ fn delete_backup_source_jni(source: &str) -> Result<(), String> {
         &[JValue::Object(&activity), JValue::Object(&source_j)],
     );
 
-    if env.exception_check().map_err(|e| format!("exception_check: {e}"))? {
+    if env
+        .exception_check()
+        .map_err(|e| format!("exception_check: {e}"))?
+    {
         env.exception_clear()
             .map_err(|e| format!("exception_clear: {e}"))?;
-        return Err(
-            result
-                .err()
-                .map(|e| format!("BackupFileHelper.deleteBackupSource: {e}"))
-                .unwrap_or_else(|| "BackupFileHelper.deleteBackupSource failed".to_string()),
-        );
+        return Err(result
+            .err()
+            .map(|e| format!("BackupFileHelper.deleteBackupSource: {e}"))
+            .unwrap_or_else(|| "BackupFileHelper.deleteBackupSource failed".to_string()));
     }
 
     let deleted = result
@@ -100,7 +102,7 @@ fn delete_backup_source_jni(source: &str) -> Result<(), String> {
     if deleted {
         Ok(())
     } else {
-        Err("backup file could not be deleted — remove it manually from Downloads".into())
+        Err("backup file could not be deleted. remove it manually from Downloads".into())
     }
 }
 

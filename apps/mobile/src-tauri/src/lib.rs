@@ -1,12 +1,17 @@
+mod biometric_store;
 mod platform;
 
 use hacash_wallet_core::WalletService;
 use tauri::Manager;
 use wallet_tauri_common::AppState;
+use zeroize::Zeroize;
 
 #[tauri::command]
 fn wallet_platform_security_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    Ok(serde_json::to_value(platform::platform_security_status(&app)).map_err(|e| e.to_string())?)
+    Ok(
+        serde_json::to_value(platform::platform_security_status(&app))
+            .map_err(|e| e.to_string())?,
+    )
 }
 
 #[tauri::command]
@@ -32,11 +37,14 @@ struct BiometricUnlockStatus {
 }
 
 #[tauri::command]
-fn wallet_biometric_unlock_status(state: tauri::State<'_, AppState>) -> Result<BiometricUnlockStatus, String> {
+fn wallet_biometric_unlock_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<BiometricUnlockStatus, String> {
     let svc = state.inner.blocking_lock();
     Ok(BiometricUnlockStatus {
         enabled: svc.get_settings().biometric_unlock_enabled,
-        configured: svc.biometric_unlock_configured(),
+        configured: biometric_store::is_configured(&app)?,
     })
 }
 
@@ -46,16 +54,30 @@ fn wallet_enable_biometric_unlock(
     passphrase: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    {
+        let mut svc = state.inner.blocking_lock();
+        svc.verify_wallet_passphrase(&passphrase)
+            .map_err(|e| e.to_string())?;
+    }
     platform::verify_native_biometric(&app, "Enable biometric unlock for Hacash Wallet")?;
+    biometric_store::store(&app, &passphrase)?;
     let mut svc = state.inner.blocking_lock();
-    svc.enable_biometric_unlock(&passphrase)
-        .map_err(|e| e.to_string())
+    if let Err(error) = svc.set_biometric_unlock_enabled(true) {
+        let _ = biometric_store::clear(&app);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn wallet_disable_biometric_unlock(state: tauri::State<'_, AppState>) -> Result<(), String> {
+fn wallet_disable_biometric_unlock(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    biometric_store::clear(&app)?;
     let mut svc = state.inner.blocking_lock();
-    svc.disable_biometric_unlock().map_err(|e| e.to_string())
+    svc.set_biometric_unlock_enabled(false)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -64,13 +86,11 @@ fn wallet_unlock_biometric(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     platform::verify_native_biometric(&app, "Unlock Hacash Wallet")?;
-    let passphrase = {
-        let svc = state.inner.blocking_lock();
-        svc.unlock_passphrase_for_biometric()
-            .map_err(|e| e.to_string())?
-    };
+    let mut passphrase = biometric_store::load(&app)?;
     let mut svc = state.inner.blocking_lock();
-    svc.unlock(&passphrase).map_err(|e| e.to_string())
+    let result = svc.unlock(&passphrase).map_err(|e| e.to_string());
+    passphrase.zeroize();
+    result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,6 +112,15 @@ pub fn run() {
                 unsafe { std::env::set_var("HACASH_WALLET_DATA", &data_dir) };
             }
             let mut svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
+            if svc.biometric_unlock_configured() {
+                tracing::warn!(
+                    "removing legacy biometric cache that stored its wrapping key on disk"
+                );
+                if let Err(error) = svc.disable_biometric_unlock() {
+                    tracing::warn!("legacy biometric cache removal failed: {error}");
+                }
+            }
+
             if svc.status().has_wallet {
                 if let Err(e) = svc.warm_vault_cache() {
                     tracing::warn!("vault cache warm skipped: {e}");

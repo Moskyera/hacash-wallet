@@ -43,7 +43,9 @@ fn audit_quantum_hybrid_create_persists_settings() {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("vault-pass-123456").unwrap();
-            let info = svc.quantum_create_hybrid("keystore-pass-123", None).unwrap();
+            let info = svc
+                .quantum_create_hybrid("keystore-pass-123", None)
+                .unwrap();
             assert_eq!(info.kind, "hybrid");
             assert_eq!(info.address_version, 7);
 
@@ -65,7 +67,8 @@ fn audit_quantum_export_import_roundtrip() {
                 .quantum_export_keystore("ks-pass-original", Some("ks-pass-rotated"))
                 .unwrap();
 
-            svc.quantum_import_keystore(&exported, "ks-pass-rotated").unwrap();
+            svc.quantum_import_keystore(&exported, "ks-pass-rotated")
+                .unwrap();
             let settings = svc.quantum_settings();
             assert_active_account(&settings, "hybrid", 7, &created.address);
         });
@@ -140,13 +143,15 @@ fn audit_quantum_pqc_type4_preflight_allowed() {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("vault-pass-123456").unwrap();
             svc.quantum_create_pqc("ks-pass-12345").unwrap();
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let preflight = rt
-                .block_on(svc.quantum_preflight_type4(
-                    "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
-                    "0.1",
-                ))
-                .unwrap();
+            let account = svc.quantum_settings().active_account.unwrap();
+            let preflight = hacash_wallet_core::hip23::validate_type4_send(
+                &account.kind,
+                "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+                0.1003,
+                0.0,
+                "1:244",
+            )
+            .unwrap();
             assert!(
                 !preflight
                     .errors

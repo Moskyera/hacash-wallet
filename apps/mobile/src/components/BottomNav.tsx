@@ -6,12 +6,12 @@ type Props = {
   watchOnly?: boolean;
 };
 
-const ITEMS: { id: TabId; label: string; icon: string }[] = [
-  { id: "home", label: "Home", icon: "⌂" },
-  { id: "pay", label: "Pay", icon: "◎" },
-  { id: "receive", label: "Receive", icon: "↗" },
-  { id: "messages", label: "Chat", icon: "💬" },
-  { id: "more", label: "More", icon: "☰" },
+const ITEMS: { id: TabId; label: string; mark: string }[] = [
+  { id: "home", label: "Home", mark: "⌂" },
+  { id: "pay", label: "Pay", mark: "↑" },
+  { id: "receive", label: "Receive", mark: "↓" },
+  { id: "messages", label: "Chat", mark: "••" },
+  { id: "more", label: "More", mark: "≡" },
 ];
 
 export default function BottomNav({ active, onChange, watchOnly }: Props) {
@@ -22,11 +22,10 @@ export default function BottomNav({ active, onChange, watchOnly }: Props) {
           key={item.id}
           type="button"
           className={`bottom-nav-item ${active === item.id ? "active" : ""}`}
+          aria-current={active === item.id ? "page" : undefined}
           onClick={() => onChange(item.id)}
         >
-          <span className="bottom-nav-icon" aria-hidden>
-            {item.icon}
-          </span>
+          <span className="bottom-nav-icon" aria-hidden>{item.mark}</span>
           <span>{item.label}</span>
         </button>
       ))}

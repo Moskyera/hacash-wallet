@@ -4,8 +4,8 @@ mod common;
 
 use common::stress_gate;
 use hacash_wallet_core::hip23::{
-    validate_all_patterns, validate_simple_l1_send, BalanceFloorInput, HeightScopeInput,
-    Type3CheckInput, ISTANBUL_HEIGHT,
+    BalanceFloorInput, HeightScopeInput, ISTANBUL_HEIGHT, Type3CheckInput, validate_all_patterns,
+    validate_simple_l1_send,
 };
 
 const ITERATIONS: usize = 10_000;

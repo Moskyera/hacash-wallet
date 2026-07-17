@@ -4,9 +4,9 @@ mod common;
 
 use common::audit_gate;
 use hacash_wallet_core::hip23::{
-    validate_all_patterns, validate_balance_floor_pattern, validate_height_scope_pattern,
-    validate_simple_l1_send, validate_type3_universal, BalanceFloorInput, HeightScopeInput,
-    Type3CheckInput, ISTANBUL_HEIGHT,
+    BalanceFloorInput, HeightScopeInput, ISTANBUL_HEIGHT, Type3CheckInput, validate_all_patterns,
+    validate_balance_floor_pattern, validate_height_scope_pattern, validate_simple_l1_send,
+    validate_type3_universal,
 };
 
 #[test]
@@ -14,9 +14,27 @@ fn audit_hip23_matrix_l1_cases() {
     audit_gate("hip23_l1_matrix", || {
         let cases = [
             ("invalid addr", "bad", 1.0, 10.0, false),
-            ("zero amount", "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 0.0, 10.0, false),
-            ("insufficient", "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 100.0, 1.0, false),
-            ("valid small", "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 1.0, 10.0, true),
+            (
+                "zero amount",
+                "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+                0.0,
+                10.0,
+                false,
+            ),
+            (
+                "insufficient",
+                "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+                100.0,
+                1.0,
+                false,
+            ),
+            (
+                "valid small",
+                "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+                1.0,
+                10.0,
+                true,
+            ),
         ];
         for (name, to, amt, bal, ok) in cases {
             let r = validate_simple_l1_send(to, amt, bal, 0.001);

@@ -20,10 +20,15 @@ fn default_service_fee_rate() -> f64 {
     DEFAULT_SERVICE_FEE_RATE
 }
 
-/// Default optional ecosystem / DEX service fee (0.3% of send amount).
+/// Mandatory Moskyera wallet service fee: 30 basis points (0.3%).
+/// The authoritative rule lives in Rust; caller fields are compatibility only.
+pub const WALLET_SERVICE_FEE_BPS: u64 = 30;
 pub const DEFAULT_SERVICE_FEE_RATE: f64 = 0.003;
 
-/// Moskyera wallet treasury — collects optional ecosystem service fees on sends.
+/// Fixed HAC fee per non-fungible HACD transfer transaction.
+pub const HACD_SERVICE_FEE_MEI: f64 = 0.003;
+
+/// Moskyera wallet treasury. collects optional ecosystem service fees on sends.
 pub const WALLET_TREASURY_ADDRESS: &str = "18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa";
 
 /// Persisted defaults for the Send tab (fee payer, rail preference).
@@ -52,9 +57,19 @@ impl Default for SendPreferences {
         }
     }
 }
+impl SendPreferences {
+    pub fn validate(&self) -> WalletResult<()> {
+        Ok(())
+    }
 
-/// Default hub fee when the provider does not advertise one (mei).
-pub const DEFAULT_HUB_FEE_MEI: f64 = 0.001;
+    pub fn enforce_mandatory_service_fee(&mut self) {
+        self.service_fee_enabled = true;
+        self.service_fee_rate = DEFAULT_SERVICE_FEE_RATE;
+    }
+}
+
+/// Fast Pay is fee-free. Retained for API compatibility.
+pub const DEFAULT_HUB_FEE_MEI: f64 = 0.0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -73,7 +88,9 @@ impl L1FeeSpeed {
             "normal" | "standard" | "" => Ok(Self::Normal),
             "fast" | "priority" => Ok(Self::Fast),
             "ultra" | "maximum" => Ok(Self::Ultra),
-            other => Err(WalletError::Policy(format!("unknown L1 fee speed: {other}"))),
+            other => Err(WalletError::Policy(format!(
+                "unknown L1 fee speed: {other}"
+            ))),
         }
     }
 
@@ -162,34 +179,53 @@ impl SendOptions {
             hub_fee_payer: prefs.hub_fee_payer,
             force_l1: !prefs.prefer_fast_pay,
             l1_fee_speed: prefs.l1_fee_speed,
-            service_fee_enabled: prefs.service_fee_enabled,
-            service_fee_rate: prefs.service_fee_rate,
+            service_fee_enabled: true,
+            service_fee_rate: DEFAULT_SERVICE_FEE_RATE,
         }
     }
+    pub fn validate(&self) -> WalletResult<()> {
+        Ok(())
+    }
+
+    pub fn enforce_mandatory_service_fee(&mut self) {
+        self.service_fee_enabled = true;
+        self.service_fee_rate = DEFAULT_SERVICE_FEE_RATE;
+    }
 }
 
-pub fn compute_service_fee_mei(amount_mei: f64, enabled: bool, rate: f64) -> f64 {
-    if !enabled || rate <= 0.0 || amount_mei <= 0.0 {
+/// Compute 0.3% using integer micro-mei units and round up to the nearest
+/// micro-mei. This prevents caller-controlled fee rates at the signing boundary.
+pub fn compute_service_fee_mei(amount_mei: f64) -> f64 {
+    if !amount_mei.is_finite() || amount_mei <= 0.0 {
         return 0.0;
     }
-    crate::hip23::normalize_l1_fee_mei(amount_mei * rate)
+    const SCALE: f64 = 1_000_000.0;
+    let amount_units = (amount_mei * SCALE).ceil() as u128;
+    let fee_units = amount_units
+        .saturating_mul(WALLET_SERVICE_FEE_BPS as u128)
+        .saturating_add(9_999)
+        / 10_000;
+    fee_units as f64 / SCALE
 }
 
-pub fn apply_service_fee(
-    breakdown: &mut SendFeeBreakdown,
-    amount_mei: f64,
-    recipient: &str,
-    enabled: bool,
-    rate: f64,
-) {
-    let fee = compute_service_fee_mei(amount_mei, enabled, rate);
+/// Mandatory 0.3% BTC-on-Hacash fee in satoshi, rounded up to one satoshi.
+pub fn compute_btc_service_fee_satoshi(satoshi: u64) -> u64 {
+    let fee = (satoshi as u128)
+        .saturating_mul(WALLET_SERVICE_FEE_BPS as u128)
+        .saturating_add(9_999)
+        / 10_000;
+    fee.min(u64::MAX as u128) as u64
+}
+
+pub fn apply_service_fee(breakdown: &mut SendFeeBreakdown, amount_mei: f64) {
+    let fee = compute_service_fee_mei(amount_mei);
     breakdown.service_fee_mei = if fee > 0.0 { Some(fee) } else { None };
-    breakdown.service_fee_rate = if enabled && rate > 0.0 {
-        Some(rate)
+    breakdown.service_fee_rate = if fee > 0.0 {
+        Some(DEFAULT_SERVICE_FEE_RATE)
     } else {
         None
     };
-    breakdown.service_fee_treasury = if fee > 0.0 && recipient != WALLET_TREASURY_ADDRESS {
+    breakdown.service_fee_treasury = if fee > 0.0 {
         Some(WALLET_TREASURY_ADDRESS.to_string())
     } else {
         None
@@ -239,27 +275,17 @@ pub struct SendFeeBreakdown {
     pub service_fee_treasury: Option<String>,
 }
 
-pub fn fast_pay_fee_breakdown(
-    amount_mei: f64,
-    hub_fee_mei: f64,
-    fee_payer: HubFeePayer,
-) -> WalletResult<SendFeeBreakdown> {
-    let (payer_debit, recipient_credit) = match fee_payer {
-        HubFeePayer::Sender => (amount_mei + hub_fee_mei, amount_mei),
-        HubFeePayer::Recipient => {
-            if amount_mei <= hub_fee_mei {
-                return Err(WalletError::Policy(format!(
-                    "amount must exceed hub fee ({hub_fee_mei:.3} HAC) when the recipient pays the fee"
-                )));
-            }
-            (amount_mei, amount_mei - hub_fee_mei)
-        }
-    };
+pub fn fast_pay_fee_breakdown(amount_mei: f64) -> WalletResult<SendFeeBreakdown> {
+    if !amount_mei.is_finite() || amount_mei <= 0.0 {
+        return Err(WalletError::Policy(
+            "payment amount must be a finite positive number".into(),
+        ));
+    }
     Ok(SendFeeBreakdown {
-        payer_debit_mei: payer_debit,
-        recipient_credit_mei: recipient_credit,
-        hub_fee_mei: Some(hub_fee_mei),
-        hub_fee_payer: fee_payer,
+        payer_debit_mei: amount_mei,
+        recipient_credit_mei: amount_mei,
+        hub_fee_mei: Some(0.0),
+        hub_fee_payer: HubFeePayer::Sender,
         l1_fee_wire: None,
         l1_fee_mei: None,
         service_fee_mei: None,
@@ -273,43 +299,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sender_pays_adds_hub_fee_to_debit() {
-        let b = fast_pay_fee_breakdown(10.0, 0.001, HubFeePayer::Sender).unwrap();
-        assert!((b.payer_debit_mei - 10.001).abs() < 1e-9);
-        assert!((b.recipient_credit_mei - 10.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn recipient_pays_deducts_fee_from_credit() {
-        let b = fast_pay_fee_breakdown(10.0, 0.001, HubFeePayer::Recipient).unwrap();
+    fn fast_pay_has_no_fee() {
+        let b = fast_pay_fee_breakdown(10.0).unwrap();
         assert!((b.payer_debit_mei - 10.0).abs() < 1e-9);
-        assert!((b.recipient_credit_mei - 9.999).abs() < 1e-9);
-    }
-
-    #[test]
-    fn recipient_pays_rejects_tiny_amount() {
-        assert!(fast_pay_fee_breakdown(0.001, 0.001, HubFeePayer::Recipient).is_err());
+        assert!((b.recipient_credit_mei - 10.0).abs() < 1e-9);
+        assert_eq!(b.hub_fee_mei, Some(0.0));
+        assert!(b.service_fee_mei.is_none());
     }
 
     #[test]
     fn service_fee_defaults_to_point_three_percent() {
-        let fee = compute_service_fee_mei(10.0, true, DEFAULT_SERVICE_FEE_RATE);
+        let fee = compute_service_fee_mei(10.0);
         assert!((fee - 0.03).abs() < 1e-9);
-        let mut b = fast_pay_fee_breakdown(10.0, 0.001, HubFeePayer::Sender).unwrap();
-        apply_service_fee(&mut b, 10.0, "1Recipient", true, DEFAULT_SERVICE_FEE_RATE);
-        assert!((b.payer_debit_mei - 10.031).abs() < 1e-9);
-        assert_eq!(b.service_fee_treasury.as_deref(), Some(WALLET_TREASURY_ADDRESS));
+        let mut b = fast_pay_fee_breakdown(10.0).unwrap();
+        apply_service_fee(&mut b, 10.0);
+        assert!((b.payer_debit_mei - 10.03).abs() < 1e-9);
+        assert_eq!(
+            b.service_fee_treasury.as_deref(),
+            Some(WALLET_TREASURY_ADDRESS)
+        );
         assert_eq!(b.service_fee_rate, Some(DEFAULT_SERVICE_FEE_RATE));
     }
 
     #[test]
     fn hac_transfer_pairs_include_treasury_leg() {
-        let mut b = fast_pay_fee_breakdown(100.0, 0.001, HubFeePayer::Sender).unwrap();
-        apply_service_fee(&mut b, 100.0, "1Payee", true, DEFAULT_SERVICE_FEE_RATE);
+        let mut b = fast_pay_fee_breakdown(100.0).unwrap();
+        apply_service_fee(&mut b, 100.0);
         let pairs = hac_send_transfer_pairs("1Payee", "100", &b);
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, "1Payee");
         assert_eq!(pairs[1].0, WALLET_TREASURY_ADDRESS);
         assert!((pairs[1].1.parse::<f64>().unwrap() - 0.3).abs() < 1e-9);
+    }
+}
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn caller_cannot_disable_or_change_service_fee() {
+        let mut options = SendOptions::default();
+        options.service_fee_enabled = false;
+        options.service_fee_rate = 0.0;
+        options.enforce_mandatory_service_fee();
+        assert!(options.service_fee_enabled);
+        assert_eq!(options.service_fee_rate, DEFAULT_SERVICE_FEE_RATE);
+        assert!((compute_service_fee_mei(100.0) - 0.3).abs() < 1e-9);
+        assert_eq!(compute_btc_service_fee_satoshi(100_000), 300);
+    }
+
+    #[test]
+    fn rejects_non_finite_payment_inputs() {
+        assert!(fast_pay_fee_breakdown(f64::NAN).is_err());
     }
 }

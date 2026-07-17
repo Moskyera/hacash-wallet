@@ -37,8 +37,8 @@ export function usePaymentFlow(opts: {
       hub_fee_payer: sendHubFeePayer,
       force_l1: sendForceL1,
       l1_fee_speed: sendL1FeeSpeed,
-      service_fee_enabled: sendServiceFeeEnabled,
-      service_fee_rate: serviceFeeRate,
+      service_fee_enabled: true,
+      service_fee_rate: DEFAULT_SERVICE_FEE_RATE,
     }),
     [sendHubFeePayer, sendForceL1, sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate],
   );
@@ -47,7 +47,7 @@ export function usePaymentFlow(opts: {
     setSendHubFeePayer(cfg.send?.hub_fee_payer ?? "sender");
     setSendForceL1(!(cfg.send?.prefer_fast_pay ?? true));
     setSendL1FeeSpeed(cfg.send?.l1_fee_speed ?? "normal");
-    setSendServiceFeeEnabled(cfg.send?.service_fee_enabled ?? true);
+    setSendServiceFeeEnabled(true);
   }, []);
 
   const persistSendPrefs = useCallback(
@@ -55,7 +55,7 @@ export function usePaymentFlow(opts: {
       hubFee: HubFeePayer,
       forceL1: boolean,
       l1FeeSpeed: L1FeeSpeed = sendL1FeeSpeed,
-      serviceFeeEnabled: boolean = sendServiceFeeEnabled,
+      _serviceFeeEnabled: boolean = sendServiceFeeEnabled,
     ) => {
       if (!settings) return;
       const next: WalletSettings = {
@@ -64,8 +64,8 @@ export function usePaymentFlow(opts: {
           hub_fee_payer: hubFee,
           prefer_fast_pay: !forceL1,
           l1_fee_speed: l1FeeSpeed,
-          service_fee_enabled: serviceFeeEnabled,
-          service_fee_rate: serviceFeeRate,
+          service_fee_enabled: true,
+          service_fee_rate: DEFAULT_SERVICE_FEE_RATE,
         },
       };
       await api.updateSettings(next);
@@ -84,9 +84,9 @@ export function usePaymentFlow(opts: {
           sendOptions: sendOptions(),
           toast: showToast,
           withAmountMessage:
-            source === "qr" ? "QR loaded — confirm payment." : "Payment link loaded — confirm below.",
+            source === "qr" ? "QR loaded. confirm payment." : "Payment link loaded. confirm below.",
           withoutAmountMessage:
-            source === "qr" ? "Address scanned — enter amount." : "Address loaded — enter amount.",
+            source === "qr" ? "Address scanned. enter amount." : "Address loaded. enter amount.",
         });
         setSendTo(result.sendTo);
         setSendAmount(result.sendAmount);

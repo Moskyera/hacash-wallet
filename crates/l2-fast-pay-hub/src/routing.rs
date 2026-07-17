@@ -76,7 +76,7 @@ fn candidate_payee_channel_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::{ChannelPartyBalance, ChannelInfo};
+    use crate::node::{ChannelInfo, ChannelPartyBalance};
 
     fn sample_channel(id: &str, left: &str, right: &str) -> ChannelInfo {
         ChannelInfo {

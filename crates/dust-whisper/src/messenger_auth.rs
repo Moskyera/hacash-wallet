@@ -1,6 +1,6 @@
 //! Inbox fetch/ack authentication verified on the relay.
 
-use libsecp256k1::{Message, PublicKey, Signature};
+use secp256k1::{Message, PublicKey, Secp256k1, ecdsa::Signature};
 use sha2::{Digest, Sha256};
 
 const INBOX_AUTH_DOMAIN: &[u8] = b"hacash-messenger-inbox-v1";
@@ -31,12 +31,14 @@ pub fn verify_inbox_auth(
     let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else {
         return false;
     };
-    let Ok(pubkey) = PublicKey::parse_compressed(&pk) else {
+    let Ok(pubkey) = PublicKey::from_slice(&pk) else {
         return false;
     };
-    let Ok(sig) = Signature::parse_standard(&sig_arr) else {
+    let Ok(sig) = Signature::from_compact(&sig_arr) else {
         return false;
     };
     let digest = inbox_auth_digest(to, nonce);
-    libsecp256k1::verify(&Message::parse(&digest), &sig, &pubkey)
+    Secp256k1::verification_only()
+        .verify_ecdsa(Message::from_digest(digest), &sig, &pubkey)
+        .is_ok()
 }

@@ -4,7 +4,7 @@ mod common;
 
 use common::{tier0_gate, with_isolated_wallet_dir, with_protocol_setup};
 use hacash_wallet_core::airgap::{
-    encode_envelope_qr, parse_airgap_qr_parts, AirgapEnvelope, AirgapUnsigned, AIRGAP_VERSION,
+    AIRGAP_VERSION, AirgapEnvelope, AirgapUnsigned, encode_envelope_qr, parse_airgap_qr_parts,
 };
 use hacash_wallet_core::{WalletError, WalletService};
 
@@ -16,6 +16,8 @@ fn sample_unsigned(from: &str) -> AirgapUnsigned {
         amount_mei: 0.5,
         amount_wire: "0:500".into(),
         fee: "1:244".into(),
+        service_fee_mei: 0.0015,
+        service_fee_treasury: Some(hacash_wallet_core::WALLET_TREASURY_ADDRESS.into()),
         body_hex: "0102030405".into(),
         summary: "airgap test".into(),
         tx_type: 1,

@@ -4,9 +4,7 @@
     "android",
     "iOS"
   ],
-  "windows": [
-    "main"
-  ],
+  "webviews": ["main"],
   "permissions": [
     "biometric:default",
     "deep-link:default",

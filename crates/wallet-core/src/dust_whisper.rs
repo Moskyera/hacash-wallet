@@ -57,7 +57,28 @@ pub async fn relay_health(
     node: &NodeClient,
     settings: &DustWhisperSettings,
 ) -> Vec<RelayHealthStatus> {
-    dust_whisper::check_relays_health(node.http(), &settings.relay_urls).await
+    let mut rows = dust_whisper::check_relays_health(node.http(), &settings.relay_urls).await;
+    for row in &mut rows {
+        if !row.online {
+            continue;
+        }
+        match row.node_url.as_deref() {
+            Some(relay_node) if dust_whisper::node_urls_match(relay_node, node.base_url()) => {}
+            Some(relay_node) => {
+                row.online = false;
+                row.error = Some(format!(
+                    "Relay targets {relay_node}, but this wallet uses {}. Broadcast blocked.",
+                    node.base_url()
+                ));
+            }
+            None => {
+                row.online = false;
+                row.error =
+                    Some("Relay did not declare its target node. Broadcast blocked.".into());
+            }
+        }
+    }
+    rows
 }
 
 impl DustWhisperSettings {
@@ -102,14 +123,7 @@ pub async fn submit_tx_hex(
     }
 
     if core.enabled {
-        match dust_whisper::submit_tx(
-            node.http(),
-            &core,
-            node.base_url(),
-            tx_hex,
-        )
-        .await
-        {
+        match dust_whisper::submit_tx(node.http(), &core, node.base_url(), tx_hex).await {
             Ok(result) => {
                 return Ok(SubmitTxResponse {
                     ret: result.ret,

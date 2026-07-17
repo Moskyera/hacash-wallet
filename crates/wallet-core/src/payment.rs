@@ -2,15 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::account::WalletAccount;
 use crate::bills::BillStore;
-use crate::channel::{query_channel, ChannelInfo, CHANNEL_STATUS_OPENING};
+use crate::channel::{CHANNEL_STATUS_OPENING, ChannelInfo, query_channel};
 use crate::error::{WalletError, WalletResult};
+use crate::hip23::format_mei_for_node;
+use crate::l1_fee::{L1FeeTierQuote, estimate_hac_l1_fee_tiers, format_l1_fee_label};
 use crate::l2_hub::{FastPayRequest, L2HubClient};
 use crate::node::NodeClient;
-use crate::hip23::format_mei_for_node;
-use crate::l1_fee::{estimate_hac_l1_fee_tiers, format_l1_fee_label, L1FeeTierQuote};
 use crate::send_options::{
-    apply_service_fee, fast_pay_fee_breakdown, HubFeePayer, SendFeeBreakdown, SendOptions,
-    DEFAULT_HUB_FEE_MEI,
+    SendFeeBreakdown, SendOptions, apply_service_fee, fast_pay_fee_breakdown,
 };
 use crate::settings::WalletSettings;
 
@@ -77,11 +76,10 @@ impl PaymentRouter {
         amount_mei: f64,
         options: &SendOptions,
     ) -> WalletResult<PaymentPlan> {
+        crate::hip23::validate_hac_amount_mei(amount_mei)?;
+        options.validate()?;
         if !options.force_l1 {
-            if let Some(plan) = self
-                .try_l2_plan(from, to, amount_mei, options)
-                .await?
-            {
+            if let Some(plan) = self.try_l2_plan(from, to, amount_mei).await? {
                 return Ok(plan);
             }
         }
@@ -94,8 +92,6 @@ impl PaymentRouter {
             &amount_wire,
             amount_mei,
             options.l1_fee_speed,
-            options.service_fee_enabled,
-            options.service_fee_rate,
         )
         .await?;
         let fee_est = tier_set.selected;
@@ -110,13 +106,7 @@ impl PaymentRouter {
             service_fee_rate: None,
             service_fee_treasury: None,
         };
-        apply_service_fee(
-            &mut fee_breakdown,
-            amount_mei,
-            to,
-            options.service_fee_enabled,
-            options.service_fee_rate,
-        );
+        apply_service_fee(&mut fee_breakdown, amount_mei);
         Ok(PaymentPlan {
             rail: PaymentRail::L1OnChain,
             summary: format!("Send {amount_mei} HAC to {to}"),
@@ -134,9 +124,7 @@ impl PaymentRouter {
         from: &str,
         to: &str,
         amount_mei: f64,
-        options: &SendOptions,
     ) -> WalletResult<Option<PaymentPlan>> {
-        let hub_fee_payer = options.hub_fee_payer;
         let hub_url = match &self.settings.l2_hub_url {
             Some(u) => u.clone(),
             None => return Ok(None),
@@ -151,29 +139,28 @@ impl PaymentRouter {
         if !health.ok {
             return Ok(None);
         }
-        let hub_fee_mei = health.hub_fee_mei.unwrap_or(DEFAULT_HUB_FEE_MEI);
+        if health.version < 3
+            || !health.settlement_ready
+            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+        {
+            // Fast Pay is fee-free and must produce a dispute-ready settlement bill.
+            return Ok(None);
+        }
+        let same_channel_payee = health.hub_address.as_deref() == Some(to);
+        if !same_channel_payee && !health.cross_channel_ready {
+            return Ok(None);
+        }
 
         let channel = query_channel(&self.node, &channel_id).await?;
         if !channel_is_ready(&channel, from) {
             return Ok(None);
         }
 
-        let mut fee_breakdown = fast_pay_fee_breakdown(amount_mei, hub_fee_mei, hub_fee_payer)?;
-        apply_service_fee(
-            &mut fee_breakdown,
-            amount_mei,
-            to,
-            options.service_fee_enabled,
-            options.service_fee_rate,
-        );
-        let fee_label = match hub_fee_payer {
-            HubFeePayer::Sender => format!("~{hub_fee_mei:.3} HAC (you pay)"),
-            HubFeePayer::Recipient => format!("~{hub_fee_mei:.3} HAC (recipient pays)"),
-        };
+        let fee_breakdown = fast_pay_fee_breakdown(amount_mei)?;
         Ok(Some(PaymentPlan {
             rail: PaymentRail::L2Fast,
             summary: format!("Send {amount_mei} HAC to {to}"),
-            estimated_fee: fee_label,
+            estimated_fee: "0 HAC".into(),
             channel_id: Some(channel_id),
             rail_label: crate::fast_pay::rail_label(PaymentRail::L2Fast).into(),
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L2Fast).into(),
@@ -186,10 +173,8 @@ impl PaymentRouter {
         &mut self,
         from: &str,
         to: &str,
-        _amount_mei: f64,
         amount_wire: &str,
         payer_account: &WalletAccount,
-        hub_fee_payer: HubFeePayer,
     ) -> WalletResult<String> {
         let hub_url = self
             .settings
@@ -203,12 +188,25 @@ impl PaymentRouter {
             .ok_or_else(|| WalletError::L2("channel not configured".into()))?;
 
         let hub = L2HubClient::new(hub_url);
+        let health = hub.health().await?;
+        let same_channel_payee = health.hub_address.as_deref() == Some(to);
+        if !health.ok
+            || health.version < 3
+            || !health.settlement_ready
+            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+            || (!same_channel_payee && !health.cross_channel_ready)
+        {
+            return Err(WalletError::L2(
+                "Fast Pay provider is not ready for a safe, fee-free settlement to this recipient"
+                    .into(),
+            ));
+        }
         let req = FastPayRequest {
             payer: from.to_owned(),
             payee: to.to_owned(),
             amount: amount_wire.to_owned(),
             channel_id,
-            fee_payer: Some(hub_fee_payer.as_str().into()),
+            fee_payer: None,
         };
         if payer_account.address() != from {
             return Err(WalletError::L2(format!(

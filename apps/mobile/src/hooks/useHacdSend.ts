@@ -93,7 +93,7 @@ export function useHacdSend(opts: {
     if (!preview) return;
     try {
       await maybeSecondFactorGate({
-        amountMei: preview.fee_mei,
+        amountMei: Number.POSITIVE_INFINITY,
         securityProfile: settings?.security_profile,
         biometricSendEnabled: settings?.biometric_send_enabled ?? true,
         nativeBiometricAvailable: platformSec?.native_biometric_available,

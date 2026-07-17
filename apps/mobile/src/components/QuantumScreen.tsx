@@ -112,6 +112,8 @@ export default function QuantumScreen({
         balance_mei: qBalance ?? 0,
         fee_wire: "0:004",
         fee_mei: 0.004,
+        service_fee_mei: 0,
+        service_fee_treasury: "",
         total_mei: 0,
       });
     }
@@ -240,7 +242,7 @@ export default function QuantumScreen({
       setAirgapQr(prep.qr_parts);
       setSignedAirgapQr([]);
       setShowAirgap(true);
-      onToast("Unsigned Type 4 QR ready — scan on offline device.", "success");
+      onToast("Unsigned Type 4 QR ready. scan on offline device.", "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -269,13 +271,15 @@ export default function QuantumScreen({
         amount_mei: env.amount_mei,
         amount_wire: env.amount_wire,
         fee: env.fee,
+        service_fee_mei: env.service_fee_mei,
+        service_fee_treasury: env.service_fee_treasury,
         body_hex: env.body_hex,
         summary: env.summary,
         tx_type: env.tx_type ?? 4,
       };
       const signed = await quantumApi.airgapSignType4(unsigned, sendPass);
       setSignedAirgapQr(signed.qr_parts);
-      onToast("Signed Type 4 QR ready — broadcast from online device.", "success");
+      onToast("Signed Type 4 QR ready. broadcast from online device.", "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -297,6 +301,10 @@ export default function QuantumScreen({
         from: env.from,
         to: env.to,
         amount_mei: env.amount_mei,
+        amount_wire: env.amount_wire,
+        fee: env.fee,
+        service_fee_mei: env.service_fee_mei,
+        service_fee_treasury: env.service_fee_treasury,
         signed_hex: env.signed_hex,
         summary: env.summary,
         tx_type: env.tx_type ?? 4,
@@ -315,7 +323,7 @@ export default function QuantumScreen({
     }
   }
 
-  async function sendType4(isTest: boolean) {
+  async function sendType4() {
     if (!type4Ready) {
       onToast("Create or import a PQC/Hybrid account first.", "error");
       return;
@@ -337,13 +345,8 @@ export default function QuantumScreen({
     setSendHash("");
     try {
       await maybeSecondFactor(amt);
-      if (isTest) {
-        const res = await quantumApi.sendTestTx(sendPass);
-        setSendHash(res.hash);
-      } else {
-        const res = await quantumApi.sendType4(sendTo.trim(), sendAmount.trim(), sendPass);
-        setSendHash(res.hash);
-      }
+      const res = await quantumApi.sendType4(sendTo.trim(), sendAmount.trim(), sendPass);
+      setSendHash(res.hash);
       onToast("Quantum transaction sent.", "success");
       await refreshBalance();
       void runPreflight();
@@ -386,6 +389,10 @@ export default function QuantumScreen({
             <span />
           </label>
         </div>
+        <p className="muted small">
+          Experimental Type 4 support. PQC and hybrid signing are implemented, but this wallet has
+          not completed an independent cryptographic audit.
+        </p>
 
         {settings.quantum_mode && (
           <>
@@ -427,7 +434,7 @@ export default function QuantumScreen({
             Send legacy HAC from your main wallet to this quantum address to fund Type 4 sends.
           </p>
           <p>
-            Balance: <strong>{qBalance == null ? "—" : `${qBalance.toFixed(3)} HAC`}</strong>
+            Balance: <strong>{qBalance == null ? "N/A" : `${qBalance.toFixed(3)} HAC`}</strong>
           </p>
           {legacyAddress && (
             <p className="muted">
@@ -466,7 +473,8 @@ export default function QuantumScreen({
               {preflight.ok && (
                 <p className="muted">
                   Preflight OK · balance {preflight.balance_mei.toFixed(3)} HAC · fee ~
-                  {preflight.fee_mei.toFixed(4)} · total ~{preflight.total_mei.toFixed(4)} HAC
+                  {preflight.fee_mei.toFixed(4)} · wallet fee {preflight.service_fee_mei.toFixed(6)} · total ~
+                  {preflight.total_mei.toFixed(4)} HAC
                 </p>
               )}
             </div>
@@ -477,17 +485,9 @@ export default function QuantumScreen({
               type="button"
               className="primary"
               disabled={busy || !type4Ready || !sendPass || !preflight?.ok}
-              onClick={() => void sendType4(false)}
+              onClick={() => void sendType4()}
             >
               Sign & Send
-            </button>
-            <button
-              type="button"
-              className="btn-test"
-              disabled={busy || !type4Ready || !sendPass || !preflight?.ok}
-              onClick={() => void sendType4(true)}
-            >
-              Test TX
             </button>
           </div>
 
@@ -516,7 +516,7 @@ export default function QuantumScreen({
 
           {showAirgap && airgapQrUrls.length > 0 && (
             <div className="preview-box">
-              <p className="muted">Unsigned Type 4 — scan on offline signer</p>
+              <p className="muted">Unsigned Type 4. scan on offline signer</p>
               <div className="qr-grid">
                 {airgapQrUrls.map((url, i) => (
                   <img key={i} src={url} alt={`Type4 unsigned ${i + 1}`} className="qr-thumb" />
@@ -527,7 +527,7 @@ export default function QuantumScreen({
 
           {signedAirgapUrls.length > 0 && (
             <div className="preview-box">
-              <p className="muted">Signed Type 4 — scan on online coordinator</p>
+              <p className="muted">Signed Type 4. scan on online coordinator</p>
               <div className="qr-grid">
                 {signedAirgapUrls.map((url, i) => (
                   <img key={i} src={url} alt={`Type4 signed ${i + 1}`} className="qr-thumb" />

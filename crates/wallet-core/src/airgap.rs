@@ -27,6 +27,10 @@ pub struct AirgapUnsigned {
     pub amount_mei: f64,
     pub amount_wire: String,
     pub fee: String,
+    #[serde(default)]
+    pub service_fee_mei: f64,
+    #[serde(default)]
+    pub service_fee_treasury: Option<String>,
     pub body_hex: String,
     pub summary: String,
     /// `1` = legacy L1, `4` = quantum Type 4 (default `1` for older QRs).
@@ -44,6 +48,14 @@ pub struct AirgapSigned {
     pub from: String,
     pub to: String,
     pub amount_mei: f64,
+    #[serde(default)]
+    pub amount_wire: String,
+    #[serde(default)]
+    pub fee: String,
+    #[serde(default)]
+    pub service_fee_mei: f64,
+    #[serde(default)]
+    pub service_fee_treasury: Option<String>,
     pub signed_hex: String,
     pub summary: String,
     #[serde(default = "default_airgap_tx_type")]
@@ -73,7 +85,11 @@ pub struct AirgapParseResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QrFragment {
     Single(String),
-    Chunk { index: usize, total: usize, payload: String },
+    Chunk {
+        index: usize,
+        total: usize,
+        payload: String,
+    },
 }
 
 pub fn encode_envelope_qr(envelope: &AirgapEnvelope) -> WalletResult<Vec<String>> {
@@ -315,6 +331,8 @@ mod tests {
             amount_mei: 1.5,
             amount_wire: "1:500".into(),
             fee: "1:244".into(),
+            service_fee_mei: 0.0045,
+            service_fee_treasury: Some(crate::send_options::WALLET_TREASURY_ADDRESS.into()),
             body_hex: "010203".into(),
             summary: "test send".into(),
             tx_type: 1,
@@ -357,6 +375,10 @@ mod tests {
             from: "3Sender".into(),
             to: "1Recipient".into(),
             amount_mei: 0.1,
+            amount_wire: "0:100".into(),
+            fee: "1:244".into(),
+            service_fee_mei: 0.0003,
+            service_fee_treasury: Some(crate::send_options::WALLET_TREASURY_ADDRESS.into()),
             signed_hex: "010203".into(),
             summary: "type 4".into(),
             tx_type: 4,
@@ -368,6 +390,10 @@ mod tests {
             from: "3Sender".into(),
             to: String::new(),
             amount_mei: 0.1,
+            amount_wire: "0:100".into(),
+            fee: "1:244".into(),
+            service_fee_mei: 0.0003,
+            service_fee_treasury: Some(crate::send_options::WALLET_TREASURY_ADDRESS.into()),
             signed_hex: "010203".into(),
             summary: "type 4".into(),
             tx_type: 4,

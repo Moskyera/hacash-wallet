@@ -4,8 +4,9 @@ import WalletLogo from "./components/WalletLogo";
 import { useToast } from "./hooks/useToast";
 import { useDesktopWallet } from "./hooks/useDesktopWallet";
 import { useHacSend } from "./hooks/useHacSend";
+import DappApprovalPanel from "./components/DappApprovalPanel";
 import DesktopRouter from "./screens/DesktopRouter";
-import { NAV_ITEMS, formatCountdown, type Screen } from "./screens/types";
+import { NAV_GROUPS, formatCountdown, type Screen } from "./screens/types";
 import {
   fastPayChipLabel,
   fastPayNavHint,
@@ -51,12 +52,18 @@ export default function App() {
     const onVis = () => setPrivacyShield(document.hidden);
     document.addEventListener("visibilitychange", onVis);
     let unlisten: (() => void) | undefined;
-    getCurrentWindow()
-      .onFocusChanged(({ payload: focused }) => setPrivacyShield(!focused))
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch(() => undefined);
+    if ("__TAURI_INTERNALS__" in window) {
+      try {
+        getCurrentWindow()
+          .onFocusChanged(({ payload: focused }) => setPrivacyShield(!focused))
+          .then((fn) => {
+            unlisten = fn;
+          })
+          .catch(() => undefined);
+      } catch {
+        // Browser preview: visibilitychange still protects the UI.
+      }
+    }
     return () => {
       document.removeEventListener("visibilitychange", onVis);
       unlisten?.();
@@ -175,7 +182,8 @@ export default function App() {
       onSetProfile: (p: string) => void wallet.handleSetProfile(p),
       onSetHardwareMode: (m: "software" | "webauthn_gate" | "watch_only") =>
         void wallet.handleSetHardwareMode(m),
-      onSaveSettings: (n: string) => void wallet.handleSaveSettings(n),
+      onSaveSettings: (nodeUrl: string, fallbackUrls: string[], autoFailover: boolean) =>
+        void wallet.handleSaveSettings(nodeUrl, fallbackUrls, autoFailover),
       onChangePassphrase: (o: string, n: string, c: string) =>
         wallet.handleChangePassphrase(o, n, c),
       onExportBackup: wallet.handleExportBackup,
@@ -187,7 +195,6 @@ export default function App() {
       refreshUnlockedData: wallet.refreshUnlockedData,
       setSendTo: hacSend.setSendTo,
       setSendAmount: hacSend.setSendAmount,
-      setSendHubFeePayer: hacSend.setSendHubFeePayer,
       setSendForceL1: hacSend.setSendForceL1,
       setSendL1FeeSpeed: hacSend.setSendL1FeeSpeed,
       setSendServiceFeeEnabled: hacSend.setSendServiceFeeEnabled,
@@ -225,33 +232,35 @@ export default function App() {
         <div className="brand">
           <WalletLogo size="sm" />
           <div>
-            <div className="brand-sub">Secure Smart Send</div>
+            <div className="brand-sub">HAC · HACD · BTC on Hacash</div>
           </div>
         </div>
         {wallet.status && !wallet.status.locked && (
           <nav>
-            {NAV_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                className={screen === item.id ? "active" : ""}
-                onClick={() => {
-                  wallet.clearMessages();
-                  setScreen(item.id);
-                }}
-              >
-                {item.id === "fastpay" ? (
-                  <>
-                    Fast Pay{" "}
-                    <span
-                      className={`nav-fp-badge ${fastPayReady ? "nav-fp-on" : "nav-fp-off"}`}
-                    >
-                      {fastPayNavHint(wallet.status?.fast_pay_state ?? "no_provider")}
-                    </span>
-                  </>
-                ) : (
-                  item.label
-                )}
-              </button>
+            {NAV_GROUPS.map((group) => (
+              <div className="nav-group" key={group.label}>
+                <span className="nav-group-label">{group.label}</span>
+                {group.items.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={screen === item.id ? "active" : ""}
+                    aria-current={screen === item.id ? "page" : undefined}
+                    onClick={() => {
+                      wallet.clearMessages();
+                      setScreen(item.id);
+                    }}
+                  >
+                    <span className="nav-item-mark" aria-hidden>{item.mark}</span>
+                    <span className="nav-item-label">{item.label}</span>
+                    {item.id === "fastpay" && (
+                      <span className={`nav-fp-badge ${fastPayReady ? "nav-fp-on" : "nav-fp-off"}`}>
+                        {fastPayNavHint(wallet.status?.fast_pay_state ?? "no_provider")}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
             ))}
           </nav>
         )}
@@ -311,6 +320,14 @@ export default function App() {
 
         <DesktopRouter screen={screen} data={routerData} actions={routerActions} />
       </main>
+
+      <DappApprovalPanel
+        unlocked={!!wallet.status && !wallet.status.locked}
+        onNotify={(msg, kind) => {
+          if (kind === "error") wallet.onError(msg);
+          else wallet.onInfo(msg);
+        }}
+      />
     </div>
   );
 }

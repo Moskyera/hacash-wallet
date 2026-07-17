@@ -120,7 +120,7 @@ export default function WelcomeScreen({
                 placeholder="1YourAddress..."
               />
               <p className="muted small-note">
-                Watch-only mode. No private key on this device — cannot send or sign.
+                Watch-only mode. No private key on this device. cannot send or sign.
               </p>
               <button
                 className="primary auth-submit"

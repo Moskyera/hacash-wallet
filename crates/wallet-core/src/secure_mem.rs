@@ -1,4 +1,4 @@
-//! Locked memory buffers — reduce swap exposure for short-lived secrets (mlock / VirtualLock).
+//! Locked memory buffers. reduce swap exposure for short-lived secrets (mlock / VirtualLock).
 
 use zeroize::Zeroize;
 
@@ -15,7 +15,9 @@ impl LockedBytes {
         let mut inner = data.to_vec();
         let locked = lock_pages(inner.as_mut_ptr(), inner.len());
         if !locked {
-            tracing::warn!("secure_mem: could not lock memory pages — continuing with zeroize-only");
+            tracing::warn!(
+                "secure_mem: could not lock memory pages. continuing with zeroize-only"
+            );
         }
         Ok(Self { inner, locked })
     }

@@ -13,9 +13,9 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::protocol::{
+    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_SEND_PATH,
     MessengerAckRequest, MessengerAckResponse, MessengerChallengeResponse, MessengerEnvelope,
     MessengerInboxRequest, MessengerInboxResponse, MessengerSendRequest, MessengerSendResponse,
-    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_SEND_PATH,
 };
 
 const MAX_PER_RECIPIENT: usize = 200;
@@ -67,8 +67,8 @@ impl MessengerInbox {
         let mut nonce_bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = hex::encode(nonce_bytes);
-        let expires_at = (Utc::now() + ChronoDuration::seconds(CHALLENGE_TTL.as_secs() as i64))
-            .to_rfc3339();
+        let expires_at =
+            (Utc::now() + ChronoDuration::seconds(CHALLENGE_TTL.as_secs() as i64)).to_rfc3339();
         let mut map = self.challenges.lock().await;
         map.insert(
             to.to_string(),
@@ -176,10 +176,14 @@ async fn inbox_handler(
 ) -> Json<MessengerInboxResponse> {
     let to = req.to.trim();
     if to.is_empty() {
-        return Json(MessengerInboxResponse { messages: Vec::new() });
+        return Json(MessengerInboxResponse {
+            messages: Vec::new(),
+        });
     }
     if !state.inbox.consume_challenge(to, req.nonce.trim()).await {
-        return Json(MessengerInboxResponse { messages: Vec::new() });
+        return Json(MessengerInboxResponse {
+            messages: Vec::new(),
+        });
     }
     if !crate::messenger_auth::verify_inbox_auth(
         to,
@@ -187,7 +191,9 @@ async fn inbox_handler(
         &req.claimant_pubkey,
         &req.signature,
     ) {
-        return Json(MessengerInboxResponse { messages: Vec::new() });
+        return Json(MessengerInboxResponse {
+            messages: Vec::new(),
+        });
     }
     let messages = state.inbox.peek(to).await;
     Json(MessengerInboxResponse { messages })

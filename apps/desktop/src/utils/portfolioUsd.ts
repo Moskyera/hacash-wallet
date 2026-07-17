@@ -30,7 +30,7 @@ export function computePortfolioUsd(assets: AssetSummary, prices: AssetPrices): 
 }
 
 export function formatUsd(value: number): string {
-  if (!Number.isFinite(value)) return "—";
+  if (!Number.isFinite(value)) return "N/A";
   if (value >= 1_000_000) {
     return `$${(value / 1_000_000).toLocaleString("en-US", { maximumFractionDigits: 2 })}M`;
   }
@@ -45,6 +45,6 @@ export function formatUsd(value: number): string {
 
 export function maskUsd(value: number | null | undefined, hide: boolean): string {
   if (hide) return "••••";
-  if (value == null) return "—";
+  if (value == null) return "N/A";
   return formatUsd(value);
 }

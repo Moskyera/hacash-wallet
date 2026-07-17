@@ -19,7 +19,7 @@ export const MONEYNEX_INJECT_SCRIPT = `(function(){
     };
   }
   window.MoneyNex = {
-    info: { name: 'Hacash Wallet', version: '0.1.19', icon: '' },
+    info: { name: 'Hacash Wallet', version: '0.1.48', icon: '' },
     wallet: bind('wallet_dapp_wallet'),
     connect: bind('wallet_dapp_connect'),
     transfer: function(p, cb) {
@@ -64,7 +64,7 @@ export const MONEYNEX_INJECT_SCRIPT_V2 = `(function(){
       .catch(function(e){ if (cb) cb({ err: String(e), ret: 1 }); });
   }
   window.MoneyNex = {
-    info: { name: 'Hacash Wallet', version: '0.1.19', icon: '' },
+    info: { name: 'Hacash Wallet', version: '0.1.48', icon: '' },
     wallet: function(p, cb) { call('wallet_dapp_wallet', { origin: origin }, cb); },
     connect: function(p, cb) { call('wallet_dapp_connect', { origin: origin }, cb); },
     transfer: function(p, cb) {

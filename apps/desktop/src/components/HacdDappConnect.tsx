@@ -131,7 +131,7 @@ export default function HacdDappConnect({
         (Chrome/Edge).
         {pauseAutoLockDapp
           ? " Auto-lock pauses while connected and hacd.it is open (Privacy setting)."
-          : " Auto-lock during HACD is off — enable it in Privacy if the wallet locks on hacd.it."}
+          : " Auto-lock during HACD is off. enable it in Privacy if the wallet locks on hacd.it."}
       </p>
     </div>
   );

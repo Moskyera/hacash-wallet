@@ -1,5 +1,6 @@
 import { useState } from "react";
 import AssetSelector from "../components/AssetSelector";
+import BtcNetworkNotice from "../components/BtcNetworkNotice";
 import DustWhisperPayOptions from "../components/DustWhisperPayOptions";
 import HacdDiamondVisual from "../components/HacdDiamondVisual";
 import PaymentQrScanner from "../components/PaymentQrScanner";
@@ -37,7 +38,6 @@ type Props = {
   sendAmount: string;
   setSendAmount: (v: string) => void;
   sendHubFeePayer: HubFeePayer;
-  setSendHubFeePayer: (v: HubFeePayer) => void;
   sendForceL1: boolean;
   setSendForceL1: (v: boolean) => void;
   sendL1FeeSpeed: L1FeeSpeed;
@@ -78,13 +78,10 @@ export default function PayTab({
   sendAmount,
   setSendAmount,
   sendHubFeePayer,
-  setSendHubFeePayer,
   sendForceL1,
   setSendForceL1,
   sendL1FeeSpeed,
   setSendL1FeeSpeed,
-  sendServiceFeeEnabled,
-  setSendServiceFeeEnabled,
   serviceFeeRate,
   preview,
   payScanMode,
@@ -221,32 +218,7 @@ export default function PayTab({
           />
           <div className="option-block">
             <p className="label">Payment options</p>
-            <label className="check-row">
-              <input
-                type="radio"
-                name="fee"
-                checked={sendHubFeePayer === "sender"}
-                onChange={() => {
-                  setSendHubFeePayer("sender");
-                  void onPersistSendPrefs("sender", sendForceL1);
-                  onResetPreview();
-                }}
-              />
-              I pay network fee
-            </label>
-            <label className="check-row">
-              <input
-                type="radio"
-                name="fee"
-                checked={sendHubFeePayer === "recipient"}
-                onChange={() => {
-                  setSendHubFeePayer("recipient");
-                  void onPersistSendPrefs("recipient", sendForceL1);
-                  onResetPreview();
-                }}
-              />
-              Recipient pays fee
-            </label>
+            <p className="muted small">Fast Pay has no network fee and no wallet service fee.</p>
             <label className="check-row">
               <input
                 type="checkbox"
@@ -260,20 +232,10 @@ export default function PayTab({
               />
               Force on-chain (L1)
             </label>
-            <label className="check-row">
-              <input
-                type="checkbox"
-                checked={sendServiceFeeEnabled}
-                onChange={(e) => {
-                  const enabled = e.target.checked;
-                  setSendServiceFeeEnabled(enabled);
-                  void onPersistSendPrefs(sendHubFeePayer, sendForceL1, sendL1FeeSpeed, enabled);
-                  onResetPreview();
-                }}
-              />
-              Ecosystem service fee ({formatServiceFeeRate(serviceFeeRate)} of amount)
-            </label>
-            <p className="muted small">Fee payer applies to Fast Pay only. L1 fees are always paid by you.</p>
+            <div className="check-row" role="note">
+              On-chain wallet service fee: {formatServiceFeeRate(serviceFeeRate)} of amount. It is
+              included in the signed L1 transaction.
+            </div>
             {showL1FeeSpeed ? (
               <div style={{ marginTop: "0.75rem" }}>
                 <p className="label">On-chain network fee</p>
@@ -321,8 +283,7 @@ export default function PayTab({
                 </li>
                 {preview.plan.rail === "L2Fast" ? (
                   <li>
-                    <strong>Instant fee:</strong> ~{formatHacMei(preview.plan.fee_breakdown.hub_fee_mei ?? 0.001)} HAC
-                    {preview.plan.fee_breakdown.hub_fee_payer === "recipient" ? " (recipient pays)" : ""}
+                    <strong>Fast Pay fee:</strong> 0 HAC
                   </li>
                 ) : (
                   <>
@@ -424,7 +385,7 @@ export default function PayTab({
               className={hacdDisplay === "visual" ? "selected" : ""}
               onClick={() => setHacdDisplay("visual")}
             >
-              Visual
+              Metadata card
             </button>
           </div>
 
@@ -459,7 +420,10 @@ export default function PayTab({
             <p className="muted small">Selected: {hacd.selected.join(", ")}</p>
           )}
           {hacd.owned.length === 0 && (
-            <p className="muted small">No HACD found in wallet. Enter a name you own on chain.</p>
+            <p className="muted small">
+              No verified HACD found on the configured node. Metadata search may still show
+              read-only mainnet information.
+            </p>
           )}
 
           {hacdDisplay === "visual" && primaryHacd && <HacdDiamondVisual name={primaryHacd} />}
@@ -541,6 +505,10 @@ export default function PayTab({
                 → <code>{maskAddress(hacd.preview.to, hideAddresses)}</code>
               </p>
               <p className="muted">Network fee: {hacd.preview.fee_mei.toFixed(3)} HAC</p>
+              <p className="muted">
+                Wallet fee: {hacd.preview.service_fee_mei.toFixed(3)} HAC · total HAC debit{" "}
+                {hacd.preview.total_hac_debit_mei.toFixed(3)}
+              </p>
               {whisperActive ? <p className="muted small">Broadcast via DUST Whisper relay.</p> : null}
               {!hacd.preview.hip23.ok && <p className="error">{hacd.preview.hip23.errors.join("; ")}</p>}
               {platformSec?.native_biometric_available && (
@@ -560,9 +528,7 @@ export default function PayTab({
 
       {asset === "BTC" && (
         <>
-          <p className="muted small">
-            On-chain BTC on the Hacash network. Recipient is a Hacash address (1…). Fee paid in HAC (estimated at preview).
-          </p>
+          <BtcNetworkNotice onNotify={onToast} />
           <label className="label">Recipient Hacash address</label>
           <input
             placeholder="1ABC…"
@@ -601,7 +567,7 @@ export default function PayTab({
             }
             onClick={() => void btc.handlePreview()}
           >
-            Preview BTC send
+            Review BTC on Hacash send
           </button>
           {btc.preview && (
             <div className="preview-box animate-in">
@@ -611,6 +577,10 @@ export default function PayTab({
                 <code>{maskAddress(btc.preview.to, hideAddresses)}</code>
               </p>
               <p className="muted">Network fee: {btc.preview.fee_mei.toFixed(3)} HAC</p>
+              <p className="muted">
+                Wallet fee (0.3%): {btc.preview.service_fee_btc.toFixed(8)} BTC · total{" "}
+                {btc.preview.total_debit_satoshi} sat
+              </p>
               {whisperActive ? <p className="muted small">Broadcast via DUST Whisper relay.</p> : null}
               {!btc.preview.hip23.ok && (
                 <p className="error">{btc.preview.hip23.errors.join("; ")}</p>
@@ -620,7 +590,7 @@ export default function PayTab({
                 disabled={busy || !btc.preview.hip23.ok}
                 onClick={() => void btc.handleConfirm()}
               >
-                {busy ? "Sending…" : "Confirm & send BTC"}
+                {busy ? "Sending…" : "Confirm BTC on Hacash send"}
               </button>
             </div>
           )}

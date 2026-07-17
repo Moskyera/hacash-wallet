@@ -21,7 +21,7 @@ export async function openTxInExplorer(
     return;
   }
   if (!canOpenTxInExplorer(row.rail, row.tx_hash)) {
-    onNotify?.("Off-chain payment — not on the block explorer.", "info");
+    onNotify?.("Off-chain payment. not on the block explorer.", "info");
     return;
   }
   try {

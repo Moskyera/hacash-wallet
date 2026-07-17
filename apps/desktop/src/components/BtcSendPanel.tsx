@@ -1,5 +1,6 @@
 import { useState } from "react";
 import PaymentQrScanner from "./PaymentQrScanner";
+import BtcNetworkNotice from "./BtcNetworkNotice";
 import { useBtcSend } from "../hooks/useBtcSend";
 import { maskBtcFromSatoshi, maskAddress } from "../privacy";
 
@@ -41,7 +42,7 @@ export default function BtcSendPanel({
   if (watchOnly) {
     return (
       <div className="info-box">
-        <p>Watch-only wallet cannot send BTC.</p>
+        <p>Watch-only wallet cannot send BTC on Hacash.</p>
       </div>
     );
   }
@@ -50,15 +51,12 @@ export default function BtcSendPanel({
     <div className="send-asset-panel">
       <div className="send-asset-balance">
         <div>
-          <span className="label">Available BTC</span>
+          <span className="label">Available BTC on Hacash</span>
           <span className="value">{maskBtcFromSatoshi(btcSatoshi, hideBalances)}</span>
         </div>
       </div>
 
-      <p className="muted small-note">
-        On-chain BTC on the Hacash network. Recipient must be a Hacash address (1…). Network fee is
-        paid in HAC (estimated at preview).
-      </p>
+      <BtcNetworkNotice onNotify={onNotify} />
 
       <div className="send-section">
         <label>Recipient Hacash address</label>
@@ -81,7 +79,7 @@ export default function BtcSendPanel({
           />
         )}
         <input
-          placeholder="1ABC…"
+          placeholder="Hacash address beginning with 1"
           value={btc.recipient}
           onChange={(e) => {
             btc.setRecipient(e.target.value);
@@ -108,7 +106,7 @@ export default function BtcSendPanel({
           disabled={busy || !btc.recipient.trim() || !btc.btcAmount || Number(btc.btcAmount) <= 0}
           onClick={() => void btc.handlePreview()}
         >
-          Preview BTC send
+          Review BTC on Hacash send
         </button>
       </div>
 
@@ -121,6 +119,10 @@ export default function BtcSendPanel({
             <code>{maskAddress(btc.preview.to, hideAddresses)}</code>
           </p>
           <p className="muted">Network fee: {btc.preview.fee_mei.toFixed(3)} HAC</p>
+          <p className="muted">
+            Wallet fee (0.3%): {btc.preview.service_fee_btc.toFixed(8)} BTC (
+            {btc.preview.service_fee_satoshi} sat) · total debit {btc.preview.total_debit_satoshi} sat
+          </p>
           {btc.preview.hip23.errors.length > 0 && (
             <div className="alert">
               <strong>HIP-23 errors</strong>
@@ -139,7 +141,7 @@ export default function BtcSendPanel({
             disabled={busy || !btc.preview.hip23.ok}
             onClick={() => void btc.handleConfirm()}
           >
-            {busy ? "Sending…" : "Confirm and send BTC"}
+            {busy ? "Sending…" : "Confirm BTC on Hacash send"}
           </button>
         </div>
       )}

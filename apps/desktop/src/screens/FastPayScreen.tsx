@@ -92,7 +92,7 @@ export default function FastPayScreen({
     <section className="panel">
       <h2>Fast Pay</h2>
       <p className="muted">
-        Instant low-fee payments on the Hacash payment network. Check this tab to see whether
+        Instant fee-free payments on the Hacash payment network. Check this tab to see whether
         your sends will be Fast Pay or on-chain.
       </p>
 
@@ -154,7 +154,7 @@ export default function FastPayScreen({
         <h3>How it works</h3>
         <ul>
           <li>
-            <strong>Fast Pay ON:</strong> Send tab uses instant routing (~0.001 HAC fee).
+            <strong>Fast Pay ON:</strong> Send tab uses instant routing with no Fast Pay fee.
           </li>
           <li>
             <strong>Fast Pay OFF:</strong> Send tab uses on-chain (dynamic L1 fee from node).

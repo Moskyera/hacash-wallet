@@ -81,7 +81,11 @@ fn fee_from_unit238(fee_238: u64, wire_bytes: usize, purity: u64) -> Type4FeeEst
     }
 }
 
-pub fn fee_from_node_average(feasible_mei: &str, wire_bytes: usize, purity: u64) -> WalletResult<Type4FeeEstimate> {
+pub fn fee_from_node_average(
+    feasible_mei: &str,
+    wire_bytes: usize,
+    purity: u64,
+) -> WalletResult<Type4FeeEstimate> {
     let base = parse_fee_mei_decimal(feasible_mei)?;
     let fee_mei = base * FEE_HEADROOM;
     Ok(Type4FeeEstimate {
@@ -106,7 +110,10 @@ mod tests {
         // nodeapi.hacash.org: consumption=5500 → feasible "0.0033132" mei
         let est = fee_from_node_average("0.0033132", 5500, 6024).unwrap();
         assert!(est.fee_mei > 0.003 && est.fee_mei < 0.01);
-        assert!(est.fee_mei < 1.0, "Type 4 fee must be well below 1 HAC at minimum purity");
+        assert!(
+            est.fee_mei < 1.0,
+            "Type 4 fee must be well below 1 HAC at minimum purity"
+        );
     }
 
     #[test]

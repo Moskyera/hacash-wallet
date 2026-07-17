@@ -1,4 +1,4 @@
-//! Shared `tauri::generate_handler!` lists — keep desktop/mobile invoke registration in sync.
+//! Shared `tauri::generate_handler!` lists. keep desktop/mobile invoke registration in sync.
 
 /// Core + security + quantum + whisper + dapp + update-check commands, plus shell-specific extras.
 #[macro_export]
@@ -23,6 +23,7 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::commands::wallet_discover_hubs,
             wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_ping_node_url,
+            wallet_tauri_common::commands::wallet_discover_nodes,
             wallet_tauri_common::commands::wallet_export_backup,
             wallet_tauri_common::backup_commands::wallet_export_backup_to_downloads,
             wallet_tauri_common::backup_commands::wallet_preview_backup,
@@ -88,6 +89,9 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::dapp_commands::wallet_dapp_transfer,
             wallet_tauri_common::dapp_commands::wallet_dapp_sign_tx,
             wallet_tauri_common::dapp_commands::wallet_dapp_chain,
+            wallet_tauri_common::dapp_commands::wallet_dapp_pending,
+            wallet_tauri_common::dapp_commands::wallet_dapp_approve,
+            wallet_tauri_common::dapp_commands::wallet_dapp_reject,
             wallet_tauri_common::dapp_commands::wallet_webview_eval,
             wallet_tauri_common::update_commands::wallet_check_app_update,
             wallet_tauri_common::update_commands::wallet_download_app_update,
@@ -119,6 +123,7 @@ macro_rules! wallet_invoke_handler_mobile {
             wallet_tauri_common::commands::wallet_discover_hubs,
             wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_ping_node_url,
+            wallet_tauri_common::commands::wallet_discover_nodes,
             wallet_tauri_common::commands::wallet_export_private_key,
             wallet_tauri_common::commands::wallet_change_passphrase,
             wallet_tauri_common::commands::wallet_list_bill_summaries,
@@ -176,6 +181,9 @@ macro_rules! wallet_invoke_handler_mobile {
             wallet_tauri_common::dapp_commands::wallet_dapp_transfer,
             wallet_tauri_common::dapp_commands::wallet_dapp_sign_tx,
             wallet_tauri_common::dapp_commands::wallet_dapp_chain,
+            wallet_tauri_common::dapp_commands::wallet_dapp_pending,
+            wallet_tauri_common::dapp_commands::wallet_dapp_approve,
+            wallet_tauri_common::dapp_commands::wallet_dapp_reject,
             wallet_tauri_common::dapp_commands::wallet_webview_eval,
             wallet_tauri_common::update_commands::wallet_check_app_update,
             wallet_tauri_common::update_commands::wallet_download_app_update,

@@ -13,7 +13,7 @@ pub enum HardwareSigningMode {
     Software,
     /// Every sign requires a fresh WebAuthn ceremony (YubiKey / Windows Hello).
     WebAuthnGate,
-    /// Address-only wallet — cannot sign locally (Sparrow-style watch-only).
+    /// Address-only wallet. cannot sign locally (Sparrow-style watch-only).
     WatchOnly,
 }
 
@@ -42,7 +42,7 @@ pub fn check_signing_allowed(
 ) -> WalletResult<()> {
     if watch_only || mode == HardwareSigningMode::WatchOnly {
         return Err(WalletError::Policy(
-            "watch-only wallet cannot sign — use hardware device or import signing key".into(),
+            "watch-only wallet cannot sign. use hardware device or import signing key".into(),
         ));
     }
     if mode == HardwareSigningMode::WebAuthnGate && !webauthn_verified {

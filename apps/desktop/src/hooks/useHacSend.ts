@@ -55,7 +55,7 @@ export function useHacSend(opts: {
     setSendHubFeePayer(settings.send?.hub_fee_payer ?? "sender");
     setSendForceL1(!(settings.send?.prefer_fast_pay ?? true));
     setSendL1FeeSpeed(settings.send?.l1_fee_speed ?? "normal");
-    setSendServiceFeeEnabled(settings.send?.service_fee_enabled ?? true);
+    setSendServiceFeeEnabled(true);
   }, [
     settings?.send?.hub_fee_payer,
     settings?.send?.prefer_fast_pay,
@@ -71,8 +71,8 @@ export function useHacSend(opts: {
       hub_fee_payer: sendHubFeePayer,
       force_l1: sendForceL1,
       l1_fee_speed: sendL1FeeSpeed,
-      service_fee_enabled: sendServiceFeeEnabled,
-      service_fee_rate: serviceFeeRate,
+      service_fee_enabled: true,
+      service_fee_rate: DEFAULT_SERVICE_FEE_RATE,
     }),
     [sendHubFeePayer, sendForceL1, sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate],
   );
@@ -91,8 +91,8 @@ export function useHacSend(opts: {
           hub_fee_payer: hubFeePayer,
           prefer_fast_pay: !forceL1,
           l1_fee_speed: l1FeeSpeed,
-          service_fee_enabled: serviceFeeEnabled,
-          service_fee_rate: serviceFeeRate,
+          service_fee_enabled: true,
+          service_fee_rate: DEFAULT_SERVICE_FEE_RATE,
         },
       };
       await api.updateSettings(next);
@@ -122,8 +122,8 @@ export function useHacSend(opts: {
           setPreview(p);
           onInfo(
             payload.label
-              ? `QR payment (${payload.label}) — review and confirm.`
-              : "QR payment loaded — review and confirm.",
+              ? `QR payment (${payload.label}). review and confirm.`
+              : "QR payment loaded. review and confirm.",
           );
         } catch (e) {
           onError(formatInvokeError(e));
@@ -133,7 +133,7 @@ export function useHacSend(opts: {
       } else {
         setSendAmount("");
         setPreview(null);
-        onInfo("Address scanned — enter amount and tap Continue.");
+        onInfo("Address scanned. enter amount and tap Continue.");
       }
       setScreen("send");
     },
