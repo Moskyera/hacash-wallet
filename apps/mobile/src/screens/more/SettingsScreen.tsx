@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   api,
   type HubDiscoveryEntry,
@@ -10,6 +10,26 @@ import {
 import AppUpdateSection from "../../components/AppUpdateSection";
 import HubDiscoveryPanel from "../../components/HubDiscoveryPanel";
 import { formatInvokeError } from "../../formatInvokeError";
+import { useLocale } from "../../locale";
+
+const OFFICIAL_NODE_URL = "http://nodeapi.hacash.org";
+
+function normalizeNodeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function isOfficialNode(url: string): boolean {
+  const n = normalizeNodeUrl(url);
+  return (
+    n === "" ||
+    n === normalizeNodeUrl(OFFICIAL_NODE_URL) ||
+    n === "http://nodeapi.org" ||
+    n === "https://nodeapi.hacash.org" ||
+    n === "https://nodeapi.org" ||
+    n === "nodeapi.hacash.org" ||
+    n === "nodeapi.org"
+  );
+}
 
 type Props = {
   status: WalletStatus | null;
@@ -37,7 +57,8 @@ export default function SettingsScreen({
   onApplyHub,
   onToast,
 }: Props) {
-  const [nodeUrl, setNodeUrl] = useState(settings?.node_url ?? "");
+  const { t } = useLocale();
+  const [nodeUrl, setNodeUrl] = useState(settings?.node_url ?? OFFICIAL_NODE_URL);
   const [hubUrl, setHubUrl] = useState(settings?.l2_hub_url ?? "");
   const [fallbackText, setFallbackText] = useState(
     (settings?.node_fallback_urls ?? []).join("\n"),
@@ -45,6 +66,9 @@ export default function SettingsScreen({
   const [autoFailover, setAutoFailover] = useState(settings?.auto_node_failover ?? true);
   const [nodeTestMsg, setNodeTestMsg] = useState<string | null>(null);
   const [discovery, setDiscovery] = useState<NodeDiscoveryReport | null>(null);
+  const [showCustomNode, setShowCustomNode] = useState(
+    () => !isOfficialNode(settings?.node_url ?? OFFICIAL_NODE_URL),
+  );
 
   useEffect(() => {
     if (settings) {
@@ -52,61 +76,94 @@ export default function SettingsScreen({
       setHubUrl(settings.l2_hub_url ?? "");
       setFallbackText((settings.node_fallback_urls ?? []).join("\n"));
       setAutoFailover(settings.auto_node_failover ?? true);
+      setShowCustomNode(!isOfficialNode(settings.node_url));
     }
   }, [settings]);
+
+  const activeIsOfficial = useMemo(
+    () => isOfficialNode(status?.node_url ?? nodeUrl),
+    [status?.node_url, nodeUrl],
+  );
+
+  const applyOfficial = () => {
+    setNodeUrl(OFFICIAL_NODE_URL);
+    setShowCustomNode(false);
+    setNodeTestMsg(null);
+  };
 
   return (
     <>
       <AppUpdateSection onToast={onToast} />
       <div className="card">
         <h2>Network</h2>
-        {status?.node_url ? (
-          <p className="muted">
-            Active node: <code>{status.node_url}</code>
-          </p>
-        ) : null}
-        <label className="label">Node URL</label>
-        <input
-          value={nodeUrl}
-          onChange={(e) => setNodeUrl(e.target.value)}
-          placeholder="http://nodeapi.hacash.org"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck={false}
-        />
-        <p className="muted">
-          Official Hacash node uses <strong>http://</strong> (not https). Tap Save after editing.
-        </p>
-        <button
-          type="button"
-          className="small"
-          disabled={busy}
-          onClick={() => setNodeUrl("http://nodeapi.hacash.org")}
-        >
-          Use official node
-        </button>
-        <label className="label">Fallback nodes (one per line)</label>
-        <textarea
-          rows={3}
-          value={fallbackText}
-          onChange={(event) => setFallbackText(event.target.value)}
-          placeholder="http://your-node.example:8081"
-          autoCapitalize="none"
-          autoCorrect="off"
-          spellCheck={false}
-        />
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={autoFailover}
-            onChange={(event) => setAutoFailover(event.target.checked)}
-          />
-          Automatically switch to a verified fallback node
-        </label>
         <p className="muted small">
-          Network: <strong>{settings?.network_mode ?? "mainnet"}</strong>. Mainnet nodes are checked
-          against the Hacash genesis chain. Testnet never falls back to mainnet.
+          Network: <strong>{settings?.network_mode ?? "mainnet"}</strong>
         </p>
+
+        <label className="label">{t("node.official")}</label>
+        <p className="muted">
+          {activeIsOfficial ? (
+            <>
+              {t("node.usingOfficial")}{" "}
+              <code>{OFFICIAL_NODE_URL}</code>
+            </>
+          ) : (
+            <>
+              Active node: <code>{status?.node_url ?? nodeUrl}</code>
+            </>
+          )}
+        </p>
+
+        {!showCustomNode ? (
+          <div className="row-btns">
+            <button type="button" className="small" disabled={busy} onClick={() => setShowCustomNode(true)}>
+              {t("node.change")}
+            </button>
+            {!activeIsOfficial ? (
+              <button type="button" className="small primary" disabled={busy} onClick={applyOfficial}>
+                {t("node.useOfficial")}
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <p className="muted small">{t("node.customHint")}</p>
+            <label className="label">{t("node.customTitle")}</label>
+            <input
+              value={nodeUrl}
+              onChange={(e) => setNodeUrl(e.target.value)}
+              placeholder={OFFICIAL_NODE_URL}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <p className="muted">
+              Official Hacash node uses <strong>http://</strong> (not https). Tap Save after editing.
+            </p>
+            <button type="button" className="small" disabled={busy} onClick={applyOfficial}>
+              {t("node.useOfficial")}
+            </button>
+            <label className="label">Fallback nodes (one per line)</label>
+            <textarea
+              rows={3}
+              value={fallbackText}
+              onChange={(event) => setFallbackText(event.target.value)}
+              placeholder="http://your-node.example:8081"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={autoFailover}
+                onChange={(event) => setAutoFailover(event.target.checked)}
+              />
+              Automatically switch to a verified fallback node
+            </label>
+          </>
+        )}
+
         <label className="label">L2 Hub URL</label>
         <input
           value={hubUrl}
@@ -134,13 +191,15 @@ export default function SettingsScreen({
             disabled={busy}
             onClick={() =>
               onSave(
-                nodeUrl,
+                showCustomNode ? nodeUrl : OFFICIAL_NODE_URL,
                 hubUrl,
-                fallbackText
-                  .split(/\r?\n/)
-                  .map((value) => value.trim())
-                  .filter(Boolean),
-                autoFailover,
+                showCustomNode
+                  ? fallbackText
+                      .split(/\r?\n/)
+                      .map((value) => value.trim())
+                      .filter(Boolean)
+                  : settings?.node_fallback_urls ?? [],
+                showCustomNode ? autoFailover : (settings?.auto_node_failover ?? true),
               )
             }
           >
@@ -157,6 +216,7 @@ export default function SettingsScreen({
                 .then((report) => {
                   setDiscovery(report);
                   setNodeUrl(report.active_node);
+                  if (!isOfficialNode(report.active_node)) setShowCustomNode(true);
                   onToast(
                     report.switched ? `Connected to ${report.active_node}` : "Active node is healthy.",
                     "success",
@@ -174,8 +234,9 @@ export default function SettingsScreen({
             onClick={() => {
               setNodeTestMsg(null);
               setBusy(true);
+              const pingUrl = showCustomNode ? nodeUrl.trim() : OFFICIAL_NODE_URL;
               void api
-                .pingNodeUrl(nodeUrl.trim() || undefined)
+                .pingNodeUrl(pingUrl || undefined)
                 .then((r) => {
                   setNodeTestMsg(`Node OK (${String(r.reachable ?? "true")})`);
                   onToast("Node connection OK.", "success");

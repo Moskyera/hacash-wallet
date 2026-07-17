@@ -57,7 +57,15 @@ const messages: Record<AppLocale, Record<string, string>> = {
     "hacd.emptyHint": "Diamonds appear after the node lists them for your address. You can still look up a name above.",
     "hacd.unlockFirst": "Unlock the wallet to load your HACD collection.",
     "more.network": "Network settings",
+    "more.language": "Language",
     "more.back": "Back",
+    "node.official": "Official Hacash node",
+    "node.officialUrl": "http://nodeapi.hacash.org",
+    "node.usingOfficial": "Using the official public node API.",
+    "node.change": "Change node",
+    "node.useOfficial": "Use official node",
+    "node.customTitle": "Custom node",
+    "node.customHint": "Only change this if you run your own Hacash node or need a private endpoint.",
     "status.on": "on",
     "status.off": "off",
     "quantum.funding.title": "Fund quantum account",
@@ -118,7 +126,15 @@ const messages: Record<AppLocale, Record<string, string>> = {
     "hacd.emptyHint": "Τα diamonds εμφανίζονται όταν το node τα επιστρέψει για τη διεύθυνσή σου. Μπορείς να ψάξεις όνομα παραπάνω.",
     "hacd.unlockFirst": "Ξεκλείδωσε το πορτοφόλι για να φορτωθεί η συλλογή HACD.",
     "more.network": "Ρυθμίσεις δικτύου",
+    "more.language": "Γλώσσα",
     "more.back": "Πίσω",
+    "node.official": "Επίσημο Hacash node",
+    "node.officialUrl": "http://nodeapi.hacash.org",
+    "node.usingOfficial": "Χρησιμοποιείται το επίσημο public node API.",
+    "node.change": "Αλλαγή node",
+    "node.useOfficial": "Χρήση επίσημου node",
+    "node.customTitle": "Προσαρμοσμένο node",
+    "node.customHint": "Άλλαξέ το μόνο αν τρέχεις δικό σου Hacash node ή ιδιωτικό endpoint.",
     "status.on": "ενεργό",
     "status.off": "ανενεργό",
     "quantum.funding.title": "Χρηματοδότηση quantum λογαριασμού",
@@ -188,10 +204,10 @@ export function useLocale(): LocaleContextValue {
   return value;
 }
 
-export function LanguageSwitcher() {
+export function LanguageSwitcher({ className = "" }: { className?: string }) {
   const { locale, setLocale, t } = useLocale();
   return (
-    <label className="language-switcher">
+    <label className={`language-switcher ${className}`.trim()}>
       <span>{t("language.label")}</span>
       <select
         aria-label={t("language.label")}

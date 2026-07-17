@@ -13,7 +13,7 @@ import { downloadJson } from "../../utils/downloadJson";
 import FastPayChannelScreen from "../FastPayChannelScreen";
 import HacdTab from "../HacdTab";
 import { fastPayMenuBadge } from "../../fastPayUi";
-import { useLocale } from "../../locale";
+import { LanguageSwitcher, useLocale } from "../../locale";
 import ContactsScreen from "./ContactsScreen";
 import PrivacyScreen from "./PrivacyScreen";
 import SecurityScreen from "./SecurityScreen";
@@ -117,6 +117,12 @@ export default function MoreRouter({ page, data, actions }: Props) {
           <span>{dustWhisper?.enabled ? t("status.on") : t("status.off")}</span>
         </button>
         <p className="section-title">{t("more.preferences")}</p>
+        <div className="card language-card">
+          <h2 className="section-title" style={{ marginTop: 0 }}>
+            {t("more.language")}
+          </h2>
+          <LanguageSwitcher />
+        </div>
         <button type="button" onClick={() => onNavigate("settings")}>
           <span>{t("more.network")}</span>
           <span>→</span>

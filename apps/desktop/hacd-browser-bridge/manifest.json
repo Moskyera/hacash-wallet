@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hacash Wallet. HACD Bridge",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "description": "Connects hacd.it to your local Hacash Wallet desktop app (MoneyNex-compatible).",
   "permissions": [],
   "host_permissions": ["http://127.0.0.1:9477/*"],

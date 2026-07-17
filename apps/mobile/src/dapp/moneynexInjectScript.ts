@@ -1,4 +1,8 @@
 /** Injected into the HACD Launchpad webview (hacd.it) to provide MoneyNex-compatible APIs. */
+import { WALLET_VERSION } from "../walletVersion";
+
+const APP_VERSION = WALLET_VERSION.replace(/^v/, "");
+
 export const MONEYNEX_INJECT_SCRIPT = `(function(){
   if (window.MoneyNex) return;
   var invoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
@@ -19,7 +23,7 @@ export const MONEYNEX_INJECT_SCRIPT = `(function(){
     };
   }
   window.MoneyNex = {
-    info: { name: 'Hacash Wallet', version: '0.1.48', icon: '' },
+    info: { name: 'Hacash Wallet', version: '${APP_VERSION}', icon: '' },
     wallet: bind('wallet_dapp_wallet'),
     connect: bind('wallet_dapp_connect'),
     transfer: function(p, cb) {
@@ -64,7 +68,7 @@ export const MONEYNEX_INJECT_SCRIPT_V2 = `(function(){
       .catch(function(e){ if (cb) cb({ err: String(e), ret: 1 }); });
   }
   window.MoneyNex = {
-    info: { name: 'Hacash Wallet', version: '0.1.48', icon: '' },
+    info: { name: 'Hacash Wallet', version: '${APP_VERSION}', icon: '' },
     wallet: function(p, cb) { call('wallet_dapp_wallet', { origin: origin }, cb); },
     connect: function(p, cb) { call('wallet_dapp_connect', { origin: origin }, cb); },
     transfer: function(p, cb) {
