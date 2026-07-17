@@ -62,7 +62,7 @@ export default function HacdDiamondVisual({ name, size = "lg" }: Props) {
   }
 
   if (diamondState.status === "error") {
-    return <MetadataState size={size} title={normalized} message="The configured Hacash node did not return metadata." />;
+    return <MetadataState size={size} title={normalized} message={`Metadata unavailable: ${diamondState.message}`} />;
   }
 
   if (diamondState.status !== "ready") {

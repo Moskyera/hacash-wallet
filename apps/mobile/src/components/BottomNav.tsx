@@ -1,3 +1,4 @@
+import { useLocale } from "../locale";
 export type TabId = "home" | "pay" | "receive" | "messages" | "more";
 
 type Props = {
@@ -15,6 +16,7 @@ const ITEMS: { id: TabId; label: string; mark: string }[] = [
 ];
 
 export default function BottomNav({ active, onChange, watchOnly }: Props) {
+  const { t } = useLocale();
   return (
     <nav className="bottom-nav" aria-label="Main navigation">
       {ITEMS.filter((item) => !(watchOnly && item.id === "pay")).map((item) => (
@@ -26,7 +28,7 @@ export default function BottomNav({ active, onChange, watchOnly }: Props) {
           onClick={() => onChange(item.id)}
         >
           <span className="bottom-nav-icon" aria-hidden>{item.mark}</span>
-          <span>{item.label}</span>
+          <span>{t(`nav.${item.id}`)}</span>
         </button>
       ))}
     </nav>

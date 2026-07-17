@@ -1,10 +1,13 @@
+import { QuantumFundingCard, useType4Probe } from "@hacash/wallet-ui";
 import { useState } from "react";
 import { WalletSettings, WalletStatus } from "../api";
 import { quantumApi, QuantumAccountSummary } from "../api";
+import AddressBadge from "../components/AddressBadge";
 import QuantumToggle from "../components/QuantumToggle";
 import SendQuantumTx from "../components/SendQuantumTx";
-import QuantumFundingCard from "../components/QuantumFundingCard";
 import QuantumNodeHealth from "../components/QuantumNodeHealth";
+import { formatInvokeError } from "../formatInvokeError";
+import { copyWithPrivacyClear } from "../privacy";
 import type { Screen } from "./types";
 
 type Props = {
@@ -25,29 +28,42 @@ export default function QuantumScreen({
   onSetSendTo,
 }: Props) {
   const [quantumAccount, setQuantumAccount] = useState<QuantumAccountSummary | null>(null);
-  const [quantumBalance, setQuantumBalance] = useState<number | null>(null);
+  const { probe } = useType4Probe(
+    quantumAccount?.address,
+    quantumApi.balanceProbe,
+    formatInvokeError,
+  );
 
   return (
     <section className="stack">
-      <QuantumToggle
-        onAccountChange={(acc) => {
-          setQuantumAccount(acc);
-          if (acc) {
-            quantumApi
-              .balance()
-              .then(setQuantumBalance)
-              .catch(() => setQuantumBalance(null));
-          } else {
-            setQuantumBalance(null);
-          }
-        }}
-      />
+      <QuantumToggle onAccountChange={setQuantumAccount} />
       <QuantumNodeHealth nodeUrl={settings?.node_url ?? status?.node_url} />
       <QuantumFundingCard
-        account={quantumAccount}
-        balance={quantumBalance}
+        account={
+          quantumAccount
+            ? {
+                address: quantumAccount.address,
+                addressVersion: quantumAccount.address_version,
+                kind: quantumAccount.kind,
+              }
+            : null
+        }
+        probe={probe}
         legacyAddress={status?.address}
-        onGoToSend={() => {
+        accountBadge={
+          quantumAccount ? (
+            <AddressBadge
+              address={quantumAccount.address}
+              version={quantumAccount.address_version}
+              kind={quantumAccount.kind}
+            />
+          ) : undefined
+        }
+        containerClassName="panel quantum-funding"
+        actionClassName="btn-ghost"
+        headingLevel={3}
+        onCopyAddress={(address) => copyWithPrivacyClear(address, 30)}
+        onOpenLegacyFund={() => {
           if (quantumAccount?.address) onSetSendTo(quantumAccount.address);
           onNavigate("send");
         }}

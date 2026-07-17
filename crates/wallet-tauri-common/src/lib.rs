@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod dapp_commands;
 pub mod handlers;
+pub mod invoke;
 pub mod quantum_commands;
 pub mod security_commands;
 pub mod state;
@@ -22,4 +23,5 @@ pub mod desktop_commands;
 #[cfg(feature = "desktop")]
 pub mod desktop_relay;
 
+pub use invoke::invoke_with_panic_boundary;
 pub use state::AppState;

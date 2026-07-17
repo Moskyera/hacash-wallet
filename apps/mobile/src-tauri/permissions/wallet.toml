@@ -8,7 +8,7 @@ commands.allow = [
   "messenger_send",
   "messenger_threads",
   "quantum_airgap_sign_type4",
-  "quantum_balance",
+  "quantum_balance_probe",
   "quantum_create_hybrid",
   "quantum_create_hybrid_from_privakey",
   "quantum_create_pqc",

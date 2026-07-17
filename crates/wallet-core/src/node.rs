@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use field::Address;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -10,6 +11,37 @@ use crate::settings::{DEFAULT_NODE_URL, sanitize_node_url};
 
 const DEFAULT_NODE: &str = DEFAULT_NODE_URL;
 const USER_AGENT: &str = concat!("HacashWallet/", env!("CARGO_PKG_VERSION"));
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BalanceError {
+    UnsupportedAddress { message: String },
+    Node { ret: i32, message: String },
+}
+
+impl From<BalanceError> for WalletError {
+    fn from(error: BalanceError) -> Self {
+        match error {
+            BalanceError::UnsupportedAddress { message } => {
+                WalletError::UnsupportedAddress(message)
+            }
+            BalanceError::Node { ret, message } => {
+                WalletError::Node(format!("{message} (ret={ret})"))
+            }
+        }
+    }
+}
+
+fn classify_balance_error(ret: i32, address: &str, message: String) -> BalanceError {
+    let type4_address = Address::from_readable(address)
+        .map(|parsed| matches!(parsed.version(), Address::PQCKEY | Address::HYBRID))
+        .unwrap_or(false);
+
+    if ret == 1 && type4_address {
+        BalanceError::UnsupportedAddress { message }
+    } else {
+        BalanceError::Node { ret, message }
+    }
+}
 
 fn shared_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -272,10 +304,10 @@ impl NodeClient {
         }
         let body: BalanceResponse = http_get_json(url).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(format!(
-                "balance query failed ret={}",
-                body.ret
-            )));
+            let node_message = body
+                .err
+                .unwrap_or_else(|| format!("balance query failed (ret={})", body.ret));
+            return Err(classify_balance_error(body.ret, address, node_message).into());
         }
         body.list
             .iter()
@@ -441,10 +473,9 @@ impl NodeClient {
         let url = format!("{}/query/diamond?name={}", self.base_url, normalized);
         let body: DiamondQueryResponse = http_get_json(url).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(format!(
-                "diamond '{}' not found (ret={})",
-                normalized, body.ret
-            )));
+            return Err(WalletError::Node(body.err.unwrap_or_else(|| {
+                format!("diamond '{}' not found (ret={})", normalized, body.ret)
+            })));
         }
         Ok(body.into_info(&normalized))
     }
@@ -495,6 +526,8 @@ pub struct DiamondInfo {
 #[derive(Debug, Deserialize)]
 struct DiamondQueryResponse {
     ret: i32,
+    #[serde(default)]
+    err: Option<String>,
     #[allow(dead_code)]
     name: Option<String>,
     number: Option<u64>,
@@ -508,6 +541,13 @@ struct DiamondQueryResponse {
     prev_hash: Option<String>,
     #[serde(default)]
     inscriptions: Vec<String>,
+    #[serde(default)]
+    inscription_items: Vec<DiamondInscriptionItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiamondInscriptionItem {
+    content: Option<String>,
 }
 
 impl DiamondQueryResponse {
@@ -533,7 +573,19 @@ impl DiamondQueryResponse {
             inscriptions: self
                 .inscriptions
                 .into_iter()
+                .chain(
+                    self.inscription_items
+                        .into_iter()
+                        .filter_map(|item| item.content),
+                )
                 .filter_map(clean_inscription)
+                .fold(Vec::new(), |mut values, value| {
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                    values
+                })
+                .into_iter()
                 .take(16)
                 .collect(),
         }
@@ -583,6 +635,9 @@ fn clean_inscription(value: String) -> Option<String> {
 #[derive(Debug, Deserialize)]
 struct BalanceResponse {
     ret: i32,
+    #[serde(default)]
+    err: Option<String>,
+    #[serde(default)]
     list: Vec<BalanceEntry>,
 }
 
@@ -663,6 +718,7 @@ mod diamond_metadata_tests {
     fn rejects_untrusted_metadata_fields() {
         let response = DiamondQueryResponse {
             ret: 0,
+            err: None,
             name: Some("<script>".into()),
             number: None,
             visual_gene: Some("<svg onload=alert(1)>".into()),
@@ -674,6 +730,7 @@ mod diamond_metadata_tests {
             born: None,
             prev_hash: Some("0".repeat(63)),
             inscriptions: vec!["ok".into(), "bad\ncontrol".into()],
+            inscription_items: vec![],
         };
         let info = response.into_info("WTYU");
         assert_eq!(info.name, "WTYU");
@@ -691,5 +748,64 @@ mod diamond_metadata_tests {
         );
         assert!(is_valid_node_diamond_name("VWMMMM"));
         assert!(!is_valid_node_diamond_name("ABCDEF"));
+    }
+
+    #[test]
+    fn parses_official_balance_error_envelope_without_decode_failure() {
+        let raw = r#"{"err":"address 3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj format invalid","ret":1}"#;
+        let response: BalanceResponse = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(response.ret, 1);
+        assert_eq!(
+            response.err.as_deref(),
+            Some("address 3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj format invalid")
+        );
+        assert!(response.list.is_empty());
+    }
+
+    #[test]
+    fn reads_inscriptions_from_current_official_metadata_shape() {
+        let raw = r#"{
+            "ret": 0,
+            "name": "VWMMMM",
+            "inscription_items": [{"content":"hacds","engraved_type":0}]
+        }"#;
+        let response: DiamondQueryResponse = serde_json::from_str(raw).unwrap();
+        let info = response.into_info("VWMMMM");
+
+        assert_eq!(info.inscriptions, vec!["hacds"]);
+    }
+
+    #[test]
+    fn classifies_type4_balance_rejection_without_matching_node_text() {
+        let error = classify_balance_error(
+            1,
+            "3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj",
+            "address rejected".into(),
+        );
+
+        assert!(matches!(error, BalanceError::UnsupportedAddress { .. }));
+    }
+
+    #[test]
+    fn preserves_non_format_type4_node_errors() {
+        let error = classify_balance_error(
+            2,
+            "3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj",
+            "node unavailable".into(),
+        );
+
+        assert!(matches!(error, BalanceError::Node { ret: 2, .. }));
+    }
+
+    #[test]
+    fn preserves_regular_node_balance_errors() {
+        let error = classify_balance_error(
+            1,
+            "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9",
+            "temporary failure".into(),
+        );
+
+        assert!(matches!(error, BalanceError::Node { ret: 1, .. }));
     }
 }

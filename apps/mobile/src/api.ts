@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Type4ProbeResult } from "@hacash/wallet-ui";
 
 export type PrivacySettings = {
   hide_balances: boolean;
@@ -440,7 +441,7 @@ export const quantumApi = {
   sendTestTx: (keystorePassword: string) =>
     invoke<QuantumTestResult>("quantum_send_test_tx", { keystorePassword }),
   nodePing: () => invoke<Record<string, unknown>>("quantum_node_ping"),
-  balance: () => invoke<number>("quantum_balance"),
+  balanceProbe: () => invoke<Type4ProbeResult>("quantum_balance_probe"),
   preflightType4: (toAddress: string, amountHacash: string) =>
     invoke<QuantumPreflight>("quantum_preflight_type4", { toAddress, amountHacash }),
   prepareAirgapType4: (toAddress: string, amountHacash: string) =>

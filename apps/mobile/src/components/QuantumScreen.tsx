@@ -1,3 +1,4 @@
+import { QuantumFundingCard, type4Balance, useType4Probe } from "@hacash/wallet-ui";
 import { useCallback, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import {
@@ -56,7 +57,6 @@ export default function QuantumScreen({
   const [sendTo, setSendTo] = useState(DEFAULT_TO);
   const [sendAmount, setSendAmount] = useState("0.1");
   const [sendPass, setSendPass] = useState("");
-  const [qBalance, setQBalance] = useState<number | null>(null);
   const [preflight, setPreflight] = useState<QuantumPreflight | null>(null);
   const [sendHash, setSendHash] = useState("");
   const [nodeMetrics, setNodeMetrics] = useState<Record<string, unknown> | null>(null);
@@ -68,24 +68,18 @@ export default function QuantumScreen({
   const [showAirgap, setShowAirgap] = useState(false);
 
   const type4Ready = canSendType4(account);
+  const { probe: balanceProbe, refresh: refreshBalance } = useType4Probe(
+    account?.address,
+    quantumApi.balanceProbe,
+    formatInvokeError,
+  );
 
+  const qBalance = type4Balance(balanceProbe);
   const refreshSettings = useCallback(async () => {
     const s = await quantumApi.getSettings();
     setSettings(s);
     setAccount(accountSummaryFromSettings(s));
   }, []);
-
-  const refreshBalance = useCallback(async () => {
-    if (!account) {
-      setQBalance(null);
-      return;
-    }
-    try {
-      setQBalance(await quantumApi.balance());
-    } catch {
-      setQBalance(null);
-    }
-  }, [account]);
 
   const refreshNode = useCallback(async () => {
     setNodeErr("");
@@ -122,10 +116,6 @@ export default function QuantumScreen({
   useEffect(() => {
     void refreshSettings().catch((e) => onToast(formatInvokeError(e), "error"));
   }, [refreshSettings, onToast]);
-
-  useEffect(() => {
-    void refreshBalance();
-  }, [refreshBalance]);
 
   useEffect(() => {
     void refreshNode();
@@ -428,25 +418,24 @@ export default function QuantumScreen({
       </div>
 
       {settings.quantum_mode && account && (
-        <div className="card">
-          <h2>Fund quantum account</h2>
-          <p className="muted">
-            Send legacy HAC from your main wallet to this quantum address to fund Type 4 sends.
-          </p>
-          <p>
-            Balance: <strong>{qBalance == null ? "N/A" : `${qBalance.toFixed(3)} HAC`}</strong>
-          </p>
-          {legacyAddress && (
-            <p className="muted">
-              Legacy wallet: <code>{legacyAddress}</code>
-            </p>
-          )}
-          {onGoLegacySend && (
-            <button type="button" className="primary" onClick={onGoLegacySend}>
-              Open legacy Pay tab
-            </button>
-          )}
-        </div>
+        <QuantumFundingCard
+          account={{
+            address: account.address,
+            addressVersion: account.address_version,
+            kind: account.kind,
+          }}
+          probe={balanceProbe}
+          legacyAddress={legacyAddress}
+          accountBadge={
+            <AddressBadge
+              address={account.address}
+              version={account.address_version}
+              kind={account.kind}
+            />
+          }
+          onCopyAddress={(address) => copyWithPrivacyClear(address, clipboardClearSecs)}
+          onOpenLegacyFund={onGoLegacySend}
+        />
       )}
 
       {settings.quantum_mode && (

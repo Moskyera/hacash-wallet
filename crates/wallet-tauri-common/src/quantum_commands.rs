@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use hacash_wallet_core::WalletService;
 use hacash_wallet_core::airgap::{AirgapPrepareResult, AirgapSignResult, AirgapUnsigned};
 use hacash_wallet_core::quantum::{
     QuantumAccountInfo, QuantumPreflight, QuantumSendResult, QuantumSettings, QuantumTestResult,
 };
+use hacash_wallet_core::{WalletError, WalletService};
+use serde::Serialize;
 use tauri::State;
 use tokio::sync::Mutex;
 
@@ -37,8 +38,8 @@ where
 }
 
 #[tauri::command]
-pub fn quantum_get_settings(state: State<'_, AppState>) -> Result<QuantumSettings, String> {
-    let svc = state.inner.blocking_lock();
+pub async fn quantum_get_settings(state: State<'_, AppState>) -> Result<QuantumSettings, String> {
+    let svc = state.inner.lock().await;
     Ok(svc.quantum_settings())
 }
 
@@ -171,10 +172,41 @@ pub async fn quantum_node_ping(state: State<'_, AppState>) -> Result<serde_json:
     svc.quantum_node_metrics().await.map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantumBalanceFailureKind {
+    Unsupported,
+    Other,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum QuantumBalanceProbe {
+    Ok {
+        balance: f64,
+    },
+    Failed {
+        kind: QuantumBalanceFailureKind,
+        message: String,
+    },
+}
+
 #[tauri::command]
-pub async fn quantum_balance(state: State<'_, AppState>) -> Result<f64, String> {
+pub async fn quantum_balance_probe(
+    state: State<'_, AppState>,
+) -> Result<QuantumBalanceProbe, String> {
     let svc = state.inner.lock().await;
-    svc.quantum_balance_mei().await.map_err(|e| e.to_string())
+    Ok(match svc.quantum_balance_mei().await {
+        Ok(balance) => QuantumBalanceProbe::Ok { balance },
+        Err(WalletError::UnsupportedAddress(message)) => QuantumBalanceProbe::Failed {
+            kind: QuantumBalanceFailureKind::Unsupported,
+            message,
+        },
+        Err(error) => QuantumBalanceProbe::Failed {
+            kind: QuantumBalanceFailureKind::Other,
+            message: error.to_string(),
+        },
+    })
 }
 
 #[tauri::command]

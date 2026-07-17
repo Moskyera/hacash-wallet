@@ -7,7 +7,9 @@ use wallet_tauri_common::AppState;
 use zeroize::Zeroize;
 
 #[tauri::command]
-fn wallet_platform_security_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+async fn wallet_platform_security_status(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
     Ok(
         serde_json::to_value(platform::platform_security_status(&app))
             .map_err(|e| e.to_string())?,
@@ -15,17 +17,17 @@ fn wallet_platform_security_status(app: tauri::AppHandle) -> Result<serde_json::
 }
 
 #[tauri::command]
-fn wallet_confirm_biometric_native(
+async fn wallet_confirm_biometric_native(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let nonce = {
-        let mut svc = state.inner.blocking_lock();
+        let mut svc = state.inner.lock().await;
         svc.begin_native_biometric().map_err(|e| e.to_string())?
     };
     let message = format!("Authorize Hacash Wallet transaction\nReference: {nonce}");
     platform::verify_native_biometric(&app, &message)?;
-    let mut svc = state.inner.blocking_lock();
+    let mut svc = state.inner.lock().await;
     svc.finish_native_biometric(&nonce)
         .map_err(|e| e.to_string())
 }
@@ -37,11 +39,11 @@ struct BiometricUnlockStatus {
 }
 
 #[tauri::command]
-fn wallet_biometric_unlock_status(
+async fn wallet_biometric_unlock_status(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<BiometricUnlockStatus, String> {
-    let svc = state.inner.blocking_lock();
+    let svc = state.inner.lock().await;
     Ok(BiometricUnlockStatus {
         enabled: svc.get_settings().biometric_unlock_enabled,
         configured: biometric_store::is_configured(&app)?,
@@ -49,19 +51,19 @@ fn wallet_biometric_unlock_status(
 }
 
 #[tauri::command]
-fn wallet_enable_biometric_unlock(
+async fn wallet_enable_biometric_unlock(
     app: tauri::AppHandle,
     passphrase: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     {
-        let mut svc = state.inner.blocking_lock();
+        let mut svc = state.inner.lock().await;
         svc.verify_wallet_passphrase(&passphrase)
             .map_err(|e| e.to_string())?;
     }
     platform::verify_native_biometric(&app, "Enable biometric unlock for Hacash Wallet")?;
     biometric_store::store(&app, &passphrase)?;
-    let mut svc = state.inner.blocking_lock();
+    let mut svc = state.inner.lock().await;
     if let Err(error) = svc.set_biometric_unlock_enabled(true) {
         let _ = biometric_store::clear(&app);
         return Err(error.to_string());
@@ -70,24 +72,24 @@ fn wallet_enable_biometric_unlock(
 }
 
 #[tauri::command]
-fn wallet_disable_biometric_unlock(
+async fn wallet_disable_biometric_unlock(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     biometric_store::clear(&app)?;
-    let mut svc = state.inner.blocking_lock();
+    let mut svc = state.inner.lock().await;
     svc.set_biometric_unlock_enabled(false)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn wallet_unlock_biometric(
+async fn wallet_unlock_biometric(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     platform::verify_native_biometric(&app, "Unlock Hacash Wallet")?;
     let mut passphrase = biometric_store::load(&app)?;
-    let mut svc = state.inner.blocking_lock();
+    let mut svc = state.inner.lock().await;
     let result = svc.unlock(&passphrase).map_err(|e| e.to_string());
     passphrase.zeroize();
     result
@@ -129,16 +131,19 @@ pub fn run() {
             app.manage(AppState::new(svc));
             Ok(())
         })
-        .invoke_handler(wallet_tauri_common::wallet_invoke_handler_mobile![
-            wallet_platform_security_status,
-            wallet_confirm_biometric_native,
-            wallet_biometric_unlock_status,
-            wallet_enable_biometric_unlock,
-            wallet_disable_biometric_unlock,
-            wallet_unlock_biometric,
-            wallet_tauri_common::whisper_commands::wallet_update_dust_whisper_settings,
-            wallet_tauri_common::update_commands::wallet_install_mobile_update,
-        ])
+        .invoke_handler(wallet_tauri_common::invoke_with_panic_boundary(
+            wallet_tauri_common::wallet_invoke_handler_mobile![
+                wallet_platform_security_status,
+                wallet_confirm_biometric_native,
+                wallet_biometric_unlock_status,
+                wallet_enable_biometric_unlock,
+                wallet_disable_biometric_unlock,
+                wallet_unlock_biometric,
+                wallet_tauri_common::whisper_commands::wallet_update_dust_whisper_settings,
+                wallet_tauri_common::update_commands::wallet_install_mobile_update,
+            ],
+            "mobile",
+        ))
         .run(tauri::generate_context!())
         .expect("error while building mobile tauri application");
 }

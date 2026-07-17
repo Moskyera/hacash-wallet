@@ -1,3 +1,4 @@
+import { type4Balance, useType4Probe } from "@hacash/wallet-ui";
 import { useCallback, useEffect, useState } from "react";
 import { api, quantumApi, QuantumAccountSummary, QuantumPreflight } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
@@ -51,7 +52,6 @@ export default function SendQuantumTx({
   const [to, setTo] = useState(DEFAULT_TO);
   const [amount, setAmount] = useState("0.1");
   const [pass, setPass] = useState("");
-  const [balance, setBalance] = useState<number | null>(null);
   const [preflight, setPreflight] = useState<QuantumPreflight | null>(null);
   const [phase, setPhase] = useState<"idle" | "busy" | "ok" | "err">("idle");
   const [hash, setHash] = useState("");
@@ -64,18 +64,12 @@ export default function SendQuantumTx({
   const type4Ready = canSendType4(account);
   const isPqcSender = account?.kind === "pqckey" && account.address_version === 6;
 
-  const refreshBalance = useCallback(async () => {
-    if (!account) {
-      setBalance(null);
-      return;
-    }
-    try {
-      const b = await quantumApi.balance();
-      setBalance(b);
-    } catch {
-      setBalance(null);
-    }
-  }, [account]);
+  const { probe: balanceProbe, refresh: refreshBalance } = useType4Probe(
+    account?.address,
+    quantumApi.balanceProbe,
+    formatInvokeError,
+  );
+  const balance = type4Balance(balanceProbe);
 
   const runPreflight = useCallback(async () => {
     if (!account || !type4Ready) {
@@ -99,10 +93,6 @@ export default function SendQuantumTx({
       });
     }
   }, [account, type4Ready, to, amount, balance]);
-
-  useEffect(() => {
-    refreshBalance();
-  }, [refreshBalance]);
 
   useEffect(() => {
     const t = setTimeout(() => {

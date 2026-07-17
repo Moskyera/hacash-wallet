@@ -63,17 +63,20 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(wallet_tauri_common::wallet_invoke_handler![
-            wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
-            wallet_list_bills,
-            wallet_validate_hip23,
-            wallet_platform_security_status,
-            wallet_confirm_biometric_native,
-            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_start,
-            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_stop,
-            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_status,
-            wallet_tauri_common::update_commands::wallet_install_desktop_update,
-        ])
+        .invoke_handler(wallet_tauri_common::invoke_with_panic_boundary(
+            wallet_tauri_common::wallet_invoke_handler![
+                wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
+                wallet_list_bills,
+                wallet_validate_hip23,
+                wallet_platform_security_status,
+                wallet_confirm_biometric_native,
+                wallet_tauri_common::desktop_commands::wallet_dapp_bridge_start,
+                wallet_tauri_common::desktop_commands::wallet_dapp_bridge_stop,
+                wallet_tauri_common::desktop_commands::wallet_dapp_bridge_status,
+                wallet_tauri_common::update_commands::wallet_install_desktop_update,
+            ],
+            "desktop",
+        ))
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
