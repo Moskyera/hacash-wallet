@@ -11,6 +11,7 @@ import QuantumScreen from "../../components/QuantumScreen";
 import WhisperScreen from "../../components/WhisperScreen";
 import { downloadJson } from "../../utils/downloadJson";
 import FastPayChannelScreen from "../FastPayChannelScreen";
+import HacdTab from "../HacdTab";
 import { fastPayMenuBadge } from "../../fastPayUi";
 import { useLocale } from "../../locale";
 import ContactsScreen from "./ContactsScreen";
@@ -88,6 +89,14 @@ export default function MoreRouter({ page, data, actions }: Props) {
         <button type="button" onClick={() => onNavigate("contacts")}>
           <span>{t("more.contacts")}</span>
           <span>{contacts.length}</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("hacd")}>
+          <span>{t("more.hacd")}</span>
+          <span>◆</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("messages")}>
+          <span>{t("nav.messages")}</span>
+          <span>••</span>
         </button>
         <button type="button" onClick={() => onNavigate("quantum")}>
           <span>{t("more.quantum")}</span>
@@ -261,6 +270,14 @@ export default function MoreRouter({ page, data, actions }: Props) {
           contacts={contacts}
           onToast={onToast}
           onGoPay={onGoPayPeer}
+        />
+      )}
+      {page === "hacd" && (
+        <HacdTab
+          locked={!status || status.locked}
+          busy={busy}
+          onToast={onToast}
+          onGoPay={onGoLegacySend}
         />
       )}
       {page === "quantum" && (

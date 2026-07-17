@@ -3,7 +3,6 @@ import { api, BillSummary, type BiometricUnlockStatus } from "./api";
 import BottomNav, { type TabId } from "./components/BottomNav";
 import BillDetailModal from "./components/BillDetailModal";
 import DappApprovalPanel from "./components/DappApprovalPanel";
-import MessengerScreen from "./components/MessengerScreen";
 import PrivacyShield from "./components/PrivacyShield";
 import Toast from "./components/Toast";
 import SplashScreen from "./components/SplashScreen";
@@ -12,6 +11,7 @@ import { usePaymentFlow } from "./hooks/usePaymentFlow";
 import { useToast } from "./hooks/useToast";
 import { useWalletSession } from "./hooks/useWalletSession";
 import HomeTab from "./screens/HomeTab";
+import HacdTab from "./screens/HacdTab";
 import PayTab from "./screens/PayTab";
 import ReceiveTab from "./screens/ReceiveTab";
 import UnlockScreen from "./screens/UnlockScreen";
@@ -548,17 +548,13 @@ export default function MobileApp() {
           />
         )}
 
-        {tab === "messages" && (
-          <MessengerScreen
-            myAddress={session.status?.address}
-            hideAddresses={session.privacy.hide_addresses}
-            whisperEnabled={session.dustWhisper?.enabled}
-            contacts={contacts}
+        {tab === "hacd" && (
+          <HacdTab
+            locked={!session.status || session.status.locked}
+            busy={session.busy}
+            ownedHint={session.assets?.hacd_names}
             onToast={showToast}
-            onGoPay={(peer) => {
-              payment.goToPayContact(peer);
-              navigateToPay();
-            }}
+            onGoPay={() => navigateToPay()}
           />
         )}
 

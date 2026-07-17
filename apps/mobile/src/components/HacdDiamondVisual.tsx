@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useHacdDiamond } from "../hooks/useHacdDiamond";
-import { renderHip5Svg, resolveVisualGene } from "../lib/hip5";
+import type { HacdDiamondInfo } from "../api";
+import { hip5MainColors, renderHip5Svg, resolveVisualGene } from "../lib/hip5";
 import { isValidHacdName, normalizeHacdName } from "../utils/paymentAssets";
 
 type Props = {
@@ -11,164 +12,229 @@ type Props = {
 
 const EXPLORER_BASE = "https://explorer.hacash.org/diamond/";
 
-export default function HacdDiamondVisual({ name, size = "lg" }: Props) {
+/** Single Explorer-style metadata card — all identity art + genes + bid in one poster. */
+export default function HacdDiamondVisual({ name }: Props) {
   const normalized = normalizeHacdName(name);
   const lookupName = isValidHacdName(normalized) ? normalized : null;
   const diamondState = useHacdDiamond(lookupName);
-  const [showDetails, setShowDetails] = useState(false);
-  const [actionStatus, setActionStatus] = useState("");
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(0.36);
 
-  const svgUrl = useMemo(() => {
-    if (diamondState.status !== "ready") return null;
-    const gene = resolveVisualGene({
-      name: diamondState.info.name,
-      visualGene: diamondState.info.visual_gene,
-      lifeGene: diamondState.info.life_gene,
-    });
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const fit = () => {
+      const w = host.clientWidth || 320;
+      setScale(Math.max(0.14, Math.min(0.48, w / 800)));
+    };
+    fit();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(host);
+    return () => ro.disconnect();
+  }, [diamondState.status, lookupName]);
+
+  if (!normalized) {
+    return <PendingCard message="Enter a HACD name" />;
+  }
+  if (!lookupName) {
+    return <PendingCard title={normalized} message="Use 4–6 letters from WTYUIAHXVMEKBSZN" />;
+  }
+  if (diamondState.status === "loading" || diamondState.status === "idle") {
+    return <PendingCard title={normalized} message="Loading metadata…" />;
+  }
+  if (diamondState.status === "not_found") {
+    return <PendingCard title={normalized} message="Not found on chain" />;
+  }
+  if (diamondState.status === "error") {
+    return <PendingCard title={normalized} message={diamondState.message} />;
+  }
+
+  return (
+    <div ref={hostRef} className="hacd-metadata-host">
+      <ExplorerMetadataCard
+        info={diamondState.info}
+        displayName={normalized}
+        scale={scale}
+      />
+    </div>
+  );
+}
+
+function ExplorerMetadataCard({
+  info,
+  displayName,
+  scale,
+}: {
+  info: HacdDiamondInfo;
+  displayName: string;
+  scale: number;
+}) {
+  const gene = useMemo(
+    () =>
+      resolveVisualGene({
+        name: info.name || displayName,
+        visualGene: info.visual_gene,
+        lifeGene: info.life_gene,
+      }),
+    [info, displayName],
+  );
+
+  const art = useMemo(() => {
     if (!gene) return null;
-    const svgSize = size === "lg" ? 240 : 144;
-    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(renderHip5Svg(gene, svgSize))}`;
-  }, [diamondState, size]);
-
-  const copyCode = async () => {
-    await navigator.clipboard.writeText(`hacd:${normalized}`);
-    setActionStatus("Copied");
-    window.setTimeout(() => setActionStatus(""), 1800);
-  };
-
-  const openExplorer = async () => {
-    if (!lookupName) return;
     try {
-      await openUrl(`${EXPLORER_BASE}${lookupName}`);
+      const svg = renderHip5Svg(gene, 500);
+      const colors = hip5MainColors(gene);
+      return { svg, colors, gene };
     } catch {
-      setActionStatus("Could not open explorer");
+      return null;
+    }
+  }, [gene]);
+
+  const openExplorer = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    try {
+      await openUrl(`${EXPLORER_BASE}${encodeURIComponent(displayName)}`);
+    } catch {
+      /* ignore */
     }
   };
 
-  if (!normalized) {
-    return <MetadataState size={size} message="Enter a HACD name to load its metadata." />;
-  }
-
-  if (!lookupName) {
-    return <MetadataState size={size} title={normalized} message="HACD names use 4 to 6 valid letters." />;
-  }
-
-  if (diamondState.status === "loading") {
-    return <MetadataState size={size} title={normalized} message="Loading on-chain metadata…" loading />;
-  }
-
-  if (diamondState.status === "not_found") {
-    return <MetadataState size={size} title={normalized} message="Not found on chain. Check the name." />;
-  }
-
-  if (diamondState.status === "error") {
-    return <MetadataState size={size} title={normalized} message={`Metadata unavailable: ${diamondState.message}`} />;
-  }
-
-  if (diamondState.status !== "ready") {
-    return <MetadataState size={size} title={normalized} message="Metadata is unavailable." />;
-  }
-
-  const info = diamondState.info;
-  const inscription = info.inscriptions.length > 0 ? info.inscriptions.join(" · ") : "None";
+  const bornTail = info.born?.hash ? `···${info.born.hash.slice(-20)}` : "";
+  const minerShort = info.miner ? `${info.miner.slice(0, 12)}···` : "";
+  const bid = formatBidFee(info.bid_fee);
+  const lifeHtml = formatLifeGeneHtml(info.life_gene);
+  const visualHtml = formatVisualGeneHtml(art?.gene ?? "");
+  const gradient = art
+    ? `linear-gradient(to right bottom, #${art.colors[0]}99, #${art.colors[1]})`
+    : "#1a0a2e";
 
   return (
-    <article className={`hacd-metadata-card hacd-metadata-${size}`}>
-      <header className="hacd-metadata-header">
-        <div>
-          <span className="eyebrow">HACD metadata</span>
-          <h3>{normalized}</h3>
-        </div>
-        <span className="hacd-number">{info.number != null ? `#${info.number}` : "On-chain"}</span>
-      </header>
-      {info.metadata_source === "mainnet" ? (
-        <p className="muted small" role="status">
-          Mainnet metadata is read-only. Ownership and sends still use your configured node.
-        </p>
-      ) : null}
-
-      <div className="hacd-metadata-main">
-        <div className="hacd-art-frame">
-          {svgUrl ? (
-            <img src={svgUrl} alt={`HIP-5 visual for HACD ${normalized}`} className="hacd-hip5-svg" />
-          ) : (
-            <span className="muted">HIP-5 visual unavailable</span>
+    <article className="hacd-metadata-card" data-hacd-name={displayName}>
+      <a
+        className="hacd-meta-cdit"
+        href={`${EXPLORER_BASE}${encodeURIComponent(displayName)}`}
+        onClick={(e) => void openExplorer(e)}
+        title="View on Hacash Explorer"
+      >
+        <div
+          className="hacd-meta-cdcon"
+          style={{
+            transform: `scale(${scale})`,
+            backgroundImage: gradient,
+          }}
+        >
+          {art && (
+            <>
+              <div
+                className="hacd-meta-ibg"
+                aria-hidden
+                dangerouslySetInnerHTML={{ __html: art.svg }}
+              />
+              <div className="hacd-meta-ldz" aria-hidden />
+              <div
+                className="hacd-meta-img"
+                aria-hidden
+                dangerouslySetInnerHTML={{ __html: art.svg }}
+              />
+            </>
           )}
+          <div className="hacd-meta-overlay">
+            <div className="hacd-meta-blk">
+              {bornTail}
+              <br />
+              BORN BLOCK: <b>{info.born?.height ?? "—"}</b>
+            </div>
+            <div className="hacd-meta-clb" aria-hidden />
+            <div className="hacd-meta-num">{info.number ?? ""}</div>
+            <div
+              className="hacd-meta-dn"
+              style={
+                art
+                  ? {
+                      backgroundImage: `linear-gradient(90deg, #${art.colors[0]}, #${art.colors[1]})`,
+                    }
+                  : undefined
+              }
+            >
+              {displayName}
+            </div>
+            <p className="hacd-meta-lgn">LIFE GENES</p>
+            <p
+              className="hacd-meta-lg"
+              style={
+                art
+                  ? {
+                      backgroundImage: `linear-gradient(-21deg, #${art.colors[0]}, #${art.colors[1]})`,
+                    }
+                  : undefined
+              }
+              dangerouslySetInnerHTML={{ __html: lifeHtml || "—" }}
+            />
+            <div
+              className="hacd-meta-vg"
+              dangerouslySetInnerHTML={{ __html: visualHtml || "—" }}
+            />
+            <p className="hacd-meta-gmn">LIFE GAME CODE</p>
+            <p className="hacd-meta-bid">
+              BID: {bid}
+              <br />
+              {minerShort}
+            </p>
+            <div className="hacd-meta-cll" aria-hidden />
+          </div>
         </div>
-
-        <dl className="hacd-facts">
-          <div>
-            <dt>Born block</dt>
-            <dd>{info.born?.height ?? "N/A"}</dd>
-          </div>
-          <div>
-            <dt>Average burn</dt>
-            <dd>{info.average_bid_burn != null ? `${info.average_bid_burn} HACD` : "N/A"}</dd>
-          </div>
-          <div>
-            <dt>Bid fee (wire)</dt>
-            <dd>{info.bid_fee ?? "N/A"}</dd>
-          </div>
-          <div>
-            <dt>Inscriptions</dt>
-            <dd title={inscription}>{inscription}</dd>
-          </div>
-        </dl>
-      </div>
-
-      <div className="hacd-card-actions">
-        <button type="button" className="primary" onClick={() => void copyCode()}>
-          {actionStatus === "Copied" ? "Copied" : "Copy HACD code"}
-        </button>
-        <button type="button" onClick={() => setShowDetails((value) => !value)} aria-expanded={showDetails}>
-          {showDetails ? "Hide details" : "Details"}
-        </button>
-        <button type="button" className="text-button" onClick={() => void openExplorer()}>
-          Explorer
-        </button>
-      </div>
-
-      {actionStatus && actionStatus !== "Copied" && <p className="form-error">{actionStatus}</p>}
-
-      {showDetails && (
-        <dl className="hacd-details">
-          <MetadataRow label="Owner" value={info.belong} />
-          <MetadataRow label="Miner" value={info.miner} />
-          <MetadataRow label="Born hash" value={info.born?.hash} />
-          <MetadataRow label="Previous hash" value={info.prev_hash} />
-          <MetadataRow label="Visual gene" value={info.visual_gene} />
-          <MetadataRow label="Life gene" value={info.life_gene} />
-        </dl>
+      </a>
+      {info.metadata_source === "mainnet" && (
+        <p className="muted small hacd-meta-source">Mainnet metadata (read-only)</p>
       )}
     </article>
   );
 }
 
-function MetadataState({
-  size,
-  title,
-  message,
-  loading = false,
-}: {
-  size: "sm" | "lg";
-  title?: string;
-  message: string;
-  loading?: boolean;
-}) {
+function PendingCard({ title, message }: { title?: string; message: string }) {
   return (
-    <div className={`hacd-metadata-card hacd-metadata-${size} hacd-metadata-empty`} aria-busy={loading}>
-      <span className="eyebrow">HACD metadata</span>
-      {title && <strong>{title}</strong>}
-      <span className="muted">{message}</span>
+    <div className="hacd-metadata-host">
+      <div className="hacd-metadata-card hacd-metadata-card-pending">
+        <div className="hacd-meta-pending">
+          {title && <strong>{title}</strong>}
+          <span>{message}</span>
+        </div>
+      </div>
     </div>
   );
 }
 
-function MetadataRow({ label, value }: { label: string; value?: string | null }) {
-  return (
-    <div>
-      <dt>{label}</dt>
-      <dd><code>{value || "N/A"}</code></dd>
-    </div>
-  );
+function formatBidFee(fee?: string | null): string {
+  const raw = String(fee || "").trim();
+  if (!raw) return "—";
+  return `ㄜ${raw}`;
+}
+
+function insertAt(str: string, sep: string, positions: number[]): string {
+  const chars = str.split("");
+  let offset = 0;
+  for (const pos of positions) {
+    const idx = pos - 1 + offset;
+    if (idx > 0 && idx < chars.length) {
+      chars.splice(idx, 0, sep);
+      offset += sep.length;
+    }
+  }
+  return chars.join("");
+}
+
+function formatLifeGeneHtml(lifeGene?: string | null): string {
+  const lg = String(lifeGene || "");
+  if (!lg) return "";
+  return insertAt(lg, "<br>", [8, 16, 24, 32, 40, 48, 56]);
+}
+
+function formatVisualGeneHtml(visualGene: string): string {
+  const vg = String(visualGene || "").toUpperCase();
+  if (!vg) return "";
+  const spaced = insertAt(vg, " ", [2, 6, 10, 14, 18]);
+  return spaced
+    .replace(/^0/, '<span class="hacd-meta-vg-a">0</span>')
+    .replace(/(.{2})$/, '<span class="hacd-meta-vg-dim">$1</span>');
 }

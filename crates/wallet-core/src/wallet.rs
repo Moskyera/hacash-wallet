@@ -924,12 +924,18 @@ impl WalletService {
                 "HACD name must use 4 to 6 letters from WTYUIAHXVMEKBSZN".into(),
             ));
         }
+        // Metadata is read-only identity: try configured node, then official mainnet.
         match self.node.query_diamond_by_name(&normalized).await {
             Ok(info) => Ok(info),
-            Err(configured_error)
-                if self.settings.node_url != crate::settings::DEFAULT_NODE_URL =>
-            {
-                let official = crate::node::NodeClient::new(crate::settings::DEFAULT_NODE_URL);
+            Err(configured_error) => {
+                let configured = self.settings.node_url.trim().trim_end_matches('/');
+                let official_url = crate::settings::DEFAULT_NODE_URL;
+                if configured.eq_ignore_ascii_case(official_url)
+                    || configured.eq_ignore_ascii_case("https://nodeapi.hacash.org")
+                {
+                    return Err(configured_error);
+                }
+                let official = crate::node::NodeClient::new(official_url);
                 match official.query_diamond_by_name(&normalized).await {
                     Ok(mut info) => {
                         info.metadata_source = "mainnet".into();
@@ -938,7 +944,6 @@ impl WalletService {
                     Err(_) => Err(configured_error),
                 }
             }
-            Err(error) => Err(error),
         }
     }
 

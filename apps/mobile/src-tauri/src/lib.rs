@@ -131,19 +131,18 @@ pub fn run() {
             app.manage(AppState::new(svc));
             Ok(())
         })
-        .invoke_handler(wallet_tauri_common::invoke_with_panic_boundary(
-            wallet_tauri_common::wallet_invoke_handler_mobile![
-                wallet_platform_security_status,
-                wallet_confirm_biometric_native,
-                wallet_biometric_unlock_status,
-                wallet_enable_biometric_unlock,
-                wallet_disable_biometric_unlock,
-                wallet_unlock_biometric,
-                wallet_tauri_common::whisper_commands::wallet_update_dust_whisper_settings,
-                wallet_tauri_common::update_commands::wallet_install_mobile_update,
-            ],
-            "mobile",
-        ))
+        // Plain Tauri handler only — never catch_unwind around IPC on Android.
+        // JNI Rust_ipc is nounwind; unwind/abort there crashes the app (SIGABRT).
+        .invoke_handler(wallet_tauri_common::wallet_invoke_handler_mobile![
+            wallet_platform_security_status,
+            wallet_confirm_biometric_native,
+            wallet_biometric_unlock_status,
+            wallet_enable_biometric_unlock,
+            wallet_disable_biometric_unlock,
+            wallet_unlock_biometric,
+            wallet_tauri_common::whisper_commands::wallet_update_dust_whisper_settings,
+            wallet_tauri_common::update_commands::wallet_install_mobile_update,
+        ])
         .run(tauri::generate_context!())
         .expect("error while building mobile tauri application");
 }

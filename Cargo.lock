@@ -1419,7 +1419,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dust-whisper"
-version = "0.1.48"
+version = "0.1.50"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet"
-version = "0.1.48"
+version = "0.1.50"
 dependencies = [
  "hacash-wallet-core",
  "serde",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet-core"
-version = "0.1.48"
+version = "0.1.50"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2187,7 +2187,7 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet-mobile"
-version = "0.1.48"
+version = "0.1.50"
 dependencies = [
  "hacash-wallet-core",
  "jni",
@@ -2803,7 +2803,7 @@ dependencies = [
 
 [[package]]
 name = "l2-fast-pay-hub"
-version = "0.1.48"
+version = "0.1.50"
 dependencies = [
  "anyhow",
  "axum",
@@ -6018,7 +6018,7 @@ dependencies = [
 
 [[package]]
 name = "wallet-tauri-common"
-version = "0.1.48"
+version = "0.1.50"
 dependencies = [
  "axum",
  "dust-whisper",

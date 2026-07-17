@@ -557,7 +557,7 @@ impl DiamondQueryResponse {
             name: requested_name.to_ascii_uppercase(),
             metadata_source: "configured".into(),
             number: self.number,
-            visual_gene: exact_hex(self.visual_gene, 20),
+            visual_gene: clean_visual_gene(self.visual_gene),
             life_gene: exact_hex(self.life_gene, 64),
             belong: clean_node_address(self.belong),
             miner: clean_node_address(self.miner),
@@ -596,6 +596,14 @@ fn exact_hex(value: Option<String>, expected_len: usize) -> Option<String> {
     let value = value?;
     (value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| value.to_ascii_lowercase())
+}
+
+/// Official nodes/explorers use 18–20 hex visual genes (HIP-5).
+fn clean_visual_gene(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let lower = value.to_ascii_lowercase();
+    let len = lower.len();
+    ((18..=20).contains(&len) && lower.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(lower)
 }
 
 fn clean_node_address(value: Option<String>) -> Option<String> {

@@ -29,7 +29,13 @@ export function useHacdDiamond(name: string | null) {
       .catch((err: unknown) => {
         if (cancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.toLowerCase().includes("not found") || msg.includes("ret=1")) {
+        const lower = msg.toLowerCase();
+        if (
+          lower.includes("not found")
+          || lower.includes("cannot find diamond")
+          || lower.includes("find diamond")
+          || msg.includes("ret=1")
+        ) {
           setState({ status: "not_found" });
           return;
         }

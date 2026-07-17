@@ -1,5 +1,5 @@
 import { useLocale } from "../locale";
-export type TabId = "home" | "pay" | "receive" | "messages" | "more";
+export type TabId = "home" | "pay" | "receive" | "hacd" | "more";
 
 type Props = {
   active: TabId;
@@ -11,7 +11,7 @@ const ITEMS: { id: TabId; label: string; mark: string }[] = [
   { id: "home", label: "Home", mark: "⌂" },
   { id: "pay", label: "Pay", mark: "↑" },
   { id: "receive", label: "Receive", mark: "↓" },
-  { id: "messages", label: "Chat", mark: "••" },
+  { id: "hacd", label: "HACD", mark: "◆" },
   { id: "more", label: "More", mark: "≡" },
 ];
 

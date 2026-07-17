@@ -21,6 +21,7 @@ export type MorePage =
   | "security"
   | "privacy"
   | "contacts"
+  | "hacd"
   | "quantum"
   | "airgap"
   | "launchpad"

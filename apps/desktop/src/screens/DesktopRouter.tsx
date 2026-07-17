@@ -7,6 +7,7 @@ import type { FastPayStatus } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
 import AdvancedScreen from "./AdvancedScreen";
 import FastPayScreen from "./FastPayScreen";
+import HacdScreen from "./HacdScreen";
 import HistoryScreen from "./HistoryScreen";
 import HomeScreen from "./HomeScreen";
 import PrivacyScreen from "./PrivacyScreen";
@@ -319,6 +320,16 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           busy={busy}
           onCopyAddress={onCopyAddress}
           onNotify={onNotify}
+        />
+      );
+    case "hacd":
+      return (
+        <HacdScreen
+          locked={!!status?.locked}
+          busy={busy}
+          ownedHint={assets?.hacd_names}
+          onNotify={onNotify}
+          onGoSend={() => setScreen("send")}
         />
       );
     case "history":

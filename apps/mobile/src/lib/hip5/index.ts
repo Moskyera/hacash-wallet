@@ -8,7 +8,7 @@ export type Hip5RenderInput = {
   lifeGene?: string | null;
 };
 
-const VISUAL_GENE_RE = /^[0-9a-f]{20}$/i;
+const VISUAL_GENE_RE = /^[0-9a-f]{18,20}$/i;
 const LIFE_GENE_RE = /^[0-9a-f]{64}$/i;
 const DIAMOND_NAME_RE = /^[WTYUIAHXVMEKBSZN]{4,6}$/i;
 const HEX_COLOR_RE = /^[0-9a-f]{6}$/i;
