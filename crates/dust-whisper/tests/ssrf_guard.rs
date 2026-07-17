@@ -1,8 +1,8 @@
 //! Relay must not forward to client-supplied URLs (SSRF guard).
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::routing::post;
 use axum::{Json, Router};

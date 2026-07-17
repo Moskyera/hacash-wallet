@@ -1,4 +1,4 @@
-use field::{Address, Fixed64, Fixed33, HashHalf, Parse, Serialize, Sign, Timestamp, Uint1};
+use field::{Address, Fixed33, Fixed64, HashHalf, Parse, Serialize, Sign, Timestamp, Uint1};
 use sys::Ret;
 
 use super::hash::sha3_hash;
@@ -7,7 +7,7 @@ use super::prove_body::TransferProveBody;
 /// `fields.SignSize` in Go core (33-byte pubkey + 64-byte signature).
 const SIGN_WIRE_SIZE: usize = 33 + 64;
 
-/// `channel.OffChainFormPaymentChannelTransfer` (unsigned — empty signature slots).
+/// `channel.OffChainFormPaymentChannelTransfer` (unsigned. empty signature slots).
 #[derive(Debug, Clone)]
 pub struct OffChainChannelTransfer {
     pub timestamp: Timestamp,
@@ -44,15 +44,11 @@ impl OffChainChannelTransfer {
         sign_addresses: Vec<Address>,
         timestamp: u64,
     ) -> Self {
-        let prove_hash_checkers: Vec<HashHalf> = prove_bodies
-            .iter()
-            .map(|b| b.hash_half_checker())
-            .collect();
+        let prove_hash_checkers: Vec<HashHalf> =
+            prove_bodies.iter().map(|b| b.hash_half_checker()).collect();
         let must_sign_count = Uint1::from(sign_addresses.len() as u8);
         let channel_count = Uint1::from(prove_bodies.len() as u8);
-        let must_signs = (0..sign_addresses.len())
-            .map(|_| empty_sign())
-            .collect();
+        let must_signs = (0..sign_addresses.len()).map(|_| empty_sign()).collect();
         Self {
             timestamp: Timestamp::from(timestamp),
             order_note_hash: HashHalf::default(),

@@ -3,10 +3,10 @@
 
 use std::sync::Mutex;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use coset::{iana, CborSerializable, CoseKey, Label, RegisteredLabelWithPrivate};
-use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use coset::{CborSerializable, CoseKey, Label, RegisteredLabelWithPrivate, iana};
 use p256::EncodedPoint;
+use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -49,10 +49,7 @@ fn resolve_webauthn_context(client_origin: Option<&str>) -> (String, String) {
             return (normalized, rp_id);
         }
     }
-    (
-        DEFAULT_RP_ORIGIN.to_string(),
-        DEFAULT_RP_ID.to_string(),
-    )
+    (DEFAULT_RP_ORIGIN.to_string(), DEFAULT_RP_ID.to_string())
 }
 
 fn origin_to_rp_id(origin: &str) -> Option<String> {
@@ -82,7 +79,11 @@ impl WebAuthnGate {
         })
     }
 
-    pub fn begin_register(&self, username: &str, client_origin: Option<&str>) -> WalletResult<String> {
+    pub fn begin_register(
+        &self,
+        username: &str,
+        client_origin: Option<&str>,
+    ) -> WalletResult<String> {
         let challenge = random_challenge();
         let (expected_origin, rp_id) = resolve_webauthn_context(client_origin);
         *self.pending.lock().map_err(|e| lock_err(e))? = Some(CeremonyState {
@@ -129,8 +130,8 @@ impl WebAuthnGate {
 
     pub fn finish_register(&self, credential_json: &str) -> WalletResult<String> {
         let state = self.take_pending("registration")?;
-        let cred: RegisterCredential = serde_json::from_str(credential_json)
-            .map_err(|e| WalletError::Other(e.to_string()))?;
+        let cred: RegisterCredential =
+            serde_json::from_str(credential_json).map_err(|e| WalletError::Other(e.to_string()))?;
         verify_client_data(
             &cred.response.client_data_json,
             &state.challenge_b64,
@@ -176,8 +177,8 @@ impl WebAuthnGate {
 
     pub fn finish_auth(&self, assertion_json: &str, stored_b64: Option<&str>) -> WalletResult<()> {
         let state = self.take_pending("authentication")?;
-        let cred: AuthCredential = serde_json::from_str(assertion_json)
-            .map_err(|e| WalletError::Other(e.to_string()))?;
+        let cred: AuthCredential =
+            serde_json::from_str(assertion_json).map_err(|e| WalletError::Other(e.to_string()))?;
         let client_data_bytes = decode_b64(&cred.response.client_data_json)?;
         verify_client_data_bytes(
             &client_data_bytes,
@@ -186,24 +187,18 @@ impl WebAuthnGate {
             &state.expected_origin,
         )?;
 
-        let stored_cred = stored_b64
-            .map(load_stored_credential)
-            .transpose()?;
+        let stored_cred = stored_b64.map(load_stored_credential).transpose()?;
 
         if stored_cred
             .as_ref()
             .and_then(|s| s.public_key_b64.as_ref())
             .is_some()
         {
-            let auth_b64 = cred
-                .response
-                .authenticator_data
-                .as_ref()
-                .ok_or_else(|| {
-                    WalletError::Policy(
-                        "authenticatorData required when credential has public key".into(),
-                    )
-                })?;
+            let auth_b64 = cred.response.authenticator_data.as_ref().ok_or_else(|| {
+                WalletError::Policy(
+                    "authenticatorData required when credential has public key".into(),
+                )
+            })?;
             let sig_b64 = cred.response.signature.as_ref().ok_or_else(|| {
                 WalletError::Policy("signature required when credential has public key".into())
             })?;
@@ -365,7 +360,9 @@ fn verify_es256_signature(pk_b64: &str, signed: &[u8], signature: &[u8]) -> Wall
     let pk_bytes = decode_b64(pk_b64)?;
     let cose = CoseKey::from_slice(&pk_bytes).map_err(|e| WalletError::Policy(e.to_string()))?;
     if cose.alg != Some(RegisteredLabelWithPrivate::Assigned(iana::Algorithm::ES256)) {
-        return Err(WalletError::Policy("unsupported WebAuthn public key algorithm".into()));
+        return Err(WalletError::Policy(
+            "unsupported WebAuthn public key algorithm".into(),
+        ));
     }
     let x = cose_param_bytes(&cose, -2)
         .ok_or_else(|| WalletError::Policy("COSE key missing x coordinate".into()))?;
@@ -374,10 +371,10 @@ fn verify_es256_signature(pk_b64: &str, signed: &[u8], signature: &[u8]) -> Wall
     let mut uncompressed = vec![0x04];
     uncompressed.extend_from_slice(x);
     uncompressed.extend_from_slice(y);
-    let point = EncodedPoint::from_bytes(&uncompressed)
-        .map_err(|e| WalletError::Policy(e.to_string()))?;
-    let verifying_key = VerifyingKey::from_encoded_point(&point)
-        .map_err(|e| WalletError::Policy(e.to_string()))?;
+    let point =
+        EncodedPoint::from_bytes(&uncompressed).map_err(|e| WalletError::Policy(e.to_string()))?;
+    let verifying_key =
+        VerifyingKey::from_encoded_point(&point).map_err(|e| WalletError::Policy(e.to_string()))?;
     let sig = Signature::from_der(signature).or_else(|_| {
         Signature::from_slice(signature)
             .map_err(|e| WalletError::Policy(format!("invalid ES256 signature: {e}")))
@@ -428,7 +425,9 @@ impl WebAuthnGate {
             .take()
             .ok_or_else(|| WalletError::Other("WebAuthn ceremony not started".into()))?;
         if state.purpose != purpose {
-            return Err(WalletError::Other("WebAuthn ceremony purpose mismatch".into()));
+            return Err(WalletError::Other(
+                "WebAuthn ceremony purpose mismatch".into(),
+            ));
         }
         Ok(state)
     }

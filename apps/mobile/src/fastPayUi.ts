@@ -20,11 +20,11 @@ export function l1FeeSpeedDetail(speed: L1FeeSpeed): string {
     case "slow":
       return "Network minimum fee.";
     case "fast":
-      return "5× network average — higher mempool priority.";
+      return "5× network average. higher mempool priority.";
     case "ultra":
-      return "15× network average — highest priority.";
+      return "15× network average. highest priority.";
     default:
-      return "1.2× network average — balanced.";
+      return "1.2× network average. balanced.";
   }
 }
 
@@ -35,10 +35,22 @@ export function formatServiceFeeRate(rate: number | null | undefined): string {
   return `${(rate * 100).toFixed(1).replace(/\.0$/, "")}%`;
 }
 
-export type FastPayState = "ready" | "needs_channel" | "hub_unreachable" | "no_provider";
+export type FastPayState =
+  | "ready"
+  | "needs_channel"
+  | "hub_unreachable"
+  | "checking"
+  | "provider_incompatible"
+  | "no_provider";
 
 export function parseFastPayState(raw?: string | null): FastPayState {
-  if (raw === "ready" || raw === "needs_channel" || raw === "hub_unreachable") {
+  if (
+    raw === "ready" ||
+    raw === "needs_channel" ||
+    raw === "hub_unreachable" ||
+    raw === "checking" ||
+    raw === "provider_incompatible"
+  ) {
     return raw;
   }
   return "no_provider";
@@ -48,11 +60,15 @@ export function parseFastPayState(raw?: string | null): FastPayState {
 export function fastPayStatusLine(state?: string | null, depositMei = 10): string {
   switch (parseFastPayState(state)) {
     case "ready":
-      return "Sends settle in seconds with a low fee.";
+      return "Sends settle in seconds with no Fast Pay fee.";
     case "needs_channel":
       return `Deposit ${depositMei} HAC once to turn on. Blockchain pays still work.`;
     case "hub_unreachable":
       return "Payment network offline. Sends use the blockchain for now.";
+    case "checking":
+      return "Checking settlement, routing and fee capabilities. Sends stay on-chain.";
+    case "provider_incompatible":
+      return "Provider cannot create safe, fee-free routed settlements. Sends stay on-chain.";
     default:
       return "Not set up yet. Sends use the blockchain.";
   }
@@ -67,6 +83,10 @@ export function fastPayStatusTitle(state?: string | null): string {
       return "Setup needed";
     case "hub_unreachable":
       return "Network offline";
+    case "checking":
+      return "Checking provider";
+    case "provider_incompatible":
+      return "Provider unavailable";
     default:
       return "Fast Pay is off";
   }
@@ -81,6 +101,10 @@ export function fastPayMenuBadge(state?: string | null): string {
       return "setup";
     case "hub_unreachable":
       return "offline";
+    case "checking":
+      return "checking";
+    case "provider_incompatible":
+      return "unsupported";
     default:
       return "off";
   }

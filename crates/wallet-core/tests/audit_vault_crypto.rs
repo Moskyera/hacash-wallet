@@ -4,13 +4,14 @@
 mod common;
 
 use common::audit_gate;
-use hacash_wallet_core::vault::EncryptedVault;
 use hacash_wallet_core::WalletError;
+use hacash_wallet_core::vault::EncryptedVault;
 
 #[test]
 fn audit_vault_wrong_passphrase_never_decrypts() {
     audit_gate("vault_wrong_passphrase", || {
-        let vault = EncryptedVault::encrypt("deadbeef", "1Audit", "correct-horse", "balanced").unwrap();
+        let vault =
+            EncryptedVault::encrypt("deadbeef", "1Audit", "correct-horse", "balanced").unwrap();
         let err = vault.decrypt("wrong-passphrase").unwrap_err();
         assert!(matches!(err, WalletError::InvalidPassphrase));
     });
@@ -50,7 +51,9 @@ fn audit_vault_reencrypt_roundtrip() {
     audit_gate("vault_reencrypt", || {
         let mut vault =
             EncryptedVault::encrypt("rotate-me", "1Audit", "old-passphrase", "balanced").unwrap();
-        vault.reencrypt("old-passphrase", "new-passphrase-99").unwrap();
+        vault
+            .reencrypt("old-passphrase", "new-passphrase-99")
+            .unwrap();
         assert_eq!(vault.decrypt("new-passphrase-99").unwrap(), "rotate-me");
         assert!(vault.decrypt("old-passphrase").is_err());
     });
@@ -72,7 +75,8 @@ fn audit_vault_save_load_roundtrip() {
     audit_gate("vault_save_load", || {
         common::with_isolated_wallet_dir(|| {
             let path = hacash_wallet_core::vault::default_vault_path();
-            let vault = EncryptedVault::encrypt("persist", "1Audit", "pass123456", "balanced").unwrap();
+            let vault =
+                EncryptedVault::encrypt("persist", "1Audit", "pass123456", "balanced").unwrap();
             vault.save(&path).unwrap();
             let loaded = EncryptedVault::load(&path).unwrap();
             assert_eq!(loaded.decrypt("pass123456").unwrap(), "persist");

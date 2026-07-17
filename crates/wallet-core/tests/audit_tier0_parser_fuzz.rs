@@ -1,4 +1,4 @@
-//! TIER-0: Parser hardening — arbitrary vault JSON / hex must never panic or leak plaintext.
+//! TIER-0: Parser hardening. arbitrary vault JSON / hex must never panic or leak plaintext.
 
 mod common;
 
@@ -6,8 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use common::tier0_gate;
-use hacash_wallet_core::vault::EncryptedVault;
 use hacash_wallet_core::WalletError;
+use hacash_wallet_core::vault::EncryptedVault;
 use proptest::prelude::*;
 
 fn temp_vault_file(contents: &str) -> (tempfile::TempDir, PathBuf) {

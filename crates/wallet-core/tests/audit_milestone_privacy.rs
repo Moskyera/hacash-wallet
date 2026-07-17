@@ -3,9 +3,9 @@
 mod common;
 
 use common::{tier0_gate, with_isolated_wallet_dir};
+use hacash_wallet_core::WalletService;
 use hacash_wallet_core::payment::PaymentRail;
 use hacash_wallet_core::privacy::PrivacySettings;
-use hacash_wallet_core::WalletService;
 
 #[test]
 fn milestone_privacy_skips_history_storage() {

@@ -45,7 +45,7 @@ export default function QuantumFundingCard({
       </div>
       <p className="quantum-balance-line">
         Quantum balance:{" "}
-        <strong>{balance == null ? "—" : `${balance.toFixed(3)} HAC`}</strong>
+        <strong>{balance == null ? "N/A" : `${balance.toFixed(3)} HAC`}</strong>
       </p>
       {legacyAddress && (
         <p className="muted small">

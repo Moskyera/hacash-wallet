@@ -26,11 +26,11 @@ export default function SecurityInfoScreen({
       <div className="security-grid">
         <div className="security-item done">
           <h4>Encrypted vault</h4>
-          <p>Argon2id + AES-256-GCM. Keys never leave device unencrypted.</p>
+          <p>Argon2id and AES-256-GCM protect the vault. Keys are decrypted in memory while unlocked.</p>
         </div>
         <div className="security-item done">
           <h4>Local signing</h4>
-          <p>Transactions signed in Rust core — private key never sent to node API.</p>
+          <p>Transactions signed in Rust core. private key never sent to node API.</p>
         </div>
         <div className="security-item done">
           <h4>HIP-23 pre-sign checks</h4>

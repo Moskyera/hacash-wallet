@@ -2,12 +2,12 @@
 
 mod common;
 
-use std::fs;
 use common::{audit_gate, with_isolated_wallet_dir};
-use hacash_wallet_core::paths::{secure_delete_backup_file, wallet_data_root};
-use hacash_wallet_core::vault::EncryptedVault;
 use hacash_wallet_core::WalletError;
 use hacash_wallet_core::WalletService;
+use hacash_wallet_core::paths::{secure_delete_backup_file, wallet_data_root};
+use hacash_wallet_core::vault::EncryptedVault;
+use std::fs;
 
 #[test]
 fn audit_backup_export_import_roundtrip() {
@@ -70,10 +70,8 @@ fn audit_secure_delete_backup_refuses_wallet_dir() {
             assert!(vault.exists());
             assert!(secure_delete_backup_file(&vault).is_err());
 
-            let outside = std::env::temp_dir().join(format!(
-                "hacash-backup-test-{}.json",
-                std::process::id()
-            ));
+            let outside = std::env::temp_dir()
+                .join(format!("hacash-backup-test-{}.json", std::process::id()));
             fs::write(&outside, svc.export_backup("backup-pass-1234").unwrap()).unwrap();
             secure_delete_backup_file(&outside).expect("outside json should delete");
             assert!(!outside.exists());

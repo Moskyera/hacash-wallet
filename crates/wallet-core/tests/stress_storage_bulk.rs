@@ -36,7 +36,8 @@ fn stress_bills_store_1000_entries() {
         with_isolated_wallet_dir(|| {
             let mut b = BillStore::load().unwrap();
             for i in 0..1000 {
-                b.store_bill(&format!("pay-{i:05}"), &format!("{i:064x}")).unwrap();
+                b.store_bill(&format!("pay-{i:05}"), &format!("{i:064x}"))
+                    .unwrap();
             }
             assert_eq!(b.count(), 1000);
             let reloaded = BillStore::load().unwrap();

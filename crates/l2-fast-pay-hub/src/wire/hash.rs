@@ -9,7 +9,7 @@ pub fn sha3_hash(stuff: &[u8]) -> Hash {
     Hash::from(digest)
 }
 
-/// First 16 bytes of SHA3-256(stuff) — `HashHalfChecker` in Go.
+/// First 16 bytes of SHA3-256(stuff). `HashHalfChecker` in Go.
 pub fn half_checker(stuff: &[u8]) -> Fixed16 {
     sha3_hash(stuff).half()
 }

@@ -15,7 +15,7 @@ impl WalletAccount {
         Ok(Self { account })
     }
 
-    /// Cryptographically random account — used for new wallet creation.
+    /// Cryptographically random account. used for new wallet creation.
     pub fn create_random() -> WalletResult<Self> {
         let account = Account::create_randomly(&|buf| {
             rand::thread_rng().fill_bytes(buf);

@@ -1,18 +1,16 @@
 import { useEffect, useState } from "react";
 import HacdDiamondVisual from "./HacdDiamondVisual";
+import BtcNetworkNotice from "./BtcNetworkNotice";
 import PaymentQrDisplay from "./PaymentQrDisplay";
 import { encodePaymentUri } from "../paymentQr";
 import { copyWithPrivacyClear, maskAddress } from "../privacy";
 import {
-  isValidBtcAddress,
   isValidHacdName,
   normalizeHacdName,
   type PaymentAsset,
 } from "../utils/paymentAssets";
 import {
-  loadBtcReceiveAddress,
   loadWalletHacdName,
-  saveBtcReceiveAddress,
   saveWalletHacdName,
 } from "../utils/receivePrefs";
 
@@ -45,15 +43,10 @@ export default function ReceivePanel({
     return saved || ownedHacdNames[0] || "";
   });
   const [hacdDisplay, setHacdDisplay] = useState<"name" | "visual">("visual");
-  const [btcAddress, setBtcAddress] = useState(loadBtcReceiveAddress);
 
   useEffect(() => {
     if (isValidHacdName(hacdName)) saveWalletHacdName(hacdName);
   }, [hacdName]);
-
-  useEffect(() => {
-    if (btcAddress.trim()) saveBtcReceiveAddress(btcAddress);
-  }, [btcAddress]);
 
   const hacdNorm = normalizeHacdName(hacdName);
 
@@ -67,12 +60,12 @@ export default function ReceivePanel({
   }
 
   async function copyBtc() {
-    if (!isValidBtcAddress(btcAddress)) {
-      onNotify("Enter a valid BTC address.", "error");
+    if (!address) {
+      onNotify("Hacash receive address is unavailable.", "error");
       return;
     }
-    await copyWithPrivacyClear(btcAddress.trim(), clipboardSecs);
-    onNotify("BTC address copied.", "success");
+    await copyWithPrivacyClear(address, clipboardSecs);
+    onNotify("Hacash address for BTC copied.", "success");
   }
 
   async function shareHacLink() {
@@ -176,7 +169,7 @@ export default function ReceivePanel({
               className={hacdDisplay === "visual" ? "selected" : ""}
               onClick={() => setHacdDisplay("visual")}
             >
-              Visual
+              Metadata card
             </button>
           </div>
           <label>Your HACD name</label>
@@ -208,8 +201,8 @@ export default function ReceivePanel({
             </p>
           )}
           <p className="muted small-note">
-            Share your name or <code>hacd:{hacdNorm || "NAME"}</code> to receive HACD. Visual is
-            unique per diamond.
+            Share the name or <code>hacd:{hacdNorm || "NAME"}</code>. The metadata card is
+            loaded from the configured Hacash node.
           </p>
           <button
             type="button"
@@ -224,21 +217,32 @@ export default function ReceivePanel({
 
       {asset === "BTC" && (
         <div className="send-section">
-          <label>Your BTC receive address</label>
-          <input
-            placeholder="bc1… or 1…"
-            value={btcAddress}
-            onChange={(e) => setBtcAddress(e.target.value)}
-          />
-          <p className="muted small-note">Receive on-chain BTC to this wallet address.</p>
-          <button
-            type="button"
-            className="primary"
-            disabled={!isValidBtcAddress(btcAddress)}
-            onClick={() => void copyBtc()}
-          >
-            Copy BTC address
-          </button>
+          <BtcNetworkNotice onNotify={onNotify} />
+          <label>Your Hacash receive address</label>
+          {address && (
+            <PaymentQrDisplay
+              address={address}
+              hideAddress={hideAddresses}
+              caption="Hacash address for BTC on Hacash"
+            />
+          )}
+          <div className="address-box">
+            <code>{maskAddress(address, hideAddresses)}</code>
+          </div>
+          <p className="muted small-note">
+            This address receives BTC already circulating on Hacash. It is not a Bitcoin L1
+            deposit address.
+          </p>
+          {address && !hideAddresses && (
+            <button
+              type="button"
+              className="primary"
+              disabled={busy}
+              onClick={() => void copyBtc()}
+            >
+              Copy Hacash address for BTC
+            </button>
+          )}
         </div>
       )}
     </>

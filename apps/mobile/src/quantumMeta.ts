@@ -38,7 +38,7 @@ export const PQC_TYPE4_HINT =
 
 export const REPLACE_KEYSTORE_WARNING =
   "Creating a new quantum account replaces the stored keystore. " +
-  "Funds on the previous address remain there — save your private key first if needed.";
+  "Funds on the previous address remain there. save your private key first if needed.";
 
 export const MIN_KEYSTORE_PASS = 8;
 export const MIN_WALLET_PASS = 8;

@@ -1,15 +1,15 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::error::{WalletError, WalletResult};
-use crate::settings::{sanitize_node_url, DEFAULT_NODE_URL};
+use crate::settings::{DEFAULT_NODE_URL, sanitize_node_url};
 
 const DEFAULT_NODE: &str = DEFAULT_NODE_URL;
-const USER_AGENT: &str = "HacashWalletMobile/0.1.7";
+const USER_AGENT: &str = concat!("HacashWallet/", env!("CARGO_PKG_VERSION"));
 
 fn shared_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -20,7 +20,7 @@ fn shared_http_client() -> &'static reqwest::Client {
             .connect_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(45))
             .user_agent(USER_AGENT)
-            // Ignore system/VPN proxy — it often breaks direct node access on mobile.
+            // Ignore system/VPN proxy. it often breaks direct node access on mobile.
             .no_proxy()
             .build()
             .expect("http client")
@@ -40,7 +40,7 @@ fn blocking_http_client() -> reqwest::blocking::Client {
 fn node_reachability_hint(url: &str) -> String {
     let mut hints: Vec<&str> = Vec::new();
     if url.starts_with("https://nodeapi.hacash.org") || url.starts_with("https://nodeapi.org") {
-        hints.push("Official Hacash node is HTTP only — use http://nodeapi.hacash.org.");
+        hints.push("Official Hacash node is HTTP only. use http://nodeapi.hacash.org.");
     }
     if url.contains("127.0.0.1")
         || url.contains("localhost")
@@ -48,7 +48,7 @@ fn node_reachability_hint(url: &str) -> String {
         || url.contains("192.168.")
         || url.contains("10.")
     {
-        hints.push("That URL points to a local/private network host — it will not work on a phone unless it is your LAN IP.");
+        hints.push("That URL points to a local/private network host. it will not work on a phone unless it is your LAN IP.");
     }
     #[cfg(target_os = "android")]
     {
@@ -69,7 +69,7 @@ fn node_reachability_hint(url: &str) -> String {
 
 fn node_transport_err(url: &str, err: impl std::fmt::Display) -> WalletError {
     let hint = node_reachability_hint(url);
-    WalletError::Node(format!("cannot reach {url} — {err}.{hint}"))
+    WalletError::Node(format!("cannot reach {url}. {err}.{hint}"))
 }
 
 async fn http_get_json<T>(url: String) -> WalletResult<T>
@@ -200,6 +200,17 @@ impl NodeClient {
         }))
     }
 
+    pub async fn block_intro(&self, height: u64) -> WalletResult<BlockIntroResponse> {
+        let url = format!("{}/query/block/intro?height={height}", self.base_url);
+        let body: BlockIntroResponse = http_get_json(url).await?;
+        if body.ret != 0 {
+            return Err(WalletError::Node(body.err.clone().unwrap_or_else(|| {
+                format!("block intro failed (ret={})", body.ret)
+            })));
+        }
+        Ok(body)
+    }
+
     /// Estimate minimum Type 4 fee: `fee_purity × wire_bytes` (see `/query/fee/average`).
     pub async fn query_fee_average(
         &self,
@@ -212,10 +223,9 @@ impl NodeClient {
         );
         let body: FeeAverageResponse = http_get_json(url).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(
-                body.err
-                    .unwrap_or_else(|| format!("fee/average failed (ret={})", body.ret)),
-            ));
+            return Err(WalletError::Node(body.err.unwrap_or_else(|| {
+                format!("fee/average failed (ret={})", body.ret)
+            })));
         }
         Ok(body)
     }
@@ -262,7 +272,10 @@ impl NodeClient {
         }
         let body: BalanceResponse = http_get_json(url).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(format!("balance query failed ret={}", body.ret)));
+            return Err(WalletError::Node(format!(
+                "balance query failed ret={}",
+                body.ret
+            )));
         }
         body.list
             .iter()
@@ -296,6 +309,32 @@ impl NodeClient {
             "main_address": from,
             "fee": fee,
             "actions": [action]
+        });
+        self.post_create_transaction(payload).await
+    }
+
+    /// Build an HACD transfer with a mandatory HAC treasury action in the same
+    /// transaction, so either both legs settle or neither does.
+    pub async fn build_send_diamond_tx_with_service_fee(
+        &self,
+        from: &str,
+        to: &str,
+        diamond_names: &[String],
+        service_fee: &str,
+        fee: &str,
+    ) -> WalletResult<BuildTxResponse> {
+        let diamond_action = if diamond_names.len() == 1 {
+            json!({ "kind": 5, "to": to, "diamond": diamond_names[0] })
+        } else {
+            json!({ "kind": 7, "to": to, "diamonds": diamond_names.join("") })
+        };
+        let payload = json!({
+            "main_address": from,
+            "fee": fee,
+            "actions": [
+                diamond_action,
+                { "kind": 1, "to": crate::send_options::WALLET_TREASURY_ADDRESS, "hacash": service_fee }
+            ]
         });
         self.post_create_transaction(payload).await
     }
@@ -343,16 +382,30 @@ impl NodeClient {
         satoshi: u64,
         fee: &str,
     ) -> WalletResult<BuildTxResponse> {
+        self.build_send_btc_tx_actions(from, fee, &[(to, satoshi)])
+            .await
+    }
+
+    pub async fn build_send_btc_tx_actions(
+        &self,
+        from: &str,
+        fee: &str,
+        transfers: &[(&str, u64)],
+    ) -> WalletResult<BuildTxResponse> {
+        let actions: Vec<_> = transfers
+            .iter()
+            .map(|(to, satoshi)| {
+                json!({
+                    "kind": 10,
+                    "to": to,
+                    "satoshi": satoshi
+                })
+            })
+            .collect();
         let payload = json!({
             "main_address": from,
             "fee": fee,
-            "actions": [
-                {
-                    "kind": 8,
-                    "to": to,
-                    "satoshi": satoshi
-                }
-            ]
+            "actions": actions
         });
         self.post_create_transaction(payload).await
     }
@@ -379,22 +432,31 @@ impl NodeClient {
     }
 
     pub async fn query_diamond_by_name(&self, name: &str) -> WalletResult<DiamondInfo> {
-        let url = format!("{}/query/diamond?name={}", self.base_url, name);
+        let normalized = name.trim().to_ascii_uppercase();
+        if !is_valid_node_diamond_name(&normalized) {
+            return Err(WalletError::Other(
+                "HACD name must use 4 to 6 letters from WTYUIAHXVMEKBSZN".into(),
+            ));
+        }
+        let url = format!("{}/query/diamond?name={}", self.base_url, normalized);
         let body: DiamondQueryResponse = http_get_json(url).await?;
         if body.ret != 0 {
             return Err(WalletError::Node(format!(
                 "diamond '{}' not found (ret={})",
-                name, body.ret
+                normalized, body.ret
             )));
         }
-        Ok(DiamondInfo {
-            name: body.name.unwrap_or_else(|| name.to_uppercase()),
-            number: body.number,
-            visual_gene: body.visual_gene,
-            life_gene: body.life_gene,
-            belong: body.belong,
-        })
+        Ok(body.into_info(&normalized))
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlockIntroResponse {
+    pub ret: i32,
+    #[serde(default)]
+    pub err: Option<String>,
+    pub height: u64,
+    pub hash: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -406,23 +468,116 @@ pub struct FeeAverageResponse {
     pub purity: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct DiamondBornInfo {
+    pub height: u64,
+    pub hash: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DiamondInfo {
     pub name: String,
+    /// `configured` for the selected node, or `mainnet` for the read-only
+    /// official-node metadata fallback used when a testnet has no diamonds.
+    pub metadata_source: String,
     pub number: Option<u64>,
     pub visual_gene: Option<String>,
     pub life_gene: Option<String>,
     pub belong: Option<String>,
+    pub miner: Option<String>,
+    pub bid_fee: Option<String>,
+    pub average_bid_burn: Option<u64>,
+    pub born: Option<DiamondBornInfo>,
+    pub prev_hash: Option<String>,
+    pub inscriptions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DiamondQueryResponse {
     ret: i32,
+    #[allow(dead_code)]
     name: Option<String>,
     number: Option<u64>,
     visual_gene: Option<String>,
     life_gene: Option<String>,
     belong: Option<String>,
+    miner: Option<String>,
+    bid_fee: Option<String>,
+    average_bid_burn: Option<u64>,
+    born: Option<DiamondBornInfo>,
+    prev_hash: Option<String>,
+    #[serde(default)]
+    inscriptions: Vec<String>,
+}
+
+impl DiamondQueryResponse {
+    fn into_info(self, requested_name: &str) -> DiamondInfo {
+        DiamondInfo {
+            // The HTTP node is untrusted. Keep the exact validated name requested by the wallet.
+            name: requested_name.to_ascii_uppercase(),
+            metadata_source: "configured".into(),
+            number: self.number,
+            visual_gene: exact_hex(self.visual_gene, 20),
+            life_gene: exact_hex(self.life_gene, 64),
+            belong: clean_node_address(self.belong),
+            miner: clean_node_address(self.miner),
+            bid_fee: self.bid_fee.and_then(clean_bid_fee),
+            average_bid_burn: self.average_bid_burn,
+            born: self.born.and_then(|born| {
+                exact_hex(Some(born.hash), 64).map(|hash| DiamondBornInfo {
+                    height: born.height,
+                    hash,
+                })
+            }),
+            prev_hash: exact_hex(self.prev_hash, 64),
+            inscriptions: self
+                .inscriptions
+                .into_iter()
+                .filter_map(clean_inscription)
+                .take(16)
+                .collect(),
+        }
+    }
+}
+
+fn exact_hex(value: Option<String>, expected_len: usize) -> Option<String> {
+    let value = value?;
+    (value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
+fn clean_node_address(value: Option<String>) -> Option<String> {
+    const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let value = value?;
+    (value.len() >= 26
+        && value.len() <= 45
+        && value.starts_with('1')
+        && value.chars().all(|ch| BASE58.contains(ch)))
+    .then_some(value)
+}
+
+fn clean_bid_fee(value: String) -> Option<String> {
+    let value = value.trim();
+    let mut parts = value.split(':');
+    let amount = parts.next()?;
+    let unit = parts.next();
+    let valid_amount = !amount.is_empty() && amount.bytes().all(|byte| byte.is_ascii_digit());
+    let valid_unit = unit.is_none_or(|part| {
+        !part.is_empty() && part.len() <= 3 && part.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    (value.len() <= 32 && valid_amount && valid_unit && parts.next().is_none())
+        .then(|| value.to_owned())
+}
+
+fn is_valid_node_diamond_name(name: &str) -> bool {
+    const ALPHABET: &str = "WTYUIAHXVMEKBSZN";
+    (4..=6).contains(&name.len()) && name.chars().all(|character| ALPHABET.contains(character))
+}
+
+fn clean_inscription(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.chars().count() <= 128 && value.chars().all(|ch| !ch.is_control()))
+        .then(|| value.to_owned())
 }
 
 #[derive(Debug, Deserialize)]
@@ -469,4 +624,72 @@ pub struct SubmitTxResponse {
     pub err: Option<String>,
     pub message: Option<String>,
     pub hash: Option<String>,
+}
+
+#[cfg(test)]
+mod diamond_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn parses_and_bounds_official_diamond_metadata() {
+        let raw = r#"{
+            "ret": 0,
+            "name": "VWMMMM",
+            "number": 101028,
+            "visual_gene": "2580999930cc13fbfde0",
+            "life_gene": "ede9413718d6927708542f05c8c86526634cf4e1c3d01c7c91138f7b3f2d9e25",
+            "belong": "15fv6cNEapTNqYhigMPr38pC1XRKn3Wh5q",
+            "miner": "1Hf721QbjYCaD6YUFvBa9dF9RJkM4DgBXP",
+            "bid_fee": "225214:244",
+            "average_bid_burn": 14,
+            "born": {
+                "height": 599640,
+                "hash": "00000000000d36e38debbb4f38423a66d4620884b6ae1e4e447372210043f471"
+            },
+            "prev_hash": "000000000012930b81cafac920c2a9ce2af116e2cf6725c6183dc206754430e5",
+            "inscriptions": ["hacds"]
+        }"#;
+        let response: DiamondQueryResponse = serde_json::from_str(raw).unwrap();
+        let info = response.into_info("vwmmmm");
+
+        assert_eq!(info.name, "VWMMMM");
+        assert_eq!(info.number, Some(101028));
+        assert_eq!(info.average_bid_burn, Some(14));
+        assert_eq!(info.born.as_ref().map(|born| born.height), Some(599640));
+        assert_eq!(info.inscriptions, vec!["hacds"]);
+    }
+
+    #[test]
+    fn rejects_untrusted_metadata_fields() {
+        let response = DiamondQueryResponse {
+            ret: 0,
+            name: Some("<script>".into()),
+            number: None,
+            visual_gene: Some("<svg onload=alert(1)>".into()),
+            life_gene: Some("g".repeat(64)),
+            belong: Some("javascript:alert(1)".into()),
+            miner: None,
+            bid_fee: Some("1:244<script>".into()),
+            average_bid_burn: None,
+            born: None,
+            prev_hash: Some("0".repeat(63)),
+            inscriptions: vec!["ok".into(), "bad\ncontrol".into()],
+        };
+        let info = response.into_info("WTYU");
+        assert_eq!(info.name, "WTYU");
+        assert!(info.visual_gene.is_none());
+        assert!(info.life_gene.is_none());
+        assert!(info.belong.is_none());
+        assert!(info.bid_fee.is_none());
+        assert!(info.prev_hash.is_none());
+        assert_eq!(info.inscriptions, vec!["ok"]);
+        assert!(clean_bid_fee("::".into()).is_none());
+        assert!(clean_bid_fee("1:244:1".into()).is_none());
+        assert_eq!(
+            clean_bid_fee("225214:244".into()).as_deref(),
+            Some("225214:244")
+        );
+        assert!(is_valid_node_diamond_name("VWMMMM"));
+        assert!(!is_valid_node_diamond_name("ABCDEF"));
+    }
 }

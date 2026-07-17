@@ -1,4 +1,7 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, State};
@@ -13,8 +16,8 @@ use crate::error::WhisperError;
 use crate::http_util::ensure_success;
 use crate::messenger_relay::{self, MessengerInbox, RelayAppState};
 use crate::protocol::{
-    WhisperInfo, WhisperSubmitRequest, WhisperSubmitResponse, INFO_PATH, PROTOCOL_VERSION,
-    SUBMIT_PATH,
+    INFO_PATH, PROTOCOL_VERSION, SUBMIT_PATH, WhisperInfo, WhisperSubmitRequest,
+    WhisperSubmitResponse,
 };
 
 /// Max encrypted envelope size accepted by the relay (generous for large type-4 txs).
@@ -43,8 +46,16 @@ pub fn build_router(state: RelayState) -> Router {
 }
 
 pub async fn serve(addr: SocketAddr, state: RelayState) -> std::io::Result<()> {
-    let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_listener(listener, state).await
+}
+
+pub async fn serve_listener(
+    listener: tokio::net::TcpListener,
+    state: RelayState,
+) -> std::io::Result<()> {
+    let app = build_router(state);
+    let addr = listener.local_addr()?;
     tracing::info!(%addr, "DUST Whisper relay listening");
     axum::serve(listener, app).await
 }
@@ -53,7 +64,7 @@ async fn info_handler(State(state): State<RelayAppState>) -> Json<WhisperInfo> {
     Json(WhisperInfo {
         v: PROTOCOL_VERSION,
         pubkey: state.relay.public_key_b64.clone(),
-        // Informational only — relay always forwards to its configured node URL.
+        // Informational only. relay always forwards to its configured node URL.
         node_url: Some(state.relay.default_node_url.clone()),
     })
 }
@@ -89,7 +100,7 @@ async fn forward_submit(
         return Err(WhisperError::Protocol("tx_hex too large".into()));
     }
 
-    // Always use operator-configured node URL — never trust client-supplied targets (SSRF).
+    // Always use operator-configured node URL. never trust client-supplied targets (SSRF).
     let node_url = state.default_node_url.trim().trim_end_matches('/');
     if node_url.is_empty() {
         return Err(WhisperError::Relay("relay node_url not configured".into()));
@@ -125,10 +136,7 @@ async fn forward_submit(
 
 pub fn relay_state_from_secret(secret: [u8; 32], default_node_url: String) -> RelayState {
     let pk = public_key_from_secret(&secret);
-    let public_key_b64 = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        pk,
-    );
+    let public_key_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, pk);
     RelayState {
         secret_key: secret,
         public_key_b64,
@@ -142,6 +150,27 @@ pub fn parse_secret_hex(hex_str: &str) -> Result<[u8; 32], String> {
     bytes
         .try_into()
         .map_err(|_| "secret key must be 32 bytes (64 hex chars)".into())
+}
+
+pub fn load_or_create_secret_key(path: &Path) -> Result<[u8; 32], String> {
+    if path.exists() {
+        let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+        return parse_secret_hex(raw.trim());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let (secret, _) = crate::crypto::generate_relay_keypair();
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| error.to_string())?;
+    writeln!(file, "{}", hex::encode(secret)).map_err(|error| error.to_string())?;
+    Ok(secret)
 }
 
 pub fn relay_info_json(state: &RelayState) -> serde_json::Value {

@@ -1,12 +1,12 @@
-//! TIER-0: WebAuthn strict mode — pubkey-bound credentials require cryptographic proof.
+//! TIER-0: WebAuthn strict mode. pubkey-bound credentials require cryptographic proof.
 
 mod common;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use common::tier0_gate;
 use hacash_wallet_core::webauthn::{StoredCredential, WebAuthnGate};
-use sha2::{Digest, Sha256};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const RP_ORIGIN: &str = "http://localhost:1420";
 
@@ -29,11 +29,11 @@ fn tier0_webauthn_pubkey_credential_rejects_assertion_without_signature() {
     tier0_gate("webauthn_strict_no_sig", || {
         let gate = WebAuthnGate::new().unwrap();
         let options = gate.begin_auth("dGVzdA", None).unwrap();
-        let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
-            ["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let challenge =
+            serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let cred = json!({
             "response": {
                 "clientDataJSON": client_data_b64(&challenge, "webauthn.get")
@@ -49,11 +49,11 @@ fn tier0_webauthn_pubkey_credential_rejects_bad_signature() {
     tier0_gate("webauthn_strict_bad_sig", || {
         let gate = WebAuthnGate::new().unwrap();
         let options = gate.begin_auth("dGVzdA", None).unwrap();
-        let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
-            ["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let challenge =
+            serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let rp_hash = Sha256::digest(b"localhost");
         let mut auth_data = vec![0u8; 37];
         auth_data[..32].copy_from_slice(&rp_hash);
@@ -75,11 +75,11 @@ fn tier0_webauthn_register_challenge_single_use() {
     tier0_gate("webauthn_register_single_use", || {
         let gate = WebAuthnGate::new().unwrap();
         let options = gate.begin_register("1User", None).unwrap();
-        let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
-            ["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let challenge =
+            serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let cred = json!({
             "rawId": "dGVzdA",
             "response": {
@@ -112,11 +112,11 @@ fn tier0_webauthn_user_not_present_flag_rejected() {
     tier0_gate("webauthn_up_flag", || {
         let gate = WebAuthnGate::new().unwrap();
         let options = gate.begin_auth("dGVzdA", None).unwrap();
-        let challenge = serde_json::from_str::<serde_json::Value>(&options).unwrap()
-            ["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let challenge =
+            serde_json::from_str::<serde_json::Value>(&options).unwrap()["publicKey"]["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
         let rp_hash = Sha256::digest(b"localhost");
         let mut auth_data = vec![0u8; 37];
         auth_data[..32].copy_from_slice(&rp_hash);

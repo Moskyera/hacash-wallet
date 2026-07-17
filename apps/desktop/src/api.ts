@@ -25,12 +25,37 @@ export type RelayHealthStatus = {
 };
 
 export type FastPayStatus = {
-  state: "ready" | "needs_channel" | "hub_unreachable" | "no_provider";
+  state:
+    | "ready"
+    | "needs_channel"
+    | "hub_unreachable"
+    | "checking"
+    | "provider_incompatible"
+    | "no_provider";
   message: string;
   provider_name: string | null;
   hub_url: string | null;
   can_enable: boolean;
   default_deposit_mei: number;
+};
+
+export type FastPayInboxItem = {
+  payment_id: string;
+  payer: string;
+  payee: string;
+  amount: string;
+  channel_id: string;
+  payee_channel_id: string;
+  status: string;
+  bill_hex: string;
+  summary: string | null;
+  created_at: number;
+};
+
+export type FastPayExecution = {
+  payment_id: string;
+  status: string;
+  summary: string;
 };
 
 export type WalletStatus = {
@@ -39,6 +64,7 @@ export type WalletStatus = {
   address: string | null;
   security_profile: string;
   node_url: string;
+  network_mode: "mainnet" | "testnet";
   l2_enabled: boolean;
   l2_hub_url: string | null;
   channel_id: string | null;
@@ -101,6 +127,9 @@ export type SendFeeBreakdown = {
 
 export type WalletSettings = {
   node_url: string;
+  node_fallback_urls?: string[];
+  auto_node_failover?: boolean;
+  network_mode?: "mainnet" | "testnet";
   l2_hub_url: string | null;
   hub_right_address: string | null;
   channel_id_hex: string | null;
@@ -108,6 +137,22 @@ export type WalletSettings = {
   security_profile: string;
   privacy: PrivacySettings;
   send?: SendPreferences;
+};
+
+export type NodeCandidateStatus = {
+  url: string;
+  online: boolean;
+  network_match: boolean;
+  height: number | null;
+  diamond: number | null;
+  error: string | null;
+};
+
+export type NodeDiscoveryReport = {
+  active_node: string;
+  switched: boolean;
+  network_mode: "mainnet" | "testnet";
+  candidates: NodeCandidateStatus[];
 };
 
 export type Hip23Check = {
@@ -137,6 +182,8 @@ export type SendPreview = {
   amount_mei: number;
   amount_wire: string;
   fee: string;
+  service_fee_mei: number;
+  service_fee_treasury: string | null;
   hip23: Hip23Check;
   fast_pay: FastPayStatus;
   send_options: SendOptions;
@@ -146,6 +193,7 @@ export type SendResult = {
   rail: "L2Fast" | "L1OnChain" | "QuantumType4";
   tx_hash: string;
   summary: string;
+  pending: boolean;
 };
 
 export type ChannelSetupPreview = {
@@ -217,6 +265,8 @@ export type HubHealth = {
   name?: string;
   hub_address?: string;
   hub_fee_mei?: number;
+  settlement_ready?: boolean;
+  cross_channel_ready?: boolean;
 };
 
 export type HubDiscoveryEntry = {
@@ -241,6 +291,8 @@ export type AirgapUnsigned = {
   amount_mei: number;
   amount_wire: string;
   fee: string;
+  service_fee_mei: number;
+  service_fee_treasury: string | null;
   body_hex: string;
   summary: string;
   tx_type?: number;
@@ -251,6 +303,10 @@ export type AirgapSigned = {
   from: string;
   to: string;
   amount_mei: number;
+  amount_wire: string;
+  fee: string;
+  service_fee_mei: number;
+  service_fee_treasury: string | null;
   signed_hex: string;
   summary: string;
   tx_type?: number;
@@ -265,6 +321,8 @@ export type AirgapEnvelope =
       amount_mei: number;
       amount_wire: string;
       fee: string;
+      service_fee_mei: number;
+      service_fee_treasury: string | null;
       body_hex: string;
       summary: string;
       tx_type?: number;
@@ -275,6 +333,10 @@ export type AirgapEnvelope =
       from: string;
       to: string;
       amount_mei: number;
+      amount_wire: string;
+      fee: string;
+      service_fee_mei: number;
+      service_fee_treasury: string | null;
       signed_hex: string;
       summary: string;
       tx_type?: number;
@@ -325,6 +387,8 @@ export type QuantumPreflight = {
   balance_mei: number;
   fee_wire: string;
   fee_mei: number;
+  service_fee_mei: number;
+  service_fee_treasury: string;
   total_mei: number;
 };
 
@@ -342,12 +406,24 @@ export type QuantumTestResult = {
   metrics: Record<string, unknown>;
 };
 
+export type HacdDiamondBornInfo = {
+  height: number;
+  hash: string;
+};
+
 export type HacdDiamondInfo = {
   name: string;
+  metadata_source: "configured" | "mainnet" | string;
   number?: number | null;
   visual_gene?: string | null;
   life_gene?: string | null;
   belong?: string | null;
+  miner?: string | null;
+  bid_fee?: string | null;
+  average_bid_burn?: number | null;
+  born?: HacdDiamondBornInfo | null;
+  prev_hash?: string | null;
+  inscriptions: string[];
 };
 
 export type AssetSummary = {
@@ -363,6 +439,10 @@ export type BtcSendPreview = {
   to: string;
   satoshi: number;
   btc_amount: number;
+  service_fee_satoshi: number;
+  service_fee_btc: number;
+  total_debit_satoshi: number;
+  service_fee_treasury: string;
   fee_mei: number;
   fee_wire: string;
   hip23: Hip23Check;
@@ -378,6 +458,9 @@ export type HacdSendPreview = {
   diamond_number?: number | null;
   fee_mei: number;
   fee_wire: string;
+  service_fee_mei: number;
+  service_fee_treasury: string;
+  total_hac_debit_mei: number;
   hip23: Hip23Check;
   summary: string;
 };
@@ -439,6 +522,7 @@ export const api = {
   getSettings: () => invoke<WalletSettings>("wallet_get_settings"),
   updateSettings: (settings: WalletSettings) =>
     invoke<void>("wallet_update_settings", { settings }),
+  discoverNodes: () => invoke<NodeDiscoveryReport>("wallet_discover_nodes"),
   webauthnRegisterBegin: (clientOrigin?: string) =>
     invoke<string>("wallet_webauthn_register_begin", { clientOrigin: clientOrigin ?? null }),
   webauthnRegisterFinish: (credentialJson: string) =>
@@ -453,6 +537,9 @@ export const api = {
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei: depositMei ?? null }),
   listBills: () => invoke<BillEntry[]>("wallet_list_bills"),
+  fastPayInbox: () => invoke<FastPayInboxItem[]>("wallet_fast_pay_inbox"),
+  acceptFastPay: (paymentId: string) =>
+    invoke<FastPayExecution>("wallet_accept_fast_pay", { paymentId }),
   listBillSummaries: () => invoke<BillSummary[]>("wallet_list_bill_summaries"),
   exportBillJson: (paymentId: string) =>
     invoke<string>("wallet_export_bill_json", { paymentId }),
@@ -528,11 +615,25 @@ export const api = {
     invoke<{ running: boolean; port: number; url: string; wallet_locked: boolean; address?: string }>(
       "wallet_dapp_bridge_status",
     ),
+  dappPending: () =>
+    invoke<DappApprovalView | null>("wallet_dapp_pending"),
+  dappApprove: (id: string) => invoke<void>("wallet_dapp_approve", { id }),
+  dappReject: (id: string, reason?: string) =>
+    invoke<void>("wallet_dapp_reject", { id, reason: reason ?? null }),
   checkAppUpdate: (channel: "mobile" | "desktop", currentVersion: string) =>
     invoke<AppUpdateInfo>("wallet_check_app_update", { channel, currentVersion }),
-  downloadAppUpdate: (url: string, filename: string) =>
-    invoke<string>("wallet_download_app_update", { url, filename }),
+  downloadAppUpdate: (url: string, filename: string, sha256: string, expectedSize: number) =>
+    invoke<string>("wallet_download_app_update", { url, filename, sha256, expectedSize }),
   installDesktopUpdate: (path: string) => invoke<void>("wallet_install_desktop_update", { path }),
+};
+
+export type DappApprovalView = {
+  id: string;
+  origin: string;
+  kind: string;
+  title: string;
+  summary: string;
+  detail: string;
 };
 
 export type AppUpdateInfo = {
@@ -541,5 +642,8 @@ export type AppUpdateInfo = {
   update_available: boolean;
   download_url: string | null;
   release_notes: string | null;
+  asset_name: string | null;
+  download_size: number | null;
+  sha256: string | null;
   release_page: string | null;
 };

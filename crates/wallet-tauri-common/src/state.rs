@@ -3,10 +3,11 @@ use std::sync::Arc;
 use hacash_wallet_core::WalletService;
 use tokio::sync::Mutex;
 
-#[cfg(feature = "desktop")]
-use crate::desktop_relay::RelayProcess;
+use crate::dapp_approval::DappApprovalQueue;
 #[cfg(feature = "desktop")]
 use crate::dapp_bridge::DappBridgeHandle;
+#[cfg(feature = "desktop")]
+use crate::desktop_relay::RelayProcess;
 
 pub struct AppState {
     pub inner: Arc<Mutex<WalletService>>,
@@ -14,6 +15,7 @@ pub struct AppState {
     pub relay: RelayProcess,
     #[cfg(feature = "desktop")]
     pub dapp_bridge: DappBridgeHandle,
+    pub dapp_approval: Arc<DappApprovalQueue>,
 }
 
 impl AppState {
@@ -24,6 +26,7 @@ impl AppState {
             relay: RelayProcess::new(),
             #[cfg(feature = "desktop")]
             dapp_bridge: DappBridgeHandle::new(),
+            dapp_approval: Arc::new(DappApprovalQueue::new()),
         }
     }
 }

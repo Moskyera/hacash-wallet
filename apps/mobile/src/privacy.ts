@@ -1,14 +1,14 @@
 import type { PrivacySettings } from "./api";
 
 export function maskAddress(address: string | null | undefined, hide: boolean): string {
-  if (!address) return "—";
+  if (!address) return "N/A";
   if (!hide) return address;
   if (address.length <= 10) return "••••••••";
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
 export function formatHacMei(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) return "—";
+  if (value == null || Number.isNaN(value)) return "N/A";
   if (value === 0) return "0";
   if (value >= 0.001) {
     return value
@@ -24,7 +24,7 @@ export function formatHacMei(value: number | null | undefined): string {
 
 export function maskBalance(value: number | null | undefined, hide: boolean): string {
   if (hide) return "••••";
-  if (value == null) return "—";
+  if (value == null) return "N/A";
   return formatHacMei(value);
 }
 
@@ -34,13 +34,13 @@ export function formatBtcFromSatoshi(satoshi: number): string {
 
 export function maskAssetCount(count: number | null | undefined, hide: boolean): string {
   if (hide) return "••••";
-  if (count == null) return "—";
+  if (count == null) return "N/A";
   return String(count);
 }
 
 export function maskBtcFromSatoshi(satoshi: number | null | undefined, hide: boolean): string {
   if (hide) return "••••";
-  if (satoshi == null) return "—";
+  if (satoshi == null) return "N/A";
   return formatBtcFromSatoshi(satoshi);
 }
 

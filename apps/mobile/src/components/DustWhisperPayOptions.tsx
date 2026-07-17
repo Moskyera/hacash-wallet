@@ -5,7 +5,7 @@ type Props = {
   dustWhisper: DustWhisperSettings;
   onPersist: (patch: Partial<DustWhisperSettings>) => void | Promise<void>;
   disabled?: boolean;
-  /** When paying HAC, Fast Pay may skip whisper — show that in the note. */
+  /** When paying HAC, Fast Pay may skip whisper. show that in the note. */
   showFastPayNote?: boolean;
 };
 
@@ -44,8 +44,8 @@ export default function DustWhisperPayOptions({
       ) : null}
       <p className="muted small">
         {showFastPayNote
-          ? "On-chain (L1) sends only — Fast Pay is unchanged."
-          : "On-chain broadcast via relay; the node does not see your IP."}
+          ? "DUST Whisper applies only to on-chain L1 broadcasts. Fast Pay does not use it."
+          : "A remote relay can hide your IP from the full node. A local relay cannot."}
         {!relaysConfigured ? (
           <>
             {" "}

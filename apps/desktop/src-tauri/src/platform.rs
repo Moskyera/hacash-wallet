@@ -24,7 +24,7 @@ pub fn native_biometric_available() -> bool {
     }
 }
 
-/// Prompt Windows Hello / PIN — must succeed before wallet core accepts biometric 2FA.
+/// Prompt Windows Hello / PIN. must succeed before wallet core accepts biometric 2FA.
 pub fn verify_native_biometric(message: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -54,10 +54,8 @@ fn windows_hello_available() -> bool {
 
 #[cfg(windows)]
 fn windows_hello_verify(message: &str) -> Result<(), String> {
+    use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
     use windows::core::HSTRING;
-    use windows::Security::Credentials::UI::{
-        UserConsentVerificationResult, UserConsentVerifier,
-    };
     let op = UserConsentVerifier::RequestVerificationAsync(&HSTRING::from(message))
         .map_err(|e| e.to_string())?;
     let result = wait_async_operation(&op).map_err(|e| e.to_string())?;
@@ -82,13 +80,13 @@ where
                 return Err(windows::core::Error::new(
                     windows::core::HRESULT(-1),
                     "async operation failed",
-                ))
+                ));
             }
             AsyncStatus::Canceled => {
                 return Err(windows::core::Error::new(
                     windows::core::HRESULT(0x800704C7u32 as i32),
                     "async operation canceled",
-                ))
+                ));
             }
             AsyncStatus::Started => {
                 std::thread::sleep(Duration::from_millis(40));

@@ -1,9 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <external-path name="my_images" path="." />
-    <!-- In-app APK updates: download + stage under context.cacheDir/updates -->
-    <cache-path name="cache_updates" path="." />
-    <cache-path name="cache_updates_dir" path="updates/" />
-    <external-cache-path name="external_updates" path="." />
-    <files-path name="files_updates" path="updates/" />
+    <!-- Expose only APKs staged by the verified updater. -->
+    <cache-path name="verified_updates" path="updates/" />
 </paths>

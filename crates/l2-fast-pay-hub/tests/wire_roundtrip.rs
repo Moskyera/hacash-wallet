@@ -1,7 +1,7 @@
 use l2_fast_pay_hub::channel_id::derive_channel_id;
-use l2_fast_pay_hub::node::{ChannelInfo, ChannelPartyBalance};
+use l2_fast_pay_hub::node::{ChannelInfo, ChannelPartyBalance, ChannelSide};
 use l2_fast_pay_hub::wire::{
-    build_cross_channel_bill, ChannelPayCompleteDocuments, ChannelWireInput,
+    ChannelPayCompleteDocuments, ChannelWireInput, build_cross_channel_bill,
 };
 
 fn sample_channel(id: &str, left: &str, right: &str, left_mei: &str) -> ChannelInfo {
@@ -48,7 +48,16 @@ fn channel_pay_complete_documents_roundtrip() {
         bill_auto_number: 1,
     };
 
-    let doc = build_cross_channel_bill(&payer, 1.501, &payee, 1.5, 1_700_000_000).unwrap();
+    let doc = build_cross_channel_bill(
+        &payer,
+        ChannelSide::Left,
+        1.501,
+        &payee,
+        ChannelSide::Left,
+        1.5,
+        1_700_000_000,
+    )
+    .unwrap();
     let hex = doc.to_bill_hex();
     assert!(hex.len() > 64);
 

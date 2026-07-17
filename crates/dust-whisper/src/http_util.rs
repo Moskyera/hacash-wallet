@@ -14,7 +14,7 @@ pub async fn ensure_success(resp: Response, context: &str) -> WhisperResult<Resp
         if snippet.is_empty() {
             String::new()
         } else {
-            format!(" — {snippet}")
+            format!(". {snippet}")
         }
     )))
 }

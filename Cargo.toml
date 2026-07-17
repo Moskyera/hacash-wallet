@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.48"
 edition = "2024"
 license = "MIT"
 
@@ -35,9 +35,11 @@ url = "2"
 p256 = { version = "0.13", features = ["ecdsa"] }
 coset = "0.3"
 proptest = "1"
+secp256k1 = "0.31.1"
 tempfile = "3"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
 axum = { version = "0.8", features = ["json"] }
 tower-http = { version = "0.6", features = ["trace"] }
 clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v4"] }

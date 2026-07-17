@@ -88,7 +88,7 @@ export type DesktopActions = {
   onRegisterWebAuthn: () => void;
   onSetProfile: (profile: string) => void;
   onSetHardwareMode: (mode: "software" | "webauthn_gate" | "watch_only") => void;
-  onSaveSettings: (nodeUrl: string) => void;
+  onSaveSettings: (nodeUrl: string, fallbackUrls: string[], autoFailover: boolean) => void;
   onChangePassphrase: (old: string, newPass: string, confirm: string) => Promise<boolean>;
   onExportBackup: (passphrase: string) => Promise<string | null>;
   onValidateHip23: Parameters<typeof AdvancedScreen>[0]["onValidate"];
@@ -99,7 +99,6 @@ export type DesktopActions = {
   refreshUnlockedData: () => Promise<void>;
   setSendTo: (v: string) => void;
   setSendAmount: (v: string) => void;
-  setSendHubFeePayer: (v: HubFeePayer) => void;
   setSendForceL1: (v: boolean) => void;
   setSendL1FeeSpeed: (v: L1FeeSpeed) => void;
   setSendServiceFeeEnabled: (v: boolean) => void;
@@ -193,7 +192,6 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     refreshUnlockedData,
     setSendTo,
     setSendAmount,
-    setSendHubFeePayer,
     setSendForceL1,
     setSendL1FeeSpeed,
     setSendServiceFeeEnabled,
@@ -267,6 +265,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           onPreviewChannel={onPreviewChannel}
           onOpenChannel={onOpenChannel}
           onCloseChannel={onCloseChannel}
+          onRefresh={refreshUnlockedData}
           onNotify={onNotify}
           clearMessages={clearMessages}
         />
@@ -288,7 +287,6 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           sendAmount={sendAmount}
           setSendAmount={setSendAmount}
           sendHubFeePayer={sendHubFeePayer}
-          setSendHubFeePayer={setSendHubFeePayer}
           sendForceL1={sendForceL1}
           setSendForceL1={setSendForceL1}
           sendL1FeeSpeed={sendL1FeeSpeed}

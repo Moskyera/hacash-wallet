@@ -2,7 +2,7 @@
 name = "hacash-wallet"
 version.workspace = true
 edition.workspace = true
-description = "Hacash Wallet — secure desktop app"
+description = "Hacash Wallet. secure desktop app"
 
 [lib]
 name = "hacash_wallet_lib"

@@ -22,7 +22,7 @@
   }
 
   window.MoneyNex = {
-    info: { name: "Hacash Wallet", version: "0.1.19", icon: "" },
+    info: { name: "Hacash Wallet", version: "0.1.48", icon: "" },
     wallet: function (_p, cb) {
       post("/v1/wallet", { origin: ORIGIN }, cb);
     },

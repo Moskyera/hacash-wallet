@@ -3,9 +3,9 @@ use reqwest::Client;
 use crate::error::{WhisperError, WhisperResult};
 use crate::http_util::ensure_success;
 use crate::protocol::{
+    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_SEND_PATH,
     MessengerAckRequest, MessengerAckResponse, MessengerChallengeResponse, MessengerEnvelope,
     MessengerInboxRequest, MessengerInboxResponse, MessengerSendRequest, MessengerSendResponse,
-    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_SEND_PATH,
 };
 
 fn base_url(relay_url: &str) -> String {

@@ -60,3 +60,35 @@ async fn whisper_relay_forwards_encrypted_submit() {
     relay_handle.abort();
     node_handle.abort();
 }
+
+#[tokio::test]
+async fn whisper_blocks_relay_for_the_wrong_node() {
+    let (node_addr, node_handle) = spawn_mock_node().await;
+    let relay_node_url = format!("http://{node_addr}");
+    let (sk, _pk) = generate_relay_keypair();
+    let relay_state = relay_state_from_secret(sk, relay_node_url);
+    let relay_app = build_router(relay_state);
+    let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = relay_listener.local_addr().unwrap();
+    let relay_handle = tokio::spawn(async move {
+        axum::serve(relay_listener, relay_app).await.unwrap();
+    });
+    let settings = WhisperSettings {
+        enabled: true,
+        relay_urls: vec![format!("http://{relay_addr}")],
+        fallback_direct: false,
+    };
+
+    let err = submit_tx(
+        &Client::new(),
+        &settings,
+        "http://127.0.0.1:65534",
+        "cafebabe",
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("does not match wallet node"));
+
+    relay_handle.abort();
+    node_handle.abort();
+}

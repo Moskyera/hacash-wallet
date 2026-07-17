@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "launchpad-dapp",
+  "description": "Isolated, least-privilege access for the HACD Launchpad webview",
+  "webviews": ["launchpad"],
+  "remote": {
+    "urls": [
+      "https://hacd.it/*",
+      "https://www.hacd.it/*",
+      "http://127.0.0.1:8787/*",
+      "http://localhost:8787/*",
+      "http://127.0.0.1:8788/*",
+      "http://localhost:8788/*"
+    ]
+  },
+  "permissions": ["allow-dapp-bridge"]
+}

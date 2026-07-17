@@ -48,7 +48,12 @@ export type MoreActions = {
   onBack: () => void;
   onNavigate: (page: MorePage) => void;
   onClearHistory: () => void;
-  onSaveSettings: (nodeUrl: string, hubUrl: string) => void;
+  onSaveSettings: (
+    nodeUrl: string,
+    hubUrl: string,
+    fallbackUrls: string[],
+    autoFailover: boolean,
+  ) => void;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
   onSaveWalletName: () => void;
   onChangePassphrase: (oldPass: string, newPass: string) => void;

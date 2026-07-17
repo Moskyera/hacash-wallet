@@ -66,7 +66,7 @@ export default function BalanceOverview({ assets, hideBalances, topHint }: Props
         </div>
 
         <div className="balance-asset-card balance-asset-card-btc">
-          <span className="symbol">BTC</span>
+          <span className="symbol">BTC <small className="asset-network-label">on Hacash</small></span>
           <span className="amount">{maskBtcFromSatoshi(btcTotalSat || null, hideBalances)}</span>
           {btcChannelHint ? <span className="hint">{btcChannelHint}</span> : null}
           <span className="usd">{maskUsd(portfolio?.btcUsd, hideBalances)}</span>

@@ -93,30 +93,30 @@ export default function HomeTab({
       {!watchOnly && (
         <div className="quick-actions">
           <button type="button" className="quick-action primary-action" onClick={onScanPay}>
-            <span className="icon">📷</span>
+            <span className="icon" aria-hidden>⌗</span>
             Scan & Pay
           </button>
           <button type="button" className="quick-action" onClick={onReceive}>
-            <span className="icon">↗</span>
+            <span className="icon" aria-hidden>↓</span>
             Receive
           </button>
           <button type="button" className="quick-action" onClick={onContacts}>
-            <span className="icon">👤</span>
+            <span className="icon" aria-hidden>◎</span>
             Contacts
           </button>
           <button type="button" className="quick-action" onClick={onHistory}>
-            <span className="icon">📋</span>
+            <span className="icon" aria-hidden>≡</span>
             History
           </button>
           <button type="button" className="quick-action" onClick={onQuantum}>
-            <span className="icon">◇</span>
+            <span className="icon" aria-hidden>◇</span>
             Quantum
           </button>
           <button type="button" className="quick-action" onClick={onLaunchpad}>
             <span className="icon" aria-hidden>
               <HacdLaunchpadIcon />
             </span>
-            Launchpad
+            HACD Apps
           </button>
         </div>
       )}

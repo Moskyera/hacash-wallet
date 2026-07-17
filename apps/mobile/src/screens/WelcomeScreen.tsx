@@ -45,7 +45,7 @@ export default function WelcomeScreen({
     <div className="auth-screen">
       <div className="auth-hero">
         <WalletLogo size="lg" />
-        <p className="muted small">Pay with QR. Fast and quantum ready.</p>
+        <p className="muted small">Pay with QR. Fast Pay and Quantum options included.</p>
       </div>
 
       <div className="display-toggle">
@@ -78,7 +78,7 @@ export default function WelcomeScreen({
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
-          <button className="primary" disabled={busy || !passphrase} onClick={() => void onCreate()}>
+          <button className="primary" disabled={busy || passphrase.length < 8} onClick={() => void onCreate()}>
             Create wallet
           </button>
         </div>
@@ -138,7 +138,7 @@ export default function WelcomeScreen({
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
-          <button className="primary" disabled={busy || !seed || !passphrase} onClick={() => void onImport()}>
+          <button className="primary" disabled={busy || !seed.trim() || passphrase.length < 8} onClick={() => void onImport()}>
             Import
           </button>
         </div>

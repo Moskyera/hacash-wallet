@@ -14,7 +14,10 @@ fn stress_webauthn_500_unique_challenges() {
         for i in 0..500 {
             let opts = gate.begin_register(&format!("1User{i}"), None).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(&opts).unwrap();
-            let ch = parsed["publicKey"]["challenge"].as_str().unwrap().to_string();
+            let ch = parsed["publicKey"]["challenge"]
+                .as_str()
+                .unwrap()
+                .to_string();
             assert!(seen.insert(ch), "duplicate challenge at iteration {i}");
         }
     });
@@ -23,7 +26,7 @@ fn stress_webauthn_500_unique_challenges() {
 #[test]
 fn stress_webauthn_register_finish_100_roundtrips() {
     stress_gate("webauthn_100_roundtrips", || {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use serde_json::json;
 
         const ORIGIN: &str = "http://localhost:1420";

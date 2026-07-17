@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type DustWhisperSettings, type RelayHealthStatus } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 
-const DEFAULT_RELAY = "http://127.0.0.1:8787";
+const RELAY_PLACEHOLDER = "https://relay.example";
 
 type Props = {
   initial?: DustWhisperSettings;
@@ -18,16 +18,14 @@ export default function WhisperScreen({ initial, onToast }: Props) {
       auto_start_relay: true,
     },
   );
-  const [relayText, setRelayText] = useState(
-    (initial?.relay_urls?.length ? initial.relay_urls : [DEFAULT_RELAY]).join("\n"),
-  );
+  const [relayText, setRelayText] = useState((initial?.relay_urls ?? []).join("\n"));
   const [health, setHealth] = useState<RelayHealthStatus[]>([]);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (initial) {
       setDraft(initial);
-      setRelayText((initial.relay_urls.length ? initial.relay_urls : [DEFAULT_RELAY]).join("\n"));
+      setRelayText(initial.relay_urls.join("\n"));
     }
   }, [initial]);
 
@@ -54,7 +52,7 @@ export default function WhisperScreen({ initial, onToast }: Props) {
         onToast("Add at least one relay URL.", "error");
         return;
       }
-      const next: DustWhisperSettings = { ...draft, relay_urls };
+      const next: DustWhisperSettings = { ...draft, relay_urls, auto_start_relay: false };
       await api.updateDustWhisper(next);
       setDraft(next);
       onToast("DUST Whisper settings saved.", "success");
@@ -71,8 +69,9 @@ export default function WhisperScreen({ initial, onToast }: Props) {
       <div className="card">
         <h2>DUST Whisper</h2>
         <p className="muted">
-          Private tx broadcast and encrypted chat delivery via relay. Your IP stays hidden from the
-          node.
+          Encrypted transaction broadcast and chat delivery via relay. A remote relay can hide your
+          IP from the full node. The local relay encrypts transport but does not provide network
+          anonymity.
         </p>
         <div className="toggle-row">
           <span>Enable Whisper</span>
@@ -94,7 +93,7 @@ export default function WhisperScreen({ initial, onToast }: Props) {
         <textarea
           value={relayText}
           onChange={(e) => setRelayText(e.target.value)}
-          placeholder={DEFAULT_RELAY}
+          placeholder={RELAY_PLACEHOLDER}
         />
         <button type="button" className="primary" disabled={busy} onClick={() => void handleSave()}>
           Save Whisper settings
@@ -110,7 +109,7 @@ export default function WhisperScreen({ initial, onToast }: Props) {
             </button>
           </div>
           {health.length === 0 ? (
-            <p className="muted">No relay health data — check URLs.</p>
+            <p className="muted">No relay health data. check URLs.</p>
           ) : (
             health.map((h) => (
               <div key={h.url} className="list-item">

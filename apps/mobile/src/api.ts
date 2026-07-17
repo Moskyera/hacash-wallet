@@ -66,6 +66,9 @@ export type RelayHealthStatus = {
 
 export type WalletSettings = {
   node_url: string;
+  node_fallback_urls?: string[];
+  auto_node_failover?: boolean;
+  network_mode?: "mainnet" | "testnet";
   l2_hub_url: string | null;
   hub_right_address: string | null;
   channel_id_hex: string | null;
@@ -84,6 +87,7 @@ export type WalletStatus = {
   address: string | null;
   security_profile: string;
   node_url: string;
+  network_mode: "mainnet" | "testnet";
   l2_enabled: boolean;
   fast_pay_state: string;
   fast_pay_message: string;
@@ -92,6 +96,22 @@ export type WalletStatus = {
   dust_whisper?: DustWhisperSettings;
   seconds_until_lock: number | null;
   channel_id: string | null;
+};
+
+export type NodeCandidateStatus = {
+  url: string;
+  online: boolean;
+  network_match: boolean;
+  height: number | null;
+  diamond: number | null;
+  error: string | null;
+};
+
+export type NodeDiscoveryReport = {
+  active_node: string;
+  switched: boolean;
+  network_mode: "mainnet" | "testnet";
+  candidates: NodeCandidateStatus[];
 };
 
 export type MessageDirection = "in" | "out";
@@ -121,12 +141,33 @@ export type FastPayStatus = {
   default_deposit_mei?: number;
 };
 
+export type FastPayInboxItem = {
+  payment_id: string;
+  payer: string;
+  payee: string;
+  amount: string;
+  channel_id: string;
+  payee_channel_id: string;
+  status: string;
+  bill_hex: string;
+  summary: string | null;
+  created_at: number;
+};
+
+export type FastPayExecution = {
+  payment_id: string;
+  status: string;
+  summary: string;
+};
+
 export type HubHealth = {
   ok: boolean;
   version: number;
   name?: string;
   hub_address?: string;
   hub_fee_mei?: number;
+  settlement_ready?: boolean;
+  cross_channel_ready?: boolean;
 };
 
 export type HubDiscoveryEntry = {
@@ -170,6 +211,7 @@ export type SendResult = {
   rail: string;
   tx_hash: string;
   summary: string;
+  pending: boolean;
 };
 
 export type TxStatus = "confirmed" | "pending" | "failed";
@@ -213,12 +255,24 @@ export type AssetSummary = {
   btc_channel_satoshi: number;
 };
 
+export type HacdDiamondBornInfo = {
+  height: number;
+  hash: string;
+};
+
 export type HacdDiamondInfo = {
   name: string;
+  metadata_source: "configured" | "mainnet" | string;
   number?: number | null;
   visual_gene?: string | null;
   life_gene?: string | null;
   belong?: string | null;
+  miner?: string | null;
+  bid_fee?: string | null;
+  average_bid_burn?: number | null;
+  born?: HacdDiamondBornInfo | null;
+  prev_hash?: string | null;
+  inscriptions: string[];
 };
 
 export type ChannelPartyBalance = {
@@ -247,6 +301,10 @@ export type BtcSendPreview = {
   to: string;
   satoshi: number;
   btc_amount: number;
+  service_fee_satoshi: number;
+  service_fee_btc: number;
+  total_debit_satoshi: number;
+  service_fee_treasury: string;
   fee_mei: number;
   fee_wire: string;
   hip23: Hip23Check;
@@ -260,6 +318,8 @@ export type AirgapUnsigned = {
   amount_mei: number;
   amount_wire: string;
   fee: string;
+  service_fee_mei: number;
+  service_fee_treasury: string | null;
   body_hex: string;
   summary: string;
   tx_type?: number;
@@ -270,6 +330,10 @@ export type AirgapSigned = {
   from: string;
   to: string;
   amount_mei: number;
+  amount_wire: string;
+  fee: string;
+  service_fee_mei: number;
+  service_fee_treasury: string | null;
   signed_hex: string;
   summary: string;
   tx_type?: number;
@@ -305,6 +369,9 @@ export type HacdSendPreview = {
   diamond_number?: number | null;
   fee_mei: number;
   fee_wire: string;
+  service_fee_mei: number;
+  service_fee_treasury: string;
+  total_hac_debit_mei: number;
   hip23: Hip23Check;
   summary: string;
 };
@@ -336,6 +403,8 @@ export type QuantumPreflight = {
   balance_mei: number;
   fee_wire: string;
   fee_mei: number;
+  service_fee_mei: number;
+  service_fee_treasury: string;
   total_mei: number;
 };
 
@@ -380,6 +449,15 @@ export const quantumApi = {
     invoke<AirgapSignResult>("quantum_airgap_sign_type4", { unsigned, keystorePassword }),
 };
 
+export type DappApprovalView = {
+  id: string;
+  origin: string;
+  kind: string;
+  title: string;
+  summary: string;
+  detail: string;
+};
+
 export const api = {
   status: () => invoke<WalletStatus>("wallet_status"),
   create: (passphrase: string) => invoke<string>("wallet_create", { passphrase }),
@@ -395,12 +473,16 @@ export const api = {
   pingNode: () => invoke<Record<string, unknown>>("wallet_ping_node"),
   pingNodeUrl: (nodeUrl?: string) =>
     invoke<Record<string, unknown>>("wallet_ping_node_url", { nodeUrl: nodeUrl ?? null }),
+  discoverNodes: () => invoke<NodeDiscoveryReport>("wallet_discover_nodes"),
   resetWallet: () => invoke<void>("wallet_reset"),
   updatePrivacy: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   txHistory: () => invoke<TxRecord[]>("wallet_tx_history"),
   clearHistory: () => invoke<void>("wallet_clear_tx_history"),
   fastPayStatus: () => invoke<FastPayStatus>("wallet_fast_pay_status"),
+  fastPayInbox: () => invoke<FastPayInboxItem[]>("wallet_fast_pay_inbox"),
+  acceptFastPay: (paymentId: string) =>
+    invoke<FastPayExecution>("wallet_accept_fast_pay", { paymentId }),
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
@@ -437,6 +519,10 @@ export const api = {
     invoke<{ address?: string; err?: string }>("wallet_dapp_wallet", { origin }),
   dappTransfer: (origin: string, txobj: string) =>
     invoke<Record<string, unknown>>("wallet_dapp_transfer", { origin, txobj }),
+  dappPending: () => invoke<DappApprovalView | null>("wallet_dapp_pending"),
+  dappApprove: (id: string) => invoke<void>("wallet_dapp_approve", { id }),
+  dappReject: (id: string, reason?: string) =>
+    invoke<void>("wallet_dapp_reject", { id, reason: reason ?? null }),
   webviewEval: (label: string, script: string) =>
     invoke<void>("wallet_webview_eval", { label, script }),
   updateDustWhisper: (dustWhisper: DustWhisperSettings) =>
@@ -477,8 +563,8 @@ export const api = {
     invoke<AirgapParseResult>("wallet_airgap_parse_qr_batch", { parts }),
   checkAppUpdate: (channel: "mobile" | "desktop", currentVersion: string) =>
     invoke<AppUpdateInfo>("wallet_check_app_update", { channel, currentVersion }),
-  downloadAppUpdate: (url: string, filename: string) =>
-    invoke<string>("wallet_download_app_update", { url, filename }),
+  downloadAppUpdate: (url: string, filename: string, sha256: string, expectedSize: number) =>
+    invoke<string>("wallet_download_app_update", { url, filename, sha256, expectedSize }),
   installMobileUpdate: (path: string) => invoke<void>("wallet_install_mobile_update", { path }),
 };
 
@@ -488,6 +574,9 @@ export type AppUpdateInfo = {
   update_available: boolean;
   download_url: string | null;
   release_notes: string | null;
+  asset_name: string | null;
+  download_size: number | null;
+  sha256: string | null;
   release_page: string | null;
 };
 

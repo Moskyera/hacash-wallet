@@ -42,7 +42,7 @@ This document describes how the **Hacash Wallet** (`Moskyera/hacash-wallet`) is 
 
 - Read [`HUB-OPERATOR.md`](./HUB-OPERATOR.md)
 - Run the hub binary from `crates/l2-fast-pay-hub` (or published release artifact)
-- Expose Hub API v1 over HTTPS; register in hub discovery list when upstream accepts community hubs
+- Expose Hub API v4 over HTTPS; register in hub discovery list when upstream accepts community hubs
 
 ### Node runners
 

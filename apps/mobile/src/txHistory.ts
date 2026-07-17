@@ -28,5 +28,5 @@ export async function openTxInExplorer(
     }
     return;
   }
-  onToast("Off-chain payment — not on the block explorer.", "info");
+  onToast("Off-chain payment. not on the block explorer.", "info");
 }

@@ -76,7 +76,7 @@ export default function HistoryScreen({ txHistory, hideAddresses, hideBalances, 
                           Explorer
                         </button>
                       ) : (
-                        <span className="muted">—</span>
+                        <span className="muted">N/A</span>
                       )}
                     </td>
                   </tr>

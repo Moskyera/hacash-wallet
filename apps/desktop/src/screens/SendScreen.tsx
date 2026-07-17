@@ -30,7 +30,6 @@ type Props = {
   sendAmount: string;
   setSendAmount: (v: string) => void;
   sendHubFeePayer: HubFeePayer;
-  setSendHubFeePayer: (v: HubFeePayer) => void;
   sendForceL1: boolean;
   setSendForceL1: (v: boolean) => void;
   sendL1FeeSpeed: L1FeeSpeed;
@@ -73,7 +72,6 @@ export default function SendScreen({
   sendAmount,
   setSendAmount,
   sendHubFeePayer,
-  setSendHubFeePayer,
   sendForceL1,
   setSendForceL1,
   sendL1FeeSpeed,
@@ -236,38 +234,9 @@ export default function SendScreen({
           </button>
           {showSendOptions && (
             <div className="send-options-card">
-              <div className="send-options-section">
-                <h4 className="send-options-heading">Fast Pay network fee</h4>
-                <label className="option-choice">
-                  <input
-                    type="radio"
-                    name="hubFeePayer"
-                    checked={sendHubFeePayer === "sender"}
-                    onChange={() => {
-                      setSendHubFeePayer("sender");
-                      clearPreview();
-                      void persistSendPreferences("sender", sendForceL1);
-                    }}
-                  />
-                  <span>I pay the fee</span>
-                </label>
-                <label className="option-choice">
-                  <input
-                    type="radio"
-                    name="hubFeePayer"
-                    checked={sendHubFeePayer === "recipient"}
-                    onChange={() => {
-                      setSendHubFeePayer("recipient");
-                      clearPreview();
-                      void persistSendPreferences("recipient", sendForceL1);
-                    }}
-                  />
-                  <span>Recipient pays (deducted from amount received)</span>
-                </label>
-                <p className="muted small-note">
-                  Applies to Fast Pay only. On-chain L1 fees are always paid by the sender.
-                </p>
-              </div>
+              <p className="muted small-note">
+                Fast Pay has no network fee and no wallet service fee.
+              </p>
               <label className="option-choice">
                 <input
                   type="checkbox"
@@ -281,27 +250,12 @@ export default function SendScreen({
                 />
                 <span>Force on-chain (skip Fast Pay)</span>
               </label>
-              <label className="option-choice">
-                <input
-                  type="checkbox"
-                  checked={sendServiceFeeEnabled}
-                  onChange={(e) => {
-                    const enabled = e.target.checked;
-                    setSendServiceFeeEnabled(enabled);
-                    clearPreview();
-                    void persistSendPreferences(
-                      sendHubFeePayer,
-                      sendForceL1,
-                      sendL1FeeSpeed,
-                      enabled,
-                    );
-                  }}
-                />
+              <div className="option-choice" role="note">
                 <span>
-                  Ecosystem service fee ({formatServiceFeeRate(serviceFeeRate)} of amount, for
-                  future DEX)
+                  On-chain wallet service fee: {formatServiceFeeRate(serviceFeeRate)} of amount.
+                  It is included in the signed L1 transaction.
                 </span>
-              </label>
+              </div>
             </div>
           )}
 
@@ -356,8 +310,7 @@ export default function SendScreen({
                 </li>
                 {preview.plan.rail === "L2Fast" ? (
                   <li>
-                    <strong>Instant fee:</strong> ~{formatHacMei(preview.plan.fee_breakdown.hub_fee_mei ?? 0.001)} HAC
-                    {preview.plan.fee_breakdown.hub_fee_payer === "recipient" ? " (recipient pays)" : ""}
+                    <strong>Fast Pay fee:</strong> 0 HAC
                   </li>
                 ) : (
                   <>
@@ -412,12 +365,6 @@ export default function SendScreen({
                   <strong>Recipient receives:</strong>{" "}
                   {formatHacMei(preview.plan.fee_breakdown.recipient_credit_mei)} HAC
                 </li>
-                {preview.plan.rail === "L2Fast" &&
-                  preview.plan.fee_breakdown.hub_fee_payer === "recipient" && (
-                    <li className="muted small-note">
-                      Hub fee is taken from the recipient&apos;s credit, not added to your debit.
-                    </li>
-                  )}
                 <li>
                   <strong>From:</strong> <code>{maskAddress(preview.from, hideAddresses)}</code>
                 </li>

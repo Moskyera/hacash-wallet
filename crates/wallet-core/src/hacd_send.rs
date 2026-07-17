@@ -3,9 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{WalletError, WalletResult};
-use crate::hip23::{is_valid_hacash_address, Hip23SendCheck};
+use crate::hip23::{Hip23SendCheck, is_valid_hacash_address};
 use crate::l1_fee::estimate_hacd_l1_fee;
 use crate::node::NodeClient;
+use crate::send_options::{HACD_SERVICE_FEE_MEI, WALLET_TREASURY_ADDRESS};
 
 /// Legacy minimum L1 fee wire (fallback when node is unreachable).
 pub const DIAMOND_TRANSFER_FEE_WIRE: &str = "1:244";
@@ -21,6 +22,9 @@ pub struct HacdSendPreview {
     pub diamond_number: Option<u64>,
     pub fee_mei: f64,
     pub fee_wire: String,
+    pub service_fee_mei: f64,
+    pub service_fee_treasury: String,
+    pub total_hac_debit_mei: f64,
     pub hip23: Hip23SendCheck,
     pub summary: String,
 }
@@ -31,7 +35,7 @@ pub fn normalize_diamond_names(raw: &[String]) -> WalletResult<Vec<String>> {
         let n = normalize_diamond_name(item);
         if !is_valid_diamond_name(&n) {
             return Err(WalletError::Other(format!(
-                "Invalid HACD name '{n}' (4–6 uppercase letters)"
+                "Invalid HACD name '{n}' (4 to 6 uppercase letters)"
             )));
         }
         if !names.contains(&n) {
@@ -42,7 +46,9 @@ pub fn normalize_diamond_names(raw: &[String]) -> WalletResult<Vec<String>> {
         return Err(WalletError::Other("Select at least one HACD".into()));
     }
     if names.len() > 200 {
-        return Err(WalletError::Other("Maximum 200 HACD per transaction".into()));
+        return Err(WalletError::Other(
+            "Maximum 200 HACD per transaction".into(),
+        ));
     }
     Ok(names)
 }
@@ -56,8 +62,12 @@ pub fn normalize_diamond_name(raw: &str) -> String {
 }
 
 pub fn is_valid_diamond_name(name: &str) -> bool {
-    let n = normalize_diamond_name(name);
-    n.len() >= 4 && n.len() <= 6 && n.chars().all(|c| c.is_ascii_uppercase())
+    const ALPHABET: &str = "WTYUIAHXVMEKBSZN";
+    let normalized = normalize_diamond_name(name);
+    (4..=6).contains(&normalized.len())
+        && normalized
+            .chars()
+            .all(|character| ALPHABET.contains(character))
 }
 
 pub fn parse_owned_diamonds(raw: &str) -> Vec<String> {
@@ -72,10 +82,24 @@ pub fn parse_owned_diamonds(raw: &str) -> Vec<String> {
 
 pub async fn list_owned_diamonds(node: &NodeClient, address: &str) -> WalletResult<Vec<String>> {
     let entry = node.query_balance_entry(address, true).await?;
-    Ok(entry
+    let candidates = entry
         .diamonds
         .map(|s| parse_owned_diamonds(&s))
-        .unwrap_or_default())
+        .unwrap_or_default();
+    let mut verified = Vec::new();
+    for name in candidates {
+        match node.query_diamond_by_name(&name).await {
+            Ok(info) if info.belong.as_deref() == Some(address) => verified.push(name),
+            Ok(_) => {
+                tracing::warn!(diamond = %name, "HACD balance entry is not owned on the active node");
+            }
+            Err(error) if error.to_string().contains("not found") => {
+                tracing::warn!(diamond = %name, "HACD balance entry does not exist on the active node");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(verified)
 }
 
 pub async fn preview_hacd_send(
@@ -86,7 +110,9 @@ pub async fn preview_hacd_send(
 ) -> WalletResult<HacdSendPreview> {
     let names = normalize_diamond_names(diamond_names)?;
     if !is_valid_hacash_address(to) {
-        return Err(WalletError::Other("Invalid recipient Hacash address".into()));
+        return Err(WalletError::Other(
+            "Invalid recipient Hacash address".into(),
+        ));
     }
     if from == to {
         return Err(WalletError::Other(
@@ -110,9 +136,17 @@ pub async fn preview_hacd_send(
     }
 
     let first_info = node.query_diamond_by_name(&names[0]).await?;
-    let balance = node.balance_mei(from).await.unwrap_or(0.0);
-    let fee_est = estimate_hacd_l1_fee(node, from, to, &names, crate::send_options::L1FeeSpeed::Normal).await?;
-    let hip23 = validate_diamond_l1_send(to, balance, fee_est.fee_mei)?;
+    let balance = node.balance_mei(from).await?;
+    let fee_est = estimate_hacd_l1_fee(
+        node,
+        from,
+        to,
+        &names,
+        crate::send_options::L1FeeSpeed::Normal,
+    )
+    .await?;
+    let total_hac_debit_mei = fee_est.fee_mei + HACD_SERVICE_FEE_MEI;
+    let hip23 = validate_diamond_l1_send(to, balance, total_hac_debit_mei)?;
 
     let summary = if names.len() == 1 {
         format!(
@@ -139,6 +173,9 @@ pub async fn preview_hacd_send(
         diamond_number: first_info.number,
         fee_mei: fee_est.fee_mei,
         fee_wire: fee_est.fee_node,
+        service_fee_mei: HACD_SERVICE_FEE_MEI,
+        service_fee_treasury: WALLET_TREASURY_ADDRESS.into(),
+        total_hac_debit_mei,
         hip23,
         summary,
     })
@@ -161,7 +198,7 @@ fn validate_diamond_l1_send(
             fee_mei, balance_mei
         ));
     }
-    warnings.push("HACD transfer is irreversible — confirm recipient address".into());
+    warnings.push("HACD transfer is irreversible. confirm recipient address".into());
 
     let ok = errors.is_empty();
     if !ok {
@@ -176,12 +213,20 @@ fn validate_diamond_l1_send(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_owned_diamonds;
+    use super::{is_valid_diamond_name, parse_owned_diamonds};
 
     #[test]
     fn parse_owned_diamonds_splits_six_letter_names() {
         let raw = "ZAKXMIWTYUIA";
         let list = parse_owned_diamonds(raw);
         assert_eq!(list, vec!["ZAKXMI".to_string(), "WTYUIA".to_string()]);
+    }
+
+    #[test]
+    fn diamond_names_use_the_official_alphabet() {
+        assert!(is_valid_diamond_name("vwmmmm"));
+        assert!(is_valid_diamond_name("WTYU"));
+        assert!(!is_valid_diamond_name("ABCDEF"));
+        assert!(!is_valid_diamond_name("WTYC"));
     }
 }

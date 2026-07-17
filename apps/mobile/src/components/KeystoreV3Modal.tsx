@@ -44,7 +44,7 @@ export default function KeystoreV3Modal({
     try {
       const acc = await quantumApi.previewKeystore(json, pass);
       setPreview(acc);
-      setMsg("Keystore unlocked — ready to import.");
+      setMsg("Keystore unlocked. ready to import.");
     } catch (e) {
       setMsg(formatInvokeError(e));
       setPreview(null);

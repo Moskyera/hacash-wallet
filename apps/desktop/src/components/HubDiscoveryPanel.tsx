@@ -85,8 +85,8 @@ export default function HubDiscoveryPanel({
                   </span>
                 </div>
                 <p className="muted small hub-discovery-url">{hub.hub_url}</p>
-                {hub.online && hub.hub_fee_mei != null && (
-                  <p className="muted small">Fee ~{hub.hub_fee_mei} HAC per pay</p>
+                {hub.online && (
+                  <p className="muted small">Fast Pay fee: 0 HAC</p>
                 )}
                 {!hub.online && hub.error && (
                   <p className="muted small">{hub.error}</p>

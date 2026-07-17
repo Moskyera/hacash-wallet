@@ -5,7 +5,7 @@ import { canSendType4, PQC_TYPE4_HINT } from "../quantumMeta";
 import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 import AddressBadge from "./AddressBadge";
 
-const DEFAULT_TO = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
+const DEFAULT_TO = "";
 
 
 type Props = {
@@ -93,6 +93,8 @@ export default function SendQuantumTx({
         balance_mei: balance ?? 0,
         fee_wire: "0:004",
         fee_mei: 0.004,
+        service_fee_mei: 0,
+        service_fee_treasury: "",
         total_mei: 0,
       });
     }
@@ -116,7 +118,7 @@ export default function SendQuantumTx({
     phase !== "busy" &&
     !disabled;
 
-  async function send(isTest: boolean) {
+  async function send() {
     if (!account) {
       setErr("Create or import a quantum account first.");
       return;
@@ -130,7 +132,7 @@ export default function SendQuantumTx({
       return;
     }
     if (!preflight?.ok) {
-      setErr(preflight?.errors.join("; ") || "Preflight checks failed — wait or fix amount/recipient.");
+      setErr(preflight?.errors.join("; ") || "Preflight checks failed. wait or fix amount/recipient.");
       return;
     }
     setPhase("busy");
@@ -138,15 +140,9 @@ export default function SendQuantumTx({
     try {
       const amt = Number(amount);
       await maybeWebAuthnGate(amt, webauthnEnabled, securityProfile, nativeBioAvailable);
-      if (isTest) {
-        const test = await quantumApi.sendTestTx(pass);
-        setHash(test.hash);
-        setFee(test.fee_used ?? preflight?.fee_wire ?? "");
-      } else {
-        const res = await quantumApi.sendType4(to.trim(), amount.trim(), pass);
-        setHash(res.hash);
-        setFee(res.fee_used ?? preflight?.fee_wire ?? "");
-      }
+      const res = await quantumApi.sendType4(to.trim(), amount.trim(), pass);
+      setHash(res.hash);
+      setFee(res.fee_used ?? preflight?.fee_wire ?? "");
       setPhase("ok");
       await refreshBalance();
       runPreflight();
@@ -194,6 +190,8 @@ export default function SendQuantumTx({
           amount_mei: env.amount_mei,
           amount_wire: env.amount_wire,
           fee: env.fee,
+          service_fee_mei: env.service_fee_mei,
+          service_fee_treasury: env.service_fee_treasury,
           body_hex: env.body_hex,
           summary: env.summary,
           tx_type: env.tx_type ?? 4,
@@ -223,6 +221,10 @@ export default function SendQuantumTx({
         from: env.from,
         to: env.to,
         amount_mei: env.amount_mei,
+        amount_wire: env.amount_wire,
+        fee: env.fee,
+        service_fee_mei: env.service_fee_mei,
+        service_fee_treasury: env.service_fee_treasury,
         signed_hex: env.signed_hex,
         summary: env.summary,
         tx_type: env.tx_type ?? 4,
@@ -240,11 +242,16 @@ export default function SendQuantumTx({
     <section className="panel send-quantum">
       <h3>Send Type 4 (Quantum)</h3>
       <p className="muted">
+        Experimental Type 4 support. PQC and hybrid signing are implemented, but this wallet has
+        not completed an independent cryptographic audit.
+      </p>
+      <p className="muted">
         Node: <code>{nodeUrl ?? "http://127.0.0.1:8080"}</code>
         {preflight?.ok ? (
           <>
             {" "}
             · fee ~<code>{preflight.fee_mei.toFixed(4)}</code> HAC · total ~
+            wallet fee <code>{preflight.service_fee_mei.toFixed(6)}</code> HAC · total{" "}
             <code>{preflight.total_mei.toFixed(4)}</code> HAC
           </>
         ) : fee ? (
@@ -274,7 +281,7 @@ export default function SendQuantumTx({
             </span>
           </>
         ) : (
-          <span className="muted">— no quantum account —</span>
+          <span className="muted">No quantum account</span>
         )}
       </div>
 
@@ -315,17 +322,9 @@ export default function SendQuantumTx({
           type="button"
           className="primary"
           disabled={!canSubmit}
-          onClick={() => send(false)}
+          onClick={() => send()}
         >
           Sign &amp; Send Type 4
-        </button>
-        <button
-          type="button"
-          className="btn-test"
-          disabled={!canSubmit}
-          onClick={() => send(true)}
-        >
-          Send Test Quantum TX
         </button>
         <button
           type="button"

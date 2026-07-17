@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { api, type BtcSendPreview } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 
 export function useBtcSend(opts: {
   active: boolean;
@@ -42,13 +43,20 @@ export function useBtcSend(opts: {
 
   const handleConfirm = useCallback(async () => {
     if (!preview) return;
-    if (nativeBioAvailable) {
-      try {
+    try {
+      const status = await api.status();
+      if (status.webauthn_enabled) {
+        const options = await api.webauthnAuthBegin(webAuthnClientOrigin());
+        const assertion = await runWebAuthnAuth(options);
+        await api.webauthnAuthFinish(assertion);
+      } else if (nativeBioAvailable) {
         await api.confirmBiometricNative();
-      } catch (e) {
-        onNotify(formatInvokeError(e), "error");
-        return;
+      } else {
+        throw new Error("Enable WebAuthn or Windows Hello before sending bridged BTC");
       }
+    } catch (e) {
+      onNotify(formatInvokeError(e), "error");
+      return;
     }
     setBusy(true);
     try {

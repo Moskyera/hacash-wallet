@@ -1,35 +1,37 @@
 pub mod account;
-pub mod biometric_unlock;
 pub mod airgap;
 pub mod bills;
+mod biometric_unlock;
+pub mod btc_send;
 pub mod channel;
 pub mod dapp;
+pub mod dust_whisper;
+pub mod error;
 pub mod fast_pay;
 pub mod hacd_send;
-pub mod btc_send;
-pub mod dust_whisper;
-pub mod messenger;
-pub mod messenger_crypto;
-pub mod error;
-pub mod history;
 pub mod hardware;
 pub mod hip23;
+pub mod history;
 pub mod kdf;
-pub mod secure_mem;
+pub mod l1_fee;
 pub mod l2_bill;
 pub mod l2_hub;
+pub mod messenger;
+pub mod messenger_crypto;
 pub mod node;
+pub mod node_discovery;
 pub mod paths;
 pub mod payment;
-pub mod send_options;
-pub mod protocol_init;
 pub mod privacy;
-pub mod security;
-pub mod settings;
+pub mod protocol_init;
 pub mod quantum;
-pub mod l1_fee;
-pub mod type4_fee;
 pub mod quantum_vault;
+pub mod secure_mem;
+pub mod security;
+pub mod send_options;
+pub mod settings;
+pub mod tx_binding;
+pub mod type4_fee;
 pub mod unlock_guard;
 pub mod vault;
 pub mod wallet;
@@ -43,29 +45,29 @@ pub use airgap::{
     AirgapUnsigned,
 };
 pub use bills::BillEntry;
-pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillSummary};
-pub use error::{WalletError, WalletResult};
-pub use history::TxRecord;
-pub use hip23::{Hip23PatternCheck, Type3CheckInput, HeightScopeInput, BalanceFloorInput};
-pub use fast_pay::{
-    FastPayState, FastPayStatus, HubDiscoveryEntry, HubDiscoveryReport, DEFAULT_CHANNEL_DEPOSIT_MEI,
-};
-pub use hacd_send::{HacdSendPreview, DIAMOND_TRANSFER_FEE_WIRE};
 pub use btc_send::{BtcSendPreview, btc_to_satoshi, satoshi_to_btc};
-pub use l2_hub::HubHealth;
-pub use hardware::HardwareSigningMode;
 pub use dust_whisper::{DustWhisperSettings, RelayHealthStatus};
-pub use messenger::{ChatMessage, ChatThread, MessageDirection};
-pub use privacy::{mask_address, mask_amount, mask_hash, PrivacySettings};
-pub use l1_fee::L1FeeTierQuote;
-pub use send_options::{
-    fast_pay_fee_breakdown, hac_send_transfer_pairs, HubFeePayer, L1FeeSpeed, SendFeeBreakdown,
-    SendOptions, SendPreferences, DEFAULT_HUB_FEE_MEI, WALLET_TREASURY_ADDRESS,
+pub use error::{WalletError, WalletResult};
+pub use fast_pay::{
+    DEFAULT_CHANNEL_DEPOSIT_MEI, FastPayState, FastPayStatus, HubDiscoveryEntry, HubDiscoveryReport,
 };
-pub use settings::WalletSettings;
+pub use hacd_send::{DIAMOND_TRANSFER_FEE_WIRE, HacdSendPreview};
+pub use hardware::HardwareSigningMode;
+pub use hip23::{BalanceFloorInput, HeightScopeInput, Hip23PatternCheck, Type3CheckInput};
+pub use history::TxRecord;
+pub use l1_fee::L1FeeTierQuote;
+pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillSummary};
+pub use l2_hub::HubHealth;
+pub use messenger::{ChatMessage, ChatThread, MessageDirection};
+pub use privacy::{PrivacySettings, mask_address, mask_amount, mask_hash};
 pub use quantum::{
-    QuantumAccountInfo, QuantumAccountSummary, QuantumPreflight, QuantumSendResult, QuantumSettings,
-    QuantumTestResult, TEST_LEGACY_RECIPIENT,
+    QuantumAccountInfo, QuantumAccountSummary, QuantumPreflight, QuantumSendResult,
+    QuantumSettings, QuantumTestResult,
+};
+pub use send_options::{
+    DEFAULT_HUB_FEE_MEI, HubFeePayer, L1FeeSpeed, SendFeeBreakdown, SendOptions, SendPreferences,
+    WALLET_TREASURY_ADDRESS, fast_pay_fee_breakdown, hac_send_transfer_pairs,
 };
 pub use settings::QuantumMeta;
+pub use settings::WalletSettings;
 pub use wallet::{AssetSummary, WalletService};

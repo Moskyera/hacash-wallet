@@ -11,7 +11,9 @@ fn milestone_watch_only_cannot_sign() {
     tier0_gate("watch_only_no_sign", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            let addr = svc.import_watch_only("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS").unwrap();
+            let addr = svc
+                .import_watch_only("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS")
+                .unwrap();
             assert_eq!(svc.status().watch_only, true);
             let err = svc.audit_sign_tx_body("00").unwrap_err();
             assert!(matches!(err, WalletError::Policy(_)));

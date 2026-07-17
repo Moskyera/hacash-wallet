@@ -63,7 +63,7 @@ export function parseUrlPay(href: string): PaymentQrPayload | null {
       return parsePaymentQr(decodeURIComponent(hash));
     }
   } catch {
-    /* not a full URL — fall through */
+    /* not a full URL. fall through */
   }
 
   return parsePaymentQr(href);

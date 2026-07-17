@@ -62,14 +62,27 @@ if ((Test-Path $pkgJson) -and (Test-Path $tauriProps)) {
 $filePaths = Join-Path $android "app\src\main\res\xml\file_paths.xml"
 if (Test-Path $filePaths) {
     $fp = Get-Content $filePaths -Raw
-    if ($fp -notmatch 'cache-path[^>]*name="cache_updates"') {
-        $errors += "file_paths.xml must expose cache-path for in-app APK updates"
+    if ($fp -notmatch 'cache-path[^>]*name="verified_updates"[^>]*path="updates/"') {
+        $errors += "file_paths.xml must expose only the verified updater cache"
+    }
+    if ($fp -match '<external-path|<external-cache-path|path="\."') {
+        $errors += "file_paths.xml exposes a path broader than cache/updates"
+    }
+}
+
+$networkConfig = Join-Path $android "app\src\main\res\xml\network_security_config.xml"
+if (Test-Path $networkConfig) {
+    $net = Get-Content $networkConfig -Raw
+    if ($net -notmatch '<base-config cleartextTrafficPermitted="false"' -or
+        $net -notmatch '<domain includeSubdomains="false">nodeapi\.hacash\.org</domain>' -or
+        $net -match '<domain[^>]*>hacash\.org</domain>') {
+        $errors += "network security must allow cleartext only for the exact official node"
     }
 }
 
 if (Test-Path $proguard) {
     $pg = Get-Content $proguard -Raw
-    foreach ($keep in @("ApkInstaller", "BackupFileHelper", "BackupExportHelper", "app.tauri.opener.OpenerPlugin", "app.tauri.deep_link", "app.tauri.biometric")) {
+    foreach ($keep in @("ApkInstaller", "BiometricSecretStore", "BackupFileHelper", "BackupExportHelper", "app.tauri.opener.OpenerPlugin", "app.tauri.deep_link", "app.tauri.biometric")) {
         if ($pg -notmatch [regex]::Escape($keep)) {
             $errors += "proguard-rules.pro missing keep rule for $keep"
         }

@@ -3,8 +3,8 @@
 mod common;
 
 use common::{stress_gate, with_isolated_wallet_dir};
-use hacash_wallet_core::security::SecurityProfile;
 use hacash_wallet_core::WalletService;
+use hacash_wallet_core::security::SecurityProfile;
 
 const CYCLES: usize = 100;
 
@@ -57,14 +57,19 @@ fn stress_security_profile_toggle() {
             svc.create_wallet("stress-passphrase-12").unwrap();
             for i in 0..50 {
                 if i % 2 == 0 {
-                    svc.set_security_profile(SecurityProfile::paranoid()).unwrap();
+                    svc.set_security_profile(SecurityProfile::paranoid())
+                        .unwrap();
                 } else {
-                    svc.set_security_profile(SecurityProfile::default()).unwrap();
+                    svc.set_security_profile(SecurityProfile::default())
+                        .unwrap();
                 }
             }
             let mut svc2 = WalletService::new(None, None).unwrap();
             svc2.unlock("stress-passphrase-12").unwrap();
-            assert!(svc2.get_settings().security_profile == "paranoid" || svc2.get_settings().security_profile == "balanced");
+            assert!(
+                svc2.get_settings().security_profile == "paranoid"
+                    || svc2.get_settings().security_profile == "balanced"
+            );
         });
     });
 }

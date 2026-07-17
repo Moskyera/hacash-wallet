@@ -12,7 +12,7 @@ pub struct KdfParams {
 }
 
 impl KdfParams {
-    /// ~2× faster unlock vs legacy m=65536,t=3,p=4 — still OWASP-grade for desktop.
+    /// ~2× faster unlock vs legacy m=65536,t=3,p=4. still OWASP-grade for desktop.
     pub fn balanced() -> Self {
         Self {
             m_cost: 32_768,
@@ -61,11 +61,20 @@ impl KdfParams {
         for part in label.split(',') {
             let part = part.trim();
             if let Some(v) = part.strip_prefix("m=") {
-                m_cost = Some(v.parse().map_err(|_| WalletError::Vault("invalid kdf m".into()))?);
+                m_cost = Some(
+                    v.parse()
+                        .map_err(|_| WalletError::Vault("invalid kdf m".into()))?,
+                );
             } else if let Some(v) = part.strip_prefix("t=") {
-                t_cost = Some(v.parse().map_err(|_| WalletError::Vault("invalid kdf t".into()))?);
+                t_cost = Some(
+                    v.parse()
+                        .map_err(|_| WalletError::Vault("invalid kdf t".into()))?,
+                );
             } else if let Some(v) = part.strip_prefix("p=") {
-                p_cost = Some(v.parse().map_err(|_| WalletError::Vault("invalid kdf p".into()))?);
+                p_cost = Some(
+                    v.parse()
+                        .map_err(|_| WalletError::Vault("invalid kdf p".into()))?,
+                );
             }
         }
         Ok(Self {

@@ -6,7 +6,10 @@ use clap::Parser;
 use l2_fast_pay_hub::HubState;
 
 #[derive(Parser, Debug)]
-#[command(name = "fast-pay-hub", about = "Hacash CSP / Fast Pay hub (Wallet Hub API v1)")]
+#[command(
+    name = "fast-pay-hub",
+    about = "Hacash CSP / Fast Pay hub (Wallet Hub API v4)"
+)]
 struct Args {
     /// Listen address (host:port)
     #[arg(long, default_value = "127.0.0.1:8790")]
@@ -16,7 +19,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     node_url: String,
 
-    /// On-chain address of this hub (CSP right party)
+    /// On-chain address of this hub (either channel side)
     #[arg(long, env = "HACASH_HUB_ADDRESS")]
     hub_address: String,
 
@@ -28,8 +31,8 @@ struct Args {
     #[arg(long, default_value = "Moskyera dev CSP")]
     name: String,
 
-    /// Per-payment hub fee in HAC (mei)
-    #[arg(long, default_value_t = 0.001)]
+    /// Fast Pay is fee-free. This must remain 0.
+    #[arg(long, default_value_t = 0.0)]
     hub_fee_mei: f64,
 
     /// Optional JSON file to persist channel ledgers and payment receipts
@@ -51,8 +54,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.hub_secret_hex,
     )?);
 
-    eprintln!("Fast Pay hub: {}", hub.health().name.as_deref().unwrap_or("hub"));
-    eprintln!("Hub address:  {}", hub.health().hub_address.as_deref().unwrap_or("?"));
+    eprintln!(
+        "Fast Pay hub: {}",
+        hub.health().name.as_deref().unwrap_or("hub")
+    );
+    eprintln!(
+        "Hub address:  {}",
+        hub.health().hub_address.as_deref().unwrap_or("?")
+    );
     eprintln!("Node API:     {}", args.node_url);
     eprintln!("Listen:       {}", args.listen);
 

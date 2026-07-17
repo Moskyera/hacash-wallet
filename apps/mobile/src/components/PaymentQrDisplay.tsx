@@ -5,13 +5,20 @@ import { encodePaymentUri } from "../paymentQr";
 type Props = {
   address: string;
   amountMei?: number;
+  caption?: string;
+  hideAddress?: boolean;
 };
 
-export default function PaymentQrDisplay({ address, amountMei }: Props) {
+export default function PaymentQrDisplay({
+  address,
+  amountMei,
+  caption,
+  hideAddress = false,
+}: Props) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!address) {
+    if (!address || hideAddress) {
       setDataUrl(null);
       return;
     }
@@ -27,7 +34,11 @@ export default function PaymentQrDisplay({ address, amountMei }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [address, amountMei]);
+  }, [address, amountMei, hideAddress]);
+
+  if (hideAddress) {
+    return <p className="muted">Show addresses in Privacy to display the receive QR code.</p>;
+  }
 
   if (!dataUrl) return null;
 
@@ -35,9 +46,9 @@ export default function PaymentQrDisplay({ address, amountMei }: Props) {
     <div className="qr-wrap">
       <img src={dataUrl} alt="Receive QR" className="qr-img" />
       <p className="muted">
-        {amountMei != null && amountMei > 0
+        {caption ?? (amountMei != null && amountMei > 0
           ? `Request ${amountMei} HAC`
-          : "Any amount"}
+          : "Any amount")}
       </p>
     </div>
   );

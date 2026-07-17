@@ -45,6 +45,30 @@ pub struct Hip23PatternCheck {
 }
 
 /// Default L1 fee (wallet millis wire `1:244`).
+/// Largest amount accepted by the f64 compatibility API while preserving milli-HAC precision.
+pub const MAX_SAFE_HAC_MEI: f64 = 9_000_000_000_000.0;
+
+pub fn validate_hac_amount_mei(amount_mei: f64) -> WalletResult<()> {
+    if !amount_mei.is_finite() || amount_mei <= 0.0 || amount_mei > MAX_SAFE_HAC_MEI {
+        return Err(WalletError::Policy(
+            "HAC amount must be a finite positive number in the supported range".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Conservative integer conversion for threshold policy checks; never rounds a send down.
+pub fn policy_amount_mei_ceil(amount_mei: f64) -> WalletResult<u64> {
+    validate_hac_amount_mei(amount_mei)?;
+    let rounded = amount_mei.ceil();
+    if rounded > u64::MAX as f64 {
+        return Err(WalletError::Policy(
+            "HAC amount is outside policy range".into(),
+        ));
+    }
+    Ok(rounded as u64)
+}
+
 pub const L1_DEFAULT_FEE_MEI: f64 = 1.244;
 
 pub fn validate_simple_l1_send(
@@ -59,8 +83,14 @@ pub fn validate_simple_l1_send(
     if !verify_hacash_address(to_address) {
         errors.push("Invalid Hacash address format".into());
     }
-    if amount_mei <= 0.0 {
-        errors.push("Amount must be positive".into());
+    if let Err(error) = validate_hac_amount_mei(amount_mei) {
+        errors.push(error.to_string());
+    }
+    if !fee_mei.is_finite() || fee_mei < 0.0 {
+        errors.push("Network fee must be a finite non-negative number".into());
+    }
+    if !balance_mei.is_finite() || balance_mei < 0.0 {
+        errors.push("Node returned an invalid balance".into());
     }
     if amount_mei + fee_mei > balance_mei {
         errors.push(format!(
@@ -149,7 +179,7 @@ pub fn validate_balance_floor_pattern(input: &BalanceFloorInput) -> Hip23SendChe
         errors.push("P3: explicit non-zero HAC floor required for protection".into());
     }
     if input.floor_hacash_mei > 0.0 && input.floor_hacash_mei < 0.001 {
-        warnings.push("Very small floor — confirm fee and gas are accounted for".into());
+        warnings.push("Very small floor. confirm fee and gas are accounted for".into());
     }
 
     Hip23SendCheck {
@@ -159,7 +189,11 @@ pub fn validate_balance_floor_pattern(input: &BalanceFloorInput) -> Hip23SendChe
     }
 }
 
-pub fn validate_type3_readiness(gas_max: u64, has_asset_tex: bool, ast_depth: u32) -> Hip23SendCheck {
+pub fn validate_type3_readiness(
+    gas_max: u64,
+    has_asset_tex: bool,
+    ast_depth: u32,
+) -> Hip23SendCheck {
     validate_type3_universal(&Type3CheckInput {
         tx_type: 3,
         chain_height: ISTANBUL_HEIGHT,
@@ -206,7 +240,7 @@ fn verify_hacash_address(addr: &str) -> bool {
 
 /// Fee mei aligned with node decimal `unit=mei` (ceil to micro-mei; sub-milli allowed).
 pub fn normalize_l1_fee_mei(raw_mei: f64) -> f64 {
-    if raw_mei <= 0.0 {
+    if !raw_mei.is_finite() || raw_mei <= 0.0 {
         return 0.0;
     }
     (raw_mei * 1_000_000.0).ceil() / 1_000_000.0
@@ -219,9 +253,7 @@ pub fn format_l1_fee_mei_for_node(fee_mei: f64) -> String {
         return "0.001".to_string();
     }
     let s = format!("{:.6}", n);
-    s.trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// Serialize mei for node `Amount::from` (decimal mei). Colon form is fin `value:unit` on-chain.
@@ -231,9 +263,7 @@ pub fn format_mei_for_node(amount_mei: f64) -> String {
         return "0.001".to_string();
     }
     let s = format!("{:.3}", rounded);
-    s.trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// Convert wallet millis wire (`whole:frac`) to node mei decimal.
@@ -265,23 +295,27 @@ pub fn validate_type4_send(
         "hybrid" => {}
         "pqckey" => {
             warnings.push(
-                "PQC (v6) Type 4 uses ML-DSA only — Hybrid (v7) is recommended for secp256k1 + ML-DSA"
+                "PQC (v6) Type 4 uses ML-DSA only. Hybrid (v7) is recommended for secp256k1 + ML-DSA"
                     .into(),
             );
         }
         _ => {
-            errors.push(
-                "Type 4 send requires a PQC (v6) or Hybrid (v7) quantum account".into(),
-            );
+            errors.push("Type 4 send requires a PQC (v6) or Hybrid (v7) quantum account".into());
         }
     }
     if !verify_hacash_address(to_address) {
         errors.push("Invalid recipient address format".into());
     }
-    if amount_mei <= 0.0 {
-        errors.push("Amount must be positive".into());
+    if let Err(error) = validate_hac_amount_mei(amount_mei) {
+        errors.push(error.to_string());
     }
     let fee_mei = parse_hacash_wire_mei(fee_wire);
+    if !fee_mei.is_finite() || fee_mei < 0.0 {
+        errors.push("Network fee must be a finite non-negative number".into());
+    }
+    if !balance_mei.is_finite() || balance_mei < 0.0 {
+        errors.push("Node returned an invalid quantum balance".into());
+    }
     if amount_mei + fee_mei > balance_mei {
         errors.push(format!(
             "Insufficient quantum balance: need {:.3} HAC (amount + fee), have {:.3}",
@@ -290,7 +324,7 @@ pub fn validate_type4_send(
         ));
     }
     if amount_mei >= 100.0 {
-        warnings.push("Large Type 4 transfer — confirm WebAuthn/hardware gate if enabled".into());
+        warnings.push("Large Type 4 transfer. confirm WebAuthn/hardware gate if enabled".into());
     }
 
     Ok(Hip23SendCheck {
@@ -313,7 +347,8 @@ mod tests {
     #[test]
     fn warns_on_large_transfer() {
         let check =
-            validate_simple_l1_send("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 150.0, 200.0, 0.001).unwrap();
+            validate_simple_l1_send("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS", 150.0, 200.0, 0.001)
+                .unwrap();
         assert!(check.ok);
         assert!(!check.warnings.is_empty());
     }
@@ -413,5 +448,23 @@ mod tests {
         assert_eq!(wire_mei_for_node("45:0"), "45");
         assert_eq!(wire_mei_for_node("1:244"), "1.244");
         assert_eq!(wire_mei_for_node("40:244"), "40.244");
+    }
+}
+
+#[cfg(test)]
+mod numeric_safety_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_finite_hac_amounts() {
+        let address = "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS";
+        assert!(validate_simple_l1_send(address, f64::NAN, 10.0, 0.001).is_err());
+        assert!(validate_simple_l1_send(address, f64::INFINITY, 10.0, 0.001).is_err());
+    }
+
+    #[test]
+    fn threshold_conversion_never_rounds_down() {
+        assert_eq!(policy_amount_mei_ceil(99.001).unwrap(), 100);
+        assert_eq!(policy_amount_mei_ceil(100.0).unwrap(), 100);
     }
 }

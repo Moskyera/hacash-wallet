@@ -75,14 +75,8 @@ pub fn encrypt_payload(
             &base64::engine::general_purpose::STANDARD,
             ephemeral_pk.as_bytes(),
         ),
-        nonce: base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            nonce_bytes,
-        ),
-        ciphertext: base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            ciphertext,
-        ),
+        nonce: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes),
+        ciphertext: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ciphertext),
     })
 }
 

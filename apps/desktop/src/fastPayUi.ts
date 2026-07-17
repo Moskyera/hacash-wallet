@@ -20,11 +20,11 @@ export function l1FeeSpeedDetail(speed: L1FeeSpeed): string {
     case "slow":
       return "Network minimum fee.";
     case "fast":
-      return "5× network average — higher mempool priority.";
+      return "5× network average. higher mempool priority.";
     case "ultra":
-      return "15× network average — highest priority.";
+      return "15× network average. highest priority.";
     default:
-      return "1.2× network average — balanced.";
+      return "1.2× network average. balanced.";
   }
 }
 
@@ -39,6 +39,8 @@ export type FastPayState =
   | "ready"
   | "needs_channel"
   | "hub_unreachable"
+  | "checking"
+  | "provider_incompatible"
   | "no_provider";
 
 export type FastPayStatus = {
@@ -58,6 +60,10 @@ export function fastPayChipLabel(state: FastPayState): string {
       return "Fast Pay setup";
     case "hub_unreachable":
       return "Fast Pay offline";
+    case "checking":
+      return "Fast Pay check";
+    case "provider_incompatible":
+      return "Fast Pay unavailable";
     default:
       return "Fast Pay OFF";
   }
@@ -71,6 +77,10 @@ export function fastPayStatusTitle(state: FastPayState): string {
       return "Fast Pay needs setup";
     case "hub_unreachable":
       return "Fast Pay provider offline";
+    case "checking":
+      return "Checking Fast Pay provider";
+    case "provider_incompatible":
+      return "Provider not compatible";
     default:
       return "Fast Pay is OFF";
   }
@@ -79,11 +89,15 @@ export function fastPayStatusTitle(state: FastPayState): string {
 export function fastPayStatusHeadline(state: FastPayState): string {
   switch (state) {
     case "ready":
-      return "Your sends from the Send tab will use instant Fast Pay (low fee, seconds).";
+      return "Your sends from the Send tab will use fee-free Fast Pay and settle in seconds.";
     case "needs_channel":
       return "A provider was found. Complete one-time setup to turn Fast Pay ON.";
     case "hub_unreachable":
       return "Your provider is not reachable. Sends use standard on-chain until it is back.";
+    case "checking":
+      return "Verifying settlement, routing and fee capabilities. Sends stay on-chain meanwhile.";
+    case "provider_incompatible":
+      return "This provider cannot create safe, fee-free routed settlements. Sends stay on-chain.";
     default:
       return "No Fast Pay provider online. Sends from the Send tab use standard on-chain.";
   }

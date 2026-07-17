@@ -3,11 +3,11 @@ use sha2::{Digest, Sha256};
 
 use crate::amount::format_amount_mei;
 use crate::error::{HubError, HubResult};
-use crate::node::ChannelInfo;
+use crate::node::{ChannelInfo, ChannelSide};
 
-use super::chain_payment::{clean_sort_addresses, OffChainChannelTransfer};
+use super::chain_payment::{OffChainChannelTransfer, clean_sort_addresses};
 use super::documents::ChannelPayCompleteDocuments;
-use super::prove_body::{TransferProveBody, DIRECTION_LEFT_TO_RIGHT, DIRECTION_RIGHT_TO_LEFT};
+use super::prove_body::{DIRECTION_LEFT_TO_RIGHT, DIRECTION_RIGHT_TO_LEFT, TransferProveBody};
 use super::satoshi_var::SatoshiVariation;
 
 /// Channel parties + balances after hub ledger settlement.
@@ -24,14 +24,12 @@ pub struct ChannelWireInput {
 
 pub fn build_same_channel_bill(
     payer_channel: &ChannelWireInput,
+    payer_side: ChannelSide,
     pay_amount_mei: f64,
     timestamp: u64,
 ) -> HubResult<ChannelPayCompleteDocuments> {
-    let body = prove_body_after_transfer(
-        payer_channel,
-        pay_amount_mei,
-        customer_pays_from_left(payer_channel)?,
-    )?;
+    let body =
+        prove_body_after_transfer(payer_channel, pay_amount_mei, debit_direction(payer_side))?;
     let addrs = clean_sort_addresses(vec![
         address_for_wire(&payer_channel.channel.left.address)?,
         address_for_wire(&payer_channel.channel.right.address)?,
@@ -46,20 +44,19 @@ pub fn build_same_channel_bill(
 
 pub fn build_cross_channel_bill(
     payer_channel: &ChannelWireInput,
+    payer_side: ChannelSide,
     pay_total_mei: f64,
     payee_channel: &ChannelWireInput,
+    payee_side: ChannelSide,
     credit_amount_mei: f64,
     timestamp: u64,
 ) -> HubResult<ChannelPayCompleteDocuments> {
-    let pay_body = prove_body_after_transfer(
-        payer_channel,
-        pay_total_mei,
-        customer_pays_from_left(payer_channel)?,
-    )?;
+    let pay_body =
+        prove_body_after_transfer(payer_channel, pay_total_mei, debit_direction(payer_side))?;
     let collect_body = prove_body_after_transfer(
         payee_channel,
         credit_amount_mei,
-        customer_collects_on_left(payee_channel)?,
+        credit_direction(payee_side),
     )?;
     let addrs = clean_sort_addresses(vec![
         address_for_wire(&payer_channel.channel.left.address)?,
@@ -78,37 +75,30 @@ pub fn build_cross_channel_bill(
     })
 }
 
-fn customer_pays_from_left(_input: &ChannelWireInput) -> HubResult<TransferSide> {
-    // Wallet opens channel as user=left, hub=right.
-    Ok(TransferSide {
-        customer_is_left: true,
-        direction: DIRECTION_LEFT_TO_RIGHT,
-    })
+fn debit_direction(side: ChannelSide) -> u8 {
+    match side {
+        ChannelSide::Left => DIRECTION_LEFT_TO_RIGHT,
+        ChannelSide::Right => DIRECTION_RIGHT_TO_LEFT,
+    }
 }
 
-fn customer_collects_on_left(_input: &ChannelWireInput) -> HubResult<TransferSide> {
-    Ok(TransferSide {
-        customer_is_left: true,
-        direction: DIRECTION_RIGHT_TO_LEFT,
-    })
-}
-
-struct TransferSide {
-    customer_is_left: bool,
-    direction: u8,
+fn credit_direction(side: ChannelSide) -> u8 {
+    match side {
+        ChannelSide::Left => DIRECTION_RIGHT_TO_LEFT,
+        ChannelSide::Right => DIRECTION_LEFT_TO_RIGHT,
+    }
 }
 
 fn prove_body_after_transfer(
     input: &ChannelWireInput,
     pay_amount_mei: f64,
-    side: TransferSide,
+    direction: u8,
 ) -> HubResult<TransferProveBody> {
-    let _ = side.customer_is_left;
     Ok(TransferProveBody {
         channel_id: channel_id_from_hex(&input.channel_id_hex)?,
         reuse_version: Uint4::from(input.channel.reuse_version as u32),
-        bill_auto_number: Uint8::from(input.bill_auto_number.min(255)),
-        pay_direction: Uint1::from(side.direction),
+        bill_auto_number: Uint8::from(input.bill_auto_number),
+        pay_direction: Uint1::from(direction),
         pay_amount: amount_from_mei(pay_amount_mei)?,
         pay_satoshi: SatoshiVariation::empty(),
         left_balance: amount_from_mei(input.left_balance_mei)?,

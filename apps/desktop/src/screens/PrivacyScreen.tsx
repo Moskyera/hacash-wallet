@@ -31,13 +31,17 @@ export default function PrivacyScreen({
   const [whisperRelayText, setWhisperRelayText] = useState("");
   const syncedRef = useRef(false);
 
-  // Sync drafts once when the tab mounts — not on status polls.
+  // Sync drafts once when the tab mounts. not on status polls.
   useEffect(() => {
     if (syncedRef.current || !status) return;
     if (status.privacy) setPrivacyDraft(status.privacy);
     if (status.dust_whisper) {
-      setWhisperDraft(status.dust_whisper);
-      setWhisperRelayText(status.dust_whisper.relay_urls.join("\n"));
+      const relayUrls =
+        status.dust_whisper.relay_urls.length > 0
+          ? status.dust_whisper.relay_urls
+          : DEFAULT_DUST_WHISPER.relay_urls;
+      setWhisperDraft({ ...status.dust_whisper, relay_urls: relayUrls });
+      setWhisperRelayText(relayUrls.join("\n"));
     }
     syncedRef.current = true;
   }, [status]);
@@ -46,7 +50,7 @@ export default function PrivacyScreen({
     <section className="panel">
       <h2>Privacy</h2>
       <p className="muted">
-        Control what appears on screen and what is stored locally. Keys stay encrypted —
+        Control what appears on screen and what is stored locally. Keys stay encrypted.
         these settings reduce shoulder-surfing and local metadata exposure.
       </p>
 
@@ -128,8 +132,14 @@ export default function PrivacyScreen({
 
       <h3>DUST Whisper</h3>
       <p className="muted">
-        Route signed transactions through an encrypted relay so the fullnode never sees your
-        IP. Balance queries still use your node URL directly.
+        Encrypt signed transactions between this wallet and a relay. A remote relay can hide your
+        IP from the full node. A relay on this device does not provide network anonymity. Balance
+        queries still use your configured node directly.
+      </p>
+      <p className="muted">
+        Desktop includes its own local relay. It starts with the wallet and follows the active node
+        after a saved change or automatic failover. A local relay improves broadcast separation but
+        does not hide your IP from the node.
       </p>
       <label className="check-row">
         <input
@@ -218,8 +228,9 @@ export default function PrivacyScreen({
       </div>
 
       <div className="info-box">
-        <strong>No cloud telemetry</strong> — node queries use your configured URL only.
-        Air-gap and watch-only modes keep signing keys off the online device.
+        <strong>No analytics telemetry.</strong> Balance and ownership queries use your configured
+        node. HACD metadata may use the official mainnet node in read-only mode. Air-gap signing
+        keeps keys off the online coordinator when a separate offline signer is used.
       </div>
     </section>
   );

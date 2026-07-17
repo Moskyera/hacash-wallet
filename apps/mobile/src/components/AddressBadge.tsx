@@ -16,7 +16,7 @@ export default function AddressBadge({ address, version, kind }: Props) {
         : { label: "Legacy", cls: "badge-legacy" };
 
   return (
-    <span className={`addr-badge ${meta.cls}`} title={`${meta.label} — ${address}`}>
+    <span className={`addr-badge ${meta.cls}`} title={`${meta.label}. ${address}`}>
       {meta.label}
     </span>
   );

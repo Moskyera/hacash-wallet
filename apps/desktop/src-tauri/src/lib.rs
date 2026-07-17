@@ -1,7 +1,7 @@
 mod platform;
 
-use hacash_wallet_core::hip23::{BalanceFloorInput, HeightScopeInput, Type3CheckInput};
 use hacash_wallet_core::WalletService;
+use hacash_wallet_core::hip23::{BalanceFloorInput, HeightScopeInput, Type3CheckInput};
 use tauri::{Manager, RunEvent};
 use wallet_tauri_common::AppState;
 
@@ -47,12 +47,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            let mut svc = WalletService::new(None, None).map_err(|e| e.to_string())?;
+            let node_override = std::env::var("HACASH_WALLET_NODE_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty());
+            let mut svc = WalletService::new(node_override, None).map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = wallet_tauri_common::desktop_relay::sync_managed_relay(&handle).await
+                if let Err(e) =
+                    wallet_tauri_common::desktop_relay::sync_managed_relay(&handle).await
                 {
                     tracing::warn!(error = %e, "DUST Whisper relay auto-start skipped");
                 }

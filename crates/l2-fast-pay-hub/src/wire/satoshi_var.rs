@@ -1,7 +1,7 @@
 use field::{Bool, Parse, Serialize, Uint8};
 use sys::Ret;
 
-/// `fields.SatoshiVariation` — optional BTC satoshi leg on channel bills.
+/// `fields.SatoshiVariation`. optional BTC satoshi leg on channel bills.
 #[derive(Debug, Clone, Default)]
 pub struct SatoshiVariation {
     pub not_empty: Bool,

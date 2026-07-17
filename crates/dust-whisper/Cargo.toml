@@ -2,7 +2,7 @@
 name = "dust-whisper"
 version.workspace = true
 edition.workspace = true
-description = "DUST Whisper — encrypted relay transport for private transaction submission"
+description = "DUST Whisper. encrypted relay transport for private transaction submission"
 license.workspace = true
 
 [dependencies]
@@ -19,7 +19,7 @@ tracing.workspace = true
 x25519-dalek.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
-libsecp256k1 = "0.7"
+secp256k1.workspace = true
 chrono.workspace = true
 urlencoding = "2"
 url.workspace = true

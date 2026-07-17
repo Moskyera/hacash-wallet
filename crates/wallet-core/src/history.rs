@@ -155,6 +155,18 @@ impl TxHistory {
     pub fn list(&self) -> &[TxRecord] {
         &self.records
     }
+
+    pub fn pending_fast_pay_records(&self) -> Vec<TxRecord> {
+        self.records
+            .iter()
+            .filter(|record| {
+                record.rail == "L2Fast"
+                    && record.status == TxStatus::Pending
+                    && !record.tx_hash.starts_with("pending:")
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 fn rail_label(rail: PaymentRail) -> String {
@@ -178,15 +190,8 @@ mod tests {
     fn append_prepends_newest() {
         let _iso = IsolatedWalletData::new();
         let mut h = TxHistory::default();
-        h.append(
-            PaymentRail::L1OnChain,
-            "abc",
-            "1From",
-            "1To",
-            1.0,
-            "test",
-        )
-        .unwrap();
+        h.append(PaymentRail::L1OnChain, "abc", "1From", "1To", 1.0, "test")
+            .unwrap();
         assert_eq!(h.list()[0].tx_hash, "abc");
         assert_eq!(h.list()[0].status, TxStatus::Confirmed);
     }
@@ -219,5 +224,29 @@ mod tests {
             .unwrap();
         h.mark_failed(&key).unwrap();
         assert_eq!(h.list()[0].status, TxStatus::Failed);
+    }
+
+    #[test]
+    fn pending_fast_pay_records_excludes_local_placeholders() {
+        let _iso = IsolatedWalletData::new();
+        let mut h = TxHistory::default();
+        let local_key = h
+            .begin_pending(PaymentRail::L2Fast, "1From", "1To", 1.0)
+            .unwrap();
+        h.append_with_status(
+            PaymentRail::L2Fast,
+            "hub-payment-id",
+            "1From",
+            "1To",
+            1.0,
+            "Waiting for recipient",
+            TxStatus::Pending,
+        )
+        .unwrap();
+
+        let records = h.pending_fast_pay_records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tx_hash, "hub-payment-id");
+        assert_ne!(records[0].tx_hash, local_key);
     }
 }

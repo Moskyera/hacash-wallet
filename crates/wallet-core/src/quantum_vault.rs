@@ -45,8 +45,8 @@ struct QuantumVaultBlob {
 pub fn save_encrypted(key: &QuantumFileKey, json: &str) -> WalletResult<()> {
     let mut nonce = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce);
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
-        .map_err(|e| WalletError::Vault(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|e| WalletError::Vault(e.to_string()))?;
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -77,9 +77,10 @@ pub fn load_encrypted(key: &QuantumFileKey) -> WalletResult<Option<String>> {
     if nonce.len() != NONCE_LEN {
         return Err(WalletError::Vault("quantum keystore nonce invalid".into()));
     }
-    let ciphertext = hex::decode(&blob.ciphertext).map_err(|e| WalletError::Vault(e.to_string()))?;
-    let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
-        .map_err(|e| WalletError::Vault(e.to_string()))?;
+    let ciphertext =
+        hex::decode(&blob.ciphertext).map_err(|e| WalletError::Vault(e.to_string()))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|e| WalletError::Vault(e.to_string()))?;
     let plain = cipher
         .decrypt(
             Nonce::from_slice(&nonce),
@@ -89,7 +90,9 @@ pub fn load_encrypted(key: &QuantumFileKey) -> WalletResult<Option<String>> {
             },
         )
         .map_err(|_| WalletError::Vault("quantum keystore decrypt failed".into()))?;
-    String::from_utf8(plain).map_err(|e| WalletError::Vault(e.to_string())).map(Some)
+    String::from_utf8(plain)
+        .map_err(|e| WalletError::Vault(e.to_string()))
+        .map(Some)
 }
 
 pub fn remove_encrypted_file() -> WalletResult<()> {

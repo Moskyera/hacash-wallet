@@ -42,7 +42,7 @@ export default function PaymentQrScanner({
     if (handledRef.current) return;
     const payload = parsePaymentQr(text);
     if (!payload) {
-      onError("Not a Hacash payment QR — expected address or hacash:… URI.");
+      onError("Not a Hacash payment QR. expected address or hacash:… URI.");
       return;
     }
     handledRef.current = true;

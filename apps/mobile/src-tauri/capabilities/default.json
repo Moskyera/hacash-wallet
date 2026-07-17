@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2/capability",
   "identifier": "default",
-  "description": "Hacash Wallet — core, channel, watch-only, HACD send, launchpad webview",
-  "windows": ["main"],
-  "webviews": ["launchpad"],
+  "description": "Hacash Wallet. core, channel, watch-only, HACD send, launchpad webview",
+  "webviews": ["main"],
   "permissions": [
+    "allow-main-wallet",
     "core:default",
     "deep-link:default",
     "core:webview:allow-create-webview",

@@ -3,8 +3,8 @@
 mod common;
 
 use common::audit_gate;
-use hacash_wallet_core::security::{check_send_policy, SecurityProfile, UnlockContext};
 use hacash_wallet_core::WalletError;
+use hacash_wallet_core::security::{SecurityProfile, UnlockContext, check_send_policy};
 
 fn ctx(bio: bool, yubi: bool) -> UnlockContext {
     UnlockContext {

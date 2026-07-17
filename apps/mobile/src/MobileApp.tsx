@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, BillSummary, type BiometricUnlockStatus } from "./api";
 import BottomNav, { type TabId } from "./components/BottomNav";
 import BillDetailModal from "./components/BillDetailModal";
+import DappApprovalPanel from "./components/DappApprovalPanel";
 import MessengerScreen from "./components/MessengerScreen";
 import PrivacyShield from "./components/PrivacyShield";
 import Toast from "./components/Toast";
@@ -329,13 +330,20 @@ export default function MobileApp() {
     }
   };
 
-  const handleSaveSettings = async (nodeUrl: string, hubUrl: string) => {
+  const handleSaveSettings = async (
+    nodeUrl: string,
+    hubUrl: string,
+    fallbackUrls: string[],
+    autoFailover: boolean,
+  ) => {
     if (!session.settings) return;
     session.setBusy(true);
     try {
       const next = {
         ...session.settings,
         node_url: nodeUrl.trim(),
+        node_fallback_urls: fallbackUrls,
+        auto_node_failover: autoFailover,
         l2_hub_url: hubUrl.trim() || null,
       };
       await api.updateSettings(next);
@@ -497,7 +505,6 @@ export default function MobileApp() {
             sendAmount={payment.sendAmount}
             setSendAmount={payment.setSendAmount}
             sendHubFeePayer={payment.sendHubFeePayer}
-            setSendHubFeePayer={payment.setSendHubFeePayer}
             sendForceL1={payment.sendForceL1}
             setSendForceL1={payment.setSendForceL1}
             sendL1FeeSpeed={payment.sendL1FeeSpeed}
@@ -530,8 +537,10 @@ export default function MobileApp() {
         {tab === "receive" && (
           <ReceiveTab
             address={session.status?.address}
+            ownedHacdNames={session.assets?.hacd_names ?? []}
             receiveAmount={receiveAmount}
             setReceiveAmount={setReceiveAmount}
+            hideAddresses={session.privacy.hide_addresses}
             clipboardSecs={clipboardSecs}
             onCopyAddress={() => void handleCopyAddress()}
             onShare={() => void handleShareReceive()}
@@ -576,7 +585,8 @@ export default function MobileApp() {
               onBack: () => setMorePage("menu"),
               onNavigate: setMorePage,
               onClearHistory: () => void session.handleClearHistory(),
-              onSaveSettings: (nodeUrl, hubUrl) => void handleSaveSettings(nodeUrl, hubUrl),
+              onSaveSettings: (nodeUrl, hubUrl, fallbackUrls, autoFailover) =>
+                void handleSaveSettings(nodeUrl, hubUrl, fallbackUrls, autoFailover),
               onApplyHub: (entry) => handleApplyHub(entry),
               onSaveWalletName: session.handleSaveWalletName,
               onChangePassphrase: (old, neu) => void handleChangePassphrase(old, neu),
@@ -609,6 +619,7 @@ export default function MobileApp() {
       </main>
 
       <BottomNav active={tab} onChange={handleTabChange} watchOnly={session.watchOnly} />
+      <DappApprovalPanel onNotify={showToast} />
       <PrivacyShield active={session.privacy.screen_privacy && privacyHidden} />
       {toast && <Toast message={toast.msg} kind={toast.kind} />}
       <BillDetailModal

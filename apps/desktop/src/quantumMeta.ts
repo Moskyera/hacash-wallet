@@ -40,4 +40,4 @@ export const PQC_TYPE4_HINT =
 
 export const REPLACE_KEYSTORE_WARNING =
   "Creating a new quantum account replaces the stored keystore. " +
-  "Funds on the previous on-chain address remain there — export a backup first if you still need them.";
+  "Funds on the previous on-chain address remain there. export a backup first if you still need them.";

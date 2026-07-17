@@ -1,53 +1,52 @@
 import { useEffect, useState } from "react";
 import AssetSelector from "../components/AssetSelector";
+import BtcNetworkNotice from "../components/BtcNetworkNotice";
 import HacdDiamondVisual from "../components/HacdDiamondVisual";
 import PaymentQrDisplay from "../components/PaymentQrDisplay";
-import { copyWithPrivacyClear } from "../privacy";
+import { copyWithPrivacyClear, maskAddress } from "../privacy";
 import {
-  isValidBtcAddress,
   isValidHacdName,
   normalizeHacdName,
   type PaymentAsset,
 } from "../utils/paymentAssets";
-import { loadBtcReceiveAddress, loadWalletHacdName, saveBtcReceiveAddress, saveWalletHacdName } from "../utils/hacdName";
+import { loadWalletHacdName, saveWalletHacdName } from "../utils/hacdName";
 
 type Props = {
   address?: string | null;
+  ownedHacdNames?: string[];
   receiveAmount: string;
-  setReceiveAmount: (v: string) => void;
+  setReceiveAmount: (value: string) => void;
+  hideAddresses: boolean;
   clipboardSecs: number;
   onCopyAddress: () => void;
   onShare: () => void;
-  onToast: (msg: string, kind: "success" | "info" | "error") => void;
+  onToast: (message: string, kind: "success" | "info" | "error") => void;
 };
 
 export default function ReceiveTab({
   address,
+  ownedHacdNames = [],
   receiveAmount,
   setReceiveAmount,
+  hideAddresses,
   clipboardSecs,
   onCopyAddress,
   onShare,
   onToast,
 }: Props) {
   const [asset, setAsset] = useState<PaymentAsset>("HAC");
-  const [hacdName, setHacdName] = useState(loadWalletHacdName);
+  const [hacdName, setHacdName] = useState(() => loadWalletHacdName() || ownedHacdNames[0] || "");
   const [hacdDisplay, setHacdDisplay] = useState<"name" | "visual">("visual");
-  const [btcAddress, setBtcAddress] = useState(loadBtcReceiveAddress);
 
   useEffect(() => {
     if (isValidHacdName(hacdName)) saveWalletHacdName(hacdName);
   }, [hacdName]);
 
-  useEffect(() => {
-    if (btcAddress.trim()) saveBtcReceiveAddress(btcAddress);
-  }, [btcAddress]);
-
   const hacdNorm = normalizeHacdName(hacdName);
 
   const copyHacd = async () => {
     if (!isValidHacdName(hacdNorm)) {
-      onToast("Enter a valid HACD name (4–6 letters).", "error");
+      onToast("Enter a valid HACD name (4 to 6 letters).", "error");
       return;
     }
     await copyWithPrivacyClear(`hacd:${hacdNorm}`, clipboardSecs);
@@ -55,30 +54,36 @@ export default function ReceiveTab({
   };
 
   const copyBtc = async () => {
-    if (!isValidBtcAddress(btcAddress)) {
-      onToast("Enter a valid BTC address.", "error");
+    if (!address) {
+      onToast("Hacash receive address is unavailable.", "error");
       return;
     }
-    await copyWithPrivacyClear(btcAddress.trim(), clipboardSecs);
-    onToast("BTC address copied.", "success");
+    await copyWithPrivacyClear(address, clipboardSecs);
+    onToast("Hacash address for BTC copied.", "success");
   };
 
   return (
-    <div className="card">
-      <h2>Receive</h2>
+    <div className="card receive-card">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Wallet address</p>
+          <h2>Receive</h2>
+        </div>
+      </div>
       <AssetSelector value={asset} onChange={setAsset} />
 
       {asset === "HAC" && (
-        <>
-          <p className="muted">Share your QR or payment link.</p>
+        <section className="receive-section">
+          <p className="muted">Share your Hacash address or a payment request.</p>
           <label className="label">Requested amount (optional)</label>
           <input
             type="number"
             min="0"
             step="0.001"
+            inputMode="decimal"
             placeholder="Any amount"
             value={receiveAmount}
-            onChange={(e) => setReceiveAmount(e.target.value)}
+            onChange={(event) => setReceiveAmount(event.target.value)}
           />
           {address && (
             <PaymentQrDisplay
@@ -86,21 +91,27 @@ export default function ReceiveTab({
               amountMei={
                 receiveAmount && Number(receiveAmount) > 0 ? Number(receiveAmount) : undefined
               }
+              hideAddress={hideAddresses}
             />
           )}
-          <div className="row-btns">
-            <button type="button" onClick={() => void onCopyAddress()}>
-              Copy address
-            </button>
-            <button type="button" className="primary" onClick={() => void onShare()}>
-              Share link
-            </button>
+          <div className="address-box">
+            <code>{maskAddress(address, hideAddresses)}</code>
           </div>
-        </>
+          {!hideAddresses && address && (
+            <div className="row-btns">
+              <button type="button" onClick={() => void onCopyAddress()}>
+                Copy address
+              </button>
+              <button type="button" className="primary" onClick={() => void onShare()}>
+                Share link
+              </button>
+            </div>
+          )}
+        </section>
       )}
 
       {asset === "HACD" && (
-        <>
+        <section className="receive-section">
           <div className="display-toggle">
             <button
               type="button"
@@ -114,15 +125,32 @@ export default function ReceiveTab({
               className={hacdDisplay === "visual" ? "selected" : ""}
               onClick={() => setHacdDisplay("visual")}
             >
-              Visual
+              Metadata card
             </button>
           </div>
+
           <label className="label">Your HACD name</label>
+          {ownedHacdNames.length > 0 && (
+            <div className="chip-row" aria-label="Owned HACD">
+              {ownedHacdNames.slice(0, 12).map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={`chip ${hacdNorm === name ? "selected" : ""}`}
+                  onClick={() => setHacdName(name)}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
           <input
             placeholder="e.g. WTUYUI"
             value={hacdName}
-            onChange={(e) => setHacdName(e.target.value.toUpperCase())}
+            onChange={(event) => setHacdName(event.target.value.toUpperCase())}
             maxLength={6}
+            autoCapitalize="characters"
+            spellCheck={false}
           />
           {hacdDisplay === "visual" ? (
             <HacdDiamondVisual name={hacdNorm} />
@@ -132,27 +160,43 @@ export default function ReceiveTab({
             </p>
           )}
           <p className="muted small">
-            Share your name or <code>hacd:{hacdNorm || "NAME"}</code> to receive HACD. Visual is unique per diamond.
+            Share the name or <code>hacd:{hacdNorm || "NAME"}</code>. The metadata card is loaded
+            from the configured Hacash node.
           </p>
-          <button type="button" className="primary" disabled={!isValidHacdName(hacdNorm)} onClick={() => void copyHacd()}>
+          <button
+            type="button"
+            className="primary"
+            disabled={!isValidHacdName(hacdNorm)}
+            onClick={() => void copyHacd()}
+          >
             Copy HACD code
           </button>
-        </>
+        </section>
       )}
 
       {asset === "BTC" && (
-        <>
-          <label className="label">Your BTC receive address</label>
-          <input
-            placeholder="bc1… or 1…"
-            value={btcAddress}
-            onChange={(e) => setBtcAddress(e.target.value)}
-          />
-          <p className="muted small">Receive on-chain BTC to this wallet address.</p>
-          <button type="button" className="primary" disabled={!isValidBtcAddress(btcAddress)} onClick={() => void copyBtc()}>
-            Copy BTC address
-          </button>
-        </>
+        <section className="receive-section">
+          <BtcNetworkNotice onNotify={onToast} />
+          <label className="label">Your Hacash receive address</label>
+          {address && (
+            <PaymentQrDisplay
+              address={address}
+              hideAddress={hideAddresses}
+              caption="Hacash address for BTC on Hacash"
+            />
+          )}
+          <div className="address-box">
+            <code>{maskAddress(address, hideAddresses)}</code>
+          </div>
+          <p className="muted small">
+            Receives BTC already circulating on Hacash. This is not a Bitcoin L1 deposit address.
+          </p>
+          {!hideAddresses && address && (
+            <button type="button" className="primary" onClick={() => void copyBtc()}>
+              Copy Hacash address for BTC
+            </button>
+          )}
+        </section>
       )}
     </div>
   );

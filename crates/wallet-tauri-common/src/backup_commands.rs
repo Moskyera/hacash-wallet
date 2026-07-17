@@ -10,8 +10,7 @@ pub fn wallet_export_backup_to_downloads(
 ) -> Result<String, String> {
     let json = {
         let svc = state.inner.blocking_lock();
-        svc.export_backup(&passphrase)
-            .map_err(|e| e.to_string())?
+        svc.export_backup(&passphrase).map_err(|e| e.to_string())?
     };
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

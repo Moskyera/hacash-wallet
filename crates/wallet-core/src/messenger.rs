@@ -3,7 +3,7 @@
 use std::fs;
 
 use chrono::Utc;
-use dust_whisper::protocol::{MessengerAckRequest, MessengerInboxRequest, MessengerEnvelope};
+use dust_whisper::protocol::{MessengerAckRequest, MessengerEnvelope, MessengerInboxRequest};
 use serde::{Deserialize, Serialize};
 use sys::Account;
 use uuid::Uuid;
@@ -11,9 +11,9 @@ use uuid::Uuid;
 use crate::account::WalletAccount;
 use crate::error::{WalletError, WalletResult};
 use crate::messenger_crypto::{
-    decrypt_body, decrypt_store, encrypt_body_v1, encrypt_body_v2, encrypt_store,
-    parse_pubkey_hex, pubkey_hex, sign_inbox_auth, storage_key_from_secret,
-    MESSENGER_CRYPTO_V1, MESSENGER_CRYPTO_V2,
+    MESSENGER_CRYPTO_V1, MESSENGER_CRYPTO_V2, decrypt_body, decrypt_store, encrypt_body_v1,
+    encrypt_body_v2, encrypt_store, parse_pubkey_hex, pubkey_hex, sign_inbox_auth,
+    storage_key_from_secret,
 };
 use crate::paths::{messenger_path, secure_write};
 
@@ -70,10 +70,8 @@ impl MessengerStore {
                 serde_json::from_slice(&plain).map_err(|e| WalletError::Other(e.to_string()))
             }
             Err(_) => {
-                let backup = path.with_extension(format!(
-                    "bak.{}",
-                    Utc::now().format("%Y%m%d%H%M%S")
-                ));
+                let backup =
+                    path.with_extension(format!("bak.{}", Utc::now().format("%Y%m%d%H%M%S")));
                 let _ = fs::rename(&path, &backup);
                 Ok(Self::default())
             }
@@ -91,7 +89,8 @@ impl MessengerStore {
     }
 
     pub fn threads(&self) -> Vec<ChatThread> {
-        let mut map: std::collections::HashMap<String, ChatThread> = std::collections::HashMap::new();
+        let mut map: std::collections::HashMap<String, ChatThread> =
+            std::collections::HashMap::new();
         for m in &self.messages {
             let entry = map.entry(m.peer.clone()).or_insert_with(|| ChatThread {
                 peer: m.peer.clone(),
@@ -157,7 +156,8 @@ fn encrypt_for_send(
     peer_pubkey: Option<&[u8; 33]>,
 ) -> WalletResult<(u8, String, String, Option<String>)> {
     if let Some(peer_pk) = peer_pubkey {
-        let (nonce, ciphertext) = encrypt_body_v2(ctx.account, ctx.my_address, peer, peer_pk, body, sent_at)?;
+        let (nonce, ciphertext) =
+            encrypt_body_v2(ctx.account, ctx.my_address, peer, peer_pk, body, sent_at)?;
         Ok((
             MESSENGER_CRYPTO_V2,
             nonce,
@@ -166,7 +166,12 @@ fn encrypt_for_send(
         ))
     } else {
         let (nonce, ciphertext) = encrypt_body_v1(ctx.my_address, peer, body, sent_at);
-        Ok((MESSENGER_CRYPTO_V1, nonce, ciphertext, Some(pubkey_hex(ctx.account))))
+        Ok((
+            MESSENGER_CRYPTO_V1,
+            nonce,
+            ciphertext,
+            Some(pubkey_hex(ctx.account)),
+        ))
     }
 }
 
@@ -248,10 +253,11 @@ pub async fn messenger_poll_inbox(
         if u.is_empty() {
             continue;
         }
-        let challenge = match dust_whisper::messenger_client::fetch_challenge(http, u, my_address).await {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let challenge =
+            match dust_whisper::messenger_client::fetch_challenge(http, u, my_address).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
         let signature = sign_inbox_auth(ctx.account, my_address, &challenge.nonce);
         let request = MessengerInboxRequest {
             to: my_address.to_string(),
@@ -325,7 +331,10 @@ pub async fn messenger_poll_inbox(
     Ok(added)
 }
 
-pub fn messenger_threads(account: &WalletAccount, my_address: &str) -> WalletResult<Vec<ChatThread>> {
+pub fn messenger_threads(
+    account: &WalletAccount,
+    my_address: &str,
+) -> WalletResult<Vec<ChatThread>> {
     let ctx = messenger_ctx(account, my_address);
     Ok(MessengerStore::load(&ctx)?.threads())
 }

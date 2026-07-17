@@ -26,7 +26,7 @@ cargo build --release --target aarch64-linux-android -p hacash-wallet-mobile >> 
 if errorlevel 1 goto fail
 
 cd /d "%MOBILE%"
-yarn build >> "%LOG%" 2>&1
+call yarn build >> "%LOG%" 2>&1
 if errorlevel 1 goto fail
 
 powershell -ExecutionPolicy Bypass -File .\apply-android-patches.ps1 >> "%LOG%" 2>&1

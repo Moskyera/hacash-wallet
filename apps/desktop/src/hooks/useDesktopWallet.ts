@@ -187,7 +187,7 @@ export function useDesktopWallet(
     return () => window.clearInterval(id);
   }, [dustWhisper.enabled, relayUrlsKey, refreshRelayHealth]);
 
-  // Load wallet data when unlocking or switching wallets — NOT on every tab click.
+  // Load wallet data when unlocking or switching wallets. NOT on every tab click.
   useEffect(() => {
     if (!status || status.locked) return;
     refreshUnlockedData().catch(() => undefined);
@@ -262,7 +262,7 @@ export function useDesktopWallet(
       try {
         await api.importWatchOnly(watchAddress.trim());
         await refreshStatus();
-        onInfo("Watch-only wallet added. You can monitor balance — signing requires a hardware device.");
+        onInfo("Watch-only wallet added. You can monitor balance. signing requires a hardware device.");
       } catch (e) {
         onError(String(e));
       } finally {
@@ -314,7 +314,7 @@ export function useDesktopWallet(
         await api.importBackup(json.trim(), passphrase, deleteSource);
         await refreshStatus();
         onInfo(
-          "Wallet restored from backup. The backup file was removed when possible — check Downloads if you imported from there.",
+          "Wallet restored from backup. The backup file was removed when possible. check Downloads if you imported from there.",
         );
       } catch (e) {
         onError(String(e));
@@ -366,7 +366,7 @@ export function useDesktopWallet(
         setFastPayDetail(fp);
         await refreshStatus();
         await refreshUnlockedData();
-        onInfo("Fast Pay is ready — your next send can be instant.");
+        onInfo("Fast Pay is ready. your next send can be instant.");
       } catch (e) {
         onError(formatInvokeError(e));
       } finally {
@@ -561,16 +561,21 @@ export function useDesktopWallet(
   }, [webauthnReady, status?.webauthn_enabled, clearMessages, refreshStatus, onInfo, onError]);
 
   const handleSaveSettings = useCallback(
-    async (nodeUrl: string) => {
+    async (nodeUrl: string, fallbackUrls: string[], autoFailover: boolean) => {
       if (!settings) return;
       setBusy(true);
       clearMessages();
       try {
-        const next: WalletSettings = { ...settings, node_url: nodeUrl.trim() };
+        const next: WalletSettings = {
+          ...settings,
+          node_url: nodeUrl.trim(),
+          node_fallback_urls: fallbackUrls,
+          auto_node_failover: autoFailover,
+        };
         await api.updateSettings(next);
         await refreshSettings();
         await refreshStatus();
-        onInfo("Node URL saved.");
+        onInfo("Node settings saved.");
       } catch (e) {
         onError(String(e));
       } finally {
@@ -756,7 +761,7 @@ export function useDesktopWallet(
       await copyWithPrivacyClear(status.address, privacy.clipboard_clear_secs);
       onInfo(
         privacy.clipboard_clear_secs > 0
-          ? `Address copied — clipboard clears in ${privacy.clipboard_clear_secs}s.`
+          ? `Address copied. clipboard clears in ${privacy.clipboard_clear_secs}s.`
           : "Address copied.",
       );
     } catch (e) {
