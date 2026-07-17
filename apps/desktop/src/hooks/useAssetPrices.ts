@@ -7,13 +7,15 @@ const REFRESH_MS = 5 * 60 * 1000;
 export function useAssetPrices() {
   const [prices, setPrices] = useState<AssetPrices | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      // Prefer native HTTP (no WebView CORS). Desktop WebView fetch to CoinGecko often fails.
       const data = await api.fetchAssetPrices();
       setPrices({ hacUsd: data.hac_usd, btcUsd: data.btc_usd, fetchedAt: Date.now() });
-    } catch {
+      setError(null);
+    } catch (e) {
+      setError(String(e));
       setPrices((prev) => prev);
     } finally {
       setLoading(false);
@@ -26,5 +28,5 @@ export function useAssetPrices() {
     return () => window.clearInterval(id);
   }, [refresh]);
 
-  return { prices, loading, refresh };
+  return { prices, loading, error, refresh };
 }

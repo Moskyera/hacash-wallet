@@ -17,7 +17,7 @@ type Props = {
 };
 
 export default function BalanceOverview({ assets, hideBalances, topHint }: Props) {
-  const { prices } = useAssetPrices();
+  const { prices, error: priceError, loading: pricesLoading } = useAssetPrices();
   const portfolio = assets && prices ? computePortfolioUsd(assets, prices) : null;
 
   const hacdCount = assets?.hacd_count ?? null;
@@ -73,6 +73,12 @@ export default function BalanceOverview({ assets, hideBalances, topHint }: Props
         </div>
       </div>
 
+      {!hideBalances && !prices && !pricesLoading && (
+        <p className="muted small balance-usd-note">
+          USD quotes offline{priceError ? ` (${priceError})` : ""}. Balances still work; prices retry
+          automatically.
+        </p>
+      )}
       {!hideBalances && (assets?.hacd_count ?? 0) > 0 && (
         <p className="muted small balance-usd-note">
           HACD USD uses a 1 HAC floor estimate per diamond. Live market prices vary.

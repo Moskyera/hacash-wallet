@@ -129,29 +129,43 @@ pub async fn check_app_update(
                 .iter()
                 .find(|asset| asset.name.contains(asset_hint) && asset.name.ends_with(".apk"))
         } else {
+            // Prefer MSI (reliable Windows Installer). setup.exe is secondary.
             release
                 .assets
                 .iter()
-                .find(|asset| asset.name.contains(asset_hint) && asset.name.ends_with("-setup.exe"))
+                .find(|asset| asset.name.contains(asset_hint) && asset.name.ends_with(".msi"))
                 .or_else(|| {
                     release.assets.iter().find(|asset| {
-                        asset.name.contains(asset_hint) && asset.name.ends_with(".exe")
+                        asset.name.contains(asset_hint) && asset.name.ends_with("-setup.exe")
                     })
                 })
                 .or_else(|| {
                     release.assets.iter().find(|asset| {
-                        asset.name.contains(asset_hint) && asset.name.ends_with(".msi")
+                        asset.name.contains(asset_hint)
+                            && asset.name.ends_with("-portable.exe")
                     })
                 })
         };
     let max_size = max_update_size(channel)?;
-    let trusted_asset = candidate.filter(|asset| {
+    let candidate_ok = candidate.filter(|asset| {
         asset.state == "uploaded"
             && (100_000..=max_size).contains(&asset.size)
-            && normalized_asset_digest(asset).is_some()
             && validate_release_download_url(&asset.browser_download_url).is_ok()
     });
-    let download_url = trusted_asset.map(|asset| asset.browser_download_url.clone());
+
+    // Prefer GitHub asset digests; fall back to SHA256SUMS-* in the same release.
+    let sha_from_sums = load_sha256_from_release_sums(&client, &release, channel).await;
+    let sha256 = candidate_ok
+        .as_ref()
+        .and_then(|asset| normalized_asset_digest(asset))
+        .or_else(|| {
+            candidate_ok
+                .as_ref()
+                .and_then(|asset| sha_from_sums.as_ref()?.get(&asset.name).cloned())
+        });
+
+    let trusted = candidate_ok.filter(|_| sha256.is_some());
+    let download_url = trusted.as_ref().map(|asset| asset.browser_download_url.clone());
 
     Ok(AppUpdateInfo {
         current_version: current_version.to_string(),
@@ -160,12 +174,55 @@ pub async fn check_app_update(
         download_url,
         release_notes: release.body.clone().or(release.name.clone()),
         release_page: release.html_url.clone(),
-        asset_name: trusted_asset.as_ref().map(|asset| asset.name.clone()),
-        download_size: trusted_asset.as_ref().map(|asset| asset.size),
-        sha256: trusted_asset
-            .as_ref()
-            .and_then(|asset| normalized_asset_digest(asset)),
+        asset_name: trusted.as_ref().map(|asset| asset.name.clone()),
+        download_size: trusted.as_ref().map(|asset| asset.size),
+        sha256,
     })
+}
+
+/// Parse `SHA256SUMS-v*-{mobile,desktop}.txt` from the release when asset digests are missing.
+async fn load_sha256_from_release_sums(
+    client: &reqwest::Client,
+    release: &GhRelease,
+    channel: &str,
+) -> Option<std::collections::HashMap<String, String>> {
+    let sums = release.assets.iter().find(|asset| {
+        asset.name.starts_with("SHA256SUMS")
+            && asset.name.contains(channel)
+            && asset.name.ends_with(".txt")
+            && asset.state == "uploaded"
+            && validate_release_download_url(&asset.browser_download_url).is_ok()
+    })?;
+    let body = client
+        .get(&sums.browser_download_url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let mut map = std::collections::HashMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // formats: "<hex>  <filename>" or "<hex> <filename>"
+        let mut parts = line.split_whitespace();
+        let Some(hex) = parts.next() else { continue };
+        let Some(name) = parts.next() else { continue };
+        let hex = hex.to_ascii_lowercase();
+        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            map.insert(name.to_string(), hex);
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(map)
+    }
 }
 
 const MAX_APK_BYTES: u64 = 300 * 1024 * 1024;

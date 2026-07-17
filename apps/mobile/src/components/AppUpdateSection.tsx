@@ -103,18 +103,18 @@ export default function AppUpdateSection({ onToast }: Props) {
           {checking ? "Checking…" : "Check again"}
         </button>
         {info?.update_available && info.download_url && info.asset_name && info.sha256 && info.download_size ? (
-          <>
-            <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
-              {updatePhase === "downloading"
-                ? "Downloading…"
-                : updatePhase === "installer"
-                  ? "Opening installer…"
-                  : "Download & install"}
-            </button>
-            <button type="button" disabled={updating} onClick={() => void openBrowserDownload()}>
-              View release
-            </button>
-          </>
+          <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
+            {updatePhase === "downloading"
+              ? "Downloading…"
+              : updatePhase === "installer"
+                ? "Opening installer…"
+                : "Download & install"}
+          </button>
+        ) : null}
+        {info?.release_page ? (
+          <button type="button" disabled={updating} onClick={() => void openBrowserDownload()}>
+            Open release page
+          </button>
         ) : null}
       </div>
       <p className="muted small">

@@ -67,6 +67,12 @@ export default function AppUpdateSection({ onInfo, onError }: Props) {
       ) : (
         <p className="muted">You are on the latest release.</p>
       )}
+      {info?.update_available && !info.download_url ? (
+        <p className="update-error">
+          Automatic install is blocked (missing trusted checksum). Use the release page: download
+          the <strong>MSI</strong> or <strong>portable .exe</strong> if setup fails.
+        </p>
+      ) : null}
       <div className="actions-row">
         <button type="button" disabled={checking || updating} onClick={() => void check()}>
           {checking ? "Checking…" : "Check again"}
@@ -74,6 +80,19 @@ export default function AppUpdateSection({ onInfo, onError }: Props) {
         {info?.update_available && info.download_url && info.asset_name && info.sha256 && info.download_size ? (
           <button type="button" className="primary" disabled={updating} onClick={() => void handleUpdate()}>
             {updating ? "Downloading…" : "Download & install"}
+          </button>
+        ) : null}
+        {info?.release_page ? (
+          <button
+            type="button"
+            disabled={updating}
+            onClick={() => {
+              void import("@tauri-apps/plugin-shell")
+                .then(({ open }) => open(info.release_page!))
+                .catch((e) => onError?.(String(e)));
+            }}
+          >
+            Open release page
           </button>
         ) : null}
       </div>

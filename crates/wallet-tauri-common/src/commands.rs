@@ -181,42 +181,90 @@ pub async fn wallet_ping_node(state: State<'_, AppState>) -> Result<serde_json::
         .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
 }
 
-/// USD spot prices via Rust HTTP (avoids WebView CORS; works on desktop + GrapheneOS).
+/// USD spot prices via Rust HTTP (avoids WebView CORS).
+/// CoinGecko free tier often returns 429; CoinPaprika is the primary source.
 #[tauri::command]
 pub async fn wallet_fetch_asset_prices() -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .user_agent("HacashWallet/0.1.52")
+        .user_agent("HacashWallet/0.1.53")
         .build()
         .map_err(|e| e.to_string())?;
+
+    if let Ok(pair) = fetch_prices_coinpaprika(&client).await {
+        return Ok(serde_json::json!({
+            "hac_usd": pair.0,
+            "btc_usd": pair.1,
+            "source": "coinpaprika",
+        }));
+    }
+
+    let pair = fetch_prices_coingecko(&client)
+        .await
+        .map_err(|e| format!("price fetch failed (all sources): {e}"))?;
+    Ok(serde_json::json!({
+        "hac_usd": pair.0,
+        "btc_usd": pair.1,
+        "source": "coingecko",
+    }))
+}
+
+async fn fetch_prices_coinpaprika(client: &reqwest::Client) -> Result<(f64, f64), String> {
+    let hac = fetch_coinpaprika_usd(client, "hac-hacash").await?;
+    let btc = fetch_coinpaprika_usd(client, "btc-bitcoin").await?;
+    Ok((hac, btc))
+}
+
+async fn fetch_coinpaprika_usd(client: &reqwest::Client, id: &str) -> Result<f64, String> {
+    let url = format!("https://api.coinpaprika.com/v1/tickers/{id}");
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("coinpaprika {id}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("coinpaprika {id} HTTP {}", resp.status()));
+    }
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("coinpaprika {id} parse: {e}"))?;
+    data.get("quotes")
+        .and_then(|q| q.get("USD"))
+        .and_then(|u| u.get("price"))
+        .and_then(|p| p.as_f64())
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .ok_or_else(|| format!("coinpaprika {id}: missing USD price"))
+}
+
+async fn fetch_prices_coingecko(client: &reqwest::Client) -> Result<(f64, f64), String> {
     let url =
         "https://api.coingecko.com/api/v3/simple/price?ids=hacash,bitcoin&vs_currencies=usd";
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("price fetch failed: {e}"))?;
+        .map_err(|e| format!("coingecko: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("price fetch HTTP {}", resp.status()));
+        return Err(format!("coingecko HTTP {}", resp.status()));
     }
     let data: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("price parse failed: {e}"))?;
+        .map_err(|e| format!("coingecko parse: {e}"))?;
     let hac = data
         .get("hacash")
         .and_then(|v| v.get("usd"))
         .and_then(|v| v.as_f64())
-        .ok_or_else(|| "missing hacash usd price".to_string())?;
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .ok_or_else(|| "coingecko: missing hacash usd".to_string())?;
     let btc = data
         .get("bitcoin")
         .and_then(|v| v.get("usd"))
         .and_then(|v| v.as_f64())
-        .ok_or_else(|| "missing bitcoin usd price".to_string())?;
-    Ok(serde_json::json!({
-        "hac_usd": hac,
-        "btc_usd": btc,
-    }))
+        .filter(|p| p.is_finite() && *p > 0.0)
+        .ok_or_else(|| "coingecko: missing bitcoin usd".to_string())?;
+    Ok((hac, btc))
 }
 
 #[tauri::command]
