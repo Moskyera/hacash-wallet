@@ -17,7 +17,7 @@ pub struct CspPreset {
     pub id: &'static str,
     pub name: &'static str,
     pub hub_url: &'static str,
-    /// On-chain address of the hub (right party). Empty = must come from hub `/v1/health`.
+    /// On-chain address of the hub. Empty means it must come from hub `/v1/health`.
     pub hub_address: &'static str,
 }
 

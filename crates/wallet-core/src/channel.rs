@@ -14,6 +14,12 @@ pub struct ChannelPartyBalance {
     pub satoshi: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChannelChallenging {
+    #[serde(default)]
+    pub assert_bill_auto_number: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelInfo {
     #[serde(default)]
@@ -26,6 +32,8 @@ pub struct ChannelInfo {
     pub arbitration_lock: u64,
     pub left: ChannelPartyBalance,
     pub right: ChannelPartyBalance,
+    #[serde(default)]
+    pub challenging: Option<ChannelChallenging>,
 }
 
 impl ChannelInfo {

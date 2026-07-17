@@ -6,7 +6,7 @@ use crate::channel::{CHANNEL_STATUS_OPENING, ChannelInfo, query_channel};
 use crate::error::{WalletError, WalletResult};
 use crate::hip23::format_mei_for_node;
 use crate::l1_fee::{L1FeeTierQuote, estimate_hac_l1_fee_tiers, format_l1_fee_label};
-use crate::l2_hub::{FastPayRequest, L2HubClient};
+use crate::l2_hub::{FastPayExecution, FastPayRequest, L2HubClient};
 use crate::node::NodeClient;
 use crate::send_options::{
     SendFeeBreakdown, SendOptions, apply_service_fee, fast_pay_fee_breakdown,
@@ -62,6 +62,9 @@ impl PaymentRouter {
         &self.bills
     }
 
+    pub fn replace_bills(&mut self, bills: BillStore) {
+        self.bills = bills;
+    }
     pub fn update_settings(&mut self, settings: WalletSettings) {
         if settings.node_url != self.node.base_url() {
             self.node = NodeClient::new(settings.node_url.clone());
@@ -175,7 +178,7 @@ impl PaymentRouter {
         to: &str,
         amount_wire: &str,
         payer_account: &WalletAccount,
-    ) -> WalletResult<String> {
+    ) -> WalletResult<FastPayExecution> {
         let hub_url = self
             .settings
             .l2_hub_url
@@ -189,7 +192,10 @@ impl PaymentRouter {
 
         let hub = L2HubClient::new(hub_url);
         let health = hub.health().await?;
-        let same_channel_payee = health.hub_address.as_deref() == Some(to);
+        let hub_address = health.hub_address.clone().ok_or_else(|| {
+            WalletError::L2("Fast Pay provider did not publish its hub address".into())
+        })?;
+        let same_channel_payee = hub_address == to;
         if !health.ok
             || health.version < 3
             || !health.settlement_ready
@@ -215,8 +221,15 @@ impl PaymentRouter {
                 from
             )));
         }
-        hub.execute_and_store_bill(&req, &mut self.bills, payer_account)
-            .await
+        let payer_channel = query_channel(&self.node, &req.channel_id).await?;
+        hub.execute_and_store_bill(
+            &req,
+            &mut self.bills,
+            payer_account,
+            &payer_channel,
+            &hub_address,
+        )
+        .await
     }
 }
 

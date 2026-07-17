@@ -7,16 +7,35 @@ pub fn parse_amount_mei(wire: &str) -> HubResult<f64> {
         return Err(HubError::Payment("empty amount".into()));
     }
     if let Some((whole, frac)) = s.split_once(':') {
-        let whole: f64 = whole
+        let whole: u64 = whole
             .parse()
             .map_err(|_| HubError::Payment(format!("invalid amount whole: {wire}")))?;
-        let frac: f64 = frac
+        let frac: u16 = frac
             .parse()
             .map_err(|_| HubError::Payment(format!("invalid amount frac: {wire}")))?;
-        return Ok(whole + frac / 1000.0);
+        if frac > 999 {
+            return Err(HubError::Payment(format!(
+                "amount fraction exceeds millimeis: {wire}"
+            )));
+        }
+        return Ok(whole as f64 + frac as f64 / 1000.0);
     }
-    s.parse::<f64>()
-        .map_err(|_| HubError::Payment(format!("invalid amount: {wire}")))
+    let amount = s
+        .parse::<f64>()
+        .map_err(|_| HubError::Payment(format!("invalid amount: {wire}")))?;
+    if !amount.is_finite() || amount < 0.0 {
+        return Err(HubError::Payment(format!(
+            "amount must be finite and non-negative: {wire}"
+        )));
+    }
+    let millis = amount * 1000.0;
+    let rounded = millis.round();
+    if !millis.is_finite() || (millis - rounded).abs() > 1e-9 {
+        return Err(HubError::Payment(format!(
+            "amount must use whole millimeis: {wire}"
+        )));
+    }
+    Ok(rounded / 1000.0)
 }
 
 pub fn format_amount_mei(amount_mei: f64) -> String {
@@ -37,5 +56,17 @@ mod tests {
     #[test]
     fn parses_decimal() {
         assert!((parse_amount_mei("10.5").unwrap() - 10.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rejects_sub_millimei_precision() {
+        assert!(parse_amount_mei("1.0004").is_err());
+    }
+
+    #[test]
+    fn rejects_non_canonical_or_non_finite_values() {
+        assert!(parse_amount_mei("1:1000").is_err());
+        assert!(parse_amount_mei("NaN").is_err());
+        assert!(parse_amount_mei("-1").is_err());
     }
 }

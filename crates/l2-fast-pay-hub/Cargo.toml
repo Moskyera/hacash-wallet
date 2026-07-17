@@ -2,7 +2,7 @@
 name = "l2-fast-pay-hub"
 version.workspace = true
 edition.workspace = true
-description = "Hacash CSP / Fast Pay hub. Wallet Hub API v1 reference server"
+description = "Hacash CSP / Fast Pay hub. Wallet Hub API v4 reference server"
 license.workspace = true
 
 [dependencies]

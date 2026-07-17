@@ -155,10 +155,10 @@ async fn hub_health_and_same_channel_fast_pay() {
         .unwrap();
     assert_eq!(health["ok"], true);
     assert_eq!(health["hub_address"], hub_address);
-    assert_eq!(health["version"], 3);
+    assert_eq!(health["version"], 4);
     assert_eq!(health["hub_fee_mei"], 0.0);
     assert_eq!(health["settlement_ready"], true);
-    assert_eq!(health["cross_channel_ready"], false);
+    assert_eq!(health["cross_channel_ready"], true);
 
     // Pay hub (other party on same channel)
     let pay = prepare_and_confirm(
@@ -181,7 +181,7 @@ async fn hub_health_and_same_channel_fast_pay() {
 }
 
 #[tokio::test]
-async fn hub_rejects_cross_channel_until_recipient_confirmation_exists() {
+async fn hub_routes_cross_channel_after_recipient_confirmation() {
     let alice = test_account("alice-cross-channel");
     let bob = test_account("bob-cross-channel");
     let hub_account = test_account("hub-cross-channel");
@@ -211,7 +211,7 @@ async fn hub_rejects_cross_channel_until_recipient_confirmation_exists() {
             "status": 0,
             "reuse_version": 1,
             "left": { "address": bob_address, "hacash": "2", "satoshi": 0 },
-            "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
+            "right": { "address": hub_address, "hacash": "5", "satoshi": 0 }
         }),
     );
     let (node_url, node_handle) = spawn_mock_node(channels).await;
@@ -237,25 +237,98 @@ async fn hub_rejects_cross_channel_until_recipient_confirmation_exists() {
     let client = reqwest::Client::new();
     let base = format!("http://{hub_addr}");
 
-    let response = client
+    let pending: Value = client
         .post(format!("{base}/v1/fast-pay"))
         .json(&json!({
-            "payer": alice_address,
-            "payee": bob_address,
+            "payer": alice_address.clone(),
+            "payee": bob_address.clone(),
             "amount": "1.5",
-            "channel_id": alice_ch_id
+            "channel_id": alice_ch_id.clone()
         }))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!(response.status(), 400);
-    let body: Value = response.json().await.unwrap();
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .contains("supports user-left to hub-right payments only")
-    );
+    assert_eq!(pending["status"], "pending", "prepare response: {pending}");
+    let payment_id = pending["payment_id"].as_str().unwrap().to_owned();
+
+    let mut payer_bill = l2_fast_pay_hub::wire::ChannelPayCompleteDocuments::from_bill_hex(
+        pending["bill_hex"].as_str().unwrap(),
+    )
+    .unwrap();
+    payer_bill
+        .chain_payment
+        .fill_sign_by_account(&alice)
+        .unwrap();
+    let awaiting: Value = client
+        .post(format!("{base}/v1/fast-pay/{payment_id}/confirm"))
+        .json(&json!({ "bill_hex": payer_bill.to_bill_hex() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(awaiting["status"], "awaiting_recipient");
+
+    let inbox: Value = client
+        .get(format!("{base}/v1/fast-pay/inbox/{bob_address}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let item = inbox.as_array().unwrap().first().unwrap();
+    assert_eq!(item["payment_id"], payment_id);
+    assert_eq!(item["channel_id"], alice_ch_id);
+    assert_eq!(item["payee_channel_id"], bob_ch_id);
+
+    let mut recipient_bill = l2_fast_pay_hub::wire::ChannelPayCompleteDocuments::from_bill_hex(
+        item["bill_hex"].as_str().unwrap(),
+    )
+    .unwrap();
+    recipient_bill
+        .chain_payment
+        .fill_sign_by_account(&bob)
+        .unwrap();
+    let settled: Value = client
+        .post(format!("{base}/v1/fast-pay/{payment_id}/confirm"))
+        .json(&json!({ "bill_hex": recipient_bill.to_bill_hex() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(settled["status"], "settled", "settle response: {settled}");
+    let final_bill = l2_fast_pay_hub::wire::ChannelPayCompleteDocuments::from_bill_hex(
+        settled["bill_hex"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!(final_bill.prove_bindings_valid());
+    assert!(final_bill.chain_payment.all_signatures_verified());
+
+    let status: Value = client
+        .get(format!("{base}/v1/fast-pay/{payment_id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["status"], "settled");
+    let empty_inbox: Value = client
+        .get(format!("{base}/v1/fast-pay/inbox/{bob_address}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(empty_inbox.as_array().unwrap().is_empty());
 
     hub_handle.abort();
     node_handle.abort();
@@ -373,7 +446,7 @@ async fn hub_rejects_payee_without_hub_channel() {
         body["error"]
             .as_str()
             .unwrap()
-            .contains("supports user-left to hub-right payments only")
+            .contains("has no open Fast Pay channel")
     );
 
     hub_handle.abort();

@@ -8,7 +8,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::trace::TraceLayer;
 
-use crate::api::{ConfirmFastPayRequest, FastPayRequest, FastPayResponse, HubHealth};
+use crate::api::{
+    ConfirmFastPayRequest, FastPayInboxItem, FastPayRequest, FastPayResponse, HubHealth,
+};
 use crate::error::HubError;
 use crate::state::HubState;
 
@@ -21,6 +23,7 @@ pub fn build_router(hub: Arc<HubState>) -> Router {
     Router::new()
         .route("/v1/health", get(health_handler))
         .route("/v1/fast-pay", post(fast_pay_handler))
+        .route("/v1/fast-pay/inbox/{payee}", get(recipient_inbox_handler))
         .route("/v1/fast-pay/{payment_id}", get(payment_status_handler))
         .route(
             "/v1/fast-pay/{payment_id}/confirm",
@@ -60,6 +63,13 @@ async fn fast_pay_handler(
         .settle_fast_pay(&req.payer, &req.payee, &req.amount, &req.channel_id)
         .await?;
     Ok(Json(resp))
+}
+
+async fn recipient_inbox_handler(
+    State(state): State<AppState>,
+    Path(payee): Path<String>,
+) -> Json<Vec<FastPayInboxItem>> {
+    Json(state.hub.recipient_inbox(&payee))
 }
 
 async fn payment_status_handler(

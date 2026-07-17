@@ -339,7 +339,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const OFFICIAL_NODE_HAC_BODY: &str = "02006a58e61400681990afd226b1cbc6c5f085cfdc2092d0843241f401010001000100540e8074a2e2244bef5d0d2d699340cba70945eef8010100000000";
+    const OFFICIAL_NODE_HAC_BODY: &str = "02006a59827900681990afd226b1cbc6c5f085cfdc2092d0843241f401010001000100d3234881daaf07d4562308104401b003328c3744f8010100000000";
 
     #[test]
     fn official_node_hac_body_matches_exact_intent() {
@@ -350,7 +350,7 @@ mod tests {
             "1:244",
             &[json!({
                 "kind": 1,
-                "to": "18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa",
+                "to": "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW",
                 "hacash": "1"
             })],
         )
@@ -381,7 +381,7 @@ mod tests {
             "2:244",
             &[json!({
                 "kind": 1,
-                "to": "18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa",
+                "to": "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW",
                 "hacash": "1"
             })],
         )

@@ -198,7 +198,7 @@ export function useHacSend(opts: {
       setSendAmount("");
       await refreshBalance();
       await refreshHistory();
-      onInfo(sendSuccessMessage(result.rail, result.summary));
+      onInfo(result.pending ? result.summary : sendSuccessMessage(result.rail, result.summary));
       setScreen("home");
     } catch (e) {
       onError(formatInvokeError(e));

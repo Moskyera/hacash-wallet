@@ -265,6 +265,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           onPreviewChannel={onPreviewChannel}
           onOpenChannel={onOpenChannel}
           onCloseChannel={onCloseChannel}
+          onRefresh={refreshUnlockedData}
           onNotify={onNotify}
           clearMessages={clearMessages}
         />

@@ -4,6 +4,7 @@ import {
   api,
   type ChannelInfo,
   type ChannelSetupPreview,
+  type FastPayInboxItem,
   type FastPayStatus,
   type HubDiscoveryEntry,
   type WalletSettings,
@@ -50,6 +51,39 @@ export default function FastPayChannelScreen({
   const [userDeposit, setUserDeposit] = useState("10");
   const [hubDeposit, setHubDeposit] = useState("0");
   const [preview, setPreview] = useState<ChannelSetupPreview | null>(null);
+  const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
+
+  const loadInbox = useCallback(async () => {
+    if (fastPay?.state !== "ready") {
+      setInbox([]);
+      return;
+    }
+    try {
+      setInbox(await api.fastPayInbox());
+    } catch {
+      setInbox([]);
+    }
+  }, [fastPay?.state]);
+
+  useEffect(() => {
+    void loadInbox();
+    if (fastPay?.state !== "ready") return;
+    const timer = window.setInterval(() => void loadInbox(), 5000);
+    return () => window.clearInterval(timer);
+  }, [fastPay?.state, loadInbox]);
+
+  async function handleAcceptFastPay(item: FastPayInboxItem) {
+    setBusy(true);
+    try {
+      const result = await api.acceptFastPay(item.payment_id);
+      onToast(result.summary, "success");
+      await Promise.all([loadInbox(), loadChannel(), onRefresh()]);
+    } catch (error) {
+      onToast(formatInvokeError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const loadChannel = useCallback(async () => {
     try {
@@ -181,6 +215,35 @@ export default function FastPayChannelScreen({
         )}
         {hubUrl && <p className="muted small">Hub: {hubUrl}</p>}
       </div>
+
+      {fastPay?.state === "ready" && (
+        <div className="card">
+          <h2>Incoming payments</h2>
+          <p className="muted small">
+            Routed Fast Pay requests settle only after your wallet verifies and signs the recipient channel update.
+          </p>
+          {inbox.length === 0 ? (
+            <p className="muted small">No payment is waiting for your signature.</p>
+          ) : (
+            inbox.map((item) => (
+              <div className="preview-box" key={item.payment_id}>
+                <p><strong>{item.amount} HAC</strong></p>
+                <p className="muted small">
+                  From {maskAddress(item.payer, hideAddresses)}. No Fast Pay fee.
+                </p>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => void handleAcceptFastPay(item)}
+                >
+                  Verify and accept
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       <div className="card">
         <h2>Find a hub</h2>

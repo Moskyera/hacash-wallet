@@ -138,6 +138,27 @@ pub async fn wallet_fast_pay_status(
 }
 
 #[tauri::command]
+pub async fn wallet_fast_pay_inbox(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut svc = state.inner.lock().await;
+    let inbox = svc.fast_pay_inbox().await.map_err(|e| e.to_string())?;
+    serde_json::to_value(inbox).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wallet_accept_fast_pay(
+    payment_id: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut svc = state.inner.lock().await;
+    let result = svc
+        .accept_fast_pay(&payment_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(result).map_err(|e| e.to_string())
+}
+#[tauri::command]
 pub async fn wallet_enable_fast_pay(
     deposit_mei: Option<f64>,
     state: State<'_, AppState>,

@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
+  api,
   ChannelInfo,
   ChannelSetupPreview,
+  FastPayInboxItem,
   HubDiscoveryEntry,
   HubHealth,
   WalletSettings,
@@ -46,6 +48,7 @@ type Props = {
     setChannelPreview: (p: ChannelSetupPreview | null) => void,
   ) => void;
   onCloseChannel: (setChannelPreview: (p: ChannelSetupPreview | null) => void) => void;
+  onRefresh: () => Promise<void>;
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
   clearMessages: () => void;
 };
@@ -70,6 +73,7 @@ export default function FastPayScreen({
   onPreviewChannel,
   onOpenChannel,
   onCloseChannel,
+  onRefresh,
   onNotify,
   clearMessages,
 }: Props) {
@@ -80,6 +84,44 @@ export default function FastPayScreen({
   const [hubAddress, setHubAddress] = useState("");
   const [channelPreview, setChannelPreview] = useState<ChannelSetupPreview | null>(null);
   const [showFastPayAdvanced, setShowFastPayAdvanced] = useState(false);
+  const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
+
+  useEffect(() => {
+    if (!fastPayReady || status?.locked) {
+      setInbox([]);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const items = await api.fastPayInbox();
+        if (!cancelled) setInbox(items);
+      } catch {
+        if (!cancelled) setInbox([]);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [fastPayReady, status?.locked, status?.address]);
+
+  const acceptIncoming = async (item: FastPayInboxItem) => {
+    setBusy(true);
+    clearMessages();
+    try {
+      const result = await api.acceptFastPay(item.payment_id);
+      setInbox((current) => current.filter((entry) => entry.payment_id !== item.payment_id));
+      onNotify(result.summary, "success");
+      await onRefresh();
+    } catch (error) {
+      onNotify(String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (!settings) return;
@@ -180,6 +222,37 @@ export default function FastPayScreen({
           }}
         />
       </div>
+
+      {fastPayReady && (
+        <div className="fast-pay-card">
+          <h3>Incoming Fast Pay requests</h3>
+          <p className="muted small">
+            A routed payment settles only after you verify and sign your recipient channel update.
+          </p>
+          {inbox.length === 0 ? (
+            <p className="muted">No payment is waiting for your signature.</p>
+          ) : (
+            inbox.map((item) => (
+              <div className="preview-card" key={item.payment_id}>
+                <p>
+                  <strong>{item.amount} HAC</strong> from{" "}
+                  {hideAddresses ? `${item.payer.slice(0, 7)}...` : item.payer}
+                </p>
+                <p className="muted small">
+                  No Fast Pay fee. Both channel updates are verified locally before signing.
+                </p>
+                <button
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => void acceptIncoming(item)}
+                >
+                  Verify and accept
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       <BillsPanel
         hideAddresses={hideAddresses}

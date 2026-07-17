@@ -28,8 +28,8 @@ pub const DEFAULT_SERVICE_FEE_RATE: f64 = 0.003;
 /// Fixed HAC fee per non-fungible HACD transfer transaction.
 pub const HACD_SERVICE_FEE_MEI: f64 = 0.003;
 
-/// Moskyera wallet treasury. collects optional ecosystem service fees on sends.
-pub const WALLET_TREASURY_ADDRESS: &str = "18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa";
+/// Moskyera wallet treasury. Collects the mandatory wallet service fee on L1 sends.
+pub const WALLET_TREASURY_ADDRESS: &str = "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW";
 
 /// Persisted defaults for the Send tab (fee payer, rail preference).
 #[derive(Debug, Clone, Serialize, Deserialize)]

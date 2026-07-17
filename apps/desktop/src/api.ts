@@ -39,6 +39,25 @@ export type FastPayStatus = {
   default_deposit_mei: number;
 };
 
+export type FastPayInboxItem = {
+  payment_id: string;
+  payer: string;
+  payee: string;
+  amount: string;
+  channel_id: string;
+  payee_channel_id: string;
+  status: string;
+  bill_hex: string;
+  summary: string | null;
+  created_at: number;
+};
+
+export type FastPayExecution = {
+  payment_id: string;
+  status: string;
+  summary: string;
+};
+
 export type WalletStatus = {
   has_wallet: boolean;
   locked: boolean;
@@ -174,6 +193,7 @@ export type SendResult = {
   rail: "L2Fast" | "L1OnChain" | "QuantumType4";
   tx_hash: string;
   summary: string;
+  pending: boolean;
 };
 
 export type ChannelSetupPreview = {
@@ -517,6 +537,9 @@ export const api = {
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei: depositMei ?? null }),
   listBills: () => invoke<BillEntry[]>("wallet_list_bills"),
+  fastPayInbox: () => invoke<FastPayInboxItem[]>("wallet_fast_pay_inbox"),
+  acceptFastPay: (paymentId: string) =>
+    invoke<FastPayExecution>("wallet_accept_fast_pay", { paymentId }),
   listBillSummaries: () => invoke<BillSummary[]>("wallet_list_bill_summaries"),
   exportBillJson: (paymentId: string) =>
     invoke<string>("wallet_export_bill_json", { paymentId }),

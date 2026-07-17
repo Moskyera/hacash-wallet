@@ -58,4 +58,83 @@ impl OffChainChannelTransfer {
             .zip(self.must_signs.iter())
             .all(|(address, signature)| verify_signature(&hash, address, signature))
     }
+
+    /// True when every non-empty slot verifies, while empty slots remain allowed.
+    pub fn all_filled_signatures_verified(&self) -> bool {
+        if self.must_sign_addresses.len() != self.must_signs.len() {
+            return false;
+        }
+        let empty = field::Fixed33::default();
+        let hash = self.sign_stuff_hash();
+        self.must_sign_addresses
+            .iter()
+            .zip(self.must_signs.iter())
+            .all(|(address, signature)| {
+                signature.publickey.to_array() == empty.to_array()
+                    || verify_signature(&hash, address, signature)
+            })
+    }
+
+    /// True when the slot for a readable Hacash address contains a valid signature.
+    pub fn signature_verified_for_readable(&self, readable: &str) -> bool {
+        let Ok(address) = Address::from_readable(readable) else {
+            return false;
+        };
+        self.signature_verified_for_address(&address)
+    }
+
+    /// True when the slot for `target` contains a valid signature.
+    pub fn signature_verified_for_address(&self, target: &Address) -> bool {
+        if self.must_sign_addresses.len() != self.must_signs.len() {
+            return false;
+        }
+        let empty = field::Fixed33::default();
+        let hash = self.sign_stuff_hash();
+        self.must_sign_addresses
+            .iter()
+            .zip(self.must_signs.iter())
+            .find(|(address, _)| address.as_ref() == target.as_ref())
+            .is_some_and(|(address, signature)| {
+                signature.publickey.to_array() != empty.to_array()
+                    && verify_signature(&hash, address, signature)
+            })
+    }
+
+    /// Merge only valid, filled signatures from the same immutable bill.
+    /// Empty slots never erase signatures already collected by the hub.
+    pub fn merge_verified_signatures(&mut self, candidate: &Self) -> HubResult<()> {
+        if self.sign_stuff_hash() != candidate.sign_stuff_hash()
+            || self.must_sign_addresses.len() != candidate.must_sign_addresses.len()
+            || self.must_signs.len() != candidate.must_signs.len()
+            || self
+                .must_sign_addresses
+                .iter()
+                .zip(candidate.must_sign_addresses.iter())
+                .any(|(left, right)| left.as_ref() != right.as_ref())
+        {
+            return Err(HubError::Payment(
+                "signature submission does not match the prepared bill".into(),
+            ));
+        }
+
+        let empty = field::Fixed33::default();
+        let hash = self.sign_stuff_hash();
+        for (index, (address, signature)) in candidate
+            .must_sign_addresses
+            .iter()
+            .zip(candidate.must_signs.iter())
+            .enumerate()
+        {
+            if signature.publickey.to_array() == empty.to_array() {
+                continue;
+            }
+            if !verify_signature(&hash, address, signature) {
+                return Err(HubError::Payment(
+                    "signature submission contains an invalid signature".into(),
+                ));
+            }
+            self.must_signs[index] = signature.clone();
+        }
+        Ok(())
+    }
 }

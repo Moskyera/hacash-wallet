@@ -8,7 +8,7 @@ use l2_fast_pay_hub::HubState;
 #[derive(Parser, Debug)]
 #[command(
     name = "fast-pay-hub",
-    about = "Hacash CSP / Fast Pay hub (Wallet Hub API v1)"
+    about = "Hacash CSP / Fast Pay hub (Wallet Hub API v4)"
 )]
 struct Args {
     /// Listen address (host:port)
@@ -19,7 +19,7 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     node_url: String,
 
-    /// On-chain address of this hub (CSP right party)
+    /// On-chain address of this hub (either channel side)
     #[arg(long, env = "HACASH_HUB_ADDRESS")]
     hub_address: String,
 

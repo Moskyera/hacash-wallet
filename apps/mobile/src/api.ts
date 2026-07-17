@@ -141,6 +141,25 @@ export type FastPayStatus = {
   default_deposit_mei?: number;
 };
 
+export type FastPayInboxItem = {
+  payment_id: string;
+  payer: string;
+  payee: string;
+  amount: string;
+  channel_id: string;
+  payee_channel_id: string;
+  status: string;
+  bill_hex: string;
+  summary: string | null;
+  created_at: number;
+};
+
+export type FastPayExecution = {
+  payment_id: string;
+  status: string;
+  summary: string;
+};
+
 export type HubHealth = {
   ok: boolean;
   version: number;
@@ -192,6 +211,7 @@ export type SendResult = {
   rail: string;
   tx_hash: string;
   summary: string;
+  pending: boolean;
 };
 
 export type TxStatus = "confirmed" | "pending" | "failed";
@@ -460,6 +480,9 @@ export const api = {
   txHistory: () => invoke<TxRecord[]>("wallet_tx_history"),
   clearHistory: () => invoke<void>("wallet_clear_tx_history"),
   fastPayStatus: () => invoke<FastPayStatus>("wallet_fast_pay_status"),
+  fastPayInbox: () => invoke<FastPayInboxItem[]>("wallet_fast_pay_inbox"),
+  acceptFastPay: (paymentId: string) =>
+    invoke<FastPayExecution>("wallet_accept_fast_pay", { paymentId }),
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),

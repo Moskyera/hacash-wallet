@@ -31,7 +31,7 @@ use crate::fast_pay::{
     discover_all_hubs, discover_healthy_hub, evaluate_fast_pay,
 };
 use crate::history::{TxHistory, TxRecord, TxStatus};
-use crate::l2_hub::{HubHealth, L2HubClient};
+use crate::l2_hub::{FastPayExecution, FastPayInboxItem, HubHealth, L2HubClient};
 use crate::node::NodeClient;
 use crate::node_discovery::{NodeDiscoveryReport, discover_node_candidates};
 use crate::payment::{PaymentPlan, PaymentRail, PaymentRouter};
@@ -121,6 +121,7 @@ pub struct SendResult {
     pub rail: PaymentRail,
     pub tx_hash: String,
     pub summary: String,
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -813,6 +814,7 @@ impl WalletService {
                 rail: PaymentRail::L1OnChain,
                 tx_hash: hash,
                 summary,
+                pending: false,
             })
         }
         .await;
@@ -894,6 +896,7 @@ impl WalletService {
                 rail: PaymentRail::L1OnChain,
                 tx_hash: hash,
                 summary,
+                pending: false,
             })
         }
         .await;
@@ -1007,6 +1010,192 @@ impl WalletService {
     pub async fn fast_pay_status(&self) -> WalletResult<FastPayStatus> {
         let user = self.unlocked.as_ref().map(|s| s.address.as_str());
         evaluate_fast_pay(&self.node, &self.settings, user).await
+    }
+
+    pub async fn fast_pay_inbox(&mut self) -> WalletResult<Vec<FastPayInboxItem>> {
+        let address = self.require_address()?;
+        let hub_url = self
+            .settings
+            .l2_hub_url
+            .clone()
+            .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
+        let client = L2HubClient::new(hub_url);
+        let health = client.health().await?;
+        if !health.ok
+            || health.version < 4
+            || !health.settlement_ready
+            || !health.cross_channel_ready
+            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+        {
+            return Err(WalletError::L2(
+                "Fast Pay provider does not support safe recipient confirmation".into(),
+            ));
+        }
+        self.sync_pending_fast_pay(&client, &health).await?;
+        client.recipient_inbox(&address).await
+    }
+
+    async fn sync_pending_fast_pay(
+        &mut self,
+        client: &L2HubClient,
+        health: &HubHealth,
+    ) -> WalletResult<()> {
+        let records = self.history.pending_fast_pay_records();
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let hub_address = health.hub_address.as_deref().ok_or_else(|| {
+            WalletError::L2("Fast Pay provider did not publish its hub address".into())
+        })?;
+        let channel_id = self
+            .settings
+            .channel_id_hex
+            .as_deref()
+            .ok_or_else(|| WalletError::L2("Fast Pay channel is not configured".into()))?;
+
+        for record in records {
+            let response = match client.payment_status(&record.tx_hash).await {
+                Ok(response) => response,
+                Err(_) => continue,
+            };
+            if response.status == "expired" {
+                self.history.resolve_pending(
+                    &record.tx_hash,
+                    &record.tx_hash,
+                    response
+                        .summary
+                        .as_deref()
+                        .unwrap_or("Fast Pay expired before recipient acceptance"),
+                    TxStatus::Failed,
+                )?;
+                continue;
+            }
+            if response.status != "settled" {
+                continue;
+            }
+            let bill_hex = response.bill_hex.as_deref().ok_or_else(|| {
+                WalletError::L2(format!(
+                    "settled Fast Pay payment {} did not include its signed bill",
+                    record.tx_hash
+                ))
+            })?;
+            let channel = query_channel(&self.node, channel_id).await?;
+            let trusted = crate::l2_bill::trusted_channel_state(&self.bills, &channel)?;
+            let summary = crate::l2_bill::validate_sender_bill(
+                &record.tx_hash,
+                bill_hex,
+                &record.from,
+                &record.to,
+                &format_amount_mei(record.amount_mei),
+                hub_address,
+                channel_id,
+                &trusted,
+            )?;
+            if !summary.dispute_ready {
+                return Err(WalletError::Policy(format!(
+                    "settled Fast Pay payment {} is not dispute-ready",
+                    record.tx_hash
+                )));
+            }
+            self.bills.store_bill(&record.tx_hash, bill_hex)?;
+            self.history.resolve_pending(
+                &record.tx_hash,
+                &record.tx_hash,
+                response
+                    .summary
+                    .as_deref()
+                    .unwrap_or("Fast Pay settled with no fee"),
+                TxStatus::Confirmed,
+            )?;
+        }
+        self.router.replace_bills(self.bills.clone());
+        Ok(())
+    }
+
+    pub async fn accept_fast_pay(&mut self, payment_id: &str) -> WalletResult<FastPayExecution> {
+        self.touch_auto_lock();
+        let hub_url = self
+            .settings
+            .l2_hub_url
+            .clone()
+            .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
+        let configured_channel_id = self
+            .settings
+            .channel_id_hex
+            .clone()
+            .ok_or_else(|| WalletError::L2("Fast Pay channel is not configured".into()))?;
+        let client = L2HubClient::new(hub_url);
+        let health = client.health().await?;
+        let hub_address = health.hub_address.clone().ok_or_else(|| {
+            WalletError::L2("Fast Pay provider did not publish its hub address".into())
+        })?;
+        if !health.ok
+            || health.version < 4
+            || !health.settlement_ready
+            || !health.cross_channel_ready
+            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+        {
+            return Err(WalletError::L2(
+                "Fast Pay provider is not ready for safe recipient confirmation".into(),
+            ));
+        }
+
+        let address = self.require_address()?;
+        let item = client
+            .recipient_inbox(&address)
+            .await?
+            .into_iter()
+            .find(|item| item.payment_id == payment_id)
+            .ok_or_else(|| {
+                WalletError::L2(format!(
+                    "Fast Pay request {payment_id} is not awaiting this wallet"
+                ))
+            })?;
+        if !item
+            .payee_channel_id
+            .eq_ignore_ascii_case(&configured_channel_id)
+        {
+            return Err(WalletError::Policy(
+                "Fast Pay request targets a different recipient channel".into(),
+            ));
+        }
+        let channel = query_channel(&self.node, &item.payee_channel_id).await?;
+        let channel_has_wallet = channel.user_is_left(&address) || channel.user_is_right(&address);
+        let channel_has_hub =
+            channel.user_is_left(&hub_address) || channel.user_is_right(&hub_address);
+        if !channel.is_open() || !channel_has_wallet || !channel_has_hub {
+            return Err(WalletError::Policy(
+                "Fast Pay recipient channel is not open between this wallet and the hub".into(),
+            ));
+        }
+
+        let account = match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
+            SessionKey::Signing(account) => account,
+            SessionKey::WatchOnly => {
+                return Err(WalletError::Policy(
+                    "watch-only wallet cannot accept Fast Pay bills".into(),
+                ));
+            }
+        };
+        let result = client
+            .accept_inbox_item(&item, &mut self.bills, account, &channel, &hub_address)
+            .await?;
+        self.router.replace_bills(self.bills.clone());
+
+        let amount_mei = item
+            .amount
+            .parse::<f64>()
+            .map_err(|_| WalletError::Policy("Fast Pay inbox returned an invalid amount".into()))?;
+        self.append_history_if_enabled(
+            PaymentRail::L2Fast,
+            &result.payment_id,
+            &item.payer,
+            &item.payee,
+            amount_mei,
+            &result.summary,
+        )?;
+        Ok(result)
     }
 
     pub async fn discover_hubs(&self) -> WalletResult<HubDiscoveryReport> {
@@ -1566,6 +1755,7 @@ impl WalletService {
                 rail: PaymentRail::QuantumType4,
                 tx_hash: hash,
                 summary,
+                pending: false,
             });
         }
         let coordinator = self.require_address()?;
@@ -1582,6 +1772,7 @@ impl WalletService {
             rail: PaymentRail::L1OnChain,
             tx_hash: hash,
             summary: signed.summary.clone(),
+            pending: false,
         };
         self.append_history_if_enabled(
             result.rail,
@@ -1631,15 +1822,16 @@ impl WalletService {
         let send_result: WalletResult<SendResult> = match preview.plan.rail {
             PaymentRail::L2Fast => match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
                 SessionKey::Signing(acc) => {
-                    let payment_id = self
+                    let execution = self
                         .router
                         .execute_l2(&from, to, &preview.amount_wire, acc)
                         .await?;
                     self.bills = self.router.bills().clone();
                     Ok(SendResult {
                         rail: PaymentRail::L2Fast,
-                        tx_hash: payment_id,
-                        summary: preview.plan.summary,
+                        tx_hash: execution.payment_id,
+                        summary: execution.summary,
+                        pending: execution.status != "settled",
                     })
                 }
                 SessionKey::WatchOnly => Err(WalletError::Policy(
@@ -1679,6 +1871,7 @@ impl WalletService {
                     rail: PaymentRail::L1OnChain,
                     tx_hash: hash,
                     summary,
+                    pending: false,
                 })
             }
             PaymentRail::QuantumType4 => Err(WalletError::Policy(
@@ -1692,7 +1885,11 @@ impl WalletService {
                     pending_key,
                     &result.tx_hash,
                     &result.summary,
-                    TxStatus::Confirmed,
+                    if result.pending {
+                        TxStatus::Pending
+                    } else {
+                        TxStatus::Confirmed
+                    },
                 )?;
                 Ok(result)
             }

@@ -1,10 +1,10 @@
-//! Wallet Hub API v1. mirrors `hacash-wallet-core::l2_hub` client types.
+//! Wallet Hub API v4. mirrors `hacash-wallet-core::l2_hub` client types.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{HubError, HubResult};
 
-pub const HUB_API_VERSION: u32 = 3;
+pub const HUB_API_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubHealth {
@@ -44,6 +44,20 @@ pub struct FastPayResponse {
     pub summary: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FastPayInboxItem {
+    pub payment_id: String,
+    pub payer: String,
+    pub payee: String,
+    pub amount: String,
+    pub channel_id: String,
+    pub payee_channel_id: String,
+    pub status: String,
+    pub bill_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub created_at: u64,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfirmFastPayRequest {
     pub bill_hex: String,

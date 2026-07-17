@@ -161,8 +161,10 @@ export function usePaymentFlow(opts: {
       setSendTo("");
       setSendAmount("");
       setPayScanMode(false);
-      showToast(`Sent via ${result.rail}`, "success");
-      hapticSuccess();
+      showToast(result.pending ? result.summary : `Sent via ${result.rail}`, result.pending ? "info" : "success");
+      if (!result.pending) {
+        hapticSuccess();
+      }
       await refresh();
       onSent?.();
     } catch (e) {

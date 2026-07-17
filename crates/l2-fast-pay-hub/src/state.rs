@@ -6,7 +6,7 @@ use std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::amount::{format_amount_mei, parse_amount_mei};
-use crate::api::FastPayResponse;
+use crate::api::{FastPayInboxItem, FastPayResponse};
 use crate::error::{HubError, HubResult};
 use crate::hub_signer::HubSigner;
 use crate::node::{ChannelInfo, ChannelSide, NodeClient};
@@ -15,6 +15,9 @@ use crate::wire::{
     ChannelPayCompleteDocuments, ChannelWireInput, build_cross_channel_bill,
     build_same_channel_bill,
 };
+
+const PENDING_TTL_SECONDS: u64 = 300;
+const MAX_PENDING_SETTLEMENTS: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ChannelLedger {
@@ -26,9 +29,21 @@ pub struct ChannelLedger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingSettlement {
     pub created_at: u64,
+    #[serde(default)]
+    pub payer: String,
+    #[serde(default)]
+    pub payee: String,
+    #[serde(default)]
+    pub amount: String,
     pub channel_id: String,
     pub base_ledger: ChannelLedger,
     pub next_ledger: ChannelLedger,
+    #[serde(default)]
+    pub payee_channel_id: Option<String>,
+    #[serde(default)]
+    pub payee_base_ledger: Option<ChannelLedger>,
+    #[serde(default)]
+    pub payee_next_ledger: Option<ChannelLedger>,
     pub response: FastPayResponse,
 }
 
@@ -99,25 +114,74 @@ impl HubState {
     }
 
     pub fn health(&self) -> crate::api::HubHealth {
+        let settlement_ready = self.hub_signer.is_some();
         crate::api::HubHealth {
             ok: true,
             version: crate::api::HUB_API_VERSION,
             name: Some(self.name.clone()),
             hub_address: Some(self.hub_address.clone()),
             hub_fee_mei: Some(self.hub_fee_mei),
-            settlement_ready: self.hub_signer.is_some(),
-            cross_channel_ready: false,
+            settlement_ready,
+            cross_channel_ready: settlement_ready,
         }
     }
 
     pub fn payment_status(&self, payment_id: &str) -> Option<FastPayResponse> {
-        self.inner.read().ok().and_then(|s| {
-            s.payments.get(payment_id).cloned().or_else(|| {
-                s.pending
-                    .get(payment_id)
-                    .map(|pending| pending.response.clone())
+        let state = self.inner.read().ok()?;
+        if let Some(payment) = state.payments.get(payment_id) {
+            return Some(payment.clone());
+        }
+        let pending = state.pending.get(payment_id)?;
+        if unix_timestamp().saturating_sub(pending.created_at) > PENDING_TTL_SECONDS {
+            return Some(FastPayResponse {
+                payment_id: payment_id.to_owned(),
+                status: "expired".into(),
+                bill_hex: None,
+                summary: Some(
+                    "Fast Pay expired before all required signatures were collected".into(),
+                ),
+            });
+        }
+        Some(pending.response.clone())
+    }
+
+    pub fn recipient_inbox(&self, payee: &str) -> Vec<FastPayInboxItem> {
+        let now = unix_timestamp();
+        let mut items = self
+            .inner
+            .read()
+            .ok()
+            .map(|state| {
+                state
+                    .pending
+                    .iter()
+                    .filter_map(|(payment_id, pending)| {
+                        let payee_channel_id = pending.payee_channel_id.as_ref()?;
+                        let bill_hex = pending.response.bill_hex.as_ref()?;
+                        if pending.payee != payee
+                            || pending.response.status != "awaiting_recipient"
+                            || now.saturating_sub(pending.created_at) > PENDING_TTL_SECONDS
+                        {
+                            return None;
+                        }
+                        Some(FastPayInboxItem {
+                            payment_id: payment_id.clone(),
+                            payer: pending.payer.clone(),
+                            payee: pending.payee.clone(),
+                            amount: pending.amount.clone(),
+                            channel_id: pending.channel_id.clone(),
+                            payee_channel_id: payee_channel_id.clone(),
+                            status: pending.response.status.clone(),
+                            bill_hex: bill_hex.clone(),
+                            summary: pending.response.summary.clone(),
+                            created_at: pending.created_at,
+                        })
+                    })
+                    .collect::<Vec<_>>()
             })
-        })
+            .unwrap_or_default();
+        items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        items
     }
 
     pub async fn settle_fast_pay(
@@ -129,34 +193,43 @@ impl HubState {
     ) -> HubResult<FastPayResponse> {
         let signer = self.hub_signer.as_ref().ok_or_else(|| {
             HubError::State(
-                "hub settlement signer is not configured; refusing to report payment as settled"
-                    .into(),
+                "hub settlement signer is not configured; refusing to prepare a payment".into(),
             )
         })?;
+        let payer = payer.trim();
+        let payee = payee.trim();
+        if payer.is_empty() || payee.is_empty() || payer == payee {
+            return Err(HubError::Payment(
+                "payer and payee must be different valid addresses".into(),
+            ));
+        }
+        if payer == self.hub_address {
+            return Err(HubError::Payment(
+                "the reference hub accepts customer-originated payments only".into(),
+            ));
+        }
+
         let amount_mei = parse_amount_mei(amount_wire)?;
-        if amount_mei <= 0.0 {
+        if !amount_mei.is_finite() || amount_mei <= 0.0 {
             return Err(HubError::Payment("amount must be positive".into()));
         }
-        let payer_debit = amount_mei;
-        let payee_credit = amount_mei;
 
         let payer_channel = self.node.query_channel(channel_id).await?;
         if !payer_channel.is_open() {
-            return Err(HubError::Channel("channel is not open".into()));
+            return Err(HubError::Channel("payer channel is not open".into()));
         }
         if payer_channel.id != channel_id {
-            return Err(HubError::Channel("channel id mismatch".into()));
+            return Err(HubError::Channel("payer channel id mismatch".into()));
         }
-
         let payer_side = payer_channel
             .party_side(payer)
-            .ok_or_else(|| HubError::Payment(format!("payer {payer} not in channel")))?;
-        if !matches!(payer_side, ChannelSide::Left)
-            || payer_channel.right.address != self.hub_address
-            || payee != self.hub_address
-        {
+            .ok_or_else(|| HubError::Payment(format!("payer {payer} not in payer channel")))?;
+        let hub_side = payer_channel.party_side(&self.hub_address).ok_or_else(|| {
+            HubError::Payment("payer channel is not connected to this hub".into())
+        })?;
+        if hub_side == payer_side {
             return Err(HubError::Payment(
-                "reference hub currently supports user-left to hub-right payments only".into(),
+                "payer and hub cannot occupy the same channel side".into(),
             ));
         }
 
@@ -169,16 +242,20 @@ impl HubState {
         )
         .await?;
 
-        if matches!(payee_route, PayeeRoute::CrossChannel { .. }) {
-            return Err(HubError::Payment(
-                "cross-channel settlement is not ready: recipient signature exchange is required"
-                    .into(),
-            ));
-        }
-
         let payee_channel_l1 = match &payee_route {
-            PayeeRoute::CrossChannel { channel_id: id, .. } => {
-                Some(self.node.query_channel(id).await?)
+            PayeeRoute::CrossChannel { channel_id, .. } => {
+                let channel = self.node.query_channel(channel_id).await?;
+                if !channel.is_open()
+                    || channel.id != *channel_id
+                    || channel.party_side(payee).is_none()
+                    || channel.party_side(&self.hub_address).is_none()
+                {
+                    return Err(HubError::Payment(
+                        "recipient Fast Pay channel is not open or is not connected to this hub"
+                            .into(),
+                    ));
+                }
+                Some(channel)
             }
             PayeeRoute::SameChannel { .. } => None,
         };
@@ -188,103 +265,98 @@ impl HubState {
             .inner
             .write()
             .map_err(|_| HubError::State("state lock poisoned".into()))?;
-        guard
-            .pending
-            .retain(|_, pending| timestamp.saturating_sub(pending.created_at) <= 300);
-        if guard.pending.len() >= 1024 {
+        guard.pending.retain(|_, pending| {
+            timestamp.saturating_sub(pending.created_at) <= PENDING_TTL_SECONDS
+        });
+        if guard.pending.len() >= MAX_PENDING_SETTLEMENTS {
             return Err(HubError::State(
                 "too many pending settlements; retry after pending proposals expire".into(),
             ));
         }
 
-        let base_ledger = {
-            let payer_ledger = guard
-                .channels
-                .entry(channel_id.to_owned())
-                .or_insert_with(|| channel_ledger_from_l1(&payer_channel));
-            let base_ledger = payer_ledger.clone();
-
-            if payer_available_mei(payer_ledger, payer_side) < payer_debit {
-                return Err(HubError::Payment(format!(
-                    "insufficient channel balance: need {payer_debit} HAC"
-                )));
-            }
-
-            apply_debit(payer_ledger, payer_side, payer_debit);
-            payer_ledger.bill_auto_number = next_bill_auto_number(payer_ledger, &payer_channel);
-
-            if let PayeeRoute::SameChannel { side } = &payee_route {
-                apply_credit(payer_ledger, *side, payee_credit);
-            }
-            base_ledger
-        };
-
-        let (route_label, payee_channel_id, _payee_balances) = match payee_route {
-            PayeeRoute::SameChannel { .. } => ("same_channel", None, None),
-            PayeeRoute::CrossChannel {
-                channel_id: payee_ch_id,
-                side,
-            } => {
-                let payee_channel = payee_channel_l1
-                    .as_ref()
-                    .ok_or_else(|| HubError::State("payee channel missing".into()))?;
-                let payee_ledger = guard
-                    .channels
-                    .entry(payee_ch_id.clone())
-                    .or_insert_with(|| channel_ledger_from_l1(payee_channel));
-                apply_credit(payee_ledger, side, payee_credit);
-                payee_ledger.bill_auto_number = next_bill_auto_number(payee_ledger, payee_channel);
-                let balances = Some((
-                    format_amount_mei(payee_ledger.left_balance_mei),
-                    format_amount_mei(payee_ledger.right_balance_mei),
-                ));
-                ("cross_channel", Some(payee_ch_id), balances)
-            }
-        };
-
-        let payer_ledger = guard
+        let base_ledger = guard
             .channels
-            .get(channel_id)
-            .ok_or_else(|| HubError::State("payer ledger missing".into()))?;
+            .entry(channel_id.to_owned())
+            .or_insert_with(|| channel_ledger_from_l1(&payer_channel))
+            .clone();
+        if payer_available_mei(&base_ledger, payer_side) < amount_mei {
+            return Err(HubError::Payment(format!(
+                "insufficient channel balance: need {amount_mei} HAC"
+            )));
+        }
+        let mut next_ledger = base_ledger.clone();
+        apply_debit(&mut next_ledger, payer_side, amount_mei);
+        next_ledger.bill_auto_number = next_bill_auto_number(&base_ledger, &payer_channel);
 
-        let payment_id = uuid::Uuid::new_v4().to_string();
-
-        let summary = match route_label {
-            "same_channel" => {
-                format!("Fast Pay prepared {amount_mei} HAC to {payee} on-channel with no fee")
-            }
-            _ => format!(
-                "Fast Pay routed {amount_mei} HAC to {payee} via channel {} with no fee",
-                payee_channel_id.as_deref().unwrap_or("?"),
-            ),
-        };
+        let (route_label, payee_channel_id, payee_base_ledger, payee_next_ledger, payee_side) =
+            match &payee_route {
+                PayeeRoute::SameChannel { side } => {
+                    apply_credit(&mut next_ledger, *side, amount_mei);
+                    ("same_channel", None, None, None, None)
+                }
+                PayeeRoute::CrossChannel { channel_id, side } => {
+                    apply_credit(&mut next_ledger, hub_side, amount_mei);
+                    let payee_channel = payee_channel_l1
+                        .as_ref()
+                        .ok_or_else(|| HubError::State("recipient channel missing".into()))?;
+                    let payee_hub_side =
+                        payee_channel.party_side(&self.hub_address).ok_or_else(|| {
+                            HubError::State("hub missing from recipient channel".into())
+                        })?;
+                    if payee_hub_side == *side {
+                        return Err(HubError::Payment(
+                            "recipient and hub cannot occupy the same channel side".into(),
+                        ));
+                    }
+                    let base = guard
+                        .channels
+                        .entry(channel_id.clone())
+                        .or_insert_with(|| channel_ledger_from_l1(payee_channel))
+                        .clone();
+                    if payer_available_mei(&base, payee_hub_side) < amount_mei {
+                        return Err(HubError::Payment(format!(
+                            "hub has insufficient recipient-channel liquidity: need {amount_mei} HAC"
+                        )));
+                    }
+                    let mut next = base.clone();
+                    apply_debit(&mut next, payee_hub_side, amount_mei);
+                    apply_credit(&mut next, *side, amount_mei);
+                    next.bill_auto_number = next_bill_auto_number(&base, payee_channel);
+                    (
+                        "cross_channel",
+                        Some(channel_id.clone()),
+                        Some(base),
+                        Some(next),
+                        Some(*side),
+                    )
+                }
+            };
 
         let payer_wire = ChannelWireInput {
             channel: payer_channel.clone(),
             channel_id_hex: channel_id.to_owned(),
-            left_balance_mei: payer_ledger.left_balance_mei,
-            right_balance_mei: payer_ledger.right_balance_mei,
+            left_balance_mei: next_ledger.left_balance_mei,
+            right_balance_mei: next_ledger.right_balance_mei,
             left_satoshi: payer_channel.left.satoshi,
             right_satoshi: payer_channel.right.satoshi,
-            bill_auto_number: payer_ledger.bill_auto_number,
+            bill_auto_number: next_ledger.bill_auto_number,
         };
 
         let mut documents = if route_label == "same_channel" {
-            build_same_channel_bill(&payer_wire, payer_debit, timestamp)?
+            build_same_channel_bill(&payer_wire, payer_side, amount_mei, timestamp)?
         } else {
-            let payee_ch_id = payee_channel_id
-                .clone()
-                .ok_or_else(|| HubError::State("payee channel id missing".into()))?;
             let payee_channel = payee_channel_l1
                 .as_ref()
-                .ok_or_else(|| HubError::State("payee channel missing".into()))?;
-            let payee_ledger = guard
-                .channels
-                .get(&payee_ch_id)
-                .ok_or_else(|| HubError::State("payee ledger missing".into()))?;
+                .ok_or_else(|| HubError::State("recipient channel missing".into()))?;
+            let payee_channel_id = payee_channel_id
+                .as_ref()
+                .ok_or_else(|| HubError::State("recipient channel id missing".into()))?;
+            let payee_ledger = payee_next_ledger
+                .as_ref()
+                .ok_or_else(|| HubError::State("recipient ledger missing".into()))?;
             let payee_wire = ChannelWireInput {
                 channel: payee_channel.clone(),
-                channel_id_hex: payee_ch_id,
+                channel_id_hex: payee_channel_id.clone(),
                 left_balance_mei: payee_ledger.left_balance_mei,
                 right_balance_mei: payee_ledger.right_balance_mei,
                 left_satoshi: payee_channel.left.satoshi,
@@ -293,42 +365,55 @@ impl HubState {
             };
             build_cross_channel_bill(
                 &payer_wire,
-                payer_debit,
+                payer_side,
+                amount_mei,
                 &payee_wire,
-                payee_credit,
+                payee_side.ok_or_else(|| HubError::State("recipient side missing".into()))?,
+                amount_mei,
                 timestamp,
             )?
         };
         signer.sign_documents(&mut documents)?;
-        let bill_hex = documents.to_bill_hex();
+        if !documents
+            .chain_payment
+            .signature_verified_for_readable(&self.hub_address)
+        {
+            return Err(HubError::State(
+                "hub failed to verify its own settlement signature".into(),
+            ));
+        }
 
-        let next_ledger = guard
-            .channels
-            .get(channel_id)
-            .cloned()
-            .ok_or_else(|| HubError::State("prepared ledger missing".into()))?;
-        guard
-            .channels
-            .insert(channel_id.to_owned(), base_ledger.clone());
+        let payment_id = uuid::Uuid::new_v4().to_string();
+        let summary = if route_label == "same_channel" {
+            format!("Fast Pay prepared {amount_mei} HAC to {payee} on-channel with no fee")
+        } else {
+            format!(
+                "Fast Pay prepared {amount_mei} HAC to {payee}; waiting for recipient confirmation with no fee"
+            )
+        };
         let response = FastPayResponse {
             payment_id: payment_id.clone(),
             status: "pending".into(),
-            bill_hex: Some(bill_hex),
+            bill_hex: Some(documents.to_bill_hex()),
             summary: Some(summary),
         };
-        guard.pending.insert(
-            payment_id,
-            PendingSettlement {
-                created_at: timestamp,
-                channel_id: channel_id.to_owned(),
-                base_ledger,
-                next_ledger,
-                response: response.clone(),
-            },
-        );
-        if let Some(path) = &self.state_path {
-            save_state_file(path, &guard)?;
-        }
+        let pending = PendingSettlement {
+            created_at: timestamp,
+            payer: payer.to_owned(),
+            payee: payee.to_owned(),
+            amount: format_amount_mei(amount_mei),
+            channel_id: channel_id.to_owned(),
+            base_ledger,
+            next_ledger,
+            payee_channel_id,
+            payee_base_ledger,
+            payee_next_ledger,
+            response: response.clone(),
+        };
+
+        let mut next_state = guard.clone();
+        next_state.pending.insert(payment_id, pending);
+        self.commit_state(&mut guard, next_state)?;
         Ok(response)
     }
 
@@ -346,8 +431,11 @@ impl HubState {
             .get(payment_id)
             .cloned()
             .ok_or_else(|| HubError::NotFound(format!("pending payment {payment_id}")))?;
-        if unix_timestamp().saturating_sub(pending.created_at) > 300 {
-            guard.pending.remove(payment_id);
+
+        if unix_timestamp().saturating_sub(pending.created_at) > PENDING_TTL_SECONDS {
+            let mut next_state = guard.clone();
+            next_state.pending.remove(payment_id);
+            self.commit_state(&mut guard, next_state)?;
             return Err(HubError::Payment(
                 "pending settlement expired; prepare the payment again".into(),
             ));
@@ -358,55 +446,142 @@ impl HubState {
             .bill_hex
             .as_deref()
             .ok_or_else(|| HubError::State("pending settlement bill missing".into()))?;
-        let expected = ChannelPayCompleteDocuments::from_bill_hex(expected_hex)?;
-        let signed = ChannelPayCompleteDocuments::from_bill_hex(signed_bill_hex)?;
-        if expected.chain_payment.sign_stuff_hash() != signed.chain_payment.sign_stuff_hash() {
+        let mut expected = ChannelPayCompleteDocuments::from_bill_hex(expected_hex)?;
+        let submitted = ChannelPayCompleteDocuments::from_bill_hex(signed_bill_hex)?;
+        if !expected.prove_bindings_valid() || !submitted.prove_bindings_valid() {
+            return Err(HubError::Payment(
+                "settlement prove bodies do not match the signed channel checkers".into(),
+            ));
+        }
+        if expected.chain_payment.sign_stuff_hash() != submitted.chain_payment.sign_stuff_hash() {
             return Err(HubError::Payment(
                 "confirmed settlement does not match the prepared bill".into(),
             ));
         }
-        if !signed.prove_bindings_valid() {
+        expected
+            .chain_payment
+            .merge_verified_signatures(&submitted.chain_payment)?;
+
+        if !expected
+            .chain_payment
+            .signature_verified_for_readable(&self.hub_address)
+        {
             return Err(HubError::Payment(
-                "confirmed settlement prove bodies do not match the signed channel checkers".into(),
+                "confirmed settlement is missing the verified hub signature".into(),
             ));
         }
-        if !signed.chain_payment.all_signatures_verified() {
+        if pending.payer.is_empty()
+            || !expected
+                .chain_payment
+                .signature_verified_for_readable(&pending.payer)
+        {
+            return Err(HubError::Payment(
+                "confirmed settlement is missing the verified payer signature".into(),
+            ));
+        }
+
+        let merged_bill_hex = expected.to_bill_hex();
+        let is_cross_channel = pending.payee_channel_id.is_some();
+        if is_cross_channel && !expected.chain_payment.all_signatures_verified() {
+            let mut awaiting = pending.clone();
+            awaiting.response.status = "awaiting_recipient".into();
+            awaiting.response.bill_hex = Some(merged_bill_hex);
+            awaiting.response.summary = Some(format!(
+                "Fast Pay {} HAC from {} is waiting for recipient confirmation",
+                pending.amount, pending.payer
+            ));
+            let response = awaiting.response.clone();
+            let mut next_state = guard.clone();
+            next_state.pending.insert(payment_id.to_owned(), awaiting);
+            self.commit_state(&mut guard, next_state)?;
+            return Ok(response);
+        }
+
+        if !expected.chain_payment.all_signatures_verified() {
             return Err(HubError::Payment(
                 "confirmed settlement is missing required verified signatures".into(),
             ));
         }
+        if is_cross_channel
+            && (pending.payee.is_empty()
+                || !expected
+                    .chain_payment
+                    .signature_verified_for_readable(&pending.payee))
+        {
+            return Err(HubError::Payment(
+                "confirmed routed settlement is missing the verified recipient signature".into(),
+            ));
+        }
 
-        let current = guard
+        let payer_is_current = guard
             .channels
             .get(&pending.channel_id)
-            .ok_or_else(|| HubError::State("current channel ledger missing".into()))?;
-        if current != &pending.base_ledger {
-            guard.pending.remove(payment_id);
+            .is_some_and(|ledger| ledger == &pending.base_ledger);
+        let payee_is_current = match (
+            pending.payee_channel_id.as_ref(),
+            pending.payee_base_ledger.as_ref(),
+        ) {
+            (Some(channel_id), Some(base)) => guard
+                .channels
+                .get(channel_id)
+                .is_some_and(|ledger| ledger == base),
+            (None, None) => true,
+            _ => false,
+        };
+        if !payer_is_current || !payee_is_current {
+            let mut next_state = guard.clone();
+            next_state.pending.remove(payment_id);
+            self.commit_state(&mut guard, next_state)?;
             return Err(HubError::Payment(
                 "prepared settlement is stale; prepare the payment again".into(),
             ));
         }
 
-        guard
-            .channels
-            .insert(pending.channel_id.clone(), pending.next_ledger);
-        guard.pending.remove(payment_id);
+        let summary = if is_cross_channel {
+            Some(format!(
+                "Fast Pay settled {} HAC to {} with no fee",
+                pending.amount, pending.payee
+            ))
+        } else {
+            pending
+                .response
+                .summary
+                .map(|summary| summary.replace("prepared", "settled"))
+        };
         let response = FastPayResponse {
             payment_id: payment_id.to_owned(),
             status: "settled".into(),
-            bill_hex: Some(signed_bill_hex.to_owned()),
-            summary: pending
-                .response
-                .summary
-                .map(|summary| summary.replace("prepared", "settled")),
+            bill_hex: Some(merged_bill_hex),
+            summary,
         };
-        guard
+
+        let mut next_state = guard.clone();
+        next_state
+            .channels
+            .insert(pending.channel_id.clone(), pending.next_ledger);
+        if let (Some(channel_id), Some(next_ledger)) =
+            (pending.payee_channel_id, pending.payee_next_ledger)
+        {
+            next_state.channels.insert(channel_id, next_ledger);
+        }
+        next_state.pending.remove(payment_id);
+        next_state
             .payments
             .insert(payment_id.to_owned(), response.clone());
-        if let Some(path) = &self.state_path {
-            save_state_file(path, &guard)?;
-        }
+        self.commit_state(&mut guard, next_state)?;
         Ok(response)
+    }
+
+    fn commit_state(
+        &self,
+        guard: &mut HubPersistedState,
+        next_state: HubPersistedState,
+    ) -> HubResult<()> {
+        if let Some(path) = &self.state_path {
+            save_state_file(path, &next_state)?;
+        }
+        *guard = next_state;
+        Ok(())
     }
 }
 
