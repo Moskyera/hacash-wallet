@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import HacdDiamondVisual from "../components/HacdDiamondVisual";
 import { formatInvokeError } from "../formatInvokeError";
@@ -23,30 +23,44 @@ export default function HacdScreen({ locked, busy, ownedHint, onNotify, onGoSend
   const [lookup, setLookup] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const onNotifyRef = useRef(onNotify);
+  onNotifyRef.current = onNotify;
 
-  const refresh = useCallback(async () => {
-    if (locked) {
-      setOwned([]);
-      setError(t("hacd.unlockFirst"));
-      return;
-    }
-    setLoading(true);
-    setError("");
-    try {
-      const names = await api.listOwnedDiamonds();
-      setOwned(names);
-    } catch (e) {
-      const msg = formatInvokeError(e);
-      setError(msg);
-      onNotify(msg, "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [locked, onNotify, t]);
-
+  // Seed from wallet assets without re-fetch loops when the parent re-renders.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (ownedHint && ownedHint.length > 0) {
+      setOwned(ownedHint);
+    }
+  }, [ownedHint]);
+
+  const refresh = useCallback(
+    async (opts?: { notify?: boolean }) => {
+      if (locked) {
+        setOwned([]);
+        setError(t("hacd.unlockFirst"));
+        return;
+      }
+      setLoading(true);
+      setError("");
+      try {
+        const names = await api.listOwnedDiamonds();
+        setOwned(names);
+      } catch (e) {
+        const msg = formatInvokeError(e);
+        setError(msg);
+        if (opts?.notify) onNotifyRef.current(msg, "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [locked, t],
+  );
+
+  // Load once when unlocked; do not depend on unstable parent callbacks.
+  useEffect(() => {
+    void refresh({ notify: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-run on lock change
+  }, [locked]);
 
   const lookupName = normalizeHacdName(lookup);
   const showLookup = isValidHacdName(lookupName);
@@ -60,7 +74,12 @@ export default function HacdScreen({ locked, busy, ownedHint, onNotify, onGoSend
           <p className="muted">{t("hacd.subtitle")}</p>
         </div>
         <div className="row-btns">
-          <button type="button" className="btn-ghost" disabled={busy || loading || locked} onClick={() => void refresh()}>
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={busy || loading || locked}
+            onClick={() => void refresh({ notify: true })}
+          >
             {loading ? t("hacd.refreshing") : t("hacd.refresh")}
           </button>
           {onGoSend && (

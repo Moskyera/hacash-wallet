@@ -524,6 +524,8 @@ export const api = {
   updateSettings: (settings: WalletSettings) =>
     invoke<void>("wallet_update_settings", { settings }),
   discoverNodes: () => invoke<NodeDiscoveryReport>("wallet_discover_nodes"),
+  fetchAssetPrices: () =>
+    invoke<{ hac_usd: number; btc_usd: number }>("wallet_fetch_asset_prices"),
   webauthnRegisterBegin: (clientOrigin?: string) =>
     invoke<string>("wallet_webauthn_register_begin", { clientOrigin: clientOrigin ?? null }),
   webauthnRegisterFinish: (credentialJson: string) =>

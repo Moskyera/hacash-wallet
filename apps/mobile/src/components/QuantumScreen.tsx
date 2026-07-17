@@ -11,6 +11,7 @@ import {
   type QuantumSettings,
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { useLocale } from "../locale";
 import { copyWithPrivacyClear } from "../privacy";
 import {
   accountSummaryFromSettings,
@@ -47,6 +48,7 @@ export default function QuantumScreen({
   onToast,
   onGoLegacySend,
 }: Props) {
+  const { t } = useLocale();
   const [settings, setSettings] = useState<QuantumSettings | null>(null);
   const [account, setAccount] = useState<QuantumAccountSummary | null>(null);
   const [ksPass, setKsPass] = useState("");
@@ -363,11 +365,18 @@ export default function QuantumScreen({
 
   return (
     <>
+      <div className="card quantum-lab-banner">
+        <h2 style={{ marginTop: 0 }}>{t("quantum.lab.title")}</h2>
+        <p className="muted" style={{ marginBottom: "0.5rem" }}>
+          {t("quantum.lab.tagline")}
+        </p>
+        <p className="muted small">{t("quantum.lab.disclaimer")}</p>
+      </div>
       <div className="card quantum-panel">
         <div className="toggle-row">
           <div>
-            <strong>Quantum Mode</strong>
-            <p className="muted">ML-DSA-65 · v6 PQC / v7 Hybrid</p>
+            <strong>{t("quantum.lab.title")}</strong>
+            <p className="muted">ML-DSA-65 · v6 PQC / v7 Hybrid · lab only</p>
           </div>
           <label className="quantum-switch">
             <input
@@ -379,10 +388,6 @@ export default function QuantumScreen({
             <span />
           </label>
         </div>
-        <p className="muted small">
-          Experimental Type 4 support. PQC and hybrid signing are implemented, but this wallet has
-          not completed an independent cryptographic audit.
-        </p>
 
         {settings.quantum_mode && (
           <>

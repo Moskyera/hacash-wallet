@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import HacdDiamondVisual from "../components/HacdDiamondVisual";
 import { formatInvokeError } from "../formatInvokeError";
@@ -20,29 +20,41 @@ export default function HacdTab({ locked, busy, ownedHint, onToast, onGoPay }: P
   const [lookup, setLookup] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-
-  const refresh = useCallback(async () => {
-    if (locked) {
-      setOwned([]);
-      setError(t("hacd.unlockFirst"));
-      return;
-    }
-    setLoading(true);
-    setError("");
-    try {
-      setOwned(await api.listOwnedDiamonds());
-    } catch (e) {
-      const msg = formatInvokeError(e);
-      setError(msg);
-      onToast(msg, "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [locked, onToast, t]);
+  const onToastRef = useRef(onToast);
+  onToastRef.current = onToast;
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (ownedHint && ownedHint.length > 0) {
+      setOwned(ownedHint);
+    }
+  }, [ownedHint]);
+
+  const refresh = useCallback(
+    async (opts?: { notify?: boolean }) => {
+      if (locked) {
+        setOwned([]);
+        setError(t("hacd.unlockFirst"));
+        return;
+      }
+      setLoading(true);
+      setError("");
+      try {
+        setOwned(await api.listOwnedDiamonds());
+      } catch (e) {
+        const msg = formatInvokeError(e);
+        setError(msg);
+        if (opts?.notify) onToastRef.current(msg, "error");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [locked, t],
+  );
+
+  useEffect(() => {
+    void refresh({ notify: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-run on lock change
+  }, [locked]);
 
   const lookupName = normalizeHacdName(lookup);
   const showLookup = isValidHacdName(lookupName);
@@ -54,7 +66,11 @@ export default function HacdTab({ locked, busy, ownedHint, onToast, onGoPay }: P
         <h1>{t("hacd.title")}</h1>
         <p className="muted">{t("hacd.subtitle")}</p>
         <div className="row-btns">
-          <button type="button" disabled={busy || loading || locked} onClick={() => void refresh()}>
+          <button
+            type="button"
+            disabled={busy || loading || locked}
+            onClick={() => void refresh({ notify: true })}
+          >
             {loading ? t("hacd.refreshing") : t("hacd.refresh")}
           </button>
           {onGoPay && (

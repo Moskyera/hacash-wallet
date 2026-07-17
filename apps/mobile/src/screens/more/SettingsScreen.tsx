@@ -276,6 +276,10 @@ export default function SettingsScreen({
           If Test node fails: turn VPN off, try Wi‑Fi and mobile data, open{" "}
           <code>http://nodeapi.hacash.org/query/latest</code> in Chrome on the phone.
         </p>
+        <p className="label" style={{ marginTop: "1rem" }}>
+          {t("node.grapheneTitle")}
+        </p>
+        <p className="muted small">{t("node.grapheneHelp")}</p>
         <p className="muted small">
           Mobile DUST requires a remote relay configured for the same node. Changing the node does
           not reconfigure a relay that is operated by somebody else.

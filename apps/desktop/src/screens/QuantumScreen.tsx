@@ -7,6 +7,7 @@ import QuantumToggle from "../components/QuantumToggle";
 import SendQuantumTx from "../components/SendQuantumTx";
 import QuantumNodeHealth from "../components/QuantumNodeHealth";
 import { formatInvokeError } from "../formatInvokeError";
+import { useLocale } from "../locale";
 import { copyWithPrivacyClear } from "../privacy";
 import type { Screen } from "./types";
 
@@ -27,6 +28,7 @@ export default function QuantumScreen({
   onNavigate,
   onSetSendTo,
 }: Props) {
+  const { t } = useLocale();
   const [quantumAccount, setQuantumAccount] = useState<QuantumAccountSummary | null>(null);
   const { probe } = useType4Probe(
     quantumAccount?.address,
@@ -36,6 +38,13 @@ export default function QuantumScreen({
 
   return (
     <section className="stack">
+      <div className="panel quantum-lab-banner">
+        <h2 style={{ marginTop: 0 }}>{t("quantum.lab.title")}</h2>
+        <p className="muted" style={{ marginBottom: "0.5rem" }}>
+          {t("quantum.lab.tagline")}
+        </p>
+        <p className="muted small-note">{t("quantum.lab.disclaimer")}</p>
+      </div>
       <QuantumToggle onAccountChange={setQuantumAccount} />
       <QuantumNodeHealth nodeUrl={settings?.node_url ?? status?.node_url} />
       <QuantumFundingCard

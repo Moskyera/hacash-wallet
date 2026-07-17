@@ -474,6 +474,8 @@ export const api = {
   pingNode: () => invoke<Record<string, unknown>>("wallet_ping_node"),
   pingNodeUrl: (nodeUrl?: string) =>
     invoke<Record<string, unknown>>("wallet_ping_node_url", { nodeUrl: nodeUrl ?? null }),
+  fetchAssetPrices: () =>
+    invoke<{ hac_usd: number; btc_usd: number }>("wallet_fetch_asset_prices"),
   discoverNodes: () => invoke<NodeDiscoveryReport>("wallet_discover_nodes"),
   resetWallet: () => invoke<void>("wallet_reset"),
   updatePrivacy: (privacy: PrivacySettings) =>

@@ -181,6 +181,44 @@ pub async fn wallet_ping_node(state: State<'_, AppState>) -> Result<serde_json::
         .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
 }
 
+/// USD spot prices via Rust HTTP (avoids WebView CORS; works on desktop + GrapheneOS).
+#[tauri::command]
+pub async fn wallet_fetch_asset_prices() -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("HacashWallet/0.1.52")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url =
+        "https://api.coingecko.com/api/v3/simple/price?ids=hacash,bitcoin&vs_currencies=usd";
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("price fetch failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("price fetch HTTP {}", resp.status()));
+    }
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("price parse failed: {e}"))?;
+    let hac = data
+        .get("hacash")
+        .and_then(|v| v.get("usd"))
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "missing hacash usd price".to_string())?;
+    let btc = data
+        .get("bitcoin")
+        .and_then(|v| v.get("usd"))
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| "missing bitcoin usd price".to_string())?;
+    Ok(serde_json::json!({
+        "hac_usd": hac,
+        "btc_usd": btc,
+    }))
+}
+
 #[tauri::command]
 pub async fn wallet_ping_node_url(
     node_url: Option<String>,

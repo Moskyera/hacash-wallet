@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { quantumApi, QuantumAccountSummary, QuantumSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { useLocale } from "../locale";
 import {
   accountSummaryFromSettings,
   kindLabel,
@@ -20,6 +21,7 @@ function confirmReplaceKeystore(hasAccount: boolean): boolean {
 }
 
 export default function QuantumToggle({ onAccountChange }: Props) {
+  const { t } = useLocale();
   const [settings, setSettings] = useState<QuantumSettings | null>(null);
   const [account, setAccount] = useState<QuantumAccountSummary | null>(null);
   const [pass, setPass] = useState("");
@@ -116,8 +118,8 @@ export default function QuantumToggle({ onAccountChange }: Props) {
     <section className="panel quantum-panel">
       <div className="panel-head row-between">
         <div>
-          <h3>Quantum Mode</h3>
-          <p className="muted">ML-DSA-65 · v6 PQC / v7 Hybrid · Keystore v3</p>
+          <h3>{t("quantum.lab.title")}</h3>
+          <p className="muted">ML-DSA-65 · v6 PQC / v7 Hybrid · Keystore v3 · lab only</p>
         </div>
         <label className="quantum-switch">
           <input
