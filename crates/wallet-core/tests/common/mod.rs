@@ -1,3 +1,7 @@
+// Each integration test is a separate crate and intentionally uses only a
+// subset of these shared helpers.
+#![allow(dead_code)]
+
 //! Shared helpers for wallet security audit integration tests.
 
 use std::sync::Mutex;

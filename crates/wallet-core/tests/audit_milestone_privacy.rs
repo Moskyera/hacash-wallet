@@ -13,8 +13,10 @@ fn milestone_privacy_skips_history_storage() {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("privacy-passphrase12").unwrap();
-            let mut privacy = PrivacySettings::default();
-            privacy.store_tx_history = false;
+            let privacy = PrivacySettings {
+                store_tx_history: false,
+                ..PrivacySettings::default()
+            };
             svc.update_privacy_settings(privacy).unwrap();
             svc.audit_append_history_if_enabled(
                 PaymentRail::L1OnChain,
@@ -67,9 +69,11 @@ fn milestone_privacy_redacts_history_view() {
                 "send",
             )
             .unwrap();
-            let mut privacy = PrivacySettings::default();
-            privacy.hide_addresses = true;
-            privacy.hide_balances = true;
+            let privacy = PrivacySettings {
+                hide_addresses: true,
+                hide_balances: true,
+                ..PrivacySettings::default()
+            };
             svc.update_privacy_settings(privacy).unwrap();
             let rows = svc.tx_history();
             assert_eq!(rows.len(), 1);

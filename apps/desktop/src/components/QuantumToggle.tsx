@@ -4,8 +4,6 @@ import { formatInvokeError } from "../formatInvokeError";
 import { useLocale } from "../locale";
 import {
   accountSummaryFromSettings,
-  kindLabel,
-  REPLACE_KEYSTORE_WARNING,
   summaryFromAccountInfo,
 } from "../quantumMeta";
 import AddressBadge from "./AddressBadge";
@@ -14,11 +12,6 @@ import KeystoreV3Modal from "./KeystoreV3Modal";
 type Props = {
   onAccountChange?: (acc: QuantumAccountSummary | null) => void;
 };
-
-function confirmReplaceKeystore(hasAccount: boolean): boolean {
-  if (!hasAccount) return true;
-  return window.confirm(`${REPLACE_KEYSTORE_WARNING}\n\nContinue?`);
-}
 
 export default function QuantumToggle({ onAccountChange }: Props) {
   const { t } = useLocale();
@@ -60,19 +53,19 @@ export default function QuantumToggle({ onAccountChange }: Props) {
 
   async function createPqc() {
     if (pass.length < 8) {
-      setErr(`Password needs at least 8 characters (${pass.length}/8).`);
+      setErr(t("quantum.passwordProgress", { current: pass.length, count: 8 }));
       return;
     }
-    if (!confirmReplaceKeystore(!!account)) return;
+    if (account && !window.confirm(`${t("quantum.replaceWarning")}\n\n${t("common.continue")}?`)) return;
     setBusy(true);
     setErr("");
-    setInfo("Creating PQC (v6)…");
+    setInfo(t("quantum.creatingAccount", { kind: t("account.pqc") }));
     try {
       const acc = summaryFromAccountInfo(await quantumApi.createPqc(pass));
       setAccount(acc);
       onAccountChange?.(acc);
       await refreshSettings();
-      setInfo(`Created: ${acc.address}`);
+      setInfo(t("quantum.accountCreatedAddress", { address: acc.address }));
     } catch (e) {
       setErr(formatInvokeError(e));
       setInfo("");
@@ -83,13 +76,13 @@ export default function QuantumToggle({ onAccountChange }: Props) {
 
   async function createHybrid() {
     if (pass.length < 8) {
-      setErr(`Password needs at least 8 characters (${pass.length}/8).`);
+      setErr(t("quantum.passwordProgress", { current: pass.length, count: 8 }));
       return;
     }
-    if (!confirmReplaceKeystore(!!account)) return;
+    if (account && !window.confirm(`${t("quantum.replaceWarning")}\n\n${t("common.continue")}?`)) return;
     setBusy(true);
     setErr("");
-    setInfo("Creating Hybrid (v7)…");
+    setInfo(t("quantum.creatingAccount", { kind: t("account.hybrid") }));
     try {
       const acc = summaryFromAccountInfo(
         await quantumApi.createHybrid(pass, legacyPrikey || undefined),
@@ -97,7 +90,7 @@ export default function QuantumToggle({ onAccountChange }: Props) {
       setAccount(acc);
       onAccountChange?.(acc);
       await refreshSettings();
-      setInfo(`Created: ${acc.address}`);
+      setInfo(t("quantum.accountCreatedAddress", { address: acc.address }));
     } catch (e) {
       setErr(formatInvokeError(e));
       setInfo("");
@@ -109,7 +102,7 @@ export default function QuantumToggle({ onAccountChange }: Props) {
   if (!settings) {
     return (
       <section className="panel quantum-panel">
-        <p className="muted">Loading quantum settings…</p>
+        <p className="muted">{t("quantum.loadingSettings")}</p>
       </section>
     );
   }
@@ -119,7 +112,7 @@ export default function QuantumToggle({ onAccountChange }: Props) {
       <div className="panel-head row-between">
         <div>
           <h3>{t("quantum.lab.title")}</h3>
-          <p className="muted">ML-DSA-65 · v6 PQC / v7 Hybrid · Keystore v3 · lab only</p>
+          <p className="muted">{t("quantum.algorithmSummaryDesktop")}</p>
         </div>
         <label className="quantum-switch">
           <input
@@ -142,12 +135,14 @@ export default function QuantumToggle({ onAccountChange }: Props) {
                 kind={account.kind}
               />
               <code className="mono">{account.address}</code>
-              <span className="muted">{kindLabel(account.kind)}</span>
+              <span className="muted">
+                {t(account.kind === "hybrid" ? "account.hybrid" : "account.pqc")}
+              </span>
             </div>
           )}
 
           <label className="field">
-            Keystore password (≥8 chars, local only)
+            {t("quantum.keystorePasswordLocal", { count: 8 })}
             <input
               type="password"
               value={pass}
@@ -155,29 +150,29 @@ export default function QuantumToggle({ onAccountChange }: Props) {
               autoComplete="new-password"
             />
             <span className={`field-hint ${pass.length >= 8 ? "ok" : "warn"}`}>
-              {pass.length}/8 characters
+              {t("quantum.characterProgress", { current: pass.length, count: 8 })}
             </span>
           </label>
 
           <label className="field">
-            Optional legacy prikey (64-hex) for hybrid-from-secp
+            {t("quantum.legacyPrivateKeyDesktop")}
             <input
               className="mono"
               value={legacyPrikey}
               onChange={(e) => setLegacyPrikey(e.target.value)}
-              placeholder="leave empty for fresh hybrid"
+              placeholder={t("quantum.freshHybridPlaceholder")}
             />
           </label>
 
           <div className="actions-row">
             <button type="button" className="btn-pqc" disabled={busy} onClick={createPqc}>
-              {busy ? "Creating…" : "Create PQC (v6)"}
+              {busy ? t("quantum.creating") : t("quantum.createPqcV6")}
             </button>
             <button type="button" className="btn-hybrid" disabled={busy} onClick={createHybrid}>
-              {busy ? "Creating…" : "Create Hybrid (v7)"}
+              {busy ? t("quantum.creating") : t("quantum.createHybridV7")}
             </button>
             <button type="button" className="btn-ghost" disabled={busy} onClick={() => setShowKs(true)}>
-              Keystore v3…
+              {t("quantum.keystoreV3")}
             </button>
           </div>
 
@@ -195,7 +190,7 @@ export default function QuantumToggle({ onAccountChange }: Props) {
             setAccount(acc);
             onAccountChange?.(acc);
             await refreshSettings();
-            setInfo(`Keystore imported: ${acc.address}`);
+            setInfo(t("quantum.keystoreImported", { address: acc.address }));
             setShowKs(false);
           }}
         />

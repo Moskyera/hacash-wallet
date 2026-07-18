@@ -246,15 +246,14 @@ pub fn hac_send_transfer_pairs(
     breakdown: &SendFeeBreakdown,
 ) -> Vec<(String, String)> {
     let mut out = vec![(recipient.to_string(), amount_wire.to_string())];
-    if breakdown.service_fee_treasury.is_some() {
-        if let Some(fee_mei) = breakdown.service_fee_mei {
-            if fee_mei > 0.0 {
-                out.push((
-                    WALLET_TREASURY_ADDRESS.to_string(),
-                    format_service_fee_amount_wire(fee_mei),
-                ));
-            }
-        }
+    if breakdown.service_fee_treasury.is_some()
+        && let Some(fee_mei) = breakdown.service_fee_mei
+        && fee_mei > 0.0
+    {
+        out.push((
+            WALLET_TREASURY_ADDRESS.to_string(),
+            format_service_fee_amount_wire(fee_mei),
+        ));
     }
     out
 }
@@ -338,9 +337,11 @@ mod validation_tests {
 
     #[test]
     fn caller_cannot_disable_or_change_service_fee() {
-        let mut options = SendOptions::default();
-        options.service_fee_enabled = false;
-        options.service_fee_rate = 0.0;
+        let mut options = SendOptions {
+            service_fee_enabled: false,
+            service_fee_rate: 0.0,
+            ..SendOptions::default()
+        };
         options.enforce_mandatory_service_fee();
         assert!(options.service_fee_enabled);
         assert_eq!(options.service_fee_rate, DEFAULT_SERVICE_FEE_RATE);

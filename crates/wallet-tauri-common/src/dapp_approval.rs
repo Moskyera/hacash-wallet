@@ -114,10 +114,93 @@ impl DappApprovalQueue {
             None => Err("no pending dApp request".into()),
         }
     }
+
+    /// Reject and remove every pending request for one disconnected origin.
+    pub async fn reject_origin(&self, origin: &str, reason: &str) -> usize {
+        let mut guard = self.pending.lock().await;
+        let ids = guard
+            .iter()
+            .filter_map(|(id, entry)| (entry.view.origin == origin).then_some(id.clone()))
+            .collect::<Vec<_>>();
+        let mut rejected = 0;
+        for id in ids {
+            if let Some(entry) = guard.remove(&id) {
+                let _ = entry
+                    .responder
+                    .send(ApprovalDecision::Rejected(reason.to_string()));
+                rejected += 1;
+            }
+        }
+        rejected
+    }
 }
 
 impl Default for DappApprovalQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn disconnect_rejects_only_requests_from_that_origin() {
+        let queue = Arc::new(DappApprovalQueue::new());
+        let first_queue = queue.clone();
+        let first = tokio::spawn(async move {
+            first_queue
+                .request(
+                    "https://hacd.it",
+                    "sign",
+                    "Sign",
+                    "Summary",
+                    "Detail",
+                    Duration::from_secs(2),
+                )
+                .await
+        });
+        let second_queue = queue.clone();
+        let second = tokio::spawn(async move {
+            second_queue
+                .request(
+                    "http://localhost:8788",
+                    "connect",
+                    "Connect",
+                    "Summary",
+                    "Detail",
+                    Duration::from_secs(2),
+                )
+                .await
+        });
+
+        for _ in 0..20 {
+            if queue.pending.lock().await.len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            queue
+                .reject_origin("https://hacd.it", "Wallet disconnected")
+                .await,
+            1
+        );
+        assert_eq!(
+            queue
+                .reject_origin("http://localhost:8788", "test cleanup")
+                .await,
+            1
+        );
+
+        assert!(
+            matches!(first.await.unwrap(), Ok(ApprovalDecision::Rejected(reason)) if reason == "Wallet disconnected")
+        );
+        assert!(
+            matches!(second.await.unwrap(), Ok(ApprovalDecision::Rejected(reason)) if reason == "test cleanup")
+        );
     }
 }

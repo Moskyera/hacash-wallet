@@ -142,7 +142,7 @@ export default function MoreRouter({ page, data, actions }: Props) {
   return (
     <>
       <button type="button" className="ghost small" onClick={onBack}>
-        ← Back
+        ← {t("more.back")}
       </button>
       {page === "history" && (
         <div className="card">
@@ -290,6 +290,7 @@ export default function MoreRouter({ page, data, actions }: Props) {
         <QuantumScreen
           legacyAddress={statusAddress}
           nodeUrl={settings?.node_url}
+          networkMode={settings?.network_mode ?? "mainnet"}
           clipboardClearSecs={clipboardSecs}
           platformSec={platformSec}
           securityProfile={settings?.security_profile}
@@ -308,7 +309,11 @@ export default function MoreRouter({ page, data, actions }: Props) {
         />
       )}
       {page === "launchpad" && (
-        <LaunchpadScreen pauseAutoLockDapp={privacy.pause_auto_lock_dapp ?? true} />
+        <LaunchpadScreen
+          pauseAutoLockDapp={privacy.pause_auto_lock_dapp ?? true}
+          watchOnly={watchOnly}
+          onNotify={onToast}
+        />
       )}
       {page === "contacts" && (
         <ContactsScreen

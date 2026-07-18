@@ -17,6 +17,8 @@ type Props = {
   containerClassName?: string;
   actionClassName?: string;
   headingLevel?: 2 | 3;
+  blocked?: boolean;
+  blockedMessage?: string;
   onCopyAddress?: (address: string) => void | Promise<void>;
   onOpenLegacyFund?: () => void;
 };
@@ -35,7 +37,7 @@ function ProbeStatus({ probe }: { probe: Type4Probe }) {
         <p className="error">
           {probe.kind === "unsupported"
             ? t("quantum.funding.unsupported")
-            : `${t("quantum.funding.failed")}: ${probe.message}`}
+            : t("quantum.funding.failed")}
         </p>
       );
   }
@@ -49,6 +51,8 @@ export function QuantumFundingCard({
   containerClassName = "card quantum-funding",
   actionClassName = "primary",
   headingLevel = 2,
+  blocked = false,
+  blockedMessage,
   onCopyAddress,
   onOpenLegacyFund,
 }: Props) {
@@ -65,7 +69,7 @@ export function QuantumFundingCard({
   }
 
   const balance = probe.status === "ok" ? `${probe.balance.toFixed(3)} HAC` : "N/A";
-  const canFund = canOpenLegacyFund(probe);
+  const canFund = !blocked && canOpenLegacyFund(probe);
 
   return (
     <section className={containerClassName}>
@@ -84,6 +88,7 @@ export function QuantumFundingCard({
         {t("quantum.funding.balance")}: <strong>{balance}</strong>
       </p>
       <ProbeStatus probe={probe} />
+      {blocked && blockedMessage ? <p className="warn">{blockedMessage}</p> : null}
       {legacyAddress && (
         <p className="muted small">
           {t("quantum.funding.legacy")}: <code className="mono">{legacyAddress}</code>
@@ -95,7 +100,7 @@ export function QuantumFundingCard({
           className={actionClassName}
           onClick={onOpenLegacyFund}
           disabled={!canFund}
-          title={!canFund ? t("quantum.funding.verifyFirst") : undefined}
+          title={!canFund ? (blocked && blockedMessage ? blockedMessage : t("quantum.funding.verifyFirst")) : undefined}
         >
           {t("quantum.funding.openLegacy")}
         </button>

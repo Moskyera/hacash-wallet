@@ -387,6 +387,18 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Allows the isolated HACD Launchpad webview to use only the reviewed dApp commands.",
+          "type": "string",
+          "const": "allow-launchpad-dapp",
+          "markdownDescription": "Allows the isolated HACD Launchpad webview to use only the reviewed dApp commands."
+        },
+        {
+          "description": "Allows only the trusted local desktop wallet shell to use every registered wallet command.",
+          "type": "string",
+          "const": "allow-main-wallet",
+          "markdownDescription": "Allows only the trusted local desktop wallet shell to use every registered wallet command."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

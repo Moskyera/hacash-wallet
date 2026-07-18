@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { api } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { useLocale } from "../locale";
 import { copyWithPrivacyClear } from "../privacy";
 
 type Props = {
@@ -26,6 +27,7 @@ export default function SecurityScreen({
   onInfo,
   clearMessages,
 }: Props) {
+  const { t } = useLocale();
   const [oldPassphrase, setOldPassphrase] = useState("");
   const [newPassphrase, setNewPassphrase] = useState("");
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
@@ -39,20 +41,20 @@ export default function SecurityScreen({
     <>
       <hr className="divider" />
 
-      <h3>Change passphrase</h3>
-      <label>Current passphrase</label>
+      <h3>{t("security.changePassphrase")}</h3>
+      <label>{t("security.currentPassphrase")}</label>
       <input
         type="password"
         value={oldPassphrase}
         onChange={(e) => setOldPassphrase(e.target.value)}
       />
-      <label>New passphrase</label>
+      <label>{t("security.newPassphrase")}</label>
       <input
         type="password"
         value={newPassphrase}
         onChange={(e) => setNewPassphrase(e.target.value)}
       />
-      <label>Confirm new passphrase</label>
+      <label>{t("security.confirmNewPassphrase")}</label>
       <input
         type="password"
         value={confirmPassphrase}
@@ -74,17 +76,14 @@ export default function SecurityScreen({
           )
         }
       >
-        Change passphrase
+        {t("security.changePassphrase")}
       </button>
 
       <hr className="divider" />
 
-      <h3>Export backup</h3>
-      <p className="muted">
-        Export an encrypted JSON backup. Restore via Welcome → Restore backup (same passphrase).
-        Delete the backup file after a one-time restore.
-      </p>
-      <label>Passphrase to decrypt vault for export</label>
+      <h3>{t("security.exportBackup")}</h3>
+      <p className="muted">{t("security.exportBackupHint")}</p>
+      <label>{t("security.exportPassphrase")}</label>
       <input
         type="password"
         value={exportPassphrase}
@@ -101,7 +100,7 @@ export default function SecurityScreen({
           })
         }
       >
-        Export backup
+        {t("security.exportBackup")}
       </button>
       {backupJson && (
         <textarea
@@ -109,18 +108,15 @@ export default function SecurityScreen({
           readOnly
           value={backupJson}
           rows={8}
-          aria-label="Exported backup JSON"
+          aria-label={t("security.exportedBackupJson")}
         />
       )}
 
       <hr className="divider" />
 
-      <h3>Private key</h3>
-      <p className="muted">
-        Advanced: view your wallet private key. Anyone with this key controls your funds.
-        Never share it.
-      </p>
-      <label>Passphrase</label>
+      <h3>{t("security.privateKey")}</h3>
+      <p className="muted">{t("security.privateKeyDesktopHint")}</p>
+      <label>{t("security.passphrase")}</label>
       <input
         type="password"
         value={privateKeyPass}
@@ -137,7 +133,7 @@ export default function SecurityScreen({
             .then((hex) => {
               setPrivateKey(hex);
               setPrivateKeyPass("");
-              onInfo("Private key revealed. It will hide in 60s.");
+              onInfo(t("security.privateKeyRevealed"));
               if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
               privateKeyTimer.current = setTimeout(() => setPrivateKey(null), 60_000);
             })
@@ -145,7 +141,7 @@ export default function SecurityScreen({
             .finally(() => setBusy(false));
         }}
       >
-        Reveal private key
+        {t("security.revealPrivateKey")}
       </button>
       {privateKey && (
         <>
@@ -157,11 +153,11 @@ export default function SecurityScreen({
               type="button"
               onClick={() =>
                 void copyWithPrivacyClear(privateKey, clipboardSecs).then(() =>
-                  onInfo("Private key copied."),
+                  onInfo(t("security.privateKeyCopied")),
                 )
               }
             >
-              Copy
+              {t("common.copy")}
             </button>
             <button
               type="button"
@@ -170,7 +166,7 @@ export default function SecurityScreen({
                 if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
               }}
             >
-              Hide
+              {t("common.hide")}
             </button>
           </div>
         </>

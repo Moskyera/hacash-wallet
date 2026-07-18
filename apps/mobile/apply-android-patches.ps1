@@ -9,6 +9,8 @@ $netDstDir = Join-Path $android "app\src\main\res\xml"
 $netDst = Join-Path $netDstDir "network_security_config.xml"
 $rulesSrc = Join-Path $mobile "src-tauri\android-data-extraction-rules.xml"
 $rulesDst = Join-Path $netDstDir "data_extraction_rules.xml"
+$backupRulesSrc = Join-Path $mobile "src-tauri\android-backup-rules.xml"
+$backupRulesDst = Join-Path $netDstDir "backup_rules.xml"
 
 if (-not (Test-Path $gradle)) {
     throw "Missing $gradle. Run yarn tauri android init first."
@@ -30,7 +32,8 @@ if (Test-Path $queriesSrc) {
 if (-not (Test-Path $netDstDir)) { New-Item -ItemType Directory -Path $netDstDir -Force | Out-Null }
 Copy-Item $netSrc $netDst -Force
 Copy-Item $rulesSrc $rulesDst -Force
-Write-Host "Copied network_security_config.xml + data_extraction_rules.xml" -ForegroundColor Green
+Copy-Item $backupRulesSrc $backupRulesDst -Force
+Write-Host "Copied network security and both Android backup exclusion configs" -ForegroundColor Green
 
 $manifestContent = Get-Content $manifest -Raw
 if ($manifestContent -notmatch "networkSecurityConfig") {
@@ -39,13 +42,20 @@ if ($manifestContent -notmatch "networkSecurityConfig") {
         'android:usesCleartextTraffic="${usesCleartextTraffic}" android:networkSecurityConfig="@xml/network_security_config">'
     )
 }
-if ($manifestContent -notmatch 'android:allowBackup="false"') {
-    $manifestContent = $manifestContent.Replace(
-        '<application',
-        '<application android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules"'
-    )
-    Write-Host "Disabled Android cloud backup (allowBackup=false)" -ForegroundColor Green
+foreach ($attribute in @(
+    @{ Name = "allowBackup"; Value = "false" },
+    @{ Name = "fullBackupContent"; Value = "@xml/backup_rules" },
+    @{ Name = "dataExtractionRules"; Value = "@xml/data_extraction_rules" }
+)) {
+    $pattern = 'android:' + $attribute.Name + '="[^"]*"'
+    $replacement = 'android:' + $attribute.Name + '="' + $attribute.Value + '"'
+    if ($manifestContent -match $pattern) {
+        $manifestContent = $manifestContent -replace $pattern, $replacement
+    } else {
+        $manifestContent = $manifestContent.Replace('<application', '<application ' + $replacement)
+    }
 }
+Write-Host "Disabled Android cloud backup and device transfer" -ForegroundColor Green
 Set-Content -Path $manifest -Value $manifestContent -NoNewline
 if ($manifestContent -match "networkSecurityConfig") {
     Write-Host "AndroidManifest security patches OK" -ForegroundColor Green
@@ -72,7 +82,7 @@ if ($gradleContent -notmatch "signingConfigs") {
         }
     }
 '@
-    $gradleContent = $gradleContent -replace '(android \{\r?\n)(\s*compileSdk)', "`$1$signingBlock`$1`$2"
+    $gradleContent = $gradleContent -replace '(android \{\r?\n)(\s*compileSdk)', "`$1$signingBlock`$2"
     Write-Host "Added signingConfigs inside android block" -ForegroundColor Green
 }
 
@@ -87,6 +97,15 @@ if ($gradleContent -match 'getByName\("release"\)' -and $gradleContent -notmatch
 # Keep the manifest-wide cleartext flag disabled. The network security XML grants
 # an exact exception only to the official HTTP node and local development hosts.
 
+# WalletNativePlugin is application code, so its direct AndroidX dependency must
+# live in the persistent app Gradle file. Tauri regenerates tauri.build.gradle.kts
+# during every Android build and would otherwise erase this compile dependency.
+$biometricDependency = 'implementation("androidx.biometric:biometric:1.1.0")'
+if ($gradleContent -notmatch [regex]::Escape('androidx.biometric:biometric:1.1.0')) {
+    $gradleContent = $gradleContent -replace '(dependencies \{\r?\n)', "`$1    $biometricDependency`r`n"
+    Write-Host "Linked persistent AndroidX strong-biometric API" -ForegroundColor Green
+}
+
 Set-Content -Path $gradle -Value $gradleContent -NoNewline
 
 # Sync branded launcher icons into generated Android res (gen/ uses Tauri placeholder by default).
@@ -100,7 +119,7 @@ if (-not (Test-Path $mipmapProbe)) {
 }
 if (Test-Path $iconSrcRoot) {
     Get-ChildItem -Path $iconSrcRoot -Recurse -File | ForEach-Object {
-        $rel = $_.FullName.Substring($iconSrcRoot.Length).TrimStart('\')
+        $rel = $_.FullName.Substring($iconSrcRoot.Length).TrimStart([char[]]@('\', '/'))
         $dst = Join-Path $iconDstRoot $rel
         $parent = Split-Path -Parent $dst
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
@@ -151,13 +170,13 @@ $kotlinSrcRoot = Join-Path $mobile "src-tauri\android-src"
 $kotlinDstRoot = Join-Path $android "app\src\main\java"
 if (Test-Path $kotlinSrcRoot) {
     Get-ChildItem -Path $kotlinSrcRoot -Recurse -Filter "*.kt" | ForEach-Object {
-        $rel = $_.FullName.Substring($kotlinSrcRoot.Length).TrimStart('\')
+        $rel = $_.FullName.Substring($kotlinSrcRoot.Length).TrimStart([char[]]@('\', '/'))
         $dst = Join-Path $kotlinDstRoot $rel
         $parent = Split-Path -Parent $dst
         if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         Copy-Item $_.FullName $dst -Force
     }
-    Write-Host "Synced Kotlin helpers (ApkInstaller)" -ForegroundColor Green
+    Write-Host "Synced Kotlin wallet-native plugin and helpers" -ForegroundColor Green
 }
 
 # Duplicate FileProvider authorities crash Android on launch; keep exactly one entry.
@@ -186,10 +205,38 @@ Write-Host "Normalized single FileProvider in AndroidManifest" -ForegroundColor 
 # Link every Tauri Android plugin crate referenced in Cargo.lock (Rust init without Gradle = startup crash).
 $repoRoot = Split-Path -Parent (Split-Path -Parent $mobile)
 $cargoLock = Join-Path $repoRoot "Cargo.lock"
-$registryRoots = Get-ChildItem (Join-Path $env:USERPROFILE ".cargo\registry\src") -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "index.crates.io-*" }
-$pluginCrates = @("tauri-plugin-biometric", "tauri-plugin-deep-link", "tauri-plugin-opener")
+$cargoHome = $env:CARGO_HOME
+if ([string]::IsNullOrWhiteSpace($cargoHome)) {
+    $userHome = $env:HOME
+    if ([string]::IsNullOrWhiteSpace($userHome)) { $userHome = $env:USERPROFILE }
+    if ([string]::IsNullOrWhiteSpace($userHome)) {
+        $userHome = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    }
+    if ([string]::IsNullOrWhiteSpace($userHome)) {
+        throw "Unable to resolve the user home directory for the Cargo registry"
+    }
+    $cargoHome = Join-Path $userHome ".cargo"
+}
+$registrySrc = Join-Path $cargoHome "registry/src"
+$registryRoots = @(Get-ChildItem -LiteralPath $registrySrc -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "index.crates.io-*" })
+$pluginCrates = @("tauri-plugin-deep-link", "tauri-plugin-opener")
 $settingsGradle = Join-Path $android "tauri.settings.gradle"
 $tauriBuildGradle = Join-Path $android "app\tauri.build.gradle.kts"
+
+# Android strong authentication is owned by WalletNativePlugin. Remove stale
+# generated links to the weak-auth upstream plugin; iOS keeps its Rust plugin.
+if (Test-Path $settingsGradle) {
+    $sg = Get-Content $settingsGradle -Raw
+    $sg = $sg -replace '(?m)^include '':tauri-plugin-biometric''\r?\n', ''
+    $sg = $sg -replace '(?m)^project\('':tauri-plugin-biometric''\)\.projectDir = .*\r?\n', ''
+    Set-Content -Path $settingsGradle -Value $sg -NoNewline
+}
+if (Test-Path $tauriBuildGradle) {
+    $bg = Get-Content $tauriBuildGradle -Raw
+    $bg = $bg -replace '(?m)^\s*implementation\(project\(":tauri-plugin-biometric"\)\)\r?\n', ''
+    $bg = $bg -replace '(?m)^\s*implementation\("androidx\.biometric:biometric:[^"]+"\)\r?\n', ''
+    Set-Content -Path $tauriBuildGradle -Value $bg -NoNewline
+}
 
 function Resolve-PluginAndroidDir([string]$crateName) {
     if (-not (Test-Path $cargoLock)) { return $null }
@@ -235,7 +282,8 @@ project(':$crate').projectDir = new File("$gradlePath")
 
 $proguardPath = Join-Path $android "app\proguard-rules.pro"
 $proguardKeeps = @'
-# In-app APK installer (JNI entry from Rust)
+# Native wallet plugin (loaded by class name through Tauri's Android lifecycle)
+-keep class org.hacash.wallet.mobile.WalletNativePlugin { *; }
 -keep class org.hacash.wallet.mobile.ApkInstaller { *; }
 -keep class org.hacash.wallet.mobile.BackupFileHelper { *; }
 -keep class org.hacash.wallet.mobile.BiometricSecretStore { *; }
@@ -244,11 +292,11 @@ $proguardKeeps = @'
 # Tauri Android plugins (loaded by class name at runtime)
 -keep class app.tauri.opener.OpenerPlugin { *; }
 -keep class app.tauri.deep_link.** { *; }
--keep class app.tauri.biometric.** { *; }
 '@
 if (Test-Path $proguardPath) {
     $proguard = Get-Content $proguardPath -Raw
     if (
+        $proguard -notmatch "WalletNativePlugin" -or
         $proguard -notmatch "app\.tauri\.opener\.OpenerPlugin" -or
         $proguard -notmatch "BackupFileHelper" -or
         $proguard -notmatch "BiometricSecretStore" -or

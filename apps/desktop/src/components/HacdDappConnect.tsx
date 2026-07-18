@@ -1,11 +1,37 @@
-import { useCallback, useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-shell";
-import { api } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+import { Webview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  DappAppSelector,
+  MONEYNEX_INITIAL_INJECTION_DELAYS_MS,
+  MONEYNEX_REINJECT_INTERVAL_MS,
+  WALLET_DAPP_CATALOG,
+  createMoneyNexInjectScript,
+  translatedDappAppSelectorCopy,
+  useDappConnection,
+  walletDappById,
+  type DappConnectionApi,
+  type WalletDapp,
+  type WalletDappId,
+} from "@hacash/wallet-ui";
 
-const LAUNCHPAD_ORIGIN = "https://hacd.it";
-const LAUNCHPAD_URL = "https://hacd.it/launchpad";
-const BRIDGE_EXT_PATH = "hacd-browser-bridge";
-const KEEPALIVE_MS = 45_000;
+import { api } from "../api";
+import { useLocale } from "../locale";
+import { WALLET_VERSION } from "../walletVersion";
+
+const LAUNCHPAD_WEBVIEW_LABEL = "launchpad";
+const MONEYNEX_INJECT_SCRIPT = createMoneyNexInjectScript(WALLET_VERSION);
+const CONNECTION_API: DappConnectionApi = {
+  connect: api.dappConnect,
+  disconnect: api.dappDisconnect,
+  wallet: api.dappWallet,
+  heartbeat: api.dappHeartbeat,
+};
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 type Props = {
   watchOnly?: boolean;
@@ -13,126 +39,199 @@ type Props = {
   onNotify?: (msg: string, kind: "info" | "error") => void;
 };
 
-export default function HacdDappConnect({
-  watchOnly,
-  pauseAutoLockDapp = true,
-  onNotify,
-}: Props) {
-  const [connected, setConnected] = useState<string | null>(null);
-  const [connectBusy, setConnectBusy] = useState(false);
-  const [bridgeRunning, setBridgeRunning] = useState(false);
+export default function HacdDappConnect({ watchOnly = false, onNotify }: Props) {
+  const { t } = useLocale();
+  const copy = useMemo(() => translatedDappAppSelectorCopy(t), [t]);
+  const [selectedId, setSelectedId] = useState<WalletDappId | null>(null);
+  const [openedApp, setOpenedApp] = useState<WalletDapp | null>(null);
+  const selectedApp = walletDappById(selectedId);
+  const connection = useDappConnection(selectedApp, CONNECTION_API, {
+    onConnected: () => onNotify?.(copy.connected, "info"),
+    onDisconnected: () => {
+      setOpenedApp(null);
+      onNotify?.(copy.disconnected, "info");
+    },
+    onError: () => onNotify?.(copy.connectionError, "error"),
+  });
 
-  const refreshBridge = useCallback(async () => {
-    try {
-      const st = await api.dappBridgeStatus();
-      setBridgeRunning(!!st.running);
-    } catch {
-      setBridgeRunning(false);
-    }
+  const selectApp = useCallback((id: WalletDappId) => {
+    setSelectedId(id);
+    setOpenedApp(null);
   }, []);
 
   useEffect(() => {
-    void refreshBridge();
-    void api.dappWallet(LAUNCHPAD_ORIGIN).then((res) => {
-      if (res.address) setConnected(res.address);
-    });
-  }, [refreshBridge]);
-
-  useEffect(() => {
-    if (!connected || !pauseAutoLockDapp) return;
-    void api.bumpActivity().catch(() => undefined);
-    const id = window.setInterval(() => {
-      void api.bumpActivity().catch(() => undefined);
-    }, KEEPALIVE_MS);
-    return () => window.clearInterval(id);
-  }, [connected, pauseAutoLockDapp]);
-
-  const handleConnect = useCallback(async () => {
-    if (watchOnly) return;
-    setConnectBusy(true);
-    try {
-      await api.dappBridgeStart();
-      const res = await api.dappConnect(LAUNCHPAD_ORIGIN);
-      if (res.address) {
-        setConnected(res.address);
-        await refreshBridge();
-        onNotify?.("Connected to HACD Launchpad.", "info");
-      } else if (res.err) {
-        onNotify?.(res.err, "error");
-      }
-    } catch (e) {
-      onNotify?.(String(e), "error");
-    } finally {
-      setConnectBusy(false);
-    }
-  }, [onNotify, refreshBridge, watchOnly]);
-
-  const handleOpenLaunchpad = useCallback(async () => {
-    try {
-      await open(LAUNCHPAD_URL);
-    } catch (e) {
-      onNotify?.(String(e), "error");
-    }
-  }, [onNotify]);
-
-  const handleInstallBridgeHint = useCallback(() => {
-    onNotify?.(
-      `Chrome/Edge → Extensions → Developer mode → Load unpacked → select apps/desktop/${BRIDGE_EXT_PATH} in the wallet repo.`,
-      "info",
-    );
-  }, [onNotify]);
-
-  if (watchOnly) {
-    return (
-      <div className="hacd-dapp-connect">
-        <p className="muted small-note">
-          HACD Launchpad trading requires a signing wallet. Watch-only cannot connect.
-        </p>
-        <button type="button" className="ghost" onClick={() => void handleOpenLaunchpad()}>
-          Open Launchpad in browser
-        </button>
-      </div>
-    );
-  }
+    if (connection.state.status !== "connected") setOpenedApp(null);
+  }, [connection.state.status]);
 
   return (
     <div className="hacd-dapp-connect">
-      <div className="hacd-dapp-connect-bar">
-        <div className="hacd-dapp-connect-copy">
-          <strong>HACD Launchpad</strong>
-          <span>
-            {connected
-              ? `Connected · ${connected.slice(0, 10)}…${connected.slice(-8)}`
-              : "Connect wallet, then open hacd.it in your browser"}
-          </span>
-          <span className="muted small-note">
-            Browser bridge: {bridgeRunning ? "running on 127.0.0.1:9477" : "start Connect to enable"}
-          </span>
-        </div>
-        <div className="hacd-dapp-connect-actions">
-          <button
-            type="button"
-            className="primary"
-            disabled={connectBusy || !!connected}
-            onClick={() => void handleConnect()}
-          >
-            {connected ? "Connected" : connectBusy ? "Connecting…" : "Connect"}
-          </button>
-          <button type="button" onClick={() => void handleOpenLaunchpad()}>
-            Open Launchpad
-          </button>
-        </div>
-      </div>
-      <p className="muted small-note">
-        One-time setup:{" "}
-        <button type="button" className="linkish" onClick={handleInstallBridgeHint}>
-          Install browser bridge extension
-        </button>{" "}
-        (Chrome/Edge).
-        {pauseAutoLockDapp
-          ? " Auto-lock pauses while connected and hacd.it is open (Privacy setting)."
-          : " Auto-lock during HACD is off. enable it in Privacy if the wallet locks on hacd.it."}
-      </p>
+      <DappAppSelector
+        apps={WALLET_DAPP_CATALOG}
+        selectedId={selectedId}
+        connection={connection.state}
+        copy={copy}
+        onSelect={selectApp}
+        onConnect={() => void connection.connect()}
+        onDisconnect={() => void connection.disconnect()}
+        onOpen={setOpenedApp}
+        watchOnly={watchOnly}
+        compact
+      />
+      {openedApp ? (
+        <EmbeddedDappWebview
+          app={openedApp}
+          closeLabel={t("dapp.close")}
+          openingLabel={t("dapp.opening")}
+          onClose={() => setOpenedApp(null)}
+          onError={() => {
+            setOpenedApp(null);
+            onNotify?.(copy.connectionError, "error");
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+function EmbeddedDappWebview({ app, closeLabel, openingLabel, onClose, onError }: {
+  app: WalletDapp;
+  closeLabel: string;
+  openingLabel: string;
+  onClose: () => void;
+  onError: () => void;
+}) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(false);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  useEffect(() => {
+    if (!isTauri()) {
+      onErrorRef.current();
+      return;
+    }
+    const host = hostRef.current;
+    if (!host) return;
+    let cancelled = false;
+    let webview: Webview | null = null;
+    let observer: ResizeObserver | null = null;
+    const timers: number[] = [];
+    let reinjectInterval: number | null = null;
+    let injectionInFlight = false;
+    let injectionFailed = false;
+
+    const position = () => {
+      if (!webview || !host.isConnected) return;
+      const rect = host.getBoundingClientRect();
+      void webview.setPosition(new LogicalPosition(rect.left, rect.top));
+      void webview.setSize(new LogicalSize(Math.max(rect.width, 560), Math.max(rect.height, 460)));
+    };
+
+    const mount = async () => {
+      try {
+        const existing = await Webview.getByLabel(LAUNCHPAD_WEBVIEW_LABEL);
+        if (existing) await existing.close().catch(() => undefined);
+        if (cancelled) return;
+        const rect = host.getBoundingClientRect();
+        const child = new Webview(getCurrentWindow(), LAUNCHPAD_WEBVIEW_LABEL, {
+          url: app.launchUrl,
+          x: rect.left,
+          y: rect.top,
+          width: Math.max(rect.width, 560),
+          height: Math.max(rect.height, 460),
+          focus: true,
+          backgroundColor: { red: 0, green: 0, blue: 0, alpha: 255 },
+        });
+        webview = child;
+        await new Promise<void>((resolve, reject) => {
+          const timeout = window.setTimeout(() => reject(new Error("dApp webview timeout")), 12_000);
+          child.once("tauri://created", () => {
+            window.clearTimeout(timeout);
+            resolve();
+          });
+          child.once("tauri://error", (event) => {
+            window.clearTimeout(timeout);
+            reject(event);
+          });
+        });
+        if (cancelled) {
+          await child.close().catch(() => undefined);
+          webview = null;
+          return;
+        }
+        setReady(true);
+        observer = new ResizeObserver(position);
+        observer.observe(host);
+        window.addEventListener("scroll", position, true);
+        const failClosed = async () => {
+          if (cancelled || injectionFailed) return;
+          injectionFailed = true;
+          timers.forEach(window.clearTimeout);
+          if (reinjectInterval !== null) {
+            window.clearInterval(reinjectInterval);
+            reinjectInterval = null;
+          }
+          observer?.disconnect();
+          observer = null;
+          window.removeEventListener("scroll", position, true);
+          setReady(false);
+          const failedWebview = webview;
+          webview = null;
+          const closePromise = failedWebview?.close().catch(() => undefined);
+          onErrorRef.current();
+          await closePromise;
+        };
+        const inject = async () => {
+          if (cancelled || injectionFailed || injectionInFlight) return;
+          injectionInFlight = true;
+          try {
+            await api.webviewEval(
+              LAUNCHPAD_WEBVIEW_LABEL,
+              app.origin,
+              MONEYNEX_INJECT_SCRIPT,
+            );
+          } catch {
+            await failClosed();
+          } finally {
+            injectionInFlight = false;
+          }
+        };
+        for (const delay of MONEYNEX_INITIAL_INJECTION_DELAYS_MS) {
+          timers.push(window.setTimeout(() => void inject(), delay));
+        }
+        reinjectInterval = window.setInterval(
+          () => void inject(),
+          MONEYNEX_REINJECT_INTERVAL_MS,
+        );
+      } catch {
+        if (webview) {
+          await webview.close().catch(() => undefined);
+          webview = null;
+        }
+        if (!cancelled) onErrorRef.current();
+      }
+    };
+
+    void mount();
+    return () => {
+      cancelled = true;
+      observer?.disconnect();
+      window.removeEventListener("scroll", position, true);
+      timers.forEach(window.clearTimeout);
+      if (reinjectInterval !== null) window.clearInterval(reinjectInterval);
+      if (webview) void webview.close().catch(() => undefined);
+    };
+  }, [app]);
+
+  return (
+    <section className="dapp-embedded-panel">
+      <header>
+        <strong>{app.name}</strong>
+        <button type="button" onClick={onClose}>{closeLabel}</button>
+      </header>
+      <div ref={hostRef} className="dapp-embedded-host">
+        {!ready ? <p>{openingLabel}</p> : null}
+      </div>
+    </section>
   );
 }

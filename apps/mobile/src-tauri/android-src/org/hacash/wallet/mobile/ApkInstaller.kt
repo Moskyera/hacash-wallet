@@ -15,34 +15,45 @@ import java.util.concurrent.TimeUnit
 object ApkInstaller {
     @JvmStatic
     fun install(activity: Activity, apkPath: String) {
+        val source = verifiedSource(activity, apkPath)
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            installOnMain(activity, apkPath)
+            installOnMain(activity, source)
             return
         }
         val latch = CountDownLatch(1)
         var error: Exception? = null
         activity.runOnUiThread {
             try {
-                installOnMain(activity, apkPath)
+                installOnMain(activity, source)
             } catch (e: Exception) {
                 error = e
             } finally {
                 latch.countDown()
             }
         }
-        latch.await(15, TimeUnit.SECONDS)
+        if (!latch.await(15, TimeUnit.SECONDS)) {
+            throw IllegalStateException("Android installer did not respond in time. The wallet is still running.")
+        }
         error?.let { throw it }
     }
 
-    private fun installOnMain(activity: Activity, apkPath: String) {
-        val source = File(apkPath)
+    private fun verifiedSource(activity: Activity, apkPath: String): File {
+        val source = File(apkPath).canonicalFile
+        val updateRoot = File(activity.cacheDir, "updates").canonicalFile
         if (!source.exists()) {
             throw IllegalArgumentException("APK not found: $apkPath")
         }
         if (!source.isFile || source.length() < 100_000L) {
             throw IllegalArgumentException("APK file is missing or too small to install")
         }
+        val rootPrefix = updateRoot.path + File.separator
+        if (!source.path.startsWith(rootPrefix)) {
+            throw IllegalArgumentException("APK must be a verified wallet update")
+        }
+        return source
+    }
 
+    private fun installOnMain(activity: Activity, source: File) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (!activity.packageManager.canRequestPackageInstalls()) {
                 val settings = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
@@ -56,19 +67,8 @@ object ApkInstaller {
             }
         }
 
-        val stagedDir = File(activity.cacheDir, "updates").apply { mkdirs() }
-        val staged = File(stagedDir, source.name)
-        if (source.canonicalPath != staged.canonicalPath) {
-            source.inputStream().use { input ->
-                staged.outputStream().use { output -> input.copyTo(output) }
-            }
-        }
-        if (!staged.exists() || staged.length() < 100_000L) {
-            throw IllegalStateException("Failed to stage APK for install")
-        }
-
         val authority = "${activity.packageName}.fileprovider"
-        val uri = FileProvider.getUriForFile(activity, authority, staged)
+        val uri = FileProvider.getUriForFile(activity, authority, source)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

@@ -153,7 +153,7 @@ pub fn build_type4_unsigned_body_transfers(
     for (to_address, amount_hacash) in transfers {
         let toaddr = Address::from_readable(to_address)
             .map_err(|e| WalletError::Other(format!("recipient invalid: {e}")))?;
-        let hac = Amount::from(*amount_hacash)
+        let hac = Amount::from(amount_hacash)
             .map_err(|e| WalletError::Other(format!("hacash invalid: {e}")))?;
         tx.push_action(Box::new(HacToTrs::create_by(toaddr, hac)))
             .map_err(|e| WalletError::Other(e.to_string()))?;
@@ -282,6 +282,7 @@ impl WalletService {
         to: &str,
         amount_hacash: &str,
     ) -> WalletResult<QuantumPreflight> {
+        self.require_quantum_testnet()?;
         let settings = self.quantum_settings();
         let account = settings
             .active_account
@@ -368,9 +369,8 @@ impl WalletService {
     }
 
     fn require_keystore_json(&self) -> WalletResult<String> {
-        self.quantum_keystore_json().ok_or_else(|| {
-            WalletError::Other("no quantum keystore. create or import first".into())
-        })
+        self.quantum_keystore_json()
+            .ok_or_else(|| WalletError::Other("no quantum keystore. create or import first".into()))
     }
 
     pub fn quantum_create_pqc(&mut self, pass: &str) -> WalletResult<QuantumAccountInfo> {
@@ -432,6 +432,7 @@ impl WalletService {
         keystore_pass: &str,
     ) -> WalletResult<QuantumSendResult> {
         self.touch_auto_lock();
+        self.require_quantum_testnet()?;
         let amount_mei = parse_decimal_hac_mei(amount)?;
         self.ensure_quantum_signing_policy(amount_mei)?;
         let settings = self.quantum_settings();
@@ -520,6 +521,7 @@ impl WalletService {
         amount_hacash: &str,
     ) -> WalletResult<crate::airgap::AirgapPrepareResult> {
         self.touch_auto_lock();
+        self.require_quantum_testnet()?;
         let settings = self.quantum_settings();
         let from = settings
             .active_account
@@ -575,6 +577,7 @@ impl WalletService {
         keystore_pass: &str,
     ) -> WalletResult<crate::airgap::AirgapSignResult> {
         self.touch_auto_lock();
+        self.require_quantum_testnet()?;
         self.ensure_quantum_signing_policy(unsigned.amount_mei)?;
         if unsigned.tx_type != 4 {
             return Err(WalletError::Policy(

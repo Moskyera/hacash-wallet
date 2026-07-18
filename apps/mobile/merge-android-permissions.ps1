@@ -1,10 +1,9 @@
 # Merge src-tauri/android-permissions.xml into generated AndroidManifest.xml
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
-$manifest = Get-ChildItem -Path "$mobile\src-tauri\gen\android" -Recurse -Filter "AndroidManifest.xml" |
-    Where-Object { $_.FullName -match "\\app\\src\\main\\" } |
-    Select-Object -First 1
-$permsFile = Join-Path $mobile "src-tauri\android-permissions.xml"
+$manifestPath = Join-Path $mobile "src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+$manifest = Get-Item -LiteralPath $manifestPath -ErrorAction SilentlyContinue
+$permsFile = Join-Path $mobile "src-tauri/android-permissions.xml"
 
 if (-not $manifest) {
     throw "AndroidManifest.xml not found under src-tauri/gen/android. Run: yarn tauri android init"

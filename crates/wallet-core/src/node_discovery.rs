@@ -56,7 +56,10 @@ pub async fn discover_node_candidates(settings: &WalletSettings) -> NodeDiscover
 }
 
 pub async fn probe_node(url: &str, network_mode: &str) -> NodeCandidateStatus {
-    let node = NodeClient::new(url.to_string());
+    let node = match NodeClient::new(url.to_string()) {
+        Ok(node) => node,
+        Err(error) => return failed(url, error.to_string()),
+    };
     let latest = match tokio::time::timeout(PROBE_TIMEOUT, node.ping()).await {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => return failed(url, error.to_string()),
@@ -130,9 +133,11 @@ mod tests {
 
     #[test]
     fn mainnet_candidates_always_keep_official_fallback() {
-        let mut settings = WalletSettings::default();
-        settings.node_url = "https://node.example".into();
-        settings.node_fallback_urls = vec!["https://backup.example".into()];
+        let settings = WalletSettings {
+            node_url: "https://node.example".into(),
+            node_fallback_urls: vec!["https://backup.example".into()],
+            ..WalletSettings::default()
+        };
         assert_eq!(
             candidate_urls(&settings),
             vec![
@@ -145,9 +150,11 @@ mod tests {
 
     #[test]
     fn testnet_never_falls_back_to_mainnet() {
-        let mut settings = WalletSettings::default();
-        settings.node_url = "http://127.0.0.1:8080".into();
-        settings.network_mode = "testnet".into();
+        let settings = WalletSettings {
+            node_url: "http://127.0.0.1:8080".into(),
+            network_mode: "testnet".into(),
+            ..WalletSettings::default()
+        };
         assert_eq!(candidate_urls(&settings), vec!["http://127.0.0.1:8080"]);
     }
 

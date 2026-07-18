@@ -12,7 +12,7 @@ import {
   l1FeeSpeedLabel,
   railBadgeClass,
 } from "../fastPayUi";
-import type { PaymentAsset } from "../utils/paymentAssets";
+import type { PaymentAsset } from "@hacash/wallet-ui";
 import type { Screen } from "./types";
 
 type Props = {

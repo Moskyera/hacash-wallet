@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -107,7 +107,7 @@ impl EncryptedVault {
         String::from_utf8(payload).map_err(|e| WalletError::Vault(e.to_string()))
     }
 
-    pub fn save(&self, path: &PathBuf) -> WalletResult<()> {
+    pub fn save(&self, path: &Path) -> WalletResult<()> {
         let blob = VaultBlob {
             metadata: self.metadata.clone(),
             salt: hex::encode(self.salt),
@@ -157,7 +157,7 @@ impl EncryptedVault {
         Ok(blob.metadata.address)
     }
 
-    pub fn load(path: &PathBuf) -> WalletResult<Self> {
+    pub fn load(path: &Path) -> WalletResult<Self> {
         let raw = fs::read_to_string(path).map_err(|e| WalletError::Vault(e.to_string()))?;
         let blob: VaultBlob =
             serde_json::from_str(&raw).map_err(|e| WalletError::Vault(e.to_string()))?;

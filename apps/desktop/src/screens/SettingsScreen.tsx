@@ -1,26 +1,8 @@
+import { OFFICIAL_NODE_URL, isOfficialNodeUrl } from "@hacash/wallet-ui";
 import { useEffect, useMemo, useState } from "react";
 import { api, type NodeDiscoveryReport, type WalletSettings } from "../api";
 import AppUpdateSection from "../components/AppUpdateSection";
 import { LanguageSwitcher, useLocale } from "../locale";
-
-const OFFICIAL_NODE_URL = "http://nodeapi.hacash.org";
-
-function normalizeNodeUrl(url: string): string {
-  return url.trim().replace(/\/+$/, "").toLowerCase();
-}
-
-function isOfficialNode(url: string): boolean {
-  const n = normalizeNodeUrl(url);
-  return (
-    n === "" ||
-    n === normalizeNodeUrl(OFFICIAL_NODE_URL) ||
-    n === "http://nodeapi.org" ||
-    n === "https://nodeapi.hacash.org" ||
-    n === "https://nodeapi.org" ||
-    n === "nodeapi.hacash.org" ||
-    n === "nodeapi.org"
-  );
-}
 
 type Props = {
   settings: WalletSettings | null;
@@ -44,10 +26,10 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
     setNodeUrl(settings.node_url);
     setFallbackText((settings.node_fallback_urls ?? []).join("\n"));
     setAutoFailover(settings.auto_node_failover ?? true);
-    setShowCustomNode(!isOfficialNode(settings.node_url));
+    setShowCustomNode(!isOfficialNodeUrl(settings.node_url));
   }, [settings]);
 
-  const activeIsOfficial = useMemo(() => isOfficialNode(nodeUrl), [nodeUrl]);
+  const activeIsOfficial = useMemo(() => isOfficialNodeUrl(nodeUrl), [nodeUrl]);
 
   const fallbackUrls = fallbackText
     .split(/\r?\n/)
@@ -65,18 +47,18 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
       const report = await api.discoverNodes();
       setDiscovery(report);
       setNodeUrl(report.active_node);
-      if (!isOfficialNode(report.active_node)) setShowCustomNode(true);
+      if (!isOfficialNodeUrl(report.active_node)) setShowCustomNode(true);
       if (report.switched) {
-        onInfo(`Connected to ${report.active_node}`);
+        onInfo(t("settings.connectedTo", { node: report.active_node }));
       } else if (
         report.candidates.some(
           (candidate) =>
             candidate.url === report.active_node && candidate.online && candidate.network_match,
         )
       ) {
-        onInfo("The active node is healthy.");
+        onInfo(t("settings.activeHealthy"));
       } else {
-        onError("No compatible Hacash node was found in the configured list.");
+        onError(t("settings.noCompatibleNode"));
       }
     } catch (error) {
       onError(String(error));
@@ -87,7 +69,7 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
 
   return (
     <section className="panel">
-      <h2>Settings</h2>
+      <h2>{t("settings.title")}</h2>
 
       <div className="language-settings-block">
         <h3>{t("more.language")}</h3>
@@ -98,10 +80,11 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
 
       <hr className="divider" />
 
-      <h3>Node</h3>
+      <h3>{t("settings.network")}</h3>
       <p className="muted">
-        Network: <strong>{settings?.network_mode ?? "mainnet"}</strong>. Mainnet candidates are
-        verified against the Hacash genesis chain before the wallet switches nodes.
+        {t("settings.desktopNetworkNotice", {
+          network: settings?.network_mode ?? "mainnet",
+        })}
       </p>
 
       <label>{t("node.official")}</label>
@@ -112,7 +95,7 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
           </>
         ) : (
           <>
-            Active node: <code>{nodeUrl}</code>
+            {t("settings.activeNode")}: <code>{nodeUrl}</code>
           </>
         )}
       </p>
@@ -140,13 +123,13 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
           <button type="button" disabled={busy} onClick={applyOfficial}>
             {t("node.useOfficial")}
           </button>
-          <label>Fallback node APIs (one per line)</label>
+          <label>{t("settings.fallbackNodes")}</label>
           <textarea
             className="textarea mono"
             rows={3}
             value={fallbackText}
             onChange={(event) => setFallbackText(event.target.value)}
-            placeholder="http://your-node.example:8081"
+            placeholder="https://your-node.example"
           />
           <label className="check-row">
             <input
@@ -154,11 +137,10 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
               checked={autoFailover}
               onChange={(event) => setAutoFailover(event.target.checked)}
             />
-            Automatically switch to a verified fallback node
+            {t("settings.autoFailover")}
           </label>
           <p className="muted small">
-            The wallet checks only your saved list and the official mainnet fallback. Testnet mode
-            never switches to a mainnet node.
+            {t("settings.testnetFailoverNotice")}
           </p>
         </>
       )}
@@ -175,15 +157,15 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
             )
           }
         >
-          Save node settings
+          {t("settings.saveNode")}
         </button>
         <button disabled={busy || discovering} onClick={() => void findActiveNode()}>
-          {discovering ? "Searching..." : "Find active node"}
+          {discovering ? t("settings.searching") : t("settings.findActive")}
         </button>
       </div>
       {discovery ? (
         <div className="relay-status-list">
-          <strong>Node check</strong>
+          <strong>{t("settings.nodeCheck")}</strong>
           {discovery.candidates.map((candidate) => (
             <div
               key={candidate.url}
@@ -196,9 +178,11 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
               <span className="muted">
                 {candidate.online
                   ? candidate.network_match
-                    ? `ready, height ${candidate.height ?? "unknown"}`
-                    : "wrong Hacash network"
-                  : candidate.error ?? "offline"}
+                    ? t("settings.readyHeight", {
+                        height: candidate.height ?? t("common.notAvailable"),
+                      })
+                    : t("settings.wrongNetwork")
+                  : candidate.error ?? t("common.offline")}
               </span>
             </div>
           ))}

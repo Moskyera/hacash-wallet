@@ -82,24 +82,11 @@ pub fn parse_owned_diamonds(raw: &str) -> Vec<String> {
 
 pub async fn list_owned_diamonds(node: &NodeClient, address: &str) -> WalletResult<Vec<String>> {
     let entry = node.query_balance_entry(address, true).await?;
-    let candidates = entry
+    Ok(entry
         .diamonds
-        .map(|s| parse_owned_diamonds(&s))
-        .unwrap_or_default();
-    let mut verified = Vec::new();
-    for name in candidates {
-        match node.query_diamond_by_name(&name).await {
-            Ok(info) if info.belong.as_deref() == Some(address) => verified.push(name),
-            Ok(_) => {
-                tracing::warn!(diamond = %name, "HACD balance entry is not owned on the active node");
-            }
-            Err(error) if error.to_string().contains("not found") => {
-                tracing::warn!(diamond = %name, "HACD balance entry does not exist on the active node");
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(verified)
+        .as_deref()
+        .map(parse_owned_diamonds)
+        .unwrap_or_default())
 }
 
 pub async fn preview_hacd_send(
@@ -126,12 +113,12 @@ pub async fn preview_hacd_send(
             return Err(WalletError::Other(format!("You do not own HACD {name}")));
         }
         let info = node.query_diamond_by_name(name).await?;
-        if let Some(belong) = &info.belong {
-            if belong != from {
-                return Err(WalletError::Other(format!(
-                    "HACD {name} is not registered to your address on-chain"
-                )));
-            }
+        if let Some(belong) = &info.belong
+            && belong != from
+        {
+            return Err(WalletError::Other(format!(
+                "HACD {name} is not registered to your address on-chain"
+            )));
         }
     }
 
@@ -213,7 +200,15 @@ fn validate_diamond_l1_send(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_diamond_name, parse_owned_diamonds};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+
+    use super::{is_valid_diamond_name, list_owned_diamonds, parse_owned_diamonds};
+    use crate::node::NodeClient;
 
     #[test]
     fn parse_owned_diamonds_splits_six_letter_names() {
@@ -228,5 +223,60 @@ mod tests {
         assert!(is_valid_diamond_name("WTYU"));
         assert!(!is_valid_diamond_name("ABCDEF"));
         assert!(!is_valid_diamond_name("WTYC"));
+    }
+
+    #[tokio::test]
+    async fn owned_listing_uses_one_balance_call_and_no_metadata_calls() {
+        let balance_calls = Arc::new(AtomicUsize::new(0));
+        let diamond_calls = Arc::new(AtomicUsize::new(0));
+        let route_balance_calls = Arc::clone(&balance_calls);
+        let route_diamond_calls = Arc::clone(&diamond_calls);
+        let app = Router::new()
+            .route(
+                "/query/balance",
+                get(move || {
+                    let calls = Arc::clone(&route_balance_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({
+                            "ret": 0,
+                            "list": [{
+                                "address": "1Example",
+                                "hacash": "12.5",
+                                "diamond": 2,
+                                "satoshi": 42,
+                                "diamonds": "ZAKXMIWTYUIA"
+                            }]
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/query/diamond",
+                get(move || {
+                    let calls = Arc::clone(&route_diamond_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({ "ret": 1, "err": "metadata must not be queried" }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock node");
+        let address = listener.local_addr().expect("mock node address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock node");
+        });
+        let node = NodeClient::new(format!("http://{address}")).expect("mock node client");
+
+        let names = list_owned_diamonds(&node, "1Example")
+            .await
+            .expect("owned HACD list");
+
+        assert_eq!(names, vec!["ZAKXMI".to_string(), "WTYUIA".to_string()]);
+        assert_eq!(balance_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(diamond_calls.load(Ordering::SeqCst), 0);
+        server.abort();
     }
 }

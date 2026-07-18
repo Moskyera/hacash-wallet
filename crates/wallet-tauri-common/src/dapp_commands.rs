@@ -5,7 +5,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, State, Webview};
 
 use crate::dapp_approval::{ApprovalDecision, DappApprovalView};
-use crate::state::AppState;
+use crate::state::{AppState, WALLET_BUSY_RETRY};
 
 #[tauri::command]
 pub fn wallet_bump_activity(webview: Webview, state: State<'_, AppState>) -> Result<(), String> {
@@ -22,6 +22,12 @@ pub async fn wallet_dapp_connect(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let origin = trusted_caller_origin(&origin, &webview, true)?;
+    {
+        let mut svc = state.inner.lock().await;
+        if svc.dapp_session_is_authorized(&origin) {
+            return svc.dapp_wallet(&origin).map_err(|e| e.to_string());
+        }
+    }
     require_approval(
         &state,
         &origin,
@@ -36,13 +42,34 @@ pub async fn wallet_dapp_connect(
 }
 
 #[tauri::command]
+pub async fn wallet_dapp_disconnect(
+    origin: String,
+    webview: Webview,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let origin = trusted_caller_origin(&origin, &webview, true)?;
+    let result = {
+        let mut svc = state.inner.lock().await;
+        svc.dapp_disconnect(&origin).map_err(|e| e.to_string())?
+    };
+    state
+        .dapp_approval
+        .reject_origin(&origin, "Wallet disconnected")
+        .await;
+    Ok(result)
+}
+
+#[tauri::command]
 pub fn wallet_dapp_wallet(
     origin: String,
     webview: Webview,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let origin = trusted_caller_origin(&origin, &webview, false)?;
-    let mut svc = state.inner.blocking_lock();
+    let origin = trusted_caller_origin(&origin, &webview, true)?;
+    let mut svc = state
+        .inner
+        .try_lock()
+        .map_err(|_| WALLET_BUSY_RETRY.to_string())?;
     svc.dapp_wallet(&origin).map_err(|e| e.to_string())
 }
 
@@ -52,8 +79,11 @@ pub fn wallet_dapp_heartbeat(
     webview: Webview,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let origin = trusted_caller_origin(&origin, &webview, false)?;
-    let mut svc = state.inner.blocking_lock();
+    let origin = trusted_caller_origin(&origin, &webview, true)?;
+    let mut svc = state
+        .inner
+        .try_lock()
+        .map_err(|_| WALLET_BUSY_RETRY.to_string())?;
     svc.dapp_heartbeat(&origin).map_err(|e| e.to_string())
 }
 
@@ -93,6 +123,8 @@ pub async fn wallet_dapp_sign_tx(
     let origin = trusted_caller_origin(&origin, &webview, false)?;
     let canonical =
         hacash_wallet_core::tx_binding::decode_transaction(&txbody).map_err(|e| e.to_string())?;
+    hacash_wallet_core::dapp::validate_raw_sign_transaction(&canonical)
+        .map_err(|e| e.to_string())?;
     let autosubmit = autosubmit.unwrap_or(false);
     let title = if autosubmit {
         "Approve signing and broadcast"
@@ -119,12 +151,9 @@ pub fn wallet_dapp_chain(
     origin: String,
     chain_id: Option<u64>,
     webview: Webview,
-    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let origin = trusted_caller_origin(&origin, &webview, false)?;
-    let svc = state.inner.blocking_lock();
-    svc.dapp_chain_status(&origin, chain_id)
-        .map_err(|e| e.to_string())
+    trusted_caller_origin(&origin, &webview, false)?;
+    Ok(hacash_wallet_core::dapp::chain_status(chain_id))
 }
 
 #[tauri::command]
@@ -164,6 +193,7 @@ pub async fn wallet_dapp_reject(
 pub fn wallet_webview_eval(
     app: AppHandle,
     label: String,
+    expected_origin: String,
     script: String,
     caller: Webview,
 ) -> Result<(), String> {
@@ -177,9 +207,25 @@ pub fn wallet_webview_eval(
     let target = app
         .get_webview(&label)
         .ok_or_else(|| format!("webview '{label}' not found"))?;
+    let target_url = target.url().map_err(|e| e.to_string())?;
+    let target_origin = target_url.origin().ascii_serialization();
+    require_matching_trusted_origin(&expected_origin, &target_origin)?;
     target.eval(&script).map_err(|e| e.to_string())
 }
 
+fn require_matching_trusted_origin(
+    expected_origin: &str,
+    target_origin: &str,
+) -> Result<(), String> {
+    let expected = hacash_wallet_core::dapp::normalized_trusted_origin(expected_origin)
+        .ok_or_else(|| "expected script injection origin is not trusted".to_string())?;
+    let target = hacash_wallet_core::dapp::normalized_trusted_origin(target_origin)
+        .ok_or_else(|| "script injection target is not a trusted dApp origin".to_string())?;
+    if target != expected {
+        return Err("script injection target origin changed".into());
+    }
+    Ok(())
+}
 async fn require_approval(
     state: &State<'_, AppState>,
     origin: &str,
@@ -243,4 +289,20 @@ fn require_wallet_shell(webview: &Webview) -> Result<(), String> {
         return Err("wallet UI is not on a trusted local origin".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_matching_trusted_origin;
+
+    #[test]
+    fn script_injection_requires_the_selected_exact_origin() {
+        assert!(require_matching_trusted_origin("https://hacd.it", "https://hacd.it:443").is_ok());
+        assert!(require_matching_trusted_origin("https://hacd.it", "https://www.hacd.it").is_err());
+        assert!(require_matching_trusted_origin("https://www.hacd.it", "https://hacd.it").is_err());
+        assert!(
+            require_matching_trusted_origin("https://hacd.it", "https://hacd.it.evil.example")
+                .is_err()
+        );
+    }
 }

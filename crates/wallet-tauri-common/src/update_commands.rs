@@ -1,79 +1,136 @@
-use crate::update::{AppUpdateInfo, check_app_update, download_update_file, run_windows_installer};
-use tauri::{AppHandle, Manager};
+#[cfg(any(target_os = "windows", target_os = "android"))]
+use std::path::Path;
+use std::path::PathBuf;
+
+use tauri::{AppHandle, Manager, State};
+
+use crate::state::AppState;
+#[cfg(target_os = "windows")]
+use crate::update::run_windows_installer;
+use crate::update::{
+    AppUpdateInfo, TrustedUpdate, UpdateTarget, check_app_update, download_update_file,
+};
+#[cfg(any(target_os = "windows", target_os = "android"))]
+use crate::update::{UpdateChannel, verify_downloaded_update};
 
 #[tauri::command]
 pub async fn wallet_check_app_update(
-    channel: String,
     current_version: String,
+    state: State<'_, AppState>,
 ) -> Result<AppUpdateInfo, String> {
-    check_app_update(&channel, &current_version).await
+    check_app_update(&current_version, &state.updates).await
 }
 
 #[tauri::command]
 pub async fn wallet_download_app_update(
     app: AppHandle,
-    url: String,
-    filename: String,
-    sha256: String,
-    expected_size: u64,
-) -> Result<String, String> {
-    if filename.is_empty()
-        || filename.len() > 160
-        || !filename.starts_with("hacash-wallet-")
-        || !filename
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-    {
-        return Err("invalid update asset filename".into());
-    }
-    let extension = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !matches!(extension.as_str(), "apk" | "exe" | "msi") {
-        return Err("unsupported update asset type".into());
+    offer_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target = UpdateTarget::current();
+    if !target.supports_automatic_install() {
+        return Err("automatic update downloads are unavailable on this operating system or architecture; use the exact official release page".into());
     }
 
+    let offer = state.updates.begin_download(&offer_id)?;
+    if offer.channel != target.channel() {
+        state.updates.download_failed(&offer_id);
+        return Err("update offer belongs to a different operating system".into());
+    }
+
+    let result = download_offer(&app, &offer_id, &offer).await;
+    match result {
+        Ok(path) => {
+            if let Err(error) = state.updates.download_complete(&offer_id, path.clone()) {
+                let _ = std::fs::remove_file(path);
+                state.updates.download_failed(&offer_id);
+                return Err(error);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            state.updates.download_failed(&offer_id);
+            Err(error)
+        }
+    }
+}
+
+async fn download_offer(
+    app: &AppHandle,
+    offer_id: &str,
+    offer: &TrustedUpdate,
+) -> Result<PathBuf, String> {
     let base = app.path().app_cache_dir().map_err(|e| e.to_string())?;
-    let dir = base.join("updates");
+    let dir = base.join("updates").join(offer_id);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let dest = dir.join(filename);
-    download_update_file(&url, &dest, &sha256, expected_size).await?;
-    Ok(dest.to_string_lossy().to_string())
+    let dest = dir.join(&offer.asset_name);
+    download_update_file(
+        &offer.download_url,
+        &dest,
+        &offer.sha256,
+        offer.download_size,
+    )
+    .await?;
+    Ok(dest)
 }
 
 #[tauri::command]
-pub fn wallet_install_desktop_update(app: AppHandle, path: String) -> Result<(), String> {
-    let path = checked_cached_update(&app, &path, &["exe", "msi"])?;
-    run_windows_installer(&path)?;
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(700));
+pub fn wallet_install_desktop_update(
+    app: AppHandle,
+    offer_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (offer, path) = state
+            .updates
+            .downloaded(&offer_id, UpdateChannel::Desktop)?;
+        let path = checked_cached_update(&app, &path, &offer)?;
+        run_windows_installer(&path)?;
+        // The verified installer must be able to replace the running wallet
+        // executable. Only exit after process creation succeeds; failures keep
+        // the current session open so the user can retry safely.
         app.exit(0);
-    });
-    Ok(())
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        let _ = offer_id;
+        let _ = state;
+        Err("automatic desktop install is only supported on Windows; use the exact official release page".to_string())
+    }
 }
 
 #[tauri::command]
-pub fn wallet_install_mobile_update(app: AppHandle, path: String) -> Result<(), String> {
+pub async fn wallet_install_mobile_update(
+    app: AppHandle,
+    offer_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let path = checked_cached_update(&app, &path, &["apk"])?;
-        return crate::update_android::install_apk(&app, &path.to_string_lossy());
+        let (offer, path) = state.updates.downloaded(&offer_id, UpdateChannel::Mobile)?;
+        let path = checked_cached_update(&app, &path, &offer)?;
+        let install_path = path.to_string_lossy().into_owned();
+        crate::update_android::install_apk(&app, &install_path).await?;
+        Ok(())
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
-        let _ = path;
+        let _ = offer_id;
+        let _ = state;
         Err("in-app APK install is only supported on Android".to_string())
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "android"))]
 fn checked_cached_update(
     app: &AppHandle,
-    raw_path: &str,
-    allowed_extensions: &[&str],
-) -> Result<std::path::PathBuf, String> {
+    stored_path: &Path,
+    offer: &TrustedUpdate,
+) -> Result<PathBuf, String> {
     let cache = app
         .path()
         .app_cache_dir()
@@ -83,20 +140,15 @@ fn checked_cached_update(
     let cache = cache
         .canonicalize()
         .map_err(|e| format!("update cache path: {e}"))?;
-    let path = std::path::PathBuf::from(raw_path)
+    let path = stored_path
         .canonicalize()
         .map_err(|e| format!("update path: {e}"))?;
     if !path.starts_with(&cache) {
         return Err("update installer is outside the app cache".into());
     }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !allowed_extensions.contains(&extension.as_str()) {
-        return Err("unexpected update installer type".into());
+    if path.file_name().and_then(|value| value.to_str()) != Some(offer.asset_name.as_str()) {
+        return Err("cached installer does not match the trusted update offer".into());
     }
-    crate::update::validate_downloaded_update(&path)?;
+    verify_downloaded_update(&path, &offer.sha256, offer.download_size)?;
     Ok(path)
 }

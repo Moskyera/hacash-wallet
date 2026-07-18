@@ -56,9 +56,11 @@ fn stress_settings_save_reload_500() {
     stress_gate("settings_500", || {
         with_isolated_wallet_dir(|| {
             for i in 0..500 {
-                let mut s = WalletSettings::default();
-                s.node_url = format!("https://node{i}.stress.test");
-                s.security_profile = if i % 2 == 0 { "balanced" } else { "paranoid" }.into();
+                let s = WalletSettings {
+                    node_url: format!("https://node{i}.stress.test"),
+                    security_profile: if i % 2 == 0 { "balanced" } else { "paranoid" }.into(),
+                    ..WalletSettings::default()
+                };
                 s.save().unwrap();
                 let loaded = WalletSettings::load().unwrap();
                 assert_eq!(loaded.node_url, format!("https://node{i}.stress.test"));

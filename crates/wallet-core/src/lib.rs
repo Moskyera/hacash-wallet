@@ -1,5 +1,6 @@
 pub mod account;
 pub mod airgap;
+mod assets;
 pub mod bills;
 mod biometric_unlock;
 pub mod btc_send;
@@ -12,6 +13,7 @@ pub mod hacd_send;
 pub mod hardware;
 pub mod hip23;
 pub mod history;
+mod http_client;
 pub mod kdf;
 pub mod l1_fee;
 pub mod l2_bill;
@@ -22,6 +24,7 @@ pub mod node;
 pub mod node_discovery;
 pub mod paths;
 pub mod payment;
+pub mod prices;
 pub mod privacy;
 pub mod protocol_init;
 pub mod quantum;
@@ -44,6 +47,7 @@ pub use airgap::{
     AirgapEnvelope, AirgapParseResult, AirgapPrepareResult, AirgapSignResult, AirgapSigned,
     AirgapUnsigned,
 };
+pub use assets::{AssetSummary, DiamondMetadataReader};
 pub use bills::BillEntry;
 pub use btc_send::{BtcSendPreview, btc_to_satoshi, satoshi_to_btc};
 pub use dust_whisper::{DustWhisperSettings, RelayHealthStatus};
@@ -59,6 +63,7 @@ pub use l1_fee::L1FeeTierQuote;
 pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillSummary};
 pub use l2_hub::HubHealth;
 pub use messenger::{ChatMessage, ChatThread, MessageDirection};
+pub use prices::{PriceSource, SpotPrices, fetch_spot_prices};
 pub use privacy::{PrivacySettings, mask_address, mask_amount, mask_hash};
 pub use quantum::{
     QuantumAccountInfo, QuantumAccountSummary, QuantumPreflight, QuantumSendResult,
@@ -70,4 +75,4 @@ pub use send_options::{
 };
 pub use settings::QuantumMeta;
 pub use settings::WalletSettings;
-pub use wallet::{AssetSummary, WalletService};
+pub use wallet::WalletService;

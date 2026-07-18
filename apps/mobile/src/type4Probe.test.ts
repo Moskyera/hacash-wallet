@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { canOpenLegacyFund, type4Balance, type Type4Probe } from "@hacash/wallet-ui";
+import {
+  canOpenLegacyFund,
+  canUseQuantumLabTransactions,
+  type4Balance,
+  type Type4Probe,
+} from "@hacash/wallet-ui";
 
 describe("Type 4 funding probe", () => {
   it.each<Type4Probe>([
@@ -20,3 +25,11 @@ describe("Type 4 funding probe", () => {
     expect(type4Balance(probe)).toBe(12.5);
   });
 });
+
+  it("enables Quantum Lab transactions only in explicit testnet mode", () => {
+    expect(canUseQuantumLabTransactions("testnet")).toBe(true);
+    expect(canUseQuantumLabTransactions("mainnet")).toBe(false);
+    expect(canUseQuantumLabTransactions("custom")).toBe(false);
+    expect(canUseQuantumLabTransactions(null)).toBe(false);
+    expect(canUseQuantumLabTransactions(undefined)).toBe(false);
+  });

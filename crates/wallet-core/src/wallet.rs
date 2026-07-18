@@ -1,3 +1,5 @@
+mod dapp_service;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -10,6 +12,8 @@ use crate::airgap::{
     AIRGAP_VERSION, AirgapEnvelope, AirgapParseResult, AirgapPrepareResult, AirgapSignResult,
     AirgapSigned, AirgapUnsigned, encode_envelope_qr, parse_airgap_qr_parts, parse_airgap_qr_text,
 };
+pub use crate::assets::AssetSummary;
+use crate::assets::{AssetService, DiamondMetadataReader};
 use crate::bills::{BillEntry, BillStore};
 use crate::channel::{
     ChannelInfo, build_channel_close_tx, build_channel_open_tx, derive_channel_id, query_channel,
@@ -42,8 +46,6 @@ use crate::unlock_guard::UnlockGuard;
 use crate::vault::{EncryptedVault, VaultMetaSnapshot, default_vault_path};
 use crate::webauthn::WebAuthnGate;
 
-const BALANCE_CACHE_TTL: Duration = Duration::from_secs(12);
-
 pub struct WalletService {
     vault_path: PathBuf,
     vault_cache: Option<EncryptedVault>,
@@ -57,7 +59,7 @@ pub struct WalletService {
     history: TxHistory,
     webauthn: WebAuthnGate,
     unlock_guard: UnlockGuard,
-    balance_cache: Option<(String, f64, Instant)>,
+    assets: AssetService,
     quantum_keystore_mem: Option<String>,
     unlocked: Option<UnlockedSession>,
     dapp_session: DappSession,
@@ -125,17 +127,6 @@ pub struct SendResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct AssetSummary {
-    pub hac_mei: f64,
-    pub hacd_count: usize,
-    pub hacd_names: Vec<String>,
-    /// On-chain BTC balance in the Hacash wallet (satoshi).
-    pub btc_wallet_satoshi: u64,
-    /// BTC balance locked in the active Fast Pay channel (satoshi), if any.
-    pub btc_channel_satoshi: u64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
 pub struct ChannelSetupPreview {
     pub channel_id: String,
     pub left_address: String,
@@ -160,7 +151,7 @@ impl WalletService {
             .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
             .unwrap_or_else(|| settings.network_mode.clone());
         let profile = SecurityProfile::from_name(&settings.security_profile);
-        let node = NodeClient::new(settings.node_url.clone());
+        let node = NodeClient::new(settings.node_url.clone())?;
         let bills = BillStore::load().unwrap_or_default();
         let history = TxHistory::load().unwrap_or_default();
         let router = PaymentRouter::new(node.clone(), settings.clone(), bills.clone());
@@ -177,14 +168,17 @@ impl WalletService {
             history,
             webauthn: WebAuthnGate::new()?,
             unlock_guard: UnlockGuard::default(),
-            balance_cache: None,
+            assets: AssetService::default(),
             quantum_keystore_mem: None,
             unlocked: None,
             dapp_session: DappSession::new(),
         })
     }
 
-    pub fn status(&self) -> WalletStatus {
+    pub fn status(&mut self) -> WalletStatus {
+        // Status is a security boundary, not a passive snapshot. Enforce the
+        // deadline before exposing any session-derived state to IPC callers.
+        self.touch_auto_lock();
         let has_wallet = self.vault_path.exists() || self.settings.watch_only_address.is_some();
         let watch_only = self.settings.hardware_mode() == HardwareSigningMode::WatchOnly
             || self.settings.watch_only_address.is_some();
@@ -273,6 +267,7 @@ impl WalletService {
         if next == self.node.base_url() {
             return Ok(report);
         }
+        let next_node = NodeClient::new(next.clone())?;
 
         let previous = self.settings.node_url.clone();
         if !self.settings.node_fallback_urls.contains(&previous) {
@@ -282,8 +277,10 @@ impl WalletService {
         self.settings.node_fallback_urls.retain(|url| url != &next);
         self.settings.node_url = next.clone();
         self.settings.save()?;
-        self.node = NodeClient::new(next.clone());
-        self.router.update_settings(self.settings.clone());
+        self.node = next_node;
+        self.assets.clear_cache();
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
         report.active_node = next;
         report.switched = true;
         Ok(report)
@@ -291,14 +288,17 @@ impl WalletService {
 
     pub fn update_settings(&mut self, mut settings: WalletSettings) -> WalletResult<()> {
         settings.validate_and_normalize()?;
+        let node = NodeClient::new(settings.node_url.clone())?;
         settings.save()?;
-        self.router.update_settings(settings.clone());
-        self.node = NodeClient::new(settings.node_url.clone());
+        self.node = node;
+        self.assets.clear_cache();
         self.profile = SecurityProfile::from_name(&settings.security_profile);
         if std::env::var("HACASH_WALLET_NETWORK").is_err() {
             self.network_mode = settings.network_mode.clone();
         }
         self.settings = settings;
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
         Ok(())
     }
 
@@ -323,13 +323,13 @@ impl WalletService {
         }
         self.vault_cache = None;
         self.vault_meta = None;
-        self.balance_cache = None;
+        self.assets.clear_cache();
         self.quantum_keystore_mem = None;
         self.settings = WalletSettings::default();
         self.settings.save()?;
         self.bills = BillStore::default();
         self.history = TxHistory::default();
-        self.node = NodeClient::new(self.settings.node_url.clone());
+        self.node = NodeClient::new(self.settings.node_url.clone())?;
         self.network_mode = std::env::var("HACASH_WALLET_NETWORK")
             .ok()
             .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
@@ -527,18 +527,18 @@ impl WalletService {
         secret.zeroize();
         let address = account.address();
         self.profile = SecurityProfile::from_name(&self.settings.security_profile);
-        self.balance_cache = None;
+        self.assets.clear_cache();
         let qkey = crate::quantum_vault::QuantumFileKey::derive(passphrase, vault.salt())?;
         let mut qks = crate::quantum_vault::load_encrypted(&qkey)?;
-        if qks.is_none() {
-            if let Some(legacy) = self.settings.quantum_keystore_json.take() {
-                crate::quantum_vault::save_encrypted(&qkey, &legacy)?;
-                if let Some(meta) = crate::quantum::quantum_meta_from_json(&legacy) {
-                    self.settings.quantum_meta = Some(meta);
-                }
-                self.settings.save()?;
-                qks = Some(legacy);
+        if qks.is_none()
+            && let Some(legacy) = self.settings.quantum_keystore_json.take()
+        {
+            crate::quantum_vault::save_encrypted(&qkey, &legacy)?;
+            if let Some(meta) = crate::quantum::quantum_meta_from_json(&legacy) {
+                self.settings.quantum_meta = Some(meta);
             }
+            self.settings.save()?;
+            qks = Some(legacy);
         }
         self.quantum_keystore_mem = qks;
         self.unlocked = Some(UnlockedSession {
@@ -641,21 +641,24 @@ impl WalletService {
 
     pub fn lock(&mut self) {
         self.unlocked = None;
-        self.balance_cache = None;
+        self.assets.clear_cache();
         self.quantum_keystore_mem = None;
         self.dapp_session.clear();
     }
 
     pub fn touch_auto_lock(&mut self) {
-        if let Some(session) = &self.unlocked {
-            if session.unlocked_at.elapsed() > Duration::from_secs(self.profile.auto_lock_secs) {
-                self.lock();
-            }
+        if let Some(session) = &self.unlocked
+            && session.unlocked_at.elapsed() >= Duration::from_secs(self.profile.auto_lock_secs)
+        {
+            self.lock();
         }
     }
 
     /// Resets the auto-lock idle timer while the wallet stays unlocked.
     pub fn bump_unlock_activity(&mut self) {
+        // UI activity that arrives after the deadline cannot revive an expired
+        // session. Enforce the deadline before moving it forward.
+        self.touch_auto_lock();
         if let Some(session) = &mut self.unlocked {
             session.unlocked_at = Instant::now();
         }
@@ -697,45 +700,35 @@ impl WalletService {
     pub async fn balance_mei(&mut self) -> WalletResult<f64> {
         self.touch_auto_lock();
         let address = self.require_address()?;
-        if let Some((cached_addr, bal, fetched_at)) = &self.balance_cache {
-            if cached_addr == &address && fetched_at.elapsed() < BALANCE_CACHE_TTL {
-                return Ok(*bal);
-            }
-        }
-        let bal = self.node.balance_mei(&address).await?;
-        self.balance_cache = Some((address, bal, Instant::now()));
-        Ok(bal)
+        self.assets.balance_mei(&self.node, &address).await
     }
 
     pub async fn asset_summary(&mut self) -> WalletResult<AssetSummary> {
         self.touch_auto_lock();
         let address = self.require_address()?;
-        let balance_entry = self.node.query_balance_entry(&address, false).await?;
-        let hac_mei = balance_entry.hacash_mei()?;
-        self.balance_cache = Some((address.clone(), hac_mei, Instant::now()));
-        let btc_wallet_satoshi = balance_entry.btc_satoshi();
-        let hacd_names = self.list_owned_diamonds().await?;
-        let hacd_count = hacd_names.len();
+        let snapshot = self.assets.snapshot(&self.node, &address).await?;
         let mut btc_channel_satoshi = 0u64;
-        if let Some(ch) = self.channel_info().await? {
-            if ch.user_is_left(&address) {
-                btc_channel_satoshi = ch.left.satoshi;
-            } else if ch.user_is_right(&address) {
-                btc_channel_satoshi = ch.right.satoshi;
+        if let Some(channel) = self.channel_info().await? {
+            if channel.user_is_left(&address) {
+                btc_channel_satoshi = channel.left.satoshi;
+            } else if channel.user_is_right(&address) {
+                btc_channel_satoshi = channel.right.satoshi;
             }
         }
+        let hacd_count = snapshot.hacd_names.len();
         Ok(AssetSummary {
-            hac_mei,
+            hac_mei: snapshot.hac_mei,
             hacd_count,
-            hacd_names: hacd_names.into_iter().take(8).collect(),
-            btc_wallet_satoshi,
+            hacd_names: snapshot.hacd_names.into_iter().take(8).collect(),
+            btc_wallet_satoshi: snapshot.btc_wallet_satoshi,
             btc_channel_satoshi,
         })
     }
 
-    pub async fn list_owned_diamonds(&self) -> WalletResult<Vec<String>> {
-        let from = self.require_address()?;
-        crate::hacd_send::list_owned_diamonds(&self.node, &from).await
+    pub async fn list_owned_diamonds(&mut self) -> WalletResult<Vec<String>> {
+        self.touch_auto_lock();
+        let address = self.require_address()?;
+        self.assets.list_owned_diamonds(&self.node, &address).await
     }
 
     pub async fn preview_send_hacd(
@@ -917,34 +910,9 @@ impl WalletService {
         }
     }
 
-    pub async fn query_diamond(&self, name: &str) -> WalletResult<crate::node::DiamondInfo> {
-        let normalized = name.trim().to_uppercase();
-        if !crate::hacd_send::is_valid_diamond_name(&normalized) {
-            return Err(WalletError::Other(
-                "HACD name must use 4 to 6 letters from WTYUIAHXVMEKBSZN".into(),
-            ));
-        }
-        // Metadata is read-only identity: try configured node, then official mainnet.
-        match self.node.query_diamond_by_name(&normalized).await {
-            Ok(info) => Ok(info),
-            Err(configured_error) => {
-                let configured = self.settings.node_url.trim().trim_end_matches('/');
-                let official_url = crate::settings::DEFAULT_NODE_URL;
-                if configured.eq_ignore_ascii_case(official_url)
-                    || configured.eq_ignore_ascii_case("https://nodeapi.hacash.org")
-                {
-                    return Err(configured_error);
-                }
-                let official = crate::node::NodeClient::new(official_url);
-                match official.query_diamond_by_name(&normalized).await {
-                    Ok(mut info) => {
-                        info.metadata_source = "mainnet".into();
-                        Ok(info)
-                    }
-                    Err(_) => Err(configured_error),
-                }
-            }
-        }
+    /// Snapshot a read-only metadata reader for use outside the wallet mutex.
+    pub fn diamond_metadata_reader(&self) -> DiamondMetadataReader {
+        DiamondMetadataReader::new(self.node.clone())
     }
 
     pub async fn hub_health(&self) -> WalletResult<Option<HubHealth>> {
@@ -963,10 +931,10 @@ impl WalletService {
         self.touch_auto_lock();
         let deposit = deposit_mei.unwrap_or(DEFAULT_CHANNEL_DEPOSIT_MEI);
 
-        if self.settings.l2_hub_url.is_none() {
-            if let Some(discovered) = discover_healthy_hub().await {
-                apply_discovered_hub(&mut self.settings, &discovered);
-            }
+        if self.settings.l2_hub_url.is_none()
+            && let Some(discovered) = discover_healthy_hub().await
+        {
+            apply_discovered_hub(&mut self.settings, &discovered);
         }
 
         let hub_url = self
@@ -992,9 +960,8 @@ impl WalletService {
             _ => health
                 .hub_address
                 .filter(|address| !address.is_empty())
-                .map(|address| {
+                .inspect(|address| {
                     self.settings.hub_right_address = Some(address.clone());
-                    address
                 })
                 .ok_or_else(|| {
                     WalletError::L2(
@@ -1008,7 +975,8 @@ impl WalletService {
         }
 
         self.settings.save()?;
-        self.router.update_settings(self.settings.clone());
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
         self.fast_pay_status().await
     }
 
@@ -1220,7 +1188,8 @@ impl WalletService {
         if let Some(discovered) = discover_healthy_hub().await {
             apply_discovered_hub(&mut self.settings, &discovered);
             self.settings.save()?;
-            self.router.update_settings(self.settings.clone());
+            self.router
+                .update_settings(self.node.clone(), self.settings.clone());
         }
         Ok(())
     }
@@ -1464,7 +1433,8 @@ impl WalletService {
         self.settings.hub_right_address = Some(hub_address.to_owned());
         self.settings.channel_id_hex = Some(preview.channel_id);
         self.settings.save()?;
-        self.router.update_settings(self.settings.clone());
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
         self.append_history_if_enabled(
             PaymentRail::L1OnChain,
             &hash,
@@ -1506,7 +1476,8 @@ impl WalletService {
             .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
         self.settings.channel_id_hex = None;
         self.settings.save()?;
-        self.router.update_settings(self.settings.clone());
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
         self.append_history_if_enabled(
             PaymentRail::L1OnChain,
             &hash,
@@ -1703,6 +1674,9 @@ impl WalletService {
         signed: &AirgapSigned,
     ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
+        if signed.tx_type == 4 {
+            self.require_quantum_testnet()?;
+        }
         let expected_service_fee = crate::send_options::compute_service_fee_mei(signed.amount_mei);
         if signed.amount_wire.is_empty()
             || signed.fee.is_empty()
@@ -1989,34 +1963,12 @@ impl WalletService {
         amount_mei: f64,
         summary: &str,
     ) -> WalletResult<()> {
-        self.append_history_with_status_if_enabled(
-            rail,
-            tx_hash,
-            from,
-            to,
-            amount_mei,
-            summary,
-            TxStatus::Confirmed,
-        )
-    }
-
-    fn append_history_with_status_if_enabled(
-        &mut self,
-        rail: PaymentRail,
-        tx_hash: &str,
-        from: &str,
-        to: &str,
-        amount_mei: f64,
-        summary: &str,
-        status: TxStatus,
-    ) -> WalletResult<()> {
         if !self.settings.privacy.store_tx_history {
             return Ok(());
         }
         self.history
-            .append_with_status(rail, tx_hash, from, to, amount_mei, summary, status)
+            .append(rail, tx_hash, from, to, amount_mei, summary)
     }
-
     fn begin_pending_history(
         &mut self,
         rail: PaymentRail,
@@ -2153,6 +2105,17 @@ fn random_biometric_nonce() -> String {
 }
 
 impl WalletService {
+    /// Type 4 support is an experimental Quantum Lab feature. Keep this guard
+    /// at the core boundary so direct IPC calls cannot enable it on mainnet.
+    pub(crate) fn require_quantum_testnet(&self) -> WalletResult<()> {
+        if self.network_mode == "testnet" {
+            return Ok(());
+        }
+        Err(WalletError::Policy(
+            "Quantum Lab Type 4 transactions are testnet only and cannot be used on mainnet".into(),
+        ))
+    }
+
     pub(crate) fn quantum_mode_enabled(&self) -> bool {
         self.settings.quantum_mode
     }
@@ -2231,10 +2194,10 @@ impl WalletService {
         self.settings.quantum_keystore_json = None;
         self.settings.quantum_mode = true;
         self.quantum_keystore_mem = Some(json.clone());
-        if let Some(session) = self.unlocked.as_mut() {
-            if let Some(key) = session.quantum_file_key.as_ref() {
-                crate::quantum_vault::save_encrypted(key, &json)?;
-            }
+        if let Some(session) = self.unlocked.as_mut()
+            && let Some(key) = session.quantum_file_key.as_ref()
+        {
+            crate::quantum_vault::save_encrypted(key, &json)?;
         }
         self.settings.save()?;
         Ok(())
@@ -2243,182 +2206,194 @@ impl WalletService {
     pub(crate) fn node_client(&self) -> &NodeClient {
         &self.node
     }
+}
+#[cfg(test)]
+mod asset_facade_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    pub fn dapp_session_active(&self) -> bool {
-        self.dapp_session.is_active()
-    }
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use serde_json::json;
+    use tokio::task::JoinHandle;
 
-    pub fn dapp_session_is_authorized(&self, origin: &str) -> bool {
-        self.dapp_session.is_authorized(origin)
-    }
+    use super::*;
+    use crate::test_support::IsolatedWalletData;
 
-    pub fn dapp_connect(&mut self, origin: &str) -> WalletResult<serde_json::Value> {
-        self.touch_auto_lock();
-        crate::dapp::require_trusted_origin(origin)?;
-        let address = self.require_address()?;
-        self.dapp_session.authorize(origin);
-        if self.settings.privacy.pause_auto_lock_dapp {
-            self.bump_unlock_activity();
-        }
-        Ok(serde_json::json!({ "address": address }))
-    }
+    const WATCH_ADDRESS: &str = "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW";
 
-    pub fn dapp_wallet(&mut self, origin: &str) -> WalletResult<serde_json::Value> {
-        crate::dapp::require_trusted_origin(origin)?;
-        if !self.dapp_session.is_authorized(origin) {
-            return Ok(serde_json::json!({ "err": "Wallet not connected" }));
-        }
-        if self.settings.privacy.pause_auto_lock_dapp {
-            self.bump_unlock_activity();
-        }
-        let address = self.require_address()?;
-        Ok(serde_json::json!({ "address": address }))
-    }
-
-    /// Resets auto-lock idle timer while a trusted dApp session is active.
-    pub fn dapp_keepalive_bump(&mut self) {
-        if self.unlocked.is_some()
-            && self.dapp_session.is_active()
-            && self.settings.privacy.pause_auto_lock_dapp
-        {
-            self.bump_unlock_activity();
-        }
-    }
-
-    pub fn dapp_heartbeat(&mut self, origin: &str) -> WalletResult<serde_json::Value> {
-        crate::dapp::require_trusted_origin(origin)?;
-        if self.dapp_session.is_authorized(origin) {
-            if self.settings.privacy.pause_auto_lock_dapp {
-                self.bump_unlock_activity();
-            }
-            Ok(serde_json::json!({ "ok": true }))
-        } else {
-            Ok(serde_json::json!({ "ok": false, "err": "Wallet not connected" }))
-        }
-    }
-
-    pub async fn dapp_transfer(
-        &mut self,
-        origin: &str,
-        txobj: &str,
-    ) -> WalletResult<serde_json::Value> {
-        self.touch_auto_lock();
-        crate::dapp::require_trusted_origin(origin)?;
-        if !self.dapp_session.is_authorized(origin) {
-            return Ok(serde_json::json!({ "err": "Wallet not connected", "ret": 1 }));
-        }
-        let from = self.require_address()?;
-        let parsed = crate::dapp::decode_txobj(txobj)?;
-        let actions_val = parsed
-            .get("actions")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| WalletError::Transaction("txobj missing actions".into()))?;
-        let mut actions = crate::dapp::normalize_actions(actions_val)?;
-        crate::dapp::append_mandatory_wallet_fee(&mut actions)?;
-        let mut fee_payload = parsed.clone();
-        fee_payload["main_address"] = serde_json::json!(from);
-        fee_payload["actions"] = serde_json::json!(actions.clone());
-        let fee =
-            crate::dapp::estimate_fee_for_payload(self.node_client(), &from, &fee_payload).await?;
-        let payload = serde_json::json!({
-            "main_address": from,
-            "fee": fee,
-            "actions": actions
+    async fn spawn_balance_node(balance: f64) -> (String, Arc<AtomicUsize>, JoinHandle<()>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let route_calls = Arc::clone(&calls);
+        let app = Router::new().route(
+            "/query/balance",
+            get(move || {
+                let calls = Arc::clone(&route_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "ret": 0,
+                        "list": [{
+                            "address": WATCH_ADDRESS,
+                            "hacash": balance.to_string(),
+                            "diamond": 0,
+                            "satoshi": 0,
+                            "diamonds": ""
+                        }]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind wallet facade node");
+        let address = listener.local_addr().expect("wallet facade node address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve wallet facade node");
         });
-        let built = self.node.post_create_transaction(payload).await?;
-        let body_hex = built
-            .body
-            .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
-        let canonical =
-            crate::tx_binding::verify_transaction_intent(&body_hex, &from, &fee, &actions)?;
-        let unlock_ctx = self.second_factor_from_session()?;
-        check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
-            &unlock_ctx,
-        )?;
-        self.clear_second_factor();
-        let signed_hex = self.sign_tx_hex(&body_hex)?;
-        let submitted = self.submit_signed_tx(&signed_hex).await?;
-        let txhash = submitted
-            .hash
-            .clone()
-            .unwrap_or_else(|| built.hash.unwrap_or_default());
-        self.bump_unlock_activity();
-        Ok(serde_json::json!({
-            "ret": 0,
-            "success": true,
-            "txbody": signed_hex,
-            "txhash": txhash,
-            "txfee": fee,
-            "description": [canonical.approval_summary()],
-            "body_sha256": canonical.body_sha256
-        }))
+        (format!("http://{address}"), calls, server)
     }
 
-    pub async fn dapp_sign_tx(
-        &mut self,
-        origin: &str,
-        txbody: &str,
-        autosubmit: bool,
-    ) -> WalletResult<serde_json::Value> {
-        self.touch_auto_lock();
-        crate::dapp::require_trusted_origin(origin)?;
-        if !self.dapp_session.is_authorized(origin) {
-            return Ok(serde_json::json!({ "err": "Wallet not connected", "ret": 1 }));
+    #[tokio::test]
+    async fn locked_and_auto_locked_asset_reads_never_reach_the_node() {
+        let _wallet_data = IsolatedWalletData::new();
+        let (node_url, calls, server) = spawn_balance_node(7.0).await;
+        let mut wallet = WalletService::new(Some(node_url), None).expect("test wallet service");
+
+        assert!(matches!(
+            wallet.balance_mei().await,
+            Err(WalletError::Locked)
+        ));
+        assert!(matches!(
+            wallet.list_owned_diamonds().await,
+            Err(WalletError::Locked)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        wallet
+            .import_watch_only(WATCH_ADDRESS)
+            .expect("watch-only session");
+        wallet.profile.auto_lock_secs = 0;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(matches!(
+            wallet.balance_mei().await,
+            Err(WalletError::Locked)
+        ));
+        assert!(wallet.status().locked);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn watch_only_reads_assets_but_node_switch_cannot_reuse_old_cache() {
+        let _wallet_data = IsolatedWalletData::new();
+        let (node_a, calls_a, server_a) = spawn_balance_node(1.0).await;
+        let (node_b, calls_b, server_b) = spawn_balance_node(2.0).await;
+        let mut wallet = WalletService::new(Some(node_a), None).expect("test wallet service");
+        wallet
+            .import_watch_only(WATCH_ADDRESS)
+            .expect("watch-only session");
+
+        assert_eq!(wallet.balance_mei().await.unwrap(), 1.0);
+        assert_eq!(wallet.balance_mei().await.unwrap(), 1.0);
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            wallet.require_signing_account(),
+            Err(WalletError::Policy(_))
+        ));
+
+        let mut settings = wallet.get_settings();
+        settings.node_url = node_b;
+        wallet.update_settings(settings).expect("switch node");
+        assert_eq!(wallet.balance_mei().await.unwrap(), 2.0);
+        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+
+        server_a.abort();
+        server_b.abort();
+    }
+}
+
+#[cfg(test)]
+mod quantum_network_policy_tests {
+    use super::*;
+    use crate::test_support::IsolatedWalletData;
+
+    fn unsigned_type4() -> AirgapUnsigned {
+        AirgapUnsigned {
+            v: AIRGAP_VERSION,
+            from: "quantum-from".into(),
+            to: "recipient".into(),
+            amount_mei: 1.0,
+            amount_wire: "1".into(),
+            fee: "1:244".into(),
+            service_fee_mei: 0.003,
+            service_fee_treasury: Some(crate::send_options::WALLET_TREASURY_ADDRESS.into()),
+            body_hex: "00".into(),
+            summary: "test Type 4".into(),
+            tx_type: 4,
         }
-        let address = self.require_address()?;
-        let canonical = crate::tx_binding::validate_signer_body(txbody, &address)?;
-        if canonical
-            .actions
-            .iter()
-            .any(|action| matches!(action.kind, 1 | 5 | 7 | 10))
-        {
-            return Err(WalletError::Policy(
-                "raw dApp signing cannot move HAC, BTC or HACD; use the transfer API so the mandatory wallet fee is bound before signing".into(),
-            ));
+    }
+
+    fn signed_type4() -> AirgapSigned {
+        let unsigned = unsigned_type4();
+        AirgapSigned {
+            v: unsigned.v,
+            from: unsigned.from,
+            to: unsigned.to,
+            amount_mei: unsigned.amount_mei,
+            amount_wire: unsigned.amount_wire,
+            fee: unsigned.fee,
+            service_fee_mei: unsigned.service_fee_mei,
+            service_fee_treasury: unsigned.service_fee_treasury,
+            signed_hex: unsigned.body_hex,
+            summary: unsigned.summary,
+            tx_type: unsigned.tx_type,
         }
-        let unlock_ctx = self.second_factor_from_session()?;
-        check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
-            &unlock_ctx,
-        )?;
-        self.clear_second_factor();
-        let signed_hex = self.sign_tx_hex(txbody)?;
-        self.bump_unlock_activity();
-        let mut result = serde_json::json!({
-            "ret": 0,
-            "body": signed_hex,
-            "address": address,
-            "hash": crate::dapp::built_hash_hint(txbody),
-            "description": canonical.approval_summary(),
-            "body_sha256": canonical.body_sha256,
-        });
-        if autosubmit {
-            let submitted = self.submit_signed_tx(&signed_hex).await?;
-            if let Some(hash) = submitted.hash {
-                result["txhash"] = serde_json::json!(hash);
-                result["success"] = serde_json::json!(true);
+    }
+
+    fn assert_testnet_gate<T>(result: WalletResult<T>) {
+        match result {
+            Err(WalletError::Policy(message)) => {
+                assert!(
+                    message.contains("testnet only"),
+                    "unexpected policy error: {message}"
+                );
             }
+            Err(error) => panic!("expected testnet policy error, got {error}"),
+            Ok(_) => panic!("mainnet Type 4 path unexpectedly succeeded"),
         }
-        Ok(result)
     }
 
-    pub fn dapp_chain_status(
-        &self,
-        _origin: &str,
-        chain_id: Option<u64>,
-    ) -> WalletResult<serde_json::Value> {
-        let target = chain_id.unwrap_or(0);
-        Ok(serde_json::json!({
-            "current_chain_id": 0,
-            "target_chain_id": target,
-            "configured": true,
-            "matched": target == 0,
-            "need_add": false,
-            "need_switch": target != 0,
-            "diff": false
-        }))
+    #[tokio::test]
+    async fn every_type4_boundary_rejects_mainnet_before_other_work() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(Some("http://127.0.0.1:1".into()), None)
+            .expect("test wallet service");
+        wallet.network_mode = "mainnet".into();
+
+        assert_testnet_gate(wallet.require_quantum_testnet());
+        assert_testnet_gate(wallet.quantum_preflight_type4("invalid", "1").await);
+        assert_testnet_gate(wallet.quantum_send_type4("invalid", "1", "pass").await);
+        assert_testnet_gate(wallet.prepare_airgap_type4("invalid", "1").await);
+        assert_testnet_gate(wallet.quantum_airgap_sign_type4(&unsigned_type4(), "pass"));
+        assert_testnet_gate(wallet.broadcast_airgap_signed(&signed_type4()).await);
+    }
+
+    #[test]
+    fn centralized_quantum_gate_allows_only_exact_testnet_mode() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(Some("http://127.0.0.1:1".into()), None)
+            .expect("test wallet service");
+
+        wallet.network_mode = "testnet".into();
+        assert!(wallet.require_quantum_testnet().is_ok());
+
+        for mode in ["mainnet", "", "TESTNET", "unknown"] {
+            wallet.network_mode = mode.into();
+            assert_testnet_gate(wallet.require_quantum_testnet());
+        }
     }
 }

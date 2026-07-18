@@ -1,3 +1,4 @@
+import { OFFICIAL_NODE_URL, isOfficialNodeUrl } from "@hacash/wallet-ui";
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
@@ -11,25 +12,6 @@ import AppUpdateSection from "../../components/AppUpdateSection";
 import HubDiscoveryPanel from "../../components/HubDiscoveryPanel";
 import { formatInvokeError } from "../../formatInvokeError";
 import { useLocale } from "../../locale";
-
-const OFFICIAL_NODE_URL = "http://nodeapi.hacash.org";
-
-function normalizeNodeUrl(url: string): string {
-  return url.trim().replace(/\/+$/, "").toLowerCase();
-}
-
-function isOfficialNode(url: string): boolean {
-  const n = normalizeNodeUrl(url);
-  return (
-    n === "" ||
-    n === normalizeNodeUrl(OFFICIAL_NODE_URL) ||
-    n === "http://nodeapi.org" ||
-    n === "https://nodeapi.hacash.org" ||
-    n === "https://nodeapi.org" ||
-    n === "nodeapi.hacash.org" ||
-    n === "nodeapi.org"
-  );
-}
 
 type Props = {
   status: WalletStatus | null;
@@ -66,8 +48,9 @@ export default function SettingsScreen({
   const [autoFailover, setAutoFailover] = useState(settings?.auto_node_failover ?? true);
   const [nodeTestMsg, setNodeTestMsg] = useState<string | null>(null);
   const [discovery, setDiscovery] = useState<NodeDiscoveryReport | null>(null);
+  const [currentHubHealth, setCurrentHubHealth] = useState<HubHealth | null>(hubHealth);
   const [showCustomNode, setShowCustomNode] = useState(
-    () => !isOfficialNode(settings?.node_url ?? OFFICIAL_NODE_URL),
+    () => !isOfficialNodeUrl(settings?.node_url ?? OFFICIAL_NODE_URL),
   );
 
   useEffect(() => {
@@ -76,12 +59,35 @@ export default function SettingsScreen({
       setHubUrl(settings.l2_hub_url ?? "");
       setFallbackText((settings.node_fallback_urls ?? []).join("\n"));
       setAutoFailover(settings.auto_node_failover ?? true);
-      setShowCustomNode(!isOfficialNode(settings.node_url));
+      setShowCustomNode(!isOfficialNodeUrl(settings.node_url));
     }
   }, [settings]);
 
+  useEffect(() => {
+    setCurrentHubHealth(hubHealth);
+  }, [hubHealth]);
+
+  useEffect(() => {
+    if (!settings?.l2_hub_url) {
+      setCurrentHubHealth(null);
+      return;
+    }
+    let active = true;
+    void api
+      .hubHealth()
+      .then((health) => {
+        if (active) setCurrentHubHealth(health);
+      })
+      .catch(() => {
+        if (active) setCurrentHubHealth(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [settings?.l2_hub_url]);
+
   const activeIsOfficial = useMemo(
-    () => isOfficialNode(status?.node_url ?? nodeUrl),
+    () => isOfficialNodeUrl(status?.node_url ?? nodeUrl),
     [status?.node_url, nodeUrl],
   );
 
@@ -95,9 +101,9 @@ export default function SettingsScreen({
     <>
       <AppUpdateSection onToast={onToast} />
       <div className="card">
-        <h2>Network</h2>
+        <h2>{t("settings.network")}</h2>
         <p className="muted small">
-          Network: <strong>{settings?.network_mode ?? "mainnet"}</strong>
+          {t("settings.networkValue", { network: settings?.network_mode ?? "mainnet" })}
         </p>
 
         <label className="label">{t("node.official")}</label>
@@ -109,7 +115,7 @@ export default function SettingsScreen({
             </>
           ) : (
             <>
-              Active node: <code>{status?.node_url ?? nodeUrl}</code>
+              {t("settings.activeNode")}: <code>{status?.node_url ?? nodeUrl}</code>
             </>
           )}
         </p>
@@ -138,17 +144,17 @@ export default function SettingsScreen({
               spellCheck={false}
             />
             <p className="muted">
-              Official Hacash node uses <strong>http://</strong> (not https). Tap Save after editing.
+              {t("settings.officialHttpNotice")}
             </p>
             <button type="button" className="small" disabled={busy} onClick={applyOfficial}>
               {t("node.useOfficial")}
             </button>
-            <label className="label">Fallback nodes (one per line)</label>
+            <label className="label">{t("settings.fallbackNodes")}</label>
             <textarea
               rows={3}
               value={fallbackText}
               onChange={(event) => setFallbackText(event.target.value)}
-              placeholder="http://your-node.example:8081"
+              placeholder="https://your-node.example"
               autoCapitalize="none"
               autoCorrect="off"
               spellCheck={false}
@@ -159,21 +165,23 @@ export default function SettingsScreen({
                 checked={autoFailover}
                 onChange={(event) => setAutoFailover(event.target.checked)}
               />
-              Automatically switch to a verified fallback node
+              {t("settings.autoFailover")}
             </label>
           </>
         )}
 
-        <label className="label">L2 Hub URL</label>
+        <label className="label">{t("settings.l2HubUrl")}</label>
         <input
           value={hubUrl}
           onChange={(e) => setHubUrl(e.target.value)}
-          placeholder="https://hub.example (optional)"
+          placeholder={t("settings.optionalHubPlaceholder")}
         />
-        {hubHealth ? (
+        {currentHubHealth ? (
           <p className="muted">
-            Hub: {hubHealth.ok ? "online" : "offline"}
-            {hubHealth.hub_fee_mei != null ? ` · fee ${hubHealth.hub_fee_mei} HAC` : ""}
+            {t("settings.hubStatus", {
+              status: t(currentHubHealth.ok ? "common.online" : "common.offline"),
+              fee: currentHubHealth.hub_fee_mei ?? t("common.notAvailable"),
+            })}
           </p>
         ) : null}
         <HubDiscoveryPanel
@@ -203,7 +211,7 @@ export default function SettingsScreen({
               )
             }
           >
-            Save settings
+            {t("settings.save")}
           </button>
           <button
             type="button"
@@ -216,9 +224,11 @@ export default function SettingsScreen({
                 .then((report) => {
                   setDiscovery(report);
                   setNodeUrl(report.active_node);
-                  if (!isOfficialNode(report.active_node)) setShowCustomNode(true);
+                  if (!isOfficialNodeUrl(report.active_node)) setShowCustomNode(true);
                   onToast(
-                    report.switched ? `Connected to ${report.active_node}` : "Active node is healthy.",
+                    report.switched
+                      ? t("settings.connectedTo", { node: report.active_node })
+                      : t("settings.activeHealthy"),
                     "success",
                   );
                 })
@@ -226,7 +236,7 @@ export default function SettingsScreen({
                 .finally(() => setBusy(false));
             }}
           >
-            Find active node
+            {t("settings.findActive")}
           </button>
           <button
             type="button"
@@ -238,8 +248,8 @@ export default function SettingsScreen({
               void api
                 .pingNodeUrl(pingUrl || undefined)
                 .then((r) => {
-                  setNodeTestMsg(`Node OK (${String(r.reachable ?? "true")})`);
-                  onToast("Node connection OK.", "success");
+                  setNodeTestMsg(t("settings.nodeOk", { reachable: String(r.reachable ?? true) }));
+                  onToast(t("settings.nodeConnectionOk"), "success");
                 })
                 .catch((e) => {
                   const msg = formatInvokeError(e);
@@ -249,7 +259,7 @@ export default function SettingsScreen({
                 .finally(() => setBusy(false));
             }}
           >
-            Test node
+            {t("settings.testNode")}
           </button>
         </div>
         {nodeTestMsg ? <p className="muted small">{nodeTestMsg}</p> : null}
@@ -264,25 +274,25 @@ export default function SettingsScreen({
                 <span className="muted">
                   {candidate.online
                     ? candidate.network_match
-                      ? `ready, height ${candidate.height ?? "unknown"}`
-                      : "wrong Hacash network"
-                    : candidate.error ?? "offline"}
+                      ? t("settings.readyHeight", {
+                          height: candidate.height ?? t("common.notAvailable"),
+                        })
+                      : t("settings.wrongNetwork")
+                    : candidate.error ?? t("common.offline")}
                 </span>
               </div>
             ))}
           </div>
         ) : null}
         <p className="muted small">
-          If Test node fails: turn VPN off, try Wi‑Fi and mobile data, open{" "}
-          <code>http://nodeapi.hacash.org/query/latest</code> in Chrome on the phone.
+          {t("settings.testHint")} <code>http://nodeapi.hacash.org/query/latest</code>
         </p>
         <p className="label" style={{ marginTop: "1rem" }}>
           {t("node.grapheneTitle")}
         </p>
         <p className="muted small">{t("node.grapheneHelp")}</p>
         <p className="muted small">
-          Mobile DUST requires a remote relay configured for the same node. Changing the node does
-          not reconfigure a relay that is operated by somebody else.
+          {t("settings.dustRelayNotice")}
         </p>
       </div>
     </>

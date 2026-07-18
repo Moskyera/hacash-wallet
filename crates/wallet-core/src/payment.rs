@@ -65,10 +65,9 @@ impl PaymentRouter {
     pub fn replace_bills(&mut self, bills: BillStore) {
         self.bills = bills;
     }
-    pub fn update_settings(&mut self, settings: WalletSettings) {
-        if settings.node_url != self.node.base_url() {
-            self.node = NodeClient::new(settings.node_url.clone());
-        }
+    pub fn update_settings(&mut self, node: NodeClient, settings: WalletSettings) {
+        debug_assert_eq!(settings.node_url, node.base_url());
+        self.node = node;
         self.settings = settings;
     }
 
@@ -81,10 +80,10 @@ impl PaymentRouter {
     ) -> WalletResult<PaymentPlan> {
         crate::hip23::validate_hac_amount_mei(amount_mei)?;
         options.validate()?;
-        if !options.force_l1 {
-            if let Some(plan) = self.try_l2_plan(from, to, amount_mei).await? {
-                return Ok(plan);
-            }
+        if !options.force_l1
+            && let Some(plan) = self.try_l2_plan(from, to, amount_mei).await?
+        {
+            return Ok(plan);
         }
         let _ = self.node.balance_mei(from).await?;
         let amount_wire = format_mei_for_node(amount_mei);

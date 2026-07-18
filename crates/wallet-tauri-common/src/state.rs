@@ -5,17 +5,17 @@ use tokio::sync::Mutex;
 
 use crate::dapp_approval::DappApprovalQueue;
 #[cfg(feature = "desktop")]
-use crate::dapp_bridge::DappBridgeHandle;
-#[cfg(feature = "desktop")]
 use crate::desktop_relay::RelayProcess;
+use crate::update::UpdateOfferStore;
+
+pub(crate) const WALLET_BUSY_RETRY: &str = "wallet busy; retry shortly";
 
 pub struct AppState {
     pub inner: Arc<Mutex<WalletService>>,
     #[cfg(feature = "desktop")]
     pub relay: RelayProcess,
-    #[cfg(feature = "desktop")]
-    pub dapp_bridge: DappBridgeHandle,
     pub dapp_approval: Arc<DappApprovalQueue>,
+    pub updates: UpdateOfferStore,
 }
 
 impl AppState {
@@ -24,9 +24,8 @@ impl AppState {
             inner: Arc::new(Mutex::new(service)),
             #[cfg(feature = "desktop")]
             relay: RelayProcess::new(),
-            #[cfg(feature = "desktop")]
-            dapp_bridge: DappBridgeHandle::new(),
             dapp_approval: Arc::new(DappApprovalQueue::new()),
+            updates: UpdateOfferStore::new(),
         }
     }
 }

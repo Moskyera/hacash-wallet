@@ -1,133 +1,37 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useMemo } from "react";
+import { open } from "@tauri-apps/plugin-shell";
+import {
+  OwnedHacdGallery,
+  translatedHacdMetadataCopy,
+  translatedOwnedHacdGalleryCopy,
+} from "@hacash/wallet-ui";
+
 import { api } from "../api";
-import HacdDiamondVisual from "../components/HacdDiamondVisual";
-import { formatInvokeError } from "../formatInvokeError";
 import { useLocale } from "../locale";
-import { isValidHacdName, normalizeHacdName } from "../utils/paymentAssets";
 
 type Props = {
   locked: boolean;
   busy: boolean;
-  ownedHint?: string[];
   onNotify: (msg: string, kind: "success" | "info" | "error") => void;
   onGoSend?: () => void;
 };
 
-/**
- * Dedicated HACD gallery: owned diamonds as full on-chain metadata cards
- * (Explorer-style card via HacdDiamondVisual — not a bare HIP-5 chip).
- */
-export default function HacdScreen({ locked, busy, ownedHint, onNotify, onGoSend }: Props) {
+/** My HACD shows only metadata cards verified as owned by the active wallet. */
+export default function HacdScreen({ locked, busy, onNotify }: Props) {
   const { t } = useLocale();
-  const [owned, setOwned] = useState<string[]>(ownedHint ?? []);
-  const [lookup, setLookup] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const onNotifyRef = useRef(onNotify);
-  onNotifyRef.current = onNotify;
-
-  // Seed from wallet assets without re-fetch loops when the parent re-renders.
-  useEffect(() => {
-    if (ownedHint && ownedHint.length > 0) {
-      setOwned(ownedHint);
-    }
-  }, [ownedHint]);
-
-  const refresh = useCallback(
-    async (opts?: { notify?: boolean }) => {
-      if (locked) {
-        setOwned([]);
-        setError(t("hacd.unlockFirst"));
-        return;
-      }
-      setLoading(true);
-      setError("");
-      try {
-        const names = await api.listOwnedDiamonds();
-        setOwned(names);
-      } catch (e) {
-        const msg = formatInvokeError(e);
-        setError(msg);
-        if (opts?.notify) onNotifyRef.current(msg, "error");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [locked, t],
-  );
-
-  // Load once when unlocked; do not depend on unstable parent callbacks.
-  useEffect(() => {
-    void refresh({ notify: false });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-run on lock change
-  }, [locked]);
-
-  const lookupName = normalizeHacdName(lookup);
-  const showLookup = isValidHacdName(lookupName);
-  const gallery = showLookup && !owned.includes(lookupName) ? [lookupName, ...owned] : owned;
+  const copy = useMemo(() => translatedOwnedHacdGalleryCopy(t), [t]);
+  const metadataCopy = useMemo(() => translatedHacdMetadataCopy(t), [t]);
 
   return (
-    <section className="stack hacd-gallery-screen">
-      <header className="panel-head row-between">
-        <div>
-          <h2>{t("hacd.title")}</h2>
-          <p className="muted">{t("hacd.subtitle")}</p>
-        </div>
-        <div className="row-btns">
-          <button
-            type="button"
-            className="btn-ghost"
-            disabled={busy || loading || locked}
-            onClick={() => void refresh({ notify: true })}
-          >
-            {loading ? t("hacd.refreshing") : t("hacd.refresh")}
-          </button>
-          {onGoSend && (
-            <button type="button" className="primary" disabled={busy || locked} onClick={onGoSend}>
-              {t("hacd.send")}
-            </button>
-          )}
-        </div>
-      </header>
-
-      <div className="panel">
-        <label className="field">
-          {t("hacd.lookup")}
-          <input
-            value={lookup}
-            onChange={(e) => setLookup(e.target.value.toUpperCase())}
-            placeholder="e.g. AVZXZS"
-            maxLength={6}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </label>
-        <p className="muted small-note">{t("hacd.lookupHint")}</p>
-      </div>
-
-      {error && <p className="form-error">{error}</p>}
-
-      {locked ? (
-        <div className="panel info-box">
-          <p>{t("hacd.unlockFirst")}</p>
-        </div>
-      ) : gallery.length === 0 && !loading ? (
-        <div className="panel info-box">
-          <p>{t("hacd.empty")}</p>
-          <p className="muted small-note">{t("hacd.emptyHint")}</p>
-        </div>
-      ) : (
-        <div className="hacd-gallery-grid" aria-live="polite">
-          {gallery.map((name) => (
-            <div key={name} className="hacd-gallery-item">
-              {!owned.includes(name) && (
-                <p className="muted small-note hacd-gallery-lookup-badge">{t("hacd.lookupBadge")}</p>
-              )}
-              <HacdDiamondVisual name={name} size="lg" />
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
+    <OwnedHacdGallery
+      locked={locked}
+      busy={busy}
+      copy={copy}
+      metadataCopy={metadataCopy}
+      listOwned={api.listOwnedDiamonds}
+      queryDiamond={api.queryDiamond}
+      openExternal={open}
+      onError={() => onNotify(copy.loadError, "error")}
+    />
   );
 }

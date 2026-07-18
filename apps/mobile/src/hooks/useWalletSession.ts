@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   BillSummary,
@@ -34,10 +34,29 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
   const [refreshing, setRefreshing] = useState(false);
   const [walletName, setWalletName] = useState("");
   const [walletNameDraft, setWalletNameDraft] = useState("");
+  const statusRequestRef = useRef<Promise<WalletStatus> | null>(null);
 
   const privacy = settings?.privacy ?? status?.privacy ?? DEFAULT_PRIVACY;
   const dustWhisper = settings?.dust_whisper ?? status?.dust_whisper;
   const watchOnly = status?.watch_only ?? false;
+
+  const fetchStatus = useCallback((): Promise<WalletStatus> => {
+    if (statusRequestRef.current) return statusRequestRef.current;
+    const request = api.status().finally(() => {
+      if (statusRequestRef.current === request) statusRequestRef.current = null;
+    });
+    statusRequestRef.current = request;
+    return request;
+  }, []);
+
+  const clearUnlockedState = useCallback(() => {
+    setBalance(null);
+    setAssets(null);
+    setFastPay(null);
+    setHubHealth(null);
+    setHistory([]);
+    setBills([]);
+  }, []);
 
   const loadWalletData = useCallback(async () => {
     const results = await Promise.allSettled([
@@ -46,7 +65,6 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
       api.txHistory(),
       api.listBillSummaries(),
       api.getSettings(),
-      api.hubHealth(),
       api.platformSecurity(),
     ]);
 
@@ -58,8 +76,7 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     const hist = pick<TxRecord[]>(2);
     const billRows = pick<BillSummary[]>(3);
     const cfg = pick<WalletSettings>(4);
-    const hub = pick<HubHealth>(5);
-    const plat = pick<PlatformSecurityStatus>(6);
+    const plat = pick<PlatformSecurityStatus>(5);
 
     const nodeErr = results
       .slice(0, 2)
@@ -80,23 +97,21 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     if (hist) setHistory(hist);
     if (billRows) setBills(billRows);
     if (cfg) setSettings(cfg);
-    setHubHealth(hub);
     setPlatformSec(plat);
     return cfg ?? (await api.getSettings());
   }, []);
 
   const refresh = useCallback(async () => {
-    const s = await api.status();
+    const s = await fetchStatus();
     setStatus(s);
     if (!s.has_wallet) {
+      clearUnlockedState();
       setAuthScreen("welcome");
       return;
     }
     if (s.locked) {
       setAuthScreen("unlock");
-      setBalance(null);
-      setAssets(null);
-      setFastPay(null);
+      clearUnlockedState();
       try {
         const [cfg, plat] = await Promise.all([
           api.getSettings(),
@@ -111,13 +126,46 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     }
     setAuthScreen("app");
     await loadWalletData();
-  }, [loadWalletData]);
+  }, [clearUnlockedState, fetchStatus, loadWalletData]);
 
   useEffect(() => {
     void refresh()
       .catch((e) => showToast(formatInvokeError(e), "error"))
       .finally(() => setBooting(false));
   }, [refresh, showToast]);
+
+  useEffect(() => {
+    if (authScreen !== "app" || !status || status.locked) return;
+    let active = true;
+    let inFlight = false;
+
+    const pollStatus = async () => {
+      if (!active || inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      try {
+        const next = await fetchStatus();
+        if (!active) return;
+        setStatus(next);
+        if (!next.has_wallet) {
+          clearUnlockedState();
+          setAuthScreen("welcome");
+        } else if (next.locked) {
+          clearUnlockedState();
+          setAuthScreen("unlock");
+        }
+      } catch {
+        // A transient status failure must not interrupt the unlocked screen.
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const id = window.setInterval(() => void pollStatus(), 5_000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, [authScreen, clearUnlockedState, fetchStatus, status?.locked]);
 
   useEffect(() => {
     setWalletName(loadWalletName(status?.address));
@@ -138,11 +186,10 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
 
   const handleLock = useCallback(async () => {
     await api.lock();
-    setBalance(null);
-    setAssets(null);
+    clearUnlockedState();
     await refresh();
     showToast("Wallet locked.", "info");
-  }, [refresh, showToast]);
+  }, [clearUnlockedState, refresh, showToast]);
 
   const handleEnableFastPay = useCallback(async () => {
     setBusy(true);

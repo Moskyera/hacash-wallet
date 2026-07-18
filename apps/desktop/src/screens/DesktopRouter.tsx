@@ -327,7 +327,6 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
         <HacdScreen
           locked={!!status?.locked}
           busy={busy}
-          ownedHint={assets?.hacd_names}
           onNotify={onNotify}
           onGoSend={() => setScreen("send")}
         />

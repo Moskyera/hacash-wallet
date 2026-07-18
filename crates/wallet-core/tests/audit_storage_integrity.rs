@@ -47,9 +47,11 @@ fn audit_bills_isolated_per_payment_id() {
 fn audit_settings_roundtrip_preserves_security_profile() {
     audit_gate("settings_roundtrip", || {
         with_isolated_wallet_dir(|| {
-            let mut s = WalletSettings::default();
-            s.security_profile = "paranoid".into();
-            s.l2_hub_url = Some("https://hub.test".into());
+            let s = WalletSettings {
+                security_profile: "paranoid".into(),
+                l2_hub_url: Some("https://hub.test".into()),
+                ..WalletSettings::default()
+            };
             s.save().unwrap();
             let loaded = WalletSettings::load().unwrap();
             assert_eq!(loaded.security_profile, "paranoid");

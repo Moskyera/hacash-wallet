@@ -8,7 +8,7 @@ use wallet_tauri_common::AppState;
 #[tauri::command]
 fn wallet_list_bills(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
     let svc = state.inner.blocking_lock();
-    Ok(serde_json::to_value(svc.list_bills()).map_err(|e| e.to_string())?)
+    serde_json::to_value(svc.list_bills()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -25,7 +25,7 @@ fn wallet_validate_hip23(
 
 #[tauri::command]
 fn wallet_platform_security_status() -> Result<serde_json::Value, String> {
-    Ok(serde_json::to_value(platform::platform_security_status()).map_err(|e| e.to_string())?)
+    serde_json::to_value(platform::platform_security_status()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -63,27 +63,30 @@ pub fn run() {
             });
             Ok(())
         })
+        // Backup files and WebAuthn are desktop-only. The Android Downloads helper is not
+        // registered until mobile exposes that flow.
         .invoke_handler(wallet_tauri_common::wallet_invoke_handler![
+            wallet_tauri_common::commands::wallet_export_backup,
+            wallet_tauri_common::backup_commands::wallet_preview_backup,
+            wallet_tauri_common::backup_commands::wallet_import_backup,
+            wallet_tauri_common::security_commands::wallet_webauthn_register_begin,
+            wallet_tauri_common::security_commands::wallet_webauthn_register_finish,
+            wallet_tauri_common::security_commands::wallet_webauthn_auth_begin,
+            wallet_tauri_common::security_commands::wallet_webauthn_auth_finish,
             wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
             wallet_list_bills,
             wallet_validate_hip23,
             wallet_platform_security_status,
             wallet_confirm_biometric_native,
-            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_start,
-            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_stop,
-            wallet_tauri_common::desktop_commands::wallet_dapp_bridge_status,
             wallet_tauri_common::update_commands::wallet_install_desktop_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let RunEvent::Exit = event {
-                if let Some(state) = app.try_state::<AppState>() {
-                    let _ = wallet_tauri_common::desktop_relay::stop_managed_relay(&state);
-                    tauri::async_runtime::block_on(async {
-                        let _ = wallet_tauri_common::dapp_bridge::stop_dapp_bridge(&state).await;
-                    });
-                }
+            if let RunEvent::Exit = event
+                && let Some(state) = app.try_state::<AppState>()
+            {
+                let _ = wallet_tauri_common::desktop_relay::stop_managed_relay(&state);
             }
         });
 }

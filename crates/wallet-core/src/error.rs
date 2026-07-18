@@ -20,6 +20,8 @@ pub enum WalletError {
     Node(String),
     #[error("node api: unsupported address: {0}")]
     UnsupportedAddress(String),
+    #[error("price service: {0}")]
+    Price(String),
     #[error("transaction: {0}")]
     Transaction(String),
     #[error("security policy blocked: {0}")]

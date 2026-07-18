@@ -277,17 +277,17 @@ pub async fn evaluate_fast_pay(
                     && h.cross_channel_ready
                     && h.hub_fee_mei.unwrap_or(0.0).abs() <= f64::EPSILON =>
             {
-                if let Ok(ch) = query_channel(node, ch_id).await {
-                    if channel_ready(&ch, user) {
-                        let name = settings
-                            .hub_right_address
-                            .as_deref()
-                            .map(|_| "your provider".to_string())
-                            .or_else(|| Some("Fast Pay".into()));
-                        return Ok(FastPayStatus::ready(
-                            name.unwrap_or_else(|| "Fast Pay".into()),
-                        ));
-                    }
+                if let Ok(ch) = query_channel(node, ch_id).await
+                    && channel_ready(&ch, user)
+                {
+                    let name = settings
+                        .hub_right_address
+                        .as_deref()
+                        .map(|_| "your provider".to_string())
+                        .or_else(|| Some("Fast Pay".into()));
+                    return Ok(FastPayStatus::ready(
+                        name.unwrap_or_else(|| "Fast Pay".into()),
+                    ));
                 }
                 return Ok(FastPayStatus::needs_channel(
                     "your provider",
@@ -320,10 +320,10 @@ pub fn apply_discovered_hub(settings: &mut WalletSettings, discovered: &Discover
     if settings.l2_hub_url.is_none() {
         settings.l2_hub_url = Some(discovered.hub_url.clone());
     }
-    if settings.hub_right_address.is_none() {
-        if let Some(addr) = &discovered.hub_address {
-            settings.hub_right_address = Some(addr.clone());
-        }
+    if settings.hub_right_address.is_none()
+        && let Some(addr) = &discovered.hub_address
+    {
+        settings.hub_right_address = Some(addr.clone());
     }
 }
 

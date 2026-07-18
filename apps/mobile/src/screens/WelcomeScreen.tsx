@@ -3,6 +3,7 @@ import Toast from "../components/Toast";
 import WalletLogo from "../components/WalletLogo";
 import PrivateKeyQrScanner from "../components/PrivateKeyQrScanner";
 import type { ToastKind } from "../hooks/useToast";
+import { useLocale } from "../locale";
 
 type WelcomeTab = "create" | "import" | "watch";
 
@@ -37,6 +38,7 @@ export default function WelcomeScreen({
   onWatchOnly,
   toast,
 }: Props) {
+  const { t } = useLocale();
   const [tab, setTab] = useState<WelcomeTab>("create");
   const [showQrScan, setShowQrScan] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -45,7 +47,7 @@ export default function WelcomeScreen({
     <div className="auth-screen">
       <div className="auth-hero">
         <WalletLogo size="lg" />
-        <p className="muted small">Pay with QR. Fast Pay and Quantum options included.</p>
+        <p className="muted small">{t("welcome.capabilities")}</p>
       </div>
 
       <div className="display-toggle">

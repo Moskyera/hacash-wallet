@@ -1,8 +1,9 @@
-import { type4Balance, useType4Probe } from "@hacash/wallet-ui";
+import { type4Balance, type Type4Probe } from "@hacash/wallet-ui";
 import { useCallback, useEffect, useState } from "react";
 import { api, quantumApi, QuantumAccountSummary, QuantumPreflight } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
-import { canSendType4, PQC_TYPE4_HINT } from "../quantumMeta";
+import { useLocale } from "../locale";
+import { canSendType4 } from "../quantumMeta";
 import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 import AddressBadge from "./AddressBadge";
 
@@ -11,8 +12,11 @@ const DEFAULT_TO = "";
 
 type Props = {
   account: QuantumAccountSummary | null;
+  balanceProbe: Type4Probe;
+  onRefreshBalance: () => Promise<void>;
   nodeUrl?: string;
   disabled?: boolean;
+  blockedMessage?: string;
   webauthnEnabled?: boolean;
   securityProfile?: string;
   nativeBioAvailable?: boolean;
@@ -23,6 +27,7 @@ async function maybeWebAuthnGate(
   webauthnEnabled?: boolean,
   securityProfile?: string,
   nativeBioAvailable?: boolean,
+  unavailableMessage?: string,
 ) {
   const needs2fa =
     securityProfile === "paranoid" || (securityProfile !== "paranoid" && amount >= 100);
@@ -38,18 +43,22 @@ async function maybeWebAuthnGate(
     await api.confirmBiometricNative();
     return;
   }
-  throw new Error("Enable WebAuthn or Windows Hello for large quantum sends");
+  throw new Error(unavailableMessage ?? "Second-factor authentication is required.");
 }
 
 export default function SendQuantumTx({
   account,
   nodeUrl,
   disabled,
+  balanceProbe,
+  onRefreshBalance,
+  blockedMessage,
   webauthnEnabled,
   securityProfile,
   nativeBioAvailable,
 }: Props) {
   const [to, setTo] = useState(DEFAULT_TO);
+  const { t } = useLocale();
   const [amount, setAmount] = useState("0.1");
   const [pass, setPass] = useState("");
   const [preflight, setPreflight] = useState<QuantumPreflight | null>(null);
@@ -64,15 +73,10 @@ export default function SendQuantumTx({
   const type4Ready = canSendType4(account);
   const isPqcSender = account?.kind === "pqckey" && account.address_version === 6;
 
-  const { probe: balanceProbe, refresh: refreshBalance } = useType4Probe(
-    account?.address,
-    quantumApi.balanceProbe,
-    formatInvokeError,
-  );
   const balance = type4Balance(balanceProbe);
 
   const runPreflight = useCallback(async () => {
-    if (!account || !type4Ready) {
+    if (!account || !type4Ready || disabled) {
       setPreflight(null);
       return;
     }
@@ -92,7 +96,7 @@ export default function SendQuantumTx({
         total_mei: 0,
       });
     }
-  }, [account, type4Ready, to, amount, balance]);
+  }, [account, type4Ready, disabled, to, amount, balance]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -109,32 +113,42 @@ export default function SendQuantumTx({
     !disabled;
 
   async function send() {
+    if (disabled) {
+      setErr(blockedMessage ?? t("quantum.signingUnavailable"));
+      return;
+    }
     if (!account) {
-      setErr("Create or import a quantum account first.");
+      setErr(t("quantum.createAccountFirst"));
       return;
     }
     if (!type4Ready) {
-      setErr("Create or import a PQC (v6) or Hybrid (v7) quantum account first.");
+      setErr(t("quantum.compatibleAccountRequired"));
       return;
     }
     if (!pass.trim()) {
-      setErr("Enter your quantum keystore password to sign.");
+      setErr(t("quantum.passwordRequired"));
       return;
     }
     if (!preflight?.ok) {
-      setErr(preflight?.errors.join("; ") || "Preflight checks failed. wait or fix amount/recipient.");
+      setErr(preflight?.errors.join("; ") || t("quantum.preflightChecksFailed"));
       return;
     }
     setPhase("busy");
     setErr("");
     try {
       const amt = Number(amount);
-      await maybeWebAuthnGate(amt, webauthnEnabled, securityProfile, nativeBioAvailable);
+      await maybeWebAuthnGate(
+        amt,
+        webauthnEnabled,
+        securityProfile,
+        nativeBioAvailable,
+        t("quantum.secondFactorRequired"),
+      );
       const res = await quantumApi.sendType4(to.trim(), amount.trim(), pass);
       setHash(res.hash);
       setFee(res.fee_used ?? preflight?.fee_wire ?? "");
       setPhase("ok");
-      await refreshBalance();
+      await onRefreshBalance();
       runPreflight();
     } catch (e) {
       setErr(formatInvokeError(e));
@@ -143,8 +157,12 @@ export default function SendQuantumTx({
   }
 
   async function prepareAirgap() {
+    if (disabled) {
+      setErr(blockedMessage ?? t("quantum.signingUnavailable"));
+      return;
+    }
     if (!type4Ready) {
-      setErr("Create or import a PQC (v6) or Hybrid (v7) quantum account first.");
+      setErr(t("quantum.compatibleAccountRequired"));
       return;
     }
     setPhase("busy");
@@ -162,6 +180,10 @@ export default function SendQuantumTx({
   }
 
   async function signAirgap() {
+    if (disabled) {
+      setErr(blockedMessage ?? t("quantum.signingUnavailable"));
+      return;
+    }
     if (!airgapQr.length) return;
     setPhase("busy");
     setErr("");
@@ -169,9 +191,15 @@ export default function SendQuantumTx({
       const parsed = await api.airgapParseQrBatch(airgapQr);
       const env = parsed.envelope;
       if (!env || env.kind !== "unsigned") {
-        throw new Error("Expected unsigned Type 4 envelope");
+        throw new Error(t("quantum.expectedUnsigned"));
       }
-      await maybeWebAuthnGate(Number(amount), webauthnEnabled, securityProfile, nativeBioAvailable);
+      await maybeWebAuthnGate(
+        Number(amount),
+        webauthnEnabled,
+        securityProfile,
+        nativeBioAvailable,
+        t("quantum.secondFactorRequired"),
+      );
       const signed = await quantumApi.airgapSignType4(
         {
           v: env.v,
@@ -197,6 +225,10 @@ export default function SendQuantumTx({
   }
 
   async function broadcastAirgap() {
+    if (disabled) {
+      setErr(blockedMessage ?? t("quantum.signingUnavailable"));
+      return;
+    }
     if (!signedQr.length) return;
     setPhase("busy");
     setErr("");
@@ -204,7 +236,7 @@ export default function SendQuantumTx({
       const parsed = await api.airgapParseQrBatch(signedQr);
       const env = parsed.envelope;
       if (!env || env.kind !== "signed") {
-        throw new Error("Expected signed Type 4 envelope");
+        throw new Error(t("quantum.expectedSigned"));
       }
       const result = await api.airgapBroadcastSigned({
         v: env.v,
@@ -221,7 +253,7 @@ export default function SendQuantumTx({
       });
       setHash(result.tx_hash);
       setPhase("ok");
-      await refreshBalance();
+      await onRefreshBalance();
     } catch (e) {
       setErr(formatInvokeError(e));
       setPhase("err");
@@ -230,34 +262,35 @@ export default function SendQuantumTx({
 
   return (
     <section className="panel send-quantum">
-      <h3>Send Type 4 (Quantum)</h3>
+      <h3>{t("quantum.sendTitle")}</h3>
+      <p className="muted">{t("quantum.experimentalWarning")}</p>
+      {blockedMessage ? <p className="warn quantum-policy-hint">{blockedMessage}</p> : null}
       <p className="muted">
-        Experimental Type 4 support. PQC and hybrid signing are implemented, but this wallet has
-        not completed an independent cryptographic audit.
-      </p>
-      <p className="muted">
-        Node: <code>{nodeUrl ?? "http://127.0.0.1:8080"}</code>
+        {t("common.node")}: <code>{nodeUrl ?? "http://127.0.0.1:8080"}</code>
         {preflight?.ok ? (
           <>
             {" "}
-            · fee ~<code>{preflight.fee_mei.toFixed(4)}</code> HAC · total ~
-            wallet fee <code>{preflight.service_fee_mei.toFixed(6)}</code> HAC · total{" "}
-            <code>{preflight.total_mei.toFixed(4)}</code> HAC
+            {" "}
+            {t("quantum.feeSummary", {
+              networkFee: preflight.fee_mei.toFixed(4),
+              walletFee: preflight.service_fee_mei.toFixed(6),
+              total: preflight.total_mei.toFixed(4),
+            })}
           </>
         ) : fee ? (
           <>
             {" "}
-            · last fee <code>{fee}</code>
+            {" "}{t("quantum.lastFee")}: <code>{fee}</code>
           </>
         ) : null}
       </p>
 
       {isPqcSender && (
-        <p className="warn quantum-policy-hint">{PQC_TYPE4_HINT}</p>
+        <p className="warn quantum-policy-hint">{t("quantum.pqcV6Warning")}</p>
       )}
 
       <div className="from-row quantum-active">
-        <span className="muted">From</span>
+        <span className="muted">{t("common.from")}</span>
         {account ? (
           <>
             <AddressBadge
@@ -271,16 +304,16 @@ export default function SendQuantumTx({
             </span>
           </>
         ) : (
-          <span className="muted">No quantum account</span>
+          <span className="muted">{t("quantum.noAccount")}</span>
         )}
       </div>
 
       <label className="field">
-        To
+        {t("quantum.toAddress")}
         <input className="mono" value={to} onChange={(e) => setTo(e.target.value)} />
       </label>
       <label className="field">
-        Amount (HAC)
+        {t("quantum.amountHac")}
         <input value={amount} onChange={(e) => setAmount(e.target.value)} />
       </label>
 
@@ -297,13 +330,15 @@ export default function SendQuantumTx({
             </p>
           ))}
           {preflight.ok && preflight.warnings.length === 0 && (
-            <p className="info">Preflight OK · balance {preflight.balance_mei.toFixed(3)} HAC</p>
+            <p className="info">
+              {t("quantum.preflightOkBalance", { balance: preflight.balance_mei.toFixed(3) })}
+            </p>
           )}
         </div>
       )}
 
       <label className="field">
-        Keystore password
+        {t("quantum.keystorePassword")}
         <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} />
       </label>
 
@@ -314,7 +349,7 @@ export default function SendQuantumTx({
           disabled={!canSubmit}
           onClick={() => send()}
         >
-          Sign &amp; Send Type 4
+          {t("quantum.signSend")}
         </button>
         <button
           type="button"
@@ -322,37 +357,37 @@ export default function SendQuantumTx({
           disabled={disabled || phase === "busy" || !type4Ready}
           onClick={prepareAirgap}
         >
-          Air-gap prepare…
+          {t("quantum.airgapUnsignedAction")}
         </button>
       </div>
       {!canSubmit && type4Ready && phase !== "busy" && (
         <p className="muted small">
           {!pass.trim()
-            ? "Enter keystore password to enable signing."
+            ? t("quantum.enterPasswordToSign")
             : !preflight
-              ? "Running preflight checks…"
+              ? t("quantum.runningPreflight")
               : !preflight.ok
-                ? "Fix preflight errors above before sending."
+                ? t("quantum.fixPreflight")
                 : null}
         </p>
       )}
 
       {showAirgap && (
         <div className="quantum-airgap-box">
-          <h4>Type 4 air-gap</h4>
+          <h4>{t("quantum.airgapTitle")}</h4>
           <p className="muted small">
-            Unsigned QR parts: {airgapQr.length} · Signed: {signedQr.length}
+            {t("quantum.airgapParts", { unsigned: airgapQr.length, signed: signedQr.length })}
           </p>
           <div className="actions-row">
-            <button type="button" disabled={phase === "busy" || !airgapQr.length} onClick={signAirgap}>
-              Sign offline (this device)
+            <button type="button" disabled={disabled || phase === "busy" || !airgapQr.length} onClick={signAirgap}>
+              {t("quantum.signOffline")}
             </button>
             <button
               type="button"
-              disabled={phase === "busy" || !signedQr.length}
+              disabled={disabled || phase === "busy" || !signedQr.length}
               onClick={broadcastAirgap}
             >
-              Broadcast signed
+              {t("quantum.broadcastSigned")}
             </button>
           </div>
         </div>
@@ -361,7 +396,7 @@ export default function SendQuantumTx({
       {phase === "ok" && (
         <div className="quantum-success">
           <div className="quantum-success__ring" />
-          <p>Quantum transaction accepted</p>
+          <p>{t("quantum.transactionAccepted")}</p>
           <code className="mono">{hash}</code>
         </div>
       )}

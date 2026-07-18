@@ -13,8 +13,7 @@ fn main() {
             std::env::var("HACASH_NODE_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
         let vault_pass =
             std::env::var("HACASH_DEV_PASSPHRASE").expect("HACASH_DEV_PASSPHRASE is required");
-        let ks_pass =
-            std::env::var("HACASH_DEV_KS_PASS").expect("HACASH_DEV_KS_PASS is required");
+        let ks_pass = std::env::var("HACASH_DEV_KS_PASS").expect("HACASH_DEV_KS_PASS is required");
 
         let mut svc = hacash_wallet_core::WalletService::new(Some(node_url), None).expect("wallet");
         let addr = svc.unlock(&vault_pass).expect("unlock");

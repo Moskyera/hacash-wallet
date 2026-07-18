@@ -3,7 +3,7 @@ import HacdDiamondVisual from "./HacdDiamondVisual";
 import PaymentQrScanner from "./PaymentQrScanner";
 import { useHacdSend } from "../hooks/useHacdSend";
 import { maskAddress, maskAssetCount } from "../privacy";
-import { normalizeHacdName } from "../utils/paymentAssets";
+import { normalizeHacdName } from "@hacash/wallet-ui";
 
 type Props = {
   active: boolean;

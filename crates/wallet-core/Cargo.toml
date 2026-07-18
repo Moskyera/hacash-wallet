@@ -15,7 +15,7 @@ aes-gcm.workspace = true
 rand.workspace = true
 hex.workspace = true
 reqwest.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
 chrono.workspace = true
 uuid = { version = "1", features = ["v4"] }
 dirs.workspace = true

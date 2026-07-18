@@ -38,7 +38,7 @@ fn tier0_passphrase_null_byte_suffix_not_truncated() {
 fn tier0_passphrase_rtl_override_changes_key() {
     tier0_gate("unicode_rtl", || {
         let normal = "tier0-passphrase12";
-        let rtl = format!("tier0-\u{202e}passphrase12");
+        let rtl = "tier0-\u{202e}passphrase12".to_string();
         let v1 = EncryptedVault::encrypt("s1", "1Rtl", normal, "balanced").unwrap();
         let v2 = EncryptedVault::encrypt("s1", "1Rtl", &rtl, "balanced").unwrap();
         assert!(v1.decrypt(normal).is_ok());

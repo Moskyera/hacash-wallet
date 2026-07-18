@@ -76,6 +76,8 @@ impl TxHistory {
         )
     }
 
+    // This stable API maps one-to-one to the persisted transaction record.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_with_status(
         &mut self,
         rail: PaymentRail,
@@ -104,7 +106,6 @@ impl TxHistory {
         }
         self.save()
     }
-
     pub fn begin_pending(
         &mut self,
         rail: PaymentRail,

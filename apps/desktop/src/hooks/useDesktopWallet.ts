@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   AssetSummary,
@@ -50,6 +50,7 @@ export function useDesktopWallet(
   const [webauthnReady, setWebauthnReady] = useState(false);
   const [nativeBioAvailable, setNativeBioAvailable] = useState(false);
   const [relayHealth, setRelayHealth] = useState<RelayHealthStatus[]>([]);
+  const statusRequestRef = useRef<Promise<WalletStatus> | null>(null);
 
   const privacy = status?.privacy ?? DEFAULT_PRIVACY;
   const dustWhisper = status?.dust_whisper ?? DEFAULT_DUST_WHISPER;
@@ -75,16 +76,40 @@ export function useDesktopWallet(
     setInfo("");
   }, []);
 
-  const refreshStatus = useCallback(async () => {
-    let s = await api.status();
-    if (s.has_wallet && s.watch_only && s.locked) {
-      await api.openWatchOnly();
-      s = await api.status();
-    }
-    setStatus(s);
-    if (!s.has_wallet) setScreen("welcome");
-    else if (s.locked) setScreen("unlock");
-    return s;
+  const refreshStatus = useCallback((): Promise<WalletStatus> => {
+    if (statusRequestRef.current) return statusRequestRef.current;
+    const request = (async () => {
+      let s = await api.status();
+      if (s.has_wallet && s.watch_only && s.locked) {
+        await api.openWatchOnly();
+        s = await api.status();
+      }
+      setStatus(s);
+      if (!s.has_wallet) {
+        setBalance(null);
+        setAssets(null);
+        setFastPayDetail(null);
+        setChannelInfo(null);
+        setHubHealth(undefined);
+        setTxHistory([]);
+        setBillsCount(0);
+        setScreen("welcome");
+      } else if (s.locked) {
+        setBalance(null);
+        setAssets(null);
+        setFastPayDetail(null);
+        setChannelInfo(null);
+        setHubHealth(undefined);
+        setTxHistory([]);
+        setBillsCount(0);
+        setScreen("unlock");
+      }
+      return s;
+    })().finally(() => {
+      if (statusRequestRef.current === request) statusRequestRef.current = null;
+    });
+    statusRequestRef.current = request;
+    return request;
   }, [setScreen]);
 
   const refreshSettings = useCallback(async () => {
@@ -145,12 +170,10 @@ export function useDesktopWallet(
     await Promise.all([
       refreshBalance(),
       refreshSettings(),
-      refreshChannel(),
       refreshBills(),
       refreshHistory(),
-      refreshFastPay(),
     ]);
-  }, [refreshBalance, refreshSettings, refreshChannel, refreshBills, refreshHistory, refreshFastPay]);
+  }, [refreshBalance, refreshSettings, refreshBills, refreshHistory]);
 
   const refreshRelayHealth = useCallback(async () => {
     if (!dustWhisper.enabled || dustWhisper.relay_urls.length === 0) {
@@ -214,8 +237,15 @@ export function useDesktopWallet(
 
   useEffect(() => {
     if (!status || status.locked) return;
+    let inFlight = false;
     const timer = window.setInterval(() => {
-      refreshStatus().catch(() => undefined);
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      refreshStatus()
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
     }, 5000);
     return () => window.clearInterval(timer);
   }, [status?.locked, refreshStatus]);
@@ -344,11 +374,6 @@ export function useDesktopWallet(
   );
 
   const handleLock = useCallback(async () => {
-    try {
-      await api.dappBridgeStop();
-    } catch {
-      /* bridge may not be running */
-    }
     clearMessages();
     await api.lock();
     setBalance(null);
@@ -365,7 +390,7 @@ export function useDesktopWallet(
         const fp = await api.enableFastPay(Number(userDeposit) || 10);
         setFastPayDetail(fp);
         await refreshStatus();
-        await refreshUnlockedData();
+        await Promise.all([refreshBalance(), refreshChannel(), refreshBills()]);
         onInfo("Fast Pay is ready. your next send can be instant.");
       } catch (e) {
         onError(formatInvokeError(e));
@@ -373,7 +398,7 @@ export function useDesktopWallet(
         setBusy(false);
       }
     },
-    [clearMessages, refreshStatus, refreshUnlockedData, onInfo, onError],
+    [clearMessages, refreshStatus, refreshBalance, refreshChannel, refreshBills, onInfo, onError],
   );
 
   const handleApplyHub = useCallback(

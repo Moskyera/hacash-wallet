@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type HacdSendPreview } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
-import { isValidHacdName, normalizeHacdName } from "../utils/paymentAssets";
+import { isValidHacdName, normalizeHacdName } from "@hacash/wallet-ui";
 
 export function useHacdSend(opts: {
   active: boolean;

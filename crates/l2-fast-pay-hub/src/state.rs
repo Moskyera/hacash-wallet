@@ -88,14 +88,14 @@ impl HubState {
             .filter(|s| !s.trim().is_empty())
             .map(HubSigner::from_secret_hex)
             .transpose()?;
-        if let Some(signer) = &hub_signer {
-            if signer.address() != hub_address.trim() {
-                return Err(HubError::State(format!(
-                    "hub secret key address {} does not match HACASH_HUB_ADDRESS {}",
-                    signer.address(),
-                    hub_address.trim()
-                )));
-            }
+        if let Some(signer) = &hub_signer
+            && signer.address() != hub_address.trim()
+        {
+            return Err(HubError::State(format!(
+                "hub secret key address {} does not match HACASH_HUB_ADDRESS {}",
+                signer.address(),
+                hub_address.trim()
+            )));
         }
         let persisted = if let Some(path) = &state_path {
             load_state_file(path)?
@@ -180,7 +180,7 @@ impl HubState {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at));
         items
     }
 
@@ -636,10 +636,10 @@ fn load_state_file(path: &Path) -> HubResult<HubPersistedState> {
 }
 
 fn save_state_file(path: &Path, state: &HubPersistedState) -> HubResult<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|e| HubError::State(e.to_string()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|e| HubError::State(e.to_string()))?;
     }
     let json = serde_json::to_string_pretty(state).map_err(|e| HubError::State(e.to_string()))?;
     fs::write(path, json).map_err(|e| HubError::State(e.to_string()))

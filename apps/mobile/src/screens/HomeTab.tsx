@@ -1,4 +1,5 @@
 import type { TouchEvent } from "react";
+import { useLocale } from "@hacash/wallet-ui";
 import type { AssetSummary, FastPayStatus, TxRecord } from "../api";
 import BalanceOverview from "../components/BalanceOverview";
 import HacdLaunchpadIcon from "../components/HacdLaunchpadIcon";
@@ -50,6 +51,8 @@ export default function HomeTab({
   onLaunchpad,
   onToast,
 }: Props) {
+  const { t } = useLocale();
+
   return (
     <>
       <div
@@ -61,7 +64,11 @@ export default function HomeTab({
         <BalanceOverview
           assets={assets}
           hideBalances={hideBalances}
-          topHint={<p className="muted pull-hint">{refreshing ? "Refreshing…" : "Pull down to refresh"}</p>}
+          topHint={(
+            <p className="muted pull-hint">
+              {refreshing ? t("home.refreshing") : t("home.pullToRefresh")}
+            </p>
+          )}
         />
       </div>
 
@@ -69,7 +76,7 @@ export default function HomeTab({
         <div className={`fp-banner${fastPay.state === "ready" ? " on" : ""}`}>
           <div className="fp-banner-status">
             {fastPay.state === "ready" ? (
-              <span className="badge badge-ok">Fast Pay on</span>
+              <span className="badge badge-ok">{t("home.fastPayOn")}</span>
             ) : (
               <strong>{fastPayStatusTitle(fastPay.state)}</strong>
             )}
@@ -79,12 +86,12 @@ export default function HomeTab({
           </div>
           {!watchOnly && fastPay.state !== "ready" && fastPay.can_enable && (
             <button type="button" className="primary" disabled={busy} onClick={() => void onEnableFastPay()}>
-              Enable
+              {t("home.enable")}
             </button>
           )}
           {!watchOnly && fastPay.state === "ready" && (
             <button type="button" disabled={busy} onClick={() => void onDisableFastPay()}>
-              Disable
+              {t("home.disable")}
             </button>
           )}
         </div>
@@ -94,36 +101,36 @@ export default function HomeTab({
         <div className="quick-actions">
           <button type="button" className="quick-action primary-action" onClick={onScanPay}>
             <span className="icon" aria-hidden>⌗</span>
-            Scan & Pay
+            {t("home.scanAndPay")}
           </button>
           <button type="button" className="quick-action" onClick={onReceive}>
             <span className="icon" aria-hidden>↓</span>
-            Receive
+            {t("nav.receive")}
           </button>
           <button type="button" className="quick-action" onClick={onContacts}>
             <span className="icon" aria-hidden>◎</span>
-            Contacts
+            {t("more.contacts")}
           </button>
           <button type="button" className="quick-action" onClick={onHistory}>
             <span className="icon" aria-hidden>≡</span>
-            History
+            {t("nav.history")}
           </button>
           <button type="button" className="quick-action" onClick={onQuantum}>
             <span className="icon" aria-hidden>◇</span>
-            Quantum
+            {t("nav.quantum")}
           </button>
           <button type="button" className="quick-action" onClick={onLaunchpad}>
             <span className="icon" aria-hidden>
               <HacdLaunchpadIcon />
             </span>
-            HACD Apps
+            {t("dapp.appsTitle")}
           </button>
         </div>
       )}
 
       {history.length > 0 && (
         <div className="card card-flat">
-          <h2>Recent</h2>
+          <h2>{t("home.recent")}</h2>
           {history.slice(0, 3).map((row) => (
             <button
               key={`${row.tx_hash}-${row.timestamp}`}

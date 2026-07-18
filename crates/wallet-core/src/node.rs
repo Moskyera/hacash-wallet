@@ -1,16 +1,13 @@
-use std::sync::OnceLock;
-use std::time::Duration;
-
 use field::Address;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::error::{WalletError, WalletResult};
-use crate::settings::{DEFAULT_NODE_URL, sanitize_node_url};
-
-const DEFAULT_NODE: &str = DEFAULT_NODE_URL;
-const USER_AGENT: &str = concat!("HacashWallet/", env!("CARGO_PKG_VERSION"));
+#[cfg(target_os = "android")]
+use crate::http_client::blocking_http_client;
+use crate::http_client::shared_http_client;
+use crate::settings::sanitize_node_url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BalanceError {
@@ -43,30 +40,28 @@ fn classify_balance_error(ret: i32, address: &str, message: String) -> BalanceEr
     }
 }
 
-fn shared_http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(8)
-            .tcp_keepalive(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(45))
-            .user_agent(USER_AGENT)
-            // Ignore system/VPN proxy. it often breaks direct node access on mobile.
-            .no_proxy()
-            .build()
-            .expect("http client")
-    })
-}
+fn select_balance_entry(
+    entries: &[BalanceEntry],
+    requested_address: &str,
+) -> WalletResult<BalanceEntry> {
+    if let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.address.as_deref() == Some(requested_address))
+    {
+        return Ok(entry.clone());
+    }
 
-fn blocking_http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(45))
-        .user_agent(USER_AGENT)
-        .no_proxy()
-        .build()
-        .expect("blocking http client")
+    // Older nodes may omit the address when a single address was requested.
+    // Never accept an explicitly different address or an ambiguous row set.
+    if let [entry] = entries
+        && entry.address.is_none()
+    {
+        return Ok(entry.clone());
+    }
+
+    Err(WalletError::Node(
+        "balance response did not contain the requested address".into(),
+    ))
 }
 
 fn node_reachability_hint(url: &str) -> String {
@@ -112,6 +107,7 @@ where
     {
         return tokio::task::spawn_blocking(move || {
             blocking_http_client()
+                .map_err(WalletError::Node)?
                 .get(&url)
                 .send()
                 .map_err(|e| node_transport_err(&url, e))?
@@ -124,6 +120,7 @@ where
     #[cfg(not(target_os = "android"))]
     {
         shared_http_client()
+            .map_err(WalletError::Node)?
             .get(&url)
             .send()
             .await
@@ -143,6 +140,7 @@ where
     {
         return tokio::task::spawn_blocking(move || {
             blocking_http_client()
+                .map_err(WalletError::Node)?
                 .post(&url)
                 .json(&payload)
                 .send()
@@ -156,6 +154,7 @@ where
     #[cfg(not(target_os = "android"))]
     {
         shared_http_client()
+            .map_err(WalletError::Node)?
             .post(&url)
             .json(&payload)
             .send()
@@ -175,6 +174,7 @@ where
     {
         return tokio::task::spawn_blocking(move || {
             blocking_http_client()
+                .map_err(WalletError::Node)?
                 .post(&url)
                 .header("content-type", "text/plain")
                 .body(body)
@@ -189,6 +189,7 @@ where
     #[cfg(not(target_os = "android"))]
     {
         shared_http_client()
+            .map_err(WalletError::Node)?
             .post(&url)
             .header("content-type", "text/plain")
             .body(body)
@@ -207,18 +208,12 @@ pub struct NodeClient {
     http: reqwest::Client,
 }
 
-impl Default for NodeClient {
-    fn default() -> Self {
-        Self::new(DEFAULT_NODE)
-    }
-}
-
 impl NodeClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
-        Self {
+    pub fn new(base_url: impl Into<String>) -> WalletResult<Self> {
+        Ok(Self {
             base_url: sanitize_node_url(&base_url.into()),
-            http: shared_http_client().clone(),
-        }
+            http: shared_http_client().map_err(WalletError::Node)?.clone(),
+        })
     }
 
     pub async fn ping(&self) -> WalletResult<serde_json::Value> {
@@ -309,12 +304,7 @@ impl NodeClient {
                 .unwrap_or_else(|| format!("balance query failed (ret={})", body.ret));
             return Err(classify_balance_error(body.ret, address, node_message).into());
         }
-        body.list
-            .iter()
-            .find(|x| x.address.as_deref() == Some(address))
-            .or_else(|| body.list.first())
-            .cloned()
-            .ok_or_else(|| WalletError::Node("address not in balance response".into()))
+        select_balance_entry(&body.list, address)
     }
 
     pub async fn build_send_diamond_tx(
@@ -603,7 +593,8 @@ fn clean_visual_gene(value: Option<String>) -> Option<String> {
     let value = value?;
     let lower = value.to_ascii_lowercase();
     let len = lower.len();
-    ((18..=20).contains(&len) && lower.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(lower)
+    ((18..=20).contains(&len) && lower.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(lower)
 }
 
 fn clean_node_address(value: Option<String>) -> Option<String> {
@@ -653,7 +644,7 @@ struct BalanceResponse {
 pub struct BalanceEntry {
     address: Option<String>,
     hacash: String,
-    diamond: Option<u32>,
+
     #[serde(default)]
     pub satoshi: u64,
     #[serde(default)]
@@ -815,5 +806,54 @@ mod diamond_metadata_tests {
         );
 
         assert!(matches!(error, BalanceError::Node { ret: 1, .. }));
+    }
+
+    fn parse_balance_entries(value: serde_json::Value) -> Vec<BalanceEntry> {
+        serde_json::from_value::<BalanceResponse>(json!({
+            "ret": 0,
+            "list": value,
+        }))
+        .expect("balance response")
+        .list
+    }
+
+    #[test]
+    fn balance_selector_uses_the_exact_requested_address() {
+        let entries = parse_balance_entries(json!([
+            { "address": "1Other", "hacash": "99" },
+            { "address": "1Requested", "hacash": "7" }
+        ]));
+
+        let selected = select_balance_entry(&entries, "1Requested").expect("exact match");
+        assert_eq!(selected.hacash_mei().unwrap(), 7.0);
+    }
+
+    #[test]
+    fn balance_selector_accepts_only_a_sole_addressless_legacy_row() {
+        let entries = parse_balance_entries(json!([{ "hacash": "7" }]));
+        assert_eq!(
+            select_balance_entry(&entries, "1Requested")
+                .expect("sole legacy row")
+                .hacash_mei()
+                .unwrap(),
+            7.0
+        );
+
+        let ambiguous = parse_balance_entries(json!([
+            { "hacash": "7" },
+            { "hacash": "8" }
+        ]));
+        assert!(select_balance_entry(&ambiguous, "1Requested").is_err());
+    }
+
+    #[test]
+    fn balance_selector_rejects_a_sole_mismatched_address() {
+        let entries = parse_balance_entries(json!([{
+            "address": "1Other",
+            "hacash": "99"
+        }]));
+
+        let error = select_balance_entry(&entries, "1Requested").expect_err("mismatch");
+        assert!(error.to_string().contains("requested address"));
     }
 }

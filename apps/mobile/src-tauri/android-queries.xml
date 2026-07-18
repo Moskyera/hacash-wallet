@@ -1,4 +1,4 @@
-<!-- Merge into AndroidManifest.xml — required for package installer visibility (API 30+). -->
+<!-- Merge into AndroidManifest.xml - required for package installer visibility (API 30+). -->
 <queries>
     <intent>
         <action android:name="android.intent.action.VIEW" />

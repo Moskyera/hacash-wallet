@@ -6,7 +6,7 @@ use crate::error::{WalletError, WalletResult};
 use crate::hip23::{format_mei_for_node, parse_hacash_wire_mei};
 
 /// Node default: ~1:244 on a 166-byte simple L1 tx → purity ≈ 6024.
-pub const L1_DEFAULT_LOWEST_FEE_PURITY: u64 = 10_000_00 / 166;
+pub const L1_DEFAULT_LOWEST_FEE_PURITY: u64 = 1_000_000 / 166;
 
 /// Alias kept for Type 4 local fallback (same purity constant as L1 minimum tier).
 pub const TYPE4_DEFAULT_LOWEST_FEE_PURITY: u64 = L1_DEFAULT_LOWEST_FEE_PURITY;

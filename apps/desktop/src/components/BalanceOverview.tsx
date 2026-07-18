@@ -1,13 +1,18 @@
+import {
+  computePortfolioUsd,
+  HACD_MARKET_REFERENCE_NOTICE,
+  maskUsd,
+  useAssetPrices,
+} from "@hacash/wallet-ui";
 import type { ReactNode } from "react";
-import type { AssetSummary } from "../api";
-import { useAssetPrices } from "../hooks/useAssetPrices";
+import { api, type AssetSummary } from "../api";
+import { useLocale } from "../locale";
 import {
   formatBtcFromSatoshi,
   maskAssetCount,
   maskBalance,
   maskBtcFromSatoshi,
 } from "../privacy";
-import { computePortfolioUsd, maskUsd } from "../utils/portfolioUsd";
 import { WALLET_VERSION } from "../walletVersion";
 
 type Props = {
@@ -17,7 +22,8 @@ type Props = {
 };
 
 export default function BalanceOverview({ assets, hideBalances, topHint }: Props) {
-  const { prices, error: priceError, loading: pricesLoading } = useAssetPrices();
+  const { t } = useLocale();
+  const { prices, status: priceStatus } = useAssetPrices(api.fetchAssetPrices);
   const portfolio = assets && prices ? computePortfolioUsd(assets, prices) : null;
 
   const hacdCount = assets?.hacd_count ?? null;
@@ -37,7 +43,7 @@ export default function BalanceOverview({ assets, hideBalances, topHint }: Props
   return (
     <div className="balance-portfolio">
       <div className="balance-portfolio-header">
-        <span className="label">Available balance</span>
+        <span className="label">{t("balance.available")}</span>
         <span className="wallet-version">{WALLET_VERSION}</span>
       </div>
 
@@ -48,7 +54,7 @@ export default function BalanceOverview({ assets, hideBalances, topHint }: Props
           <span className="balance-primary-value">{maskBalance(assets?.hac_mei ?? null, hideBalances)}</span>
           <span className="balance-primary-unit">HAC</span>
         </div>
-        <p className="balance-total-usd">{maskUsd(portfolio?.totalUsd, hideBalances)} total</p>
+        <p className="balance-total-usd">{maskUsd(portfolio?.totalUsd, hideBalances)} {t("balance.totalUsd")}</p>
       </div>
 
       <div className="balance-assets-grid">
@@ -66,23 +72,23 @@ export default function BalanceOverview({ assets, hideBalances, topHint }: Props
         </div>
 
         <div className="balance-asset-card balance-asset-card-btc">
-          <span className="symbol">BTC <small className="asset-network-label">on Hacash</small></span>
+          <span className="symbol">
+            BTC <small className="asset-network-label">{t("asset.btcOnHacash")}</small>
+          </span>
           <span className="amount">{maskBtcFromSatoshi(btcTotalSat || null, hideBalances)}</span>
           {btcChannelHint ? <span className="hint">{btcChannelHint}</span> : null}
           <span className="usd">{maskUsd(portfolio?.btcUsd, hideBalances)}</span>
         </div>
       </div>
 
-      {!hideBalances && !prices && !pricesLoading && (
-        <p className="muted small-note balance-usd-note">
-          USD quotes offline{priceError ? ` (${priceError})` : ""}. Balances still work; prices retry
-          automatically.
-        </p>
+      {!hideBalances && portfolio && hacdCount != null && hacdCount > 0 ? (
+        <p className="muted small-note balance-usd-note">{HACD_MARKET_REFERENCE_NOTICE}</p>
+      ) : null}
+      {!hideBalances && priceStatus === "unavailable" && (
+        <p className="muted small-note balance-usd-note">{t("prices.unavailable")}</p>
       )}
-      {!hideBalances && (assets?.hacd_count ?? 0) > 0 && (
-        <p className="muted small-note balance-usd-note">
-          HACD USD uses a 1 HAC floor estimate per diamond. Live market prices vary.
-        </p>
+      {!hideBalances && priceStatus === "stale" && (
+        <p className="muted small-note balance-usd-note">{t("prices.stale")}</p>
       )}
     </div>
   );

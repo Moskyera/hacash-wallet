@@ -7,169 +7,113 @@ import {
   type ReactNode,
 } from "react";
 
-export type AppLocale = "en" | "el";
+import {
+  messages,
+  SUPPORTED_LOCALES,
+  type AppLocale,
+  type MessageKey,
+} from "./locales";
+export { SUPPORTED_LOCALES } from "./locales";
+export type { AppLocale, MessageCatalog, MessageKey } from "./locales";
 
 const STORAGE_KEY = "hacash-wallet-locale";
 
-const messages: Record<AppLocale, Record<string, string>> = {
-  en: {
-    "language.label": "Language",
-    "language.english": "English",
-    "language.greek": "Greek",
-    "group.wallet": "Wallet",
-    "group.tools": "Tools",
-    "group.control": "Control",
-    "nav.home": "Home",
-    "nav.send": "Send assets",
-    "nav.receive": "Receive",
-    "nav.history": "History",
-    "nav.fastpay": "Fast Pay",
-    "nav.hacd": "HACD",
-    "nav.quantum": "Quantum Lab",
-    "nav.airgap": "Air-gap QR",
-    "nav.security": "Security",
-    "nav.privacy": "Privacy",
-    "nav.settings": "Settings",
-    "nav.advanced": "Advanced",
-    "nav.pay": "Pay",
-    "nav.messages": "Chat",
-    "nav.more": "More",
-    "privacy.hidden": "Wallet hidden",
-    "privacy.focus": "Focus the window to view balances and addresses.",
-    "more.wallet": "Wallet",
-    "more.preferences": "Preferences",
-    "more.transactions": "Transaction history",
-    "more.bills": "Dispute bills",
-    "more.contacts": "Contacts",
-    "more.hacd": "HACD collection",
-    "more.quantum": "Quantum Lab",
-    "more.airgap": "Air-gap (L1 QR)",
-    "more.launchpad": "HACD Launchpad",
-    "quantum.lab.title": "Quantum Lab",
-    "quantum.lab.tagline": "Experimental Type 4 / post-quantum workspace",
-    "quantum.lab.disclaimer":
-      "This is a lab, not a production quantum wallet. Type 4 (PQC/hybrid) accounts are experimental and are not fully supported on stock mainnet nodes. Create keys and test only on nodes that explicitly support Type 4. Do not send large amounts unless you understand the risk.",
-    "hacd.title": "HACD",
-    "hacd.subtitle": "Your diamonds as full on-chain metadata cards (Explorer style).",
-    "hacd.refresh": "Refresh",
-    "hacd.refreshing": "Refreshing…",
-    "hacd.send": "Send HACD",
-    "hacd.lookup": "Look up any diamond",
-    "hacd.lookupHint": "4–6 letters. Owned diamonds load automatically; lookup works for any name on mainnet.",
-    "hacd.lookupBadge": "Lookup (not in this wallet)",
-    "hacd.empty": "No verified HACD found on the configured node.",
-    "hacd.emptyHint": "Diamonds appear after the node lists them for your address. You can still look up a name above.",
-    "hacd.unlockFirst": "Unlock the wallet to load your HACD collection.",
-    "more.network": "Network settings",
-    "more.language": "Language",
-    "more.back": "Back",
-    "node.official": "Official Hacash node",
-    "node.officialUrl": "http://nodeapi.hacash.org",
-    "node.usingOfficial": "Using the official public node API.",
-    "node.change": "Change node",
-    "node.useOfficial": "Use official node",
-    "node.customTitle": "Custom node",
-    "node.customHint": "Only change this if you run your own Hacash node or need a private endpoint.",
-    "node.grapheneTitle": "GrapheneOS / de-Googled phones",
-    "node.grapheneHelp":
-      "Same APK as other Android. In app info enable Network permission. Install from Files if the browser blocks APKs. Official node uses plain HTTP (nodeapi.hacash.org) — VPN/filters can block it. No separate Graphene build is required.",
-    "status.on": "on",
-    "status.off": "off",
-    "quantum.funding.title": "Fund quantum account",
-    "quantum.funding.createFirst": "Create or import a quantum keystore first, then fund it from your legacy wallet.",
-    "quantum.funding.warning": "Fund this address only on a network and node with active Type 4 support. Verify the balance check before sending legacy HAC.",
-    "quantum.funding.balance": "Quantum balance",
-    "quantum.funding.checking": "Checking Type 4 balance support...",
-    "quantum.funding.verified": "Type 4 balance query verified.",
-    "quantum.funding.unsupported": "The selected node rejected this Type 4 address. Do not fund it through this node.",
-    "quantum.funding.failed": "Balance check failed",
-    "quantum.funding.legacy": "Legacy wallet",
-    "quantum.funding.copy": "Copy",
-    "quantum.funding.openLegacy": "Open legacy payment",
-    "quantum.funding.verifyFirst": "Verify Type 4 balance support first",
-  },
-  el: {
-    "language.label": "Γλώσσα",
-    "language.english": "Αγγλικά",
-    "language.greek": "Ελληνικά",
-    "group.wallet": "Πορτοφόλι",
-    "group.tools": "Εργαλεία",
-    "group.control": "Ρυθμίσεις",
-    "nav.home": "Αρχική",
-    "nav.send": "Αποστολή",
-    "nav.receive": "Λήψη",
-    "nav.history": "Ιστορικό",
-    "nav.fastpay": "Fast Pay",
-    "nav.hacd": "HACD",
-    "nav.quantum": "Quantum Lab",
-    "nav.airgap": "Air-gap QR",
-    "nav.security": "Ασφάλεια",
-    "nav.privacy": "Ιδιωτικότητα",
-    "nav.settings": "Ρυθμίσεις",
-    "nav.advanced": "Για προχωρημένους",
-    "nav.pay": "Πληρωμή",
-    "nav.messages": "Συνομιλία",
-    "nav.more": "Περισσότερα",
-    "privacy.hidden": "Το πορτοφόλι είναι κρυφό",
-    "privacy.focus": "Εστίασε το παράθυρο για να δεις υπόλοιπα και διευθύνσεις.",
-    "more.wallet": "Πορτοφόλι",
-    "more.preferences": "Προτιμήσεις",
-    "more.transactions": "Ιστορικό συναλλαγών",
-    "more.bills": "Αποδείξεις διαφορών",
-    "more.contacts": "Επαφές",
-    "more.hacd": "Συλλογή HACD",
-    "more.quantum": "Quantum Lab",
-    "more.airgap": "Air-gap (L1 QR)",
-    "more.launchpad": "HACD Launchpad",
-    "quantum.lab.title": "Quantum Lab",
-    "quantum.lab.tagline": "Πειραματικός χώρος Type 4 / post-quantum",
-    "quantum.lab.disclaimer":
-      "Είναι lab, όχι production quantum wallet. Οι λογαριασμοί Type 4 (PQC/hybrid) είναι πειραματικοί και δεν υποστηρίζονται πλήρως από τα stock mainnet nodes. Δημιούργησε κλειδιά και δοκίμασε μόνο σε nodes με ρητή υποστήριξη Type 4. Μην στέλνεις μεγάλα ποσά αν δεν καταλαβαίνεις τον κίνδυνο.",
-    "hacd.title": "HACD",
-    "hacd.subtitle": "Τα diamonds σου ως πλήρεις on-chain metadata cards (στυλ Explorer).",
-    "hacd.refresh": "Ανανέωση",
-    "hacd.refreshing": "Ανανέωση…",
-    "hacd.send": "Αποστολή HACD",
-    "hacd.lookup": "Αναζήτηση diamond",
-    "hacd.lookupHint": "4–6 γράμματα. Τα δικά σου φορτώνουν αυτόματα· η αναζήτηση δουλεύει για οποιοδήποτε όνομα στο mainnet.",
-    "hacd.lookupBadge": "Αναζήτηση (όχι σε αυτό το πορτοφόλι)",
-    "hacd.empty": "Δεν βρέθηκαν επιβεβαιωμένα HACD στο ρυθμισμένο node.",
-    "hacd.emptyHint": "Τα diamonds εμφανίζονται όταν το node τα επιστρέψει για τη διεύθυνσή σου. Μπορείς να ψάξεις όνομα παραπάνω.",
-    "hacd.unlockFirst": "Ξεκλείδωσε το πορτοφόλι για να φορτωθεί η συλλογή HACD.",
-    "more.network": "Ρυθμίσεις δικτύου",
-    "more.language": "Γλώσσα",
-    "more.back": "Πίσω",
-    "node.official": "Επίσημο Hacash node",
-    "node.officialUrl": "http://nodeapi.hacash.org",
-    "node.usingOfficial": "Χρησιμοποιείται το επίσημο public node API.",
-    "node.change": "Αλλαγή node",
-    "node.useOfficial": "Χρήση επίσημου node",
-    "node.customTitle": "Προσαρμοσμένο node",
-    "node.customHint": "Άλλαξέ το μόνο αν τρέχεις δικό σου Hacash node ή ιδιωτικό endpoint.",
-    "node.grapheneTitle": "GrapheneOS / de-Googled τηλέφωνα",
-    "node.grapheneHelp":
-      "Ίδιο APK με τα άλλα Android. Στις πληροφορίες εφαρμογής ενεργοποίησε Network permission. Εγκατάσταση από Files αν ο browser μπλοκάρει APK. Το επίσημο node είναι HTTP (nodeapi.hacash.org) — VPN/φίλτρα μπορεί να το κόβουν. Δεν χρειάζεται ξεχωριστό build για Graphene.",
-    "status.on": "ενεργό",
-    "status.off": "ανενεργό",
-    "quantum.funding.title": "Χρηματοδότηση quantum λογαριασμού",
-    "quantum.funding.createFirst": "Δημιούργησε ή εισήγαγε πρώτα ένα quantum keystore και μετά χρηματοδότησέ το από το κανονικό πορτοφόλι.",
-    "quantum.funding.warning": "Χρηματοδότησε αυτή τη διεύθυνση μόνο σε δίκτυο και node με ενεργή υποστήριξη Type 4. Επιβεβαίωσε πρώτα τον έλεγχο υπολοίπου.",
-    "quantum.funding.balance": "Quantum υπόλοιπο",
-    "quantum.funding.checking": "Έλεγχος υποστήριξης Type 4...",
-    "quantum.funding.verified": "Ο έλεγχος υπολοίπου Type 4 επιβεβαιώθηκε.",
-    "quantum.funding.unsupported": "Το επιλεγμένο node απέρριψε αυτή τη διεύθυνση Type 4. Μην τη χρηματοδοτήσεις μέσω αυτού του node.",
-    "quantum.funding.failed": "Ο έλεγχος υπολοίπου απέτυχε",
-    "quantum.funding.legacy": "Κανονικό πορτοφόλι",
-    "quantum.funding.copy": "Αντιγραφή",
-    "quantum.funding.openLegacy": "Άνοιγμα κανονικής πληρωμής",
-    "quantum.funding.verifyFirst": "Επιβεβαίωσε πρώτα την υποστήριξη Type 4",
-  },
-};
+const localeByCode = new Map<string, AppLocale>(
+  SUPPORTED_LOCALES.map(({ code }) => [code.toLowerCase(), code]),
+);
+
+export function normalizeLocaleTag(tag: string | null | undefined): AppLocale {
+  const normalized = tag?.trim().replace(/_/g, "-").toLowerCase();
+  if (!normalized) return "en";
+
+  const exact = localeByCode.get(normalized);
+  if (exact) return exact;
+
+  if (
+    normalized === "zh"
+    || normalized.startsWith("zh-cn")
+    || normalized.startsWith("zh-sg")
+    || normalized.startsWith("zh-hans")
+  ) {
+    return "zh-CN";
+  }
+
+  return localeByCode.get(normalized.split("-")[0] ?? "") ?? "en";
+}
+
+export function localeDirection(locale: AppLocale): "ltr" | "rtl" {
+  return SUPPORTED_LOCALES.find(({ code }) => code === locale)?.direction ?? "ltr";
+}
+
+export function applyDocumentLocale(
+  locale: AppLocale,
+  root: Pick<HTMLElement, "lang" | "dir"> = document.documentElement,
+): void {
+  root.lang = locale;
+  root.dir = localeDirection(locale);
+}
+
+export function validateLocaleCatalogParity(): void {
+  const englishKeys = Object.keys(messages.en).sort();
+  const failures: string[] = [];
+
+  for (const { code } of SUPPORTED_LOCALES) {
+    const localeKeys = Object.keys(messages[code]).sort();
+    const missing = englishKeys.filter((key) => !Object.prototype.hasOwnProperty.call(messages[code], key));
+    const extra = localeKeys.filter((key) => !Object.prototype.hasOwnProperty.call(messages.en, key));
+    if (missing.length > 0 || extra.length > 0) {
+      failures.push(`${code}: missing [${missing.join(", ")}], extra [${extra.join(", ")}]`);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`Locale catalog mismatch: ${failures.join("; ")}`);
+  }
+}
+
+export function validateLocaleCatalogContent(): void {
+  const suspicious = /\uFFFD|\?{2,}|\?(?=\p{L})/u;
+  const failures: string[] = [];
+
+  for (const { code } of SUPPORTED_LOCALES) {
+    if (code === "en") continue;
+    for (const [key, value] of Object.entries(messages[code])) {
+      if (suspicious.test(value)) failures.push(`${code}.${key}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      `Locale catalog contains suspicious encoding corruption: ${failures.join(", ")}`,
+    );
+  }
+}
+
+validateLocaleCatalogParity();
+validateLocaleCatalogContent();
+
+export type TranslationParams = Readonly<Record<string, string | number>>;
+
+export function translate(
+  locale: AppLocale,
+  key: string,
+  params?: TranslationParams,
+): string {
+  const messageKey = key as MessageKey;
+  const template = messages[locale][messageKey] ?? messages.en[messageKey];
+  if (!template) return key;
+  if (!params) return template;
+
+  return template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (placeholder, name: string) => {
+    const value = params[name];
+    return value == null ? placeholder : String(value);
+  });
+}
 
 type LocaleContextValue = {
   locale: AppLocale;
   setLocale: (locale: AppLocale) => void;
-  t: (key: string) => string;
+  t: (key: string, params?: TranslationParams) => string;
 };
 
 const LocaleContext = createContext<LocaleContextValue | null>(null);
@@ -177,11 +121,23 @@ const LocaleContext = createContext<LocaleContextValue | null>(null);
 function initialLocale(): AppLocale {
   try {
     const saved = window.localStorage.getItem(STORAGE_KEY);
-    if (saved === "en" || saved === "el") return saved;
+    if (saved && localeByCode.has(saved.toLowerCase())) {
+      return localeByCode.get(saved.toLowerCase()) ?? "en";
+    }
   } catch {
     // Storage can be disabled. Browser language remains a safe fallback.
   }
-  return navigator.language.toLowerCase().startsWith("el") ? "el" : "en";
+
+  const browserLocales = navigator.languages.length > 0
+    ? navigator.languages
+    : [navigator.language];
+  for (const browserLocale of browserLocales) {
+    const resolved = normalizeLocaleTag(browserLocale);
+    if (resolved !== "en" || browserLocale.toLowerCase().startsWith("en")) {
+      return resolved;
+    }
+  }
+  return "en";
 }
 
 export function LocaleProvider({ children }: { children: ReactNode }) {
@@ -197,14 +153,14 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
   };
 
   useEffect(() => {
-    document.documentElement.lang = locale;
+    applyDocumentLocale(locale);
   }, [locale]);
 
   const value = useMemo<LocaleContextValue>(
     () => ({
       locale,
       setLocale,
-      t: (key) => messages[locale][key] ?? messages.en[key] ?? key,
+      t: (key, params) => translate(locale, key, params),
     }),
     [locale],
   );
@@ -226,10 +182,16 @@ export function LanguageSwitcher({ className = "" }: { className?: string }) {
       <select
         aria-label={t("language.label")}
         value={locale}
-        onChange={(event) => setLocale(event.target.value as AppLocale)}
+        onChange={(event) => {
+          const next = localeByCode.get(event.target.value.toLowerCase());
+          if (next) setLocale(next);
+        }}
       >
-        <option value="en">{t("language.english")}</option>
-        <option value="el">{t("language.greek")}</option>
+        {SUPPORTED_LOCALES.map(({ code, label, direction }) => (
+          <option key={code} value={code} dir={direction}>
+            {label}
+          </option>
+        ))}
       </select>
     </label>
   );

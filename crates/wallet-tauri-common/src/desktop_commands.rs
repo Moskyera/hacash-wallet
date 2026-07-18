@@ -20,23 +20,3 @@ pub async fn wallet_update_dust_whisper_settings_desktop(
     crate::desktop_relay::sync_managed_relay(&app).await?;
     Ok(())
 }
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub async fn wallet_dapp_bridge_start(state: State<'_, AppState>) -> Result<u16, String> {
-    crate::dapp_bridge::start_dapp_bridge(&state).await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub async fn wallet_dapp_bridge_stop(state: State<'_, AppState>) -> Result<(), String> {
-    crate::dapp_bridge::stop_dapp_bridge(&state).await
-}
-
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub async fn wallet_dapp_bridge_status(
-    state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
-    crate::dapp_bridge::bridge_status(&state).await
-}

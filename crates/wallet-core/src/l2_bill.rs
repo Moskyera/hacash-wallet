@@ -113,7 +113,7 @@ pub fn summarize_bill(payment_id: &str, bill_hex: &str) -> WalletResult<BillSumm
             .iter()
             .map(|body| BillProveSummary {
                 channel_id_hex: body.channel_id.to_hex(),
-                bill_auto_number: *body.bill_auto_number as u64,
+                bill_auto_number: *body.bill_auto_number,
                 pay_amount_mei: body.pay_amount.to_unit_string("mei"),
                 pay_direction: direction_label(*body.pay_direction),
                 left_balance_mei: body.left_balance.to_unit_string("mei"),
@@ -166,7 +166,7 @@ pub(crate) fn trusted_channel_state(
             continue;
         }
         for body in &doc.prove_bodies {
-            let bill_number = *body.bill_auto_number as u64;
+            let bill_number = *body.bill_auto_number;
             if body
                 .channel_id
                 .to_hex()
@@ -199,6 +199,8 @@ pub(crate) fn trusted_channel_state(
     Ok(state)
 }
 
+// Validation deliberately names every signed protocol binding at the call site.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_sender_bill(
     payment_id: &str,
     bill_hex: &str,
@@ -272,6 +274,8 @@ pub(crate) fn validate_sender_bill(
     summarize_bill(payment_id, bill_hex)
 }
 
+// Validation deliberately names every signed protocol binding at the call site.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_recipient_bill(
     payment_id: &str,
     bill_hex: &str,
@@ -425,10 +429,10 @@ fn validate_trusted_leg(
         .bill_auto_number
         .checked_add(1)
         .ok_or_else(|| WalletError::Policy("Fast Pay bill number overflow".into()))?;
-    if *body.bill_auto_number as u64 != expected_bill {
+    if *body.bill_auto_number != expected_bill {
         return Err(WalletError::Policy(format!(
             "Fast Pay bill number must be {expected_bill}, got {}",
-            *body.bill_auto_number as u64
+            { *body.bill_auto_number }
         )));
     }
     if !amount_equal(&body.pay_amount, amount) || body.pay_satoshi.not_empty.as_ref()[0] != 0 {
@@ -494,12 +498,12 @@ fn validate_other_leg(
     credit_user: bool,
     expected_channel_id: Option<&str>,
 ) -> WalletResult<()> {
-    if let Some(channel_id) = expected_channel_id {
-        if !body.channel_id.to_hex().eq_ignore_ascii_case(channel_id) {
-            return Err(WalletError::Policy(
-                "Fast Pay bill channel binding does not match the request".into(),
-            ));
-        }
+    if let Some(channel_id) = expected_channel_id
+        && !body.channel_id.to_hex().eq_ignore_ascii_case(channel_id)
+    {
+        return Err(WalletError::Policy(
+            "Fast Pay bill channel binding does not match the request".into(),
+        ));
     }
     let left = body.left_address.to_readable();
     let right = body.right_address.to_readable();

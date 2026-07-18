@@ -552,7 +552,6 @@ export default function MobileApp() {
           <HacdTab
             locked={!session.status || session.status.locked}
             busy={session.busy}
-            ownedHint={session.assets?.hacd_names}
             onToast={showToast}
             onGoPay={() => navigateToPay()}
           />

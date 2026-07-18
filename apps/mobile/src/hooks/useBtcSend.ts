@@ -63,7 +63,7 @@ export function useBtcSend(opts: {
       setPreview(null);
       setRecipient("");
       setBtcAmount("");
-      showToast(`BTC sent on chain (${result.rail})`, "success");
+      showToast(`BTC on Hacash transaction submitted (${result.rail})`, "success");
       hapticSuccess();
       await refresh();
     } catch (e) {

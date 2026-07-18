@@ -13,7 +13,7 @@ Start-Sleep -Seconds 2
 if (-not (Test-Path $exe)) {
   Write-Host "Building wallet (first run)..." -ForegroundColor Cyan
   Set-Location $desktop
-  yarn tauri build --debug 2>&1 | Out-Null
+  node node_modules/@tauri-apps/cli/tauri.js build --debug 2>&1 | Out-Null
   if (-not (Test-Path $exe)) { throw "Missing $exe - run: yarn tauri build --debug" }
 }
 

@@ -78,6 +78,8 @@ pub async fn query_channel(node: &NodeClient, channel_id_hex: &str) -> WalletRes
     Ok(info)
 }
 
+// The arguments map one-to-one to the protocol's channel-open action fields.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_channel_open_tx(
     node: &NodeClient,
     fee_payer: &str,

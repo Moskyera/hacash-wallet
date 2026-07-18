@@ -1,4 +1,4 @@
-import { QuantumFundingCard, useType4Probe } from "@hacash/wallet-ui";
+import { canUseQuantumLabTransactions, QuantumFundingCard, useType4Probe } from "@hacash/wallet-ui";
 import { useState } from "react";
 import { WalletSettings, WalletStatus } from "../api";
 import { quantumApi, QuantumAccountSummary } from "../api";
@@ -30,8 +30,9 @@ export default function QuantumScreen({
 }: Props) {
   const { t } = useLocale();
   const [quantumAccount, setQuantumAccount] = useState<QuantumAccountSummary | null>(null);
-  const { probe } = useType4Probe(
-    quantumAccount?.address,
+  const mainnetBlocked = !canUseQuantumLabTransactions(settings?.network_mode);
+  const { probe, refresh: refreshBalance } = useType4Probe(
+    mainnetBlocked ? null : quantumAccount?.address,
     quantumApi.balanceProbe,
     formatInvokeError,
   );
@@ -46,7 +47,7 @@ export default function QuantumScreen({
         <p className="muted small-note">{t("quantum.lab.disclaimer")}</p>
       </div>
       <QuantumToggle onAccountChange={setQuantumAccount} />
-      <QuantumNodeHealth nodeUrl={settings?.node_url ?? status?.node_url} />
+      {!mainnetBlocked ? <QuantumNodeHealth nodeUrl={settings?.node_url ?? status?.node_url} /> : null}
       <QuantumFundingCard
         account={
           quantumAccount
@@ -71,6 +72,8 @@ export default function QuantumScreen({
         containerClassName="panel quantum-funding"
         actionClassName="btn-ghost"
         headingLevel={3}
+        blocked={mainnetBlocked}
+        blockedMessage={t("quantum.lab.mainnetBlocked")}
         onCopyAddress={(address) => copyWithPrivacyClear(address, 30)}
         onOpenLegacyFund={() => {
           if (quantumAccount?.address) onSetSendTo(quantumAccount.address);
@@ -80,7 +83,10 @@ export default function QuantumScreen({
       <SendQuantumTx
         account={quantumAccount}
         nodeUrl={settings?.node_url ?? status?.node_url}
-        disabled={busy || !!status?.locked}
+        balanceProbe={probe}
+        onRefreshBalance={refreshBalance}
+        disabled={busy || !!status?.locked || mainnetBlocked}
+        blockedMessage={mainnetBlocked ? t("quantum.lab.mainnetBlocked") : undefined}
         webauthnEnabled={status?.webauthn_enabled}
         securityProfile={status?.security_profile}
         nativeBioAvailable={nativeBioAvailable}

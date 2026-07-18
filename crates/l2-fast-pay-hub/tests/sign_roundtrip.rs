@@ -31,7 +31,7 @@ fn sample_channel(id: &str, left: &str, right: &str, left_mei: &str) -> ChannelI
 fn hub_and_payer_sign_same_channel_bill() {
     let alice = Account::create_by("alice-l2-sign-test").unwrap();
     let hub = Account::create_by("hub-l2-sign-test").unwrap();
-    let channel_id = derive_channel_id(&alice.readable(), &hub.readable(), 1);
+    let channel_id = derive_channel_id(alice.readable(), hub.readable(), 1);
 
     let mut doc = build_same_channel_bill(
         &ChannelWireInput {

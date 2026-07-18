@@ -64,7 +64,7 @@ export function useBtcSend(opts: {
       setPreview(null);
       setRecipient("");
       setBtcAmount("");
-      onNotify(`BTC sent on chain (${result.rail})`, "success");
+      onNotify(`BTC on Hacash transaction submitted (${result.rail})`, "success");
       await onSent();
     } catch (e) {
       onNotify(formatInvokeError(e), "error");

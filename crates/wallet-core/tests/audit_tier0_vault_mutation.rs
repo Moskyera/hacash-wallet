@@ -5,7 +5,7 @@
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use common::tier0_gate;
 use hacash_wallet_core::WalletError;
@@ -18,7 +18,7 @@ fn temp_vault_path() -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
-fn seed_vault(path: &PathBuf) -> EncryptedVault {
+fn seed_vault(path: &Path) -> EncryptedVault {
     let vault =
         EncryptedVault::encrypt("deadbeef", "1Tier0TestAddr", "mutation-pass-12", "balanced")
             .unwrap();
@@ -26,12 +26,12 @@ fn seed_vault(path: &PathBuf) -> EncryptedVault {
     vault
 }
 
-fn load_json(path: &PathBuf) -> Value {
+fn load_json(path: &Path) -> Value {
     let raw = fs::read_to_string(path).unwrap();
     serde_json::from_str(&raw).unwrap()
 }
 
-fn write_json(path: &PathBuf, v: &Value) {
+fn write_json(path: &Path, v: &Value) {
     fs::write(path, serde_json::to_string_pretty(v).unwrap()).unwrap();
 }
 

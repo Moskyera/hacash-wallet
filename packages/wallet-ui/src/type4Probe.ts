@@ -11,6 +11,10 @@ export type Type4Probe =
   | { status: "loading" }
   | Type4ProbeResult;
 
+export function canUseQuantumLabTransactions(networkMode: string | null | undefined): boolean {
+  return networkMode === "testnet";
+}
+
 export function canOpenLegacyFund(probe: Type4Probe): boolean {
   return probe.status === "ok";
 }

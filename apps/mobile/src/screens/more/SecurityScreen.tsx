@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type PlatformSecurityStatus, type WalletSettings, type WalletStatus } from "../../api";
 import PrivateKeyQrDisplay from "../../components/PrivateKeyQrDisplay";
 import { formatInvokeError } from "../../formatInvokeError";
+import { useLocale } from "../../locale";
 import { copyWithPrivacyClear } from "../../privacy";
 import { MIN_WALLET_PASS } from "../../quantumMeta";
 import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
@@ -41,11 +42,13 @@ export default function SecurityScreen({
   onToast,
   setBusy,
 }: Props) {
+  const { t } = useLocale();
   const [oldPass, setOldPass] = useState("");
   const [newPass, setNewPass] = useState("");
   const [bioUnlockPass, setBioUnlockPass] = useState("");
   const [bioUnlockStatus, setBioUnlockStatus] = useState<{ enabled: boolean; configured: boolean } | null>(null);
   const [privateKeyPass, setPrivateKeyPass] = useState("");
+  const [backupPass, setBackupPass] = useState("");
   const [privateKey, setPrivateKey] = useState<string | null>(null);
   const privateKeyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -64,21 +67,22 @@ export default function SecurityScreen({
   return (
     <>
       <div className="card">
-        <h2>Wallet name</h2>
-        <p className="muted">Shown on the unlock screen instead of your address.</p>
-        <label className="label">Display name</label>
-        <input value={walletNameDraft} onChange={(e) => setWalletNameDraft(e.target.value)} placeholder="My Wallet" />
+        <h2>{t("security.walletName")}</h2>
+        <p className="muted">{t("security.walletNameHint")}</p>
+        <label className="label">{t("security.displayName")}</label>
+        <input
+          value={walletNameDraft}
+          onChange={(e) => setWalletNameDraft(e.target.value)}
+          placeholder={t("security.walletPlaceholder")}
+        />
         <button type="button" className="primary" onClick={onSaveWalletName}>
-          Save name
+          {t("security.saveName")}
         </button>
       </div>
       <div className="card">
-        <h2>Private key</h2>
-        <p className="muted small">
-          Back up your wallet offline: reveal the key and scan the QR on a new phone (Welcome → Import → Scan QR).
-          Keep your screen private. anyone nearby can read the key.
-        </p>
-        <label className="label">Passphrase</label>
+        <h2>{t("security.privateKey")}</h2>
+        <p className="muted small">{t("security.privateKeyMobileHint")}</p>
+        <label className="label">{t("security.passphrase")}</label>
         <input type="password" value={privateKeyPass} onChange={(e) => setPrivateKeyPass(e.target.value)} />
         <button
           type="button"
@@ -91,7 +95,7 @@ export default function SecurityScreen({
               .then((hex) => {
                 setPrivateKey(hex);
                 setPrivateKeyPass("");
-                onToast("Private key revealed. Hides in 60s.", "info");
+                onToast(t("security.privateKeyRevealed"), "info");
                 if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
                 privateKeyTimer.current = setTimeout(() => hidePrivateKey(), 60_000);
               })
@@ -99,7 +103,7 @@ export default function SecurityScreen({
               .finally(() => setBusy(false));
           }}
         >
-          Reveal private key
+          {t("security.revealPrivateKey")}
         </button>
         {privateKey ? (
           <>
@@ -111,32 +115,59 @@ export default function SecurityScreen({
               type="button"
               style={{ marginTop: "0.5rem" }}
               onClick={() =>
-                void copyWithPrivacyClear(privateKey, clipboardSecs).then(() => onToast("Private key copied.", "success"))
+                void copyWithPrivacyClear(privateKey, clipboardSecs).then(() =>
+                  onToast(t("security.privateKeyCopied"), "success"),
+                )
               }
             >
-              Copy
+              {t("common.copy")}
             </button>
             <button type="button" style={{ marginTop: "0.5rem", marginLeft: "0.5rem" }} onClick={hidePrivateKey}>
-              Hide
+              {t("common.hide")}
             </button>
           </>
         ) : null}
       </div>
       <div className="card">
-        <h2>Delete wallet</h2>
-        <p className="muted">
-          Removes this wallet from the phone so you can create or import a different one. Export your private key
-          via QR first if you need to recover funds later.
-        </p>
-        <button type="button" disabled={busy} onClick={onResetWallet}>
-          Delete wallet from device
+        <h2>{t("security.exportBackup")}</h2>
+        <p className="muted small">{t("security.exportBackupHint")}</p>
+        <label className="label">{t("security.exportPassphrase")}</label>
+        <input
+          type="password"
+          value={backupPass}
+          onChange={(event) => setBackupPass(event.target.value)}
+        />
+        <button
+          type="button"
+          className="primary"
+          disabled={busy || watchOnly || !backupPass}
+          onClick={() => {
+            setBusy(true);
+            void api
+              .exportBackupToDownloads(backupPass)
+              .then((destination) => {
+                setBackupPass("");
+                onToast(`${t("security.exportedBackupJson")}: ${destination}`, "success");
+              })
+              .catch((error) => onToast(formatInvokeError(error), "error"))
+              .finally(() => setBusy(false));
+          }}
+        >
+          {t("security.exportBackup")}
         </button>
       </div>
       <div className="card">
-        <h2>Change passphrase</h2>
-        <label className="label">Current</label>
+        <h2>{t("security.deleteWallet")}</h2>
+        <p className="muted">{t("security.deleteWalletHint")}</p>
+        <button type="button" disabled={busy} onClick={onResetWallet}>
+          {t("security.deleteFromDevice")}
+        </button>
+      </div>
+      <div className="card">
+        <h2>{t("security.changePassphrase")}</h2>
+        <label className="label">{t("security.currentPassphrase")}</label>
         <input type="password" value={oldPass} onChange={(e) => setOldPass(e.target.value)} />
-        <label className="label">New</label>
+        <label className="label">{t("security.newPassphrase")}</label>
         <input type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} />
         <button
           type="button"
@@ -148,15 +179,17 @@ export default function SecurityScreen({
             setNewPass("");
           }}
         >
-          Update passphrase
+          {t("security.updatePassphrase")}
         </button>
         {newPass.length > 0 && newPass.length < MIN_WALLET_PASS ? (
-          <p className="warn-text">New passphrase must be at least {MIN_WALLET_PASS} characters.</p>
+          <p className="warn-text">
+            {t("security.passphraseMin", { count: MIN_WALLET_PASS })}
+          </p>
         ) : null}
       </div>
       <div className="card">
-        <h2>Security profile</h2>
-        <p className="muted">Balanced is default. Paranoid requires biometric confirmation for every send.</p>
+        <h2>{t("security.profile")}</h2>
+        <p className="muted">{t("security.profileHint")}</p>
         <div className="display-toggle">
           <button
             type="button"
@@ -166,10 +199,10 @@ export default function SecurityScreen({
               void api
                 .setSecurityProfile("balanced")
                 .then(() => onRefresh())
-                .then(() => onToast("Profile: balanced", "success"))
+                .then(() => onToast(t("security.profileUpdated", { profile: t("security.balanced") }), "success"))
             }
           >
-            Balanced
+            {t("security.balanced")}
           </button>
           <button
             type="button"
@@ -179,32 +212,38 @@ export default function SecurityScreen({
               void api
                 .setSecurityProfile("paranoid")
                 .then(() => onRefresh())
-                .then(() => onToast("Profile: paranoid", "success"))
+                .then(() => onToast(t("security.profileUpdated", { profile: t("security.paranoid") }), "success"))
             }
           >
-            Paranoid
+            {t("security.paranoid")}
           </button>
         </div>
-        <p className="muted small">Current: {status?.security_profile ?? "balanced"}</p>
+        <p className="muted small">
+          {t("security.currentProfile", {
+            profile: t(status?.security_profile === "paranoid" ? "security.paranoid" : "security.balanced"),
+          })}
+        </p>
       </div>
       <div className="card">
-        <h2>Biometric unlock</h2>
+        <h2>{t("security.biometricUnlock")}</h2>
         <p className="muted small">
           {platformSec?.native_biometric_available
-            ? `Open the wallet with ${platformSec.biometric_kind ?? "biometric"} instead of typing your passphrase.`
-            : "No biometric sensor on this device."}
+            ? t("security.biometricOpenWith", {
+                kind: platformSec.biometric_kind ?? t("security.biometric"),
+              })
+            : t("security.noBiometricSensor")}
         </p>
         {bioUnlockStatus?.enabled && bioUnlockStatus.configured ? (
-          <p className="muted small">Biometric unlock is active.</p>
+          <p className="muted small">{t("security.biometricUnlockActive")}</p>
         ) : null}
         {!bioUnlockStatus?.configured && platformSec?.native_biometric_available ? (
           <>
-            <label className="label">Passphrase (to enable)</label>
+            <label className="label">{t("security.passphraseToEnable")}</label>
             <input
               type="password"
               value={bioUnlockPass}
               onChange={(e) => setBioUnlockPass(e.target.value)}
-              placeholder="Enter wallet passphrase"
+              placeholder={t("security.enterWalletPassphrase")}
             />
             <button
               type="button"
@@ -220,13 +259,13 @@ export default function SecurityScreen({
                   .then((s) => {
                     setBioUnlockStatus(s);
                     setBioUnlockPass("");
-                    onToast("Biometric unlock enabled.", "success");
+                    onToast(t("security.biometricUnlockEnabled"), "success");
                   })
                   .catch((err) => onToast(formatInvokeError(err), "error"))
                   .finally(() => setBusy(false));
               }}
             >
-              Enable biometric unlock
+              {t("security.enableBiometricUnlock")}
             </button>
           </>
         ) : null}
@@ -243,25 +282,28 @@ export default function SecurityScreen({
                 .then(() => api.biometricUnlockStatus())
                 .then((s) => {
                   setBioUnlockStatus(s);
-                  onToast("Biometric unlock disabled.", "success");
+                  onToast(t("security.biometricUnlockDisabled"), "success");
                 })
                 .catch((err) => onToast(formatInvokeError(err), "error"))
                 .finally(() => setBusy(false));
             }}
           >
-            Disable biometric unlock
+            {t("security.disableBiometricUnlock")}
           </button>
         ) : null}
       </div>
       <div className="card">
-        <h2>Biometric confirm</h2>
+        <h2>{t("security.biometricConfirm")}</h2>
         <p className="muted small">
           {platformSec?.native_biometric_available
-            ? `Confirm sends ≥ ${BIOMETRIC_THRESHOLD_MEI} HAC with ${platformSec.biometric_kind ?? "biometric"}.`
-            : "No biometric sensor detected. Large sends may fail without fingerprint confirmation."}
+            ? t("security.biometricConfirmSends", {
+                amount: BIOMETRIC_THRESHOLD_MEI,
+                kind: platformSec.biometric_kind ?? t("security.biometric"),
+              })
+            : t("security.noBiometricLargeSend")}
         </p>
         <div className="toggle-row">
-          <span>Use biometric for sends</span>
+          <span>{t("security.useBiometricForSends")}</span>
           <input
             type="checkbox"
             checked={settings?.biometric_send_enabled ?? true}
@@ -271,7 +313,7 @@ export default function SecurityScreen({
               void api
                 .updateSettings({ ...settings, biometric_send_enabled: e.target.checked })
                 .then(() => onRefresh())
-                .then(() => onToast(e.target.checked ? "Biometric confirm on." : "Biometric confirm off.", "success"))
+                .then(() => onToast(t(e.target.checked ? "security.biometricConfirmOn" : "security.biometricConfirmOff"), "success"))
                 .catch((err) => onToast(formatInvokeError(err), "error"));
             }}
           />
@@ -285,16 +327,16 @@ export default function SecurityScreen({
             setBusy(true);
             void api
               .confirmBiometric()
-              .then(() => onToast("Biometric test OK.", "success"))
+              .then(() => onToast(t("security.biometricTestOk"), "success"))
               .catch((err) => onToast(formatInvokeError(err), "error"))
               .finally(() => setBusy(false));
           }}
         >
-          Test biometric
+          {t("security.testBiometric")}
         </button>
       </div>
       <button type="button" onClick={() => void onLock()}>
-        Lock wallet
+        {t("security.lockWallet")}
       </button>
     </>
   );
