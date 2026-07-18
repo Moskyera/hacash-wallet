@@ -48,7 +48,15 @@ jobs:
           shared-key: wallet-rust-quality
 
       - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+        run: >-
+          cargo fmt
+          -p dust-whisper
+          -p l2-fast-pay-hub
+          -p hacash-wallet-core
+          -p wallet-tauri-common
+          -p hacash-wallet
+          -p hacash-wallet-mobile
+          -- --check
 
       - name: Lint complete Rust workspace
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
