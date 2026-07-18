@@ -6,6 +6,7 @@ $manifest = Join-Path $android "app\src\main\AndroidManifest.xml"
 $settingsGradle = Join-Path $android "tauri.settings.gradle"
 $appGradle = Join-Path $android "app\build.gradle.kts"
 $tauriBuildGradle = Join-Path $android "app\tauri.build.gradle.kts"
+$androidBuildTask = Join-Path $android "buildSrc\src\main\java\org\hacash\wallet\mobile\kotlin\BuildTask.kt"
 $tauriProps = Join-Path $android "app\tauri.properties"
 $pkgJson = Join-Path $mobile "package.json"
 $proguard = Join-Path $android "app\proguard-rules.pro"
@@ -149,6 +150,18 @@ if (Test-Path $appGradle) {
     )).Count
     if ($biometricDependencyCount -ne 1) {
         $errors += "persistent app/build.gradle.kts must contain exactly one wallet-native AndroidX biometric dependency"
+    }
+}
+
+if (-not (Test-Path $androidBuildTask)) {
+    $errors += "Missing generated Android BuildTask.kt"
+} else {
+    $buildTaskContent = Get-Content $androidBuildTask -Raw
+    if ($buildTaskContent -notmatch 'val\s+executable\s*=\s*(?:"""yarn"""|"yarn")') {
+        $errors += "Android Rust build task must invoke the pinned Tauri CLI through yarn"
+    }
+    if ($buildTaskContent -notmatch 'listOf\("tauri",\s*"android",\s*"android-studio-script"\)') {
+        $errors += "Android Rust build task is missing the expected Tauri android-studio-script arguments"
     }
 }
 

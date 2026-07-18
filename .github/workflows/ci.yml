@@ -65,6 +65,13 @@ jobs:
           -p hacash-wallet-mobile
           -- --check
 
+      - name: Create Tauri compile-only frontend fixtures
+        run: |
+          # generate_context! validates frontendDist; frontend jobs build the real bundles.
+          mkdir -p apps/desktop/dist apps/mobile/dist
+          printf '%s\n' '<!doctype html><title>CI compile fixture</title>' > apps/desktop/dist/index.html
+          cp apps/desktop/dist/index.html apps/mobile/dist/index.html
+
       - name: Lint complete Rust workspace
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
@@ -191,7 +198,7 @@ jobs:
 
       - name: Initialize generated Android project
         working-directory: apps/mobile
-        run: node node_modules/@tauri-apps/cli/tauri.js android init --ci
+        run: yarn tauri android init --ci
 
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked
@@ -221,7 +228,7 @@ jobs:
 
       - name: Build Android arm64 debug APK
         working-directory: apps/mobile
-        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
+        run: yarn tauri android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh

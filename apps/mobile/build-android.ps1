@@ -32,7 +32,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not (Test-Path "$mobile\src-tauri\gen\android")) {
     Write-Host "Initializing Android project..." -ForegroundColor Cyan
-    node node_modules/@tauri-apps/cli/tauri.js android init
+    yarn tauri android init
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 
@@ -67,7 +67,7 @@ if (Test-Path -LiteralPath $apkOutput) {
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    $tauriOutput = @(node node_modules/@tauri-apps/cli/tauri.js android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked 2>&1)
+    $tauriOutput = @(yarn tauri android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked 2>&1)
     $tauriExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorAction
