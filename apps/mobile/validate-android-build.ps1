@@ -124,6 +124,7 @@ Test-BackupExclusions $legacyBackupRules @(
 
 if (Test-Path $appGradle) {
     $gradleContent = Get-Content $appGradle -Raw
+    $compileSdkLines = ([regex]::Matches($gradleContent, '(?m)^\s*compileSdk\s*=\s*\d+\s*$')).Count
     $androidBlocks = ([regex]::Matches($gradleContent, '(?m)^android\s*\{')).Count
     $signingBlocks = ([regex]::Matches($gradleContent, '(?m)^\s*signingConfigs\s*\{')).Count
     $releaseSigningLinks = ([regex]::Matches(
@@ -132,6 +133,9 @@ if (Test-Path $appGradle) {
     )).Count
     if ($androidBlocks -ne 1) {
         $errors += "build.gradle.kts must contain exactly one android block (found $androidBlocks)"
+    }
+    if ($compileSdkLines -ne 1) {
+        $errors += "build.gradle.kts must contain one standalone numeric compileSdk assignment (found $compileSdkLines)"
     }
     if ($signingBlocks -ne 1) {
         $errors += "build.gradle.kts must contain exactly one release signing configuration"

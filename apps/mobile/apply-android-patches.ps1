@@ -62,8 +62,9 @@ if ($manifestContent -match "networkSecurityConfig") {
 }
 
 $gradleContent = Get-Content $gradle -Raw
+$gradleLineEnding = if ($gradleContent.Contains("`r`n")) { "`r`n" } else { "`n" }
 if ($gradleContent -notmatch "import java.io.FileInputStream") {
-    $gradleContent = "import java.io.FileInputStream`r`n" + $gradleContent
+    $gradleContent = "import java.io.FileInputStream$gradleLineEnding" + $gradleContent
 }
 
 if ($gradleContent -notmatch "signingConfigs") {
@@ -82,6 +83,7 @@ if ($gradleContent -notmatch "signingConfigs") {
         }
     }
 '@
+    $signingBlock = $signingBlock.TrimEnd([char[]]"`r`n") + $gradleLineEnding
     $gradleContent = $gradleContent -replace '(android \{\r?\n)(\s*compileSdk)', "`$1$signingBlock`$2"
     Write-Host "Added signingConfigs inside android block" -ForegroundColor Green
 }
@@ -89,7 +91,7 @@ if ($gradleContent -notmatch "signingConfigs") {
 if ($gradleContent -match 'getByName\("release"\)' -and $gradleContent -notmatch 'signingConfig = signingConfigs') {
     $gradleContent = $gradleContent.Replace(
         'getByName("release") {',
-        "getByName(`"release`") {`r`n            signingConfig = signingConfigs.getByName(`"release`")"
+        "getByName(`"release`") {${gradleLineEnding}            signingConfig = signingConfigs.getByName(`"release`")"
     )
     Write-Host "Linked release signingConfig" -ForegroundColor Green
 }
@@ -102,7 +104,7 @@ if ($gradleContent -match 'getByName\("release"\)' -and $gradleContent -notmatch
 # during every Android build and would otherwise erase this compile dependency.
 $biometricDependency = 'implementation("androidx.biometric:biometric:1.1.0")'
 if ($gradleContent -notmatch [regex]::Escape('androidx.biometric:biometric:1.1.0')) {
-    $gradleContent = $gradleContent -replace '(dependencies \{\r?\n)', "`$1    $biometricDependency`r`n"
+    $gradleContent = $gradleContent -replace '(dependencies \{\r?\n)', "`$1    $biometricDependency${gradleLineEnding}"
     Write-Host "Linked persistent AndroidX strong-biometric API" -ForegroundColor Green
 }
 

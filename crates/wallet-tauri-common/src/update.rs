@@ -147,7 +147,11 @@ pub(crate) struct TrustedUpdate {
 enum OfferPhase {
     Ready,
     Downloading,
+    #[cfg(any(target_os = "windows", target_os = "android", test))]
     Downloaded(PathBuf),
+    // Manual-update targets track completion without retaining an unusable path.
+    #[cfg(not(any(target_os = "windows", target_os = "android", test)))]
+    Downloaded,
 }
 
 #[derive(Debug, Clone)]
@@ -248,11 +252,20 @@ impl UpdateOfferStore {
         if !matches!(offer.phase, OfferPhase::Downloading) {
             return Err("update offer is not downloading".into());
         }
-        offer.phase = OfferPhase::Downloaded(path);
+        #[cfg(any(target_os = "windows", target_os = "android", test))]
+        {
+            offer.phase = OfferPhase::Downloaded(path);
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "android", test)))]
+        {
+            drop(path);
+            offer.phase = OfferPhase::Downloaded;
+        }
         offer.expires_at = now + UPDATE_OFFER_TTL;
         Ok(())
     }
 
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     pub(crate) fn downloaded(
         &self,
         id: &str,
@@ -261,6 +274,7 @@ impl UpdateOfferStore {
         self.downloaded_at(id, channel, Instant::now())
     }
 
+    #[cfg(any(target_os = "windows", target_os = "android", test))]
     fn downloaded_at(
         &self,
         id: &str,
