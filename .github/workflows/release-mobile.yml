@@ -80,7 +80,7 @@ jobs:
 
       - name: Initialize generated Android project
         working-directory: apps/mobile
-        run: yarn tauri android init --ci
+        run: yarn run tauri -- android init --ci
 
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked
@@ -112,7 +112,7 @@ jobs:
 
       - name: Build signed Android arm64 release APK
         working-directory: apps/mobile
-        run: yarn tauri android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
+        run: yarn run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh
