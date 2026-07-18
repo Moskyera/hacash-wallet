@@ -146,3 +146,22 @@ fn android_9_backup_export_has_a_scoped_runtime_permission_flow() {
         );
     }
 }
+
+#[test]
+fn windows_android_release_fallback_reuses_the_verified_native_library() {
+    let root = repo_root();
+    let build_script = read(&root, "apps/mobile/build-android.ps1");
+
+    for contract in [
+        r#""yarn.cmd""#,
+        "run tauri -- android build --ci --target aarch64 --apk",
+        "Copy-Item -LiteralPath $nativeLib",
+        "assembleUniversalRelease -x :app:rustBuildArm64Release",
+        "verify-release-apk.ps1",
+    ] {
+        assert!(
+            build_script.contains(contract),
+            "Windows Android release fallback is missing {contract}"
+        );
+    }
+}

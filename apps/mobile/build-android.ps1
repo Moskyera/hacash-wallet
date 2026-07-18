@@ -7,6 +7,7 @@ $sdk = Join-Path $env:LOCALAPPDATA "Android\Sdk"
 $ndkVersion = "27.2.12479018"
 $ndkHome = Join-Path $sdk "ndk\$ndkVersion"
 $studioJbr = "C:\Program Files\Android\Android Studio\jbr"
+$yarnCommand = if ($env:OS -eq "Windows_NT") { "yarn.cmd" } else { "yarn" }
 
 function Ensure-AndroidEnv {
     if (-not (Test-Path (Join-Path $sdk "cmdline-tools\latest\bin\sdkmanager.bat"))) {
@@ -27,17 +28,17 @@ function Ensure-AndroidEnv {
 Ensure-AndroidEnv
 
 Write-Host "Installing JS dependencies..." -ForegroundColor Cyan
-yarn install --frozen-lockfile --non-interactive
+& $yarnCommand install --frozen-lockfile --non-interactive
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not (Test-Path "$mobile\src-tauri\gen\android")) {
     Write-Host "Initializing Android project..." -ForegroundColor Cyan
-    yarn run tauri -- android init
+    & $yarnCommand run tauri -- android init
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 
 Write-Host "Building frontend..." -ForegroundColor Cyan
-yarn build
+& $yarnCommand build
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
 Write-Host "Merging Android permissions..." -ForegroundColor Cyan
@@ -67,7 +68,7 @@ if (Test-Path -LiteralPath $apkOutput) {
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    $tauriOutput = @(yarn run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked 2>&1)
+    $tauriOutput = @(& $yarnCommand run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked 2>&1)
     $tauriExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorAction
@@ -91,7 +92,9 @@ if ($tauriExit -ne 0) {
     $gradleRoot = Join-Path $mobile "src-tauri\gen\android"
     Push-Location $gradleRoot
     try {
-        & .\gradlew.bat assembleUniversalRelease --no-daemon
+        # Tauri already produced the pinned arm64 library before its Windows symlink failed.
+        # Package that exact copy without starting a second coordinator-dependent Rust task.
+        & .\gradlew.bat assembleUniversalRelease -x :app:rustBuildArm64Release --no-daemon
         if ($LASTEXITCODE -ne 0) { throw "Gradle release build failed" }
     } finally {
         Pop-Location
