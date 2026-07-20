@@ -32,11 +32,35 @@ pub struct CanonicalAction {
 }
 
 impl CanonicalTransaction {
+    /// True when this body is a proof-of-ownership challenge rather than a payment: a single HAC
+    /// transfer whose sender, recipient and signing address are all identical. Signing it proves
+    /// control of the key while nothing moves anywhere the signer does not already control.
+    /// Harbor issues exactly this shape for login and vault authorisation, and naming it plainly
+    /// is what lets a signer approve with confidence instead of squinting at a raw transfer.
+    pub fn is_ownership_proof(&self) -> bool {
+        if self.actions.len() != 1 {
+            return false;
+        }
+        let action = &self.actions[0];
+        if action.kind != 14 {
+            return false;
+        }
+        let from = action.canonical_json.get("from").and_then(Value::as_str);
+        let to = action.canonical_json.get("to").and_then(Value::as_str);
+        matches!((from, to), (Some(f), Some(t)) if f == t && f == self.main_address)
+    }
+
     pub fn approval_summary(&self) -> String {
-        let mut lines = vec![
-            format!("From: {}", self.main_address),
-            format!("Network fee: {}", self.fee),
-        ];
+        let mut lines = Vec::new();
+        if self.is_ownership_proof() {
+            lines.push(
+                "Proof of ownership — you are proving you control this address. \
+                 No funds leave your wallet."
+                    .to_string(),
+            );
+        }
+        lines.push(format!("From: {}", self.main_address));
+        lines.push(format!("Network fee: {}", self.fee));
         for (index, action) in self.actions.iter().enumerate() {
             lines.push(format!("Action {}: {}", index + 1, action.description));
         }
@@ -340,6 +364,32 @@ mod tests {
     use serde_json::json;
 
     const OFFICIAL_NODE_HAC_BODY: &str = "02006a59827900681990afd226b1cbc6c5f085cfdc2092d0843241f401010001000100d3234881daaf07d4562308104401b003328c3744f8010100000000";
+
+    // A real Harbor proof-of-ownership challenge built by the node: a kind-14 HAC transfer from
+    // 1MzNY1oA…zXHzK9 to itself. Signing it proves control of the key without moving funds.
+    const HARBOR_OWNERSHIP_PROOF_BODY: &str = "02006553f16300e63c33a796b3032ce6b856f68fccf06608d9ed18f401010001000e00e63c33a796b3032ce6b856f68fccf06608d9ed1800e63c33a796b3032ce6b856f68fccf06608d9ed18f0010100000000";
+
+    #[test]
+    fn harbor_self_transfer_is_recognised_as_an_ownership_proof() {
+        crate::protocol_init::ensure_protocol_setup();
+        let canonical = decode_transaction(HARBOR_OWNERSHIP_PROOF_BODY).unwrap();
+        assert_eq!(canonical.actions.len(), 1);
+        assert_eq!(canonical.actions[0].kind, 14, "HAC_FROM_TO decodes to kind 14");
+        assert!(canonical.is_ownership_proof(), "from == to == signer");
+        assert!(
+            canonical.approval_summary().starts_with("Proof of ownership"),
+            "the signer is told plainly what they are approving"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_transfer_is_not_an_ownership_proof() {
+        crate::protocol_init::ensure_protocol_setup();
+        // OFFICIAL_NODE_HAC_BODY pays a different recipient — a real payment, not a proof.
+        let canonical = decode_transaction(OFFICIAL_NODE_HAC_BODY).unwrap();
+        assert!(!canonical.is_ownership_proof());
+        assert!(!canonical.approval_summary().starts_with("Proof of ownership"));
+    }
 
     #[test]
     fn official_node_hac_body_matches_exact_intent() {
