@@ -109,7 +109,7 @@ jobs:
           node scripts/release-artifacts.mjs stage-desktop linux dist-release
           test "$(dpkg-deb -f dist-release/hacash-wallet-desktop-v*-x64.deb Architecture)" = "amd64"
           file dist-release/hacash-wallet-desktop-v*-x64.AppImage | grep -F "x86-64"
-          file dist-release/hacash-wallet-desktop-v*-x64-binary | grep -F "x86-64"
+          file dist-release/hacash-wallet-desktop-v*-x64-portable | grep -F "x86-64"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

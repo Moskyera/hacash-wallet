@@ -1,4 +1,8 @@
-import { OFFICIAL_NODE_URL, isOfficialNodeUrl } from "@hacash/wallet-ui";
+import {
+  IstanbulSafetyPanel,
+  OFFICIAL_NODE_URL,
+  isOfficialNodeUrl,
+} from "@hacash/wallet-ui";
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
@@ -100,6 +104,13 @@ export default function SettingsScreen({
   return (
     <>
       <AppUpdateSection onToast={onToast} />
+      <IstanbulSafetyPanel
+        commands={api}
+        networkMode={settings?.network_mode ?? status?.network_mode ?? "mainnet"}
+        currentAddress={status?.address}
+        containerClassName="card"
+        formatError={formatInvokeError}
+      />
       <div className="card">
         <h2>{t("settings.network")}</h2>
         <p className="muted small">

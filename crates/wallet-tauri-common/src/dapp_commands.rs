@@ -147,13 +147,32 @@ pub async fn wallet_dapp_sign_tx(
 }
 
 #[tauri::command]
-pub fn wallet_dapp_chain(
+pub async fn wallet_dapp_chain(
     origin: String,
     chain_id: Option<u64>,
     webview: Webview,
+    state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     trusted_caller_origin(&origin, &webview, false)?;
-    Ok(hacash_wallet_core::dapp::chain_status(chain_id))
+    let node_url = {
+        let svc = state.inner.lock().await;
+        svc.get_settings().node_url
+    };
+    let node =
+        hacash_wallet_core::node::NodeClient::new(node_url).map_err(|error| error.to_string())?;
+    let capabilities = node
+        .capabilities()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (current_chain_id, source) = match capabilities.source {
+        hacash_wallet_core::CapabilitySource::Reported => (Some(capabilities.chain.id), "reported"),
+        hacash_wallet_core::CapabilitySource::LegacyType2 => (None, "legacy_type2"),
+    };
+    Ok(hacash_wallet_core::dapp::chain_status_for_node(
+        chain_id,
+        current_chain_id,
+        source,
+    ))
 }
 
 #[tauri::command]

@@ -1430,7 +1430,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dust-whisper"
-version = "0.1.55"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -2140,7 +2140,7 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet"
-version = "0.1.55"
+version = "1.0.0"
 dependencies = [
  "hacash-wallet-core",
  "serde",
@@ -2157,7 +2157,7 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet-core"
-version = "0.1.55"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2192,13 +2192,14 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "vm",
  "windows 0.58.0",
  "zeroize",
 ]
 
 [[package]]
 name = "hacash-wallet-mobile"
-version = "0.1.55"
+version = "1.0.0"
 dependencies = [
  "hacash-wallet-core",
  "serde",
@@ -2812,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "l2-fast-pay-hub"
-version = "0.1.55"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -6002,6 +6003,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vm"
+version = "0.1.0"
+dependencies = [
+ "basis",
+ "concat-idents",
+ "dyn-clone",
+ "field",
+ "hex",
+ "mint",
+ "protocol",
+ "ripemd",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sha3",
+ "sys",
+]
+
+[[package]]
 name = "vswhom"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6042,7 +6062,7 @@ dependencies = [
 
 [[package]]
 name = "wallet-tauri-common"
-version = "0.1.55"
+version = "1.0.0"
 dependencies = [
  "dust-whisper",
  "hacash-wallet-core",

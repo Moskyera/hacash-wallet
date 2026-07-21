@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::error::{WalletError, WalletResult};
-use crate::node::{DiamondInfo, NodeClient};
+use crate::node::{DiamondInfo, NativeAssetBalance, NodeClient};
 use crate::settings::{DEFAULT_NODE_URL, is_official_node_url};
 
 const BALANCE_CACHE_TTL: Duration = Duration::from_secs(12);
@@ -15,6 +15,9 @@ pub struct AssetSummary {
     pub btc_wallet_satoshi: u64,
     /// Bridged BTC locked in the active Fast Pay channel, in satoshi.
     pub btc_channel_satoshi: u64,
+    /// Istanbul native-asset primitive balances. Read-only in wallet v1.0.0.
+    #[serde(default)]
+    pub native_assets: Vec<NativeAssetBalance>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +25,7 @@ pub(crate) struct AssetSnapshot {
     pub hac_mei: f64,
     pub hacd_names: Vec<String>,
     pub btc_wallet_satoshi: u64,
+    pub native_assets: Vec<NativeAssetBalance>,
 }
 
 /// Asset-domain state kept behind the existing `WalletService` facade.
@@ -125,6 +129,7 @@ impl AssetService {
             hac_mei,
             hacd_names,
             btc_wallet_satoshi: balance_entry.btc_satoshi(),
+            native_assets: balance_entry.native_assets()?,
         })
     }
 
@@ -189,7 +194,8 @@ mod tests {
                             "hacash": "12.5",
                             "diamond": 2,
                             "satoshi": 42,
-                            "diamonds": "ZAKXMIWTYUIA"
+                            "diamonds": "ZAKXMIWTYUIA",
+                            "assets": [{"serial": 7, "amount": 9000}]
                         }]
                     }))
                 }
@@ -370,6 +376,13 @@ mod tests {
         assert_eq!(snapshot.hac_mei, 12.5);
         assert_eq!(snapshot.btc_wallet_satoshi, 42);
         assert_eq!(snapshot.hacd_names, ["ZAKXMI", "WTYUIA"]);
+        assert_eq!(
+            snapshot.native_assets,
+            [NativeAssetBalance {
+                serial: 7,
+                amount: 9000
+            }]
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         server.abort();
     }

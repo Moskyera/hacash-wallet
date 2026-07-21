@@ -2,8 +2,11 @@
 
 mod common;
 
-use common::{audit_gate, with_isolated_wallet_dir};
-use hacash_wallet_core::WalletService;
+use common::{audit_gate, with_isolated_wallet_dir, with_protocol_setup};
+use hacash_wallet_core::quantum::build_type4_unsigned_body_transfers;
+use hacash_wallet_core::{AirgapUnsigned, WALLET_TREASURY_ADDRESS, WalletService};
+
+const RECIPIENT: &str = "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS";
 
 fn assert_active_account(
     settings: &hacash_wallet_core::quantum::QuantumSettings,
@@ -188,6 +191,64 @@ fn audit_quantum_encrypted_keystore_survives_lock_reload() {
             unlocked.unlock("vault-pass-123456").unwrap();
             let settings = unlocked.quantum_settings();
             assert_active_account(&settings, "hybrid", 7, &info.address);
+        });
+    });
+}
+
+#[test]
+fn audit_quantum_airgap_rejects_amount_metadata_confusion() {
+    audit_gate("quantum_airgap_amount_binding", || {
+        with_isolated_wallet_dir(|| {
+            with_protocol_setup(|| {
+                let pass = "quantum-airgap-binding-pass";
+                let mut svc = WalletService::new(Some("http://127.0.0.1:1".into()), None).unwrap();
+                svc.create_wallet("vault-pass-123456").unwrap();
+                let mut settings = svc.get_settings();
+                settings.network_mode = "testnet".into();
+                svc.update_settings(settings).unwrap();
+                let account = svc.quantum_create_pqc(pass).unwrap();
+
+                let displayed_amount_mei = 1.0;
+                let attacker_amount_wire = "500";
+                let displayed_wallet_fee =
+                    hacash_wallet_core::send_options::compute_service_fee_mei(displayed_amount_mei);
+                let wallet_fee_wire =
+                    hacash_wallet_core::send_options::format_service_fee_amount_wire(
+                        displayed_wallet_fee,
+                    );
+                let body_hex = build_type4_unsigned_body_transfers(
+                    &account.address,
+                    "0.001",
+                    &[
+                        (RECIPIENT, attacker_amount_wire),
+                        (WALLET_TREASURY_ADDRESS, &wallet_fee_wire),
+                    ],
+                )
+                .unwrap();
+                let forged = AirgapUnsigned {
+                    v: hacash_wallet_core::airgap::AIRGAP_VERSION,
+                    from: account.address,
+                    to: RECIPIENT.into(),
+                    amount_mei: displayed_amount_mei,
+                    amount_wire: attacker_amount_wire.into(),
+                    fee: "0.001".into(),
+                    service_fee_mei: displayed_wallet_fee,
+                    service_fee_treasury: Some(WALLET_TREASURY_ADDRESS.into()),
+                    body_hex,
+                    summary: format!(
+                        "Send {attacker_amount_wire} HAC to {RECIPIENT} (Type 4 testnet lab)"
+                    ),
+                    tx_type: 4,
+                };
+
+                let error = svc
+                    .quantum_airgap_sign_type4(&forged, pass)
+                    .expect_err("Type 4 signer must bind displayed and body amounts");
+                assert!(
+                    error.to_string().contains("amount metadata"),
+                    "unexpected Type 4 rejection: {error}"
+                );
+            });
         });
     });
 }

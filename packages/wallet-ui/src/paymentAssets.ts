@@ -1,3 +1,6 @@
+export * from "./nativeAssets";
+export * from "./NativeAssetBalances";
+
 export type PaymentAsset = "HAC" | "HACD" | "BTC";
 
 export const PAYMENT_ASSETS: { id: PaymentAsset; label: string; symbol: string }[] = [

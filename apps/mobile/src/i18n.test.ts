@@ -56,6 +56,25 @@ describe("shared locale catalog", () => {
     expect(translate("el", "quantum.nodeReachableHeight", { height: 123 })).toContain("123");
   });
 
+  it("translates every non-technical Istanbul and native-asset surface", () => {
+    const keys = [
+      "istanbul.title",
+      "istanbul.subtitle",
+      "istanbul.fact.height",
+      "istanbul.address.kind.private_key",
+      "istanbul.transaction.signerPolicy",
+      "nativeAssets.title",
+      "nativeAssets.help",
+      "nativeAssets.hidden",
+    ];
+    for (const { code } of SUPPORTED_LOCALES) {
+      if (code === "en") continue;
+      for (const key of keys) {
+        expect(translate(code, key), `${code}.${key}`).not.toBe(translate("en", key));
+      }
+    }
+  });
+
   it("rejects suspicious question-mark and replacement-character corruption", () => {
     expect(() => validateLocaleCatalogContent()).not.toThrow();
   });

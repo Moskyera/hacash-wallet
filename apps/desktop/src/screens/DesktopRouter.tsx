@@ -341,7 +341,14 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
         />
       );
     case "advanced":
-      return <AdvancedScreen busy={busy} onValidate={onValidateHip23} />;
+      return (
+        <AdvancedScreen
+          busy={busy}
+          currentAddress={status?.address}
+          networkMode={settings?.network_mode ?? status?.network_mode ?? "mainnet"}
+          onValidate={onValidateHip23}
+        />
+      );
     case "quantum":
       return (
         <QuantumScreen

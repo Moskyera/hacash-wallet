@@ -130,19 +130,16 @@ pub async fn submit_tx_hex(
                     err: None,
                     message: None,
                     hash: result.hash,
+                    ..SubmitTxResponse::default()
                 });
             }
             Err(e) if settings.fallback_direct => {
                 tracing::warn!(error = %e, "DUST Whisper failed, falling back to direct submit");
-                let submitted = node.submit_tx_hex(tx_hex).await?;
-                return Ok(SubmitTxResponse {
-                    ret: submitted.ret,
-                    err: submitted.err,
-                    message: Some(format!(
-                        "DUST Whisper failed ({e}); submitted directly to node."
-                    )),
-                    hash: submitted.hash,
-                });
+                let mut submitted = node.submit_tx_hex(tx_hex).await?;
+                submitted.message = Some(format!(
+                    "DUST Whisper failed ({e}); submitted directly to node."
+                ));
+                return Ok(submitted);
             }
             Err(e) => {
                 return Err(WalletError::Node(format!("DUST Whisper: {e}")));

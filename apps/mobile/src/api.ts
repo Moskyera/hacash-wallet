@@ -1,7 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AirgapInspection,
   AssetPriceResponse,
+  CanonicalTransaction,
   HacdDiamondInfo as SharedHacdDiamondInfo,
+  NodeCapabilities,
+  ParsedAddress,
   Type4ProbeResult,
 } from "@hacash/wallet-ui";
 export type { HacdDiamondBornInfo, HacdDiamondInfo } from "@hacash/wallet-ui";
@@ -253,13 +257,7 @@ export type BiometricUnlockStatus = {
   configured: boolean;
 };
 
-export type AssetSummary = {
-  hac_mei: number;
-  hacd_count: number;
-  hacd_names: string[];
-  btc_wallet_satoshi: number;
-  btc_channel_satoshi: number;
-};
+export type AssetSummary = import("@hacash/wallet-ui").AssetSummary;
 
 export type ChannelPartyBalance = {
   address: string;
@@ -331,16 +329,19 @@ export type AirgapEnvelope =
 
 export type AirgapPrepareResult = {
   envelope: AirgapUnsigned;
+  inspection: AirgapInspection;
   qr_parts: string[];
 };
 
 export type AirgapSignResult = {
   envelope: AirgapSigned;
+  inspection: AirgapInspection;
   qr_parts: string[];
 };
 
 export type AirgapParseResult = {
   envelope: AirgapEnvelope | null;
+  inspection?: AirgapInspection | null;
   needs_more_parts: boolean;
   received_parts: number;
   total_parts: number;
@@ -462,6 +463,17 @@ export const api = {
   fetchAssetPrices: () =>
     invoke<AssetPriceResponse>("wallet_fetch_asset_prices"),
   discoverNodes: () => invoke<NodeDiscoveryReport>("wallet_discover_nodes"),
+  nodeCapabilities: () => invoke<NodeCapabilities>("wallet_node_capabilities"),
+  inspectAddress: (address: string, networkMode?: "mainnet" | "testnet") =>
+    invoke<ParsedAddress>("wallet_inspect_address", {
+      address,
+      networkMode: networkMode ?? null,
+    }),
+  inspectTransaction: (bodyHex: string, expectedChainId?: number) =>
+    invoke<CanonicalTransaction>("wallet_inspect_transaction", {
+      bodyHex,
+      expectedChainId: expectedChainId ?? null,
+    }),
   resetWallet: () => invoke<void>("wallet_reset"),
   updatePrivacy: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),

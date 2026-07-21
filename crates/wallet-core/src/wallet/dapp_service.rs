@@ -88,28 +88,35 @@ impl WalletService {
         }
         let from = self.require_address()?;
         let parsed = crate::dapp::decode_txobj(txobj)?;
-        let actions_val = parsed
-            .get("actions")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| WalletError::Transaction("txobj missing actions".into()))?;
-        let mut actions = crate::dapp::normalize_actions(actions_val)?;
-        crate::dapp::append_mandatory_wallet_fee(&mut actions)?;
+        let intent = crate::dapp::prepare_transfer_intent(&parsed)?;
+        let capabilities = self.node.capabilities().await?;
+        crate::dapp::validate_transfer_capabilities(&intent, &capabilities)?;
         let mut fee_payload = parsed.clone();
-        fee_payload["main_address"] = serde_json::json!(from);
-        fee_payload["actions"] = serde_json::json!(actions.clone());
+        fee_payload["tx_type"] = serde_json::json!(intent.tx_type);
+        if let Some(gas_max) = intent.gas_max {
+            fee_payload["gas_max"] = serde_json::json!(gas_max);
+        }
+        fee_payload["main_address"] = serde_json::json!(from.clone());
+        fee_payload["actions"] = serde_json::json!(intent.actions.clone());
         let fee =
             crate::dapp::estimate_fee_for_payload(self.node_client(), &from, &fee_payload).await?;
-        let payload = serde_json::json!({
-            "main_address": from,
-            "fee": fee,
-            "actions": actions
-        });
+        let mut payload = fee_payload;
+        payload["fee"] = serde_json::json!(fee.clone());
         let built = self.node.post_create_transaction(payload).await?;
         let body_hex = built
             .body
             .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
-        let canonical =
-            crate::tx_binding::verify_transaction_intent(&body_hex, &from, &fee, &actions)?;
+        let canonical = crate::tx_binding::verify_expected_transaction(
+            &body_hex,
+            &crate::tx_binding::ExpectedTransaction {
+                tx_type: intent.tx_type,
+                gas_max: intent.gas_max,
+                chain_id: intent.chain_id,
+                main_address: from.clone(),
+                fee: fee.clone(),
+                actions: intent.actions,
+            },
+        )?;
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(
             &self.profile,
@@ -117,7 +124,7 @@ impl WalletService {
             &unlock_ctx,
         )?;
         self.clear_second_factor();
-        let signed_hex = self.sign_tx_hex(&body_hex)?;
+        let signed_hex = self.sign_tx_for_network(&body_hex).await?;
         let submitted = self.submit_signed_tx(&signed_hex).await?;
         let txhash = submitted
             .hash
@@ -131,7 +138,9 @@ impl WalletService {
             "txhash": txhash,
             "txfee": fee,
             "description": [canonical.approval_summary()],
-            "body_sha256": canonical.body_sha256
+            "body_sha256": canonical.body_sha256,
+            "tx_type": canonical.tx_type,
+            "gas_max": canonical.gas_max
         }))
     }
 
@@ -156,7 +165,7 @@ impl WalletService {
             &unlock_ctx,
         )?;
         self.clear_second_factor();
-        let signed_hex = self.sign_tx_hex(txbody)?;
+        let signed_hex = self.sign_tx_for_network(txbody).await?;
         self.bump_unlock_activity();
         let mut result = serde_json::json!({
             "ret": 0,

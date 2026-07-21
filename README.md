@@ -10,15 +10,15 @@ Modern, secure desktop wallet for Hacash with encrypted on-device keys, local si
 | Unlock speed | Balanced: m=32K,t=2 (~2× faster than legacy); Paranoid: m=128K,t=4 |
 | Brute-force guard | Exponential unlock backoff (1s → 5min cap) |
 | I/O | Atomic secure writes (0o600), in-memory vault cache, 12s balance cache |
-| Key handling | Local sign only — private key never sent to node API |
+| Key handling | Local sign only - private key never sent to node API |
 | Memory | `zeroize` on decrypted secrets |
 | Auto-lock | Configurable timeout (balanced 180s / paranoid 60s) |
-| WebAuthn | YubiKey / Windows Hello — challenge, rpIdHash, ES256 signature verify |
-| Native biometric | Windows Hello `UserConsentVerifier` — OS-bound 2FA (not spoofable from UI) |
+| WebAuthn | YubiKey / Windows Hello - challenge, rpIdHash, ES256 signature verify |
+| Native biometric | Windows Hello `UserConsentVerifier` - OS-bound 2FA (not spoofable from UI) |
 | Hardware modes | Software · WebAuthn-gate (all signs) · Watch-only (Sparrow-style) |
 | Memory lock | `mlock` / `VirtualLock` on passphrase during KDF |
 | HIP-23 | Pre-sign checks for L1 + Type 4 quantum sends; Type3 validators (Advanced tab) |
-| Air-gap QR | L1 and Type 4 quantum flows — unsigned QR → offline sign → broadcast |
+| Air-gap QR | L1 and Type 4 quantum flows - unsigned QR → offline sign → broadcast |
 | Privacy | Hide balances/addresses, screen blur, optional history, clipboard clear |
 
 ## Architecture
@@ -60,7 +60,7 @@ git clone --branch feature/pqc-phases-1-3 https://github.com/Moskyera/fullnodede
 
 ### Run
 
-**Windows (recommended):** double-click `scripts/START-DEV-STACK.bat` — opens three separate terminals (fullnode → poworker → wallet). Requires `hacash-fullnodedev` built at `../hacash-fullnodedev/target/debug` with `hacash.config.ini` and `poworker.config.ini` in that folder. Keep all windows open.
+**Windows (recommended):** double-click `scripts/START-DEV-STACK.bat` - opens three separate terminals (fullnode → poworker → wallet). Requires `hacash-fullnodedev` built at `../hacash-fullnodedev/target/debug` with `hacash.config.ini` and `poworker.config.ini` in that folder. Keep all windows open.
 
 **Manual:**
 
@@ -107,17 +107,17 @@ cd ../hacash-wallet-integration
 cargo test
 ```
 
-## Features (v0.4 — quantum)
+## Features (v0.4 - quantum)
 
-- [x] PQC account (v6, ML-DSA) — create / import / export keystore v3
-- [x] Hybrid account (v7, ML-DSA + secp256k1) — optional legacy secp link
-- [x] Keystore v3 modal — paste JSON, password verify on export
+- [x] PQC account (v6, ML-DSA) - create / import / export keystore v3
+- [x] Hybrid account (v7, ML-DSA + secp256k1) - optional legacy secp link
+- [x] Keystore v3 modal - paste JSON, password verify on export
 - [x] Encrypted quantum keystore at rest (`quantum.keystore.enc`, vault-derived key)
 - [x] Type 4 on-chain send for **PQC and Hybrid** (dynamic fee via node `/query/fee/average`, ~0.004 HAC) via local PQC fullnode
 - [x] Preflight checks, quantum balance, node health panel, funding wizard
 - [x] Type 4 air-gap prepare / sign / broadcast (in addition to legacy L1 air-gap QR)
-- [x] Quantum tab UI — address badges (PQC / Hybrid), WebAuthn gate on send when enabled
-- [x] Settings — `quantum_mode`, `active_account` metadata (address, kind, version)
+- [x] Quantum tab UI - address badges (PQC / Hybrid), WebAuthn gate on send when enabled
+- [x] Settings - `quantum_mode`, `active_account` metadata (address, kind, version)
 - [x] Quantum unit + audit smoke tests; E2E in `hacash-wallet-integration`
 
 Requires sibling `hacash-fullnodedev` on branch `feature/pqc-phases-1-3` (PQC/Hybrid + Type 4).
@@ -137,7 +137,7 @@ Requires sibling `hacash-fullnodedev` on branch `feature/pqc-phases-1-3` (PQC/Hy
 
 Notes:
 
-- Legacy **Send** spends from the main wallet address only — not from quantum balance.
+- Legacy **Send** spends from the main wallet address only - not from quantum balance.
 - One active quantum keystore at a time; **Create** replaces the stored keystore (export first).
 - PQC Type 4 uses ML-DSA only; Hybrid adds secp256k1 binding (recommended when migrating from legacy keys).
 - Live Type 4 on-chain requires a funded quantum address and a running PQC fullnode (`http://127.0.0.1:8080` or your node URL).
@@ -160,14 +160,14 @@ Notes:
 - [x] Bill export / dispute UI (Fast Pay tab)
 - [x] CSP operator docs (`docs/HUB-OPERATOR.md`)
 - [ ] Public CSP network + liquidity
-- [x] Mobile Phase 1 (`apps/mobile/` + `wallet-tauri-common` — balance, history, bills)
+- [x] Mobile Phase 1 (`apps/mobile/` + `wallet-tauri-common` - balance, history, bills)
 - [ ] Mobile Phase 2 (send + Fast Pay on device)
 
 ## Community operation
 
 The legacy **Hacash Wallet** is intended for **community operation** (releases, hub operators, node runners). See [`docs/COMMUNITY-HANDOFF.md`](docs/COMMUNITY-HANDOFF.md).
 
-A separate **Hacash Quantum Wallet** (PQ-first fork) is planned for later — design only for now:
+A separate **Hacash Quantum Wallet** (PQ-first fork) is planned for later - design only for now:
 
 - Full design: [`docs/hacash-quantum-wallet-design.md`](docs/hacash-quantum-wallet-design.md)
 - Summary: [`docs/hacash-quantum-wallet-design-summary.md`](docs/hacash-quantum-wallet-design-summary.md)

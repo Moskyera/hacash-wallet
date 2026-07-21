@@ -1,4 +1,5 @@
 pub mod account;
+pub mod address;
 pub mod airgap;
 mod assets;
 pub mod bills;
@@ -21,6 +22,7 @@ pub mod l2_hub;
 pub mod messenger;
 pub mod messenger_crypto;
 pub mod node;
+pub mod node_capabilities;
 pub mod node_discovery;
 pub mod paths;
 pub mod payment;
@@ -43,6 +45,7 @@ pub mod webauthn;
 #[cfg(test)]
 mod test_support;
 
+pub use address::{AddressKind, ParsedAddress, parse_address, require_address_for_network};
 pub use airgap::{
     AirgapEnvelope, AirgapParseResult, AirgapPrepareResult, AirgapSignResult, AirgapSigned,
     AirgapUnsigned,
@@ -63,6 +66,11 @@ pub use l1_fee::L1FeeTierQuote;
 pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillSummary};
 pub use l2_hub::HubHealth;
 pub use messenger::{ChatMessage, ChatThread, MessageDirection};
+pub use node::NativeAssetBalance;
+pub use node_capabilities::{
+    CapabilitySource, IstanbulStatus, NodeApiError, NodeCapabilities, NodeChain, NodeFeatures,
+    NodeIdentity, NodeLimits, RegistrySet,
+};
 pub use prices::{PriceSource, SpotPrices, fetch_spot_prices};
 pub use privacy::{PrivacySettings, mask_address, mask_amount, mask_hash};
 pub use quantum::{

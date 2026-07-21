@@ -34,6 +34,7 @@ field = { path = "../../../hacash-fullnodedev/field" }
 basis = { path = "../../../hacash-fullnodedev/basis" }
 protocol = { path = "../../../hacash-fullnodedev/protocol" }
 mint = { path = "../../../hacash-fullnodedev/mint" }
+vm = { path = "../../../hacash-fullnodedev/vm" }
 sdk = { path = "../../../hacash-fullnodedev/sdk" }
 
 [target.'cfg(unix)'.dependencies]

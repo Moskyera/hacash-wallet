@@ -1,5 +1,5 @@
 # Generate release keystore + keystore.properties for signed Android APK.
-# Secrets stay in gitignored files — never commit the .jks or keystore.properties.
+# Secrets stay in gitignored files - never commit the .jks or keystore.properties.
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $keystore = Join-Path $mobile "src-tauri\hacash-wallet-release.jks"

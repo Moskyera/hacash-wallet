@@ -1,4 +1,4 @@
-# Hacash Fast Pay — CSP Hub Operator Guide
+# Hacash Fast Pay - CSP Hub Operator Guide
 
 For **operators** running a Channel Payment Service Provider (CSP) hub. End users only need the wallet.
 
@@ -20,8 +20,8 @@ For **operators** running a Channel Payment Service Provider (CSP) hub. End user
 
 Record two values:
 
-- `HACASH_HUB_ADDRESS` — base58 address
-- `HACASH_HUB_SECRET_HEX` — 64-char private key hex (must match address)
+- `HACASH_HUB_ADDRESS` - base58 address
+- `HACASH_HUB_SECRET_HEX` - 64-char private key hex (must match address)
 
 ## Build
 
@@ -64,9 +64,9 @@ Restart=on-failure
 
 ## API v4
 
-- `GET /v1/health` — discovery (returns `hub_address`)
-- `POST /v1/fast-pay` — `{ payer, payee, amount, channel_id }` → `bill_hex`
-- `GET /v1/fast-pay/{id}` — payment status
+- `GET /v1/health` - discovery (returns `hub_address`)
+- `POST /v1/fast-pay` - `{ payer, payee, amount, channel_id }` → `bill_hex`
+- `GET /v1/fast-pay/{id}` - payment status
 
 - `GET /v1/fast-pay/inbox/{payee}` retrieves routed payments awaiting the recipient signature
 - `POST /v1/fast-pay/{id}/confirm` merges verified signatures and settles only when complete

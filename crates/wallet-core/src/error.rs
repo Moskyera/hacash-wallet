@@ -18,6 +18,8 @@ pub enum WalletError {
     UnlockRateLimited(u64),
     #[error("node api: {0}")]
     Node(String),
+    #[error("node api: HTTP {status}: {message}")]
+    NodeHttpStatus { status: u16, message: String },
     #[error("node api: unsupported address: {0}")]
     UnsupportedAddress(String),
     #[error("price service: {0}")]

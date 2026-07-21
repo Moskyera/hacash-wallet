@@ -139,7 +139,7 @@ function desktopNames(releaseVersion) {
     linux: [
       `hacash-wallet-desktop-v${releaseVersion}-x64.deb`,
       `hacash-wallet-desktop-v${releaseVersion}-x64.AppImage`,
-      `hacash-wallet-desktop-v${releaseVersion}-x64-binary`,
+      `hacash-wallet-desktop-v${releaseVersion}-x64-portable`,
     ],
   };
 }
@@ -147,7 +147,7 @@ function desktopNames(releaseVersion) {
 function verifyDesktopFile(path, name) {
   if (name.endsWith(".msi")) verifyMsi(path);
   else if (name.endsWith(".deb")) verifyDeb(path);
-  else if (name.endsWith(".AppImage") || name.endsWith("-binary")) verifyElfX64(path);
+  else if (name.endsWith(".AppImage") || name.endsWith("-portable")) verifyElfX64(path);
   else verifyPe(path, !name.endsWith("-setup.exe"));
 }
 

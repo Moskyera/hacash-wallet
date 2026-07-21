@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AirgapInspectionCard, useLocale } from "@hacash/wallet-ui";
 import QRCode from "qrcode";
 import { Html5Qrcode } from "html5-qrcode";
 import {
@@ -39,6 +40,7 @@ async function qrDataUrls(parts: string[]): Promise<string[]> {
 }
 
 export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroadcast }: Props) {
+  const { t } = useLocale();
   const [mode, setMode] = useState<AirgapMode>("coordinator");
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
@@ -53,9 +55,13 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
   const [scanning, setScanning] = useState(false);
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const scanPartsRef = useRef<string[]>([]);
+  const scanGeneration = useRef(0);
   const scanMountId = "airgap-qr-reader";
 
   const resetScan = useCallback(() => {
+    scanGeneration.current += 1;
+    scanPartsRef.current = [];
     setScanParts([]);
     setParsed(null);
     setSignResult(null);
@@ -64,27 +70,48 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
   }, []);
 
   useEffect(() => {
+    let active = true;
     if (!prepareResult) {
       setPrepareQrUrls([]);
-      return;
+      return () => {
+        active = false;
+      };
     }
-    qrDataUrls(prepareResult.qr_parts)
-      .then(setPrepareQrUrls)
-      .catch((e) => onToast(String(e), "error"));
+    void qrDataUrls(prepareResult.qr_parts)
+      .then((urls) => {
+        if (active) setPrepareQrUrls(urls);
+      })
+      .catch((error) => {
+        if (active) onToast(String(error), "error");
+      });
+    return () => {
+      active = false;
+    };
   }, [prepareResult, onToast]);
 
   useEffect(() => {
+    let active = true;
     if (!signResult) {
       setSignQrUrls([]);
-      return;
+      return () => {
+        active = false;
+      };
     }
-    qrDataUrls(signResult.qr_parts)
-      .then(setSignQrUrls)
-      .catch((e) => onToast(String(e), "error"));
+    void qrDataUrls(signResult.qr_parts)
+      .then((urls) => {
+        if (active) setSignQrUrls(urls);
+      })
+      .catch((error) => {
+        if (active) onToast(String(error), "error");
+      });
+    return () => {
+      active = false;
+    };
   }, [signResult, onToast]);
 
   useEffect(() => {
     return () => {
+      scanGeneration.current += 1;
       if (scannerRef.current) {
         scannerRef.current.stop().catch(() => undefined);
         scannerRef.current.clear();
@@ -96,6 +123,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
   async function handlePrepare() {
     setBusy(true);
     setPrepareResult(null);
+    setPrepareQrUrls([]);
     resetScan();
     try {
       const result = await api.airgapPrepareSend(sendTo.trim(), Number(sendAmount));
@@ -116,12 +144,17 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
   async function ingestQrText(text: string) {
     const trimmed = text.trim();
     if (!trimmed) return;
-    const nextParts = scanParts.includes(trimmed) ? scanParts : [...scanParts, trimmed];
+    const currentParts = scanPartsRef.current;
+    if (currentParts.includes(trimmed)) return;
+    const nextParts = [...currentParts, trimmed];
+    scanPartsRef.current = nextParts;
     setScanParts(nextParts);
+    const generation = ++scanGeneration.current;
     try {
       const result = await api.airgapParseQrBatch(nextParts);
-      setParsed(result);
+      if (generation !== scanGeneration.current) return;
       if (result.needs_more_parts) {
+        setParsed(result);
         onToast(`Chunk ${result.received_parts}/${result.total_parts}. scan next QR.`, "info");
         return;
       }
@@ -129,13 +162,18 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         onToast("QR decoded but envelope missing.", "error");
         return;
       }
+      if (!result.inspection) {
+        onToast(t("airgap.inspection.missing"), "error");
+        return;
+      }
+      setParsed(result);
       if (isUnsigned(result.envelope)) {
         onToast("Unsigned tx loaded.", "success");
       } else if (isSigned(result.envelope)) {
         onToast("Signed tx loaded. ready to broadcast.", "success");
       }
     } catch (e) {
-      onToast(formatInvokeError(e), "error");
+      if (generation === scanGeneration.current) onToast(formatInvokeError(e), "error");
     }
   }
 
@@ -170,8 +208,15 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
   }
 
   async function handleSign() {
-    if (!parsed?.envelope || !isUnsigned(parsed.envelope)) return;
+    if (
+      !parsed?.envelope ||
+      !isUnsigned(parsed.envelope) ||
+      parsed.inspection?.kind !== "unsigned" ||
+      parsed.inspection.tx_type !== 2
+    ) return;
     setBusy(true);
+    setSignResult(null);
+    setSignQrUrls([]);
     try {
       const unsigned: AirgapUnsigned = {
         v: parsed.envelope.v,
@@ -184,6 +229,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         service_fee_treasury: parsed.envelope.service_fee_treasury,
         body_hex: parsed.envelope.body_hex,
         summary: parsed.envelope.summary,
+        tx_type: parsed.envelope.tx_type,
       };
       const result = await api.airgapSignUnsigned(unsigned);
       setSignResult(result);
@@ -196,7 +242,11 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
   }
 
   async function handleBroadcast() {
-    if (!parsed?.envelope || !isSigned(parsed.envelope)) return;
+    if (
+      !parsed?.envelope ||
+      !isSigned(parsed.envelope) ||
+      parsed.inspection?.kind !== "signed"
+    ) return;
     setBusy(true);
     try {
       const signed: AirgapSigned = {
@@ -210,6 +260,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         service_fee_treasury: parsed.envelope.service_fee_treasury,
         signed_hex: parsed.envelope.signed_hex,
         summary: parsed.envelope.summary,
+        tx_type: parsed.envelope.tx_type,
       };
       const result = await api.airgapBroadcastSigned(signed);
       resetScan();
@@ -223,8 +274,10 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
     }
   }
 
-  const unsignedLoaded = parsed?.envelope && isUnsigned(parsed.envelope);
-  const signedLoaded = parsed?.envelope && isSigned(parsed.envelope);
+  const unsignedLoaded =
+    parsed?.envelope && isUnsigned(parsed.envelope) && parsed.inspection?.kind === "unsigned";
+  const signedLoaded =
+    parsed?.envelope && isSigned(parsed.envelope) && parsed.inspection?.kind === "signed";
 
   return (
     <>
@@ -274,7 +327,10 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
           </button>
           {prepareResult && (
             <div className="preview-box">
-              <p>{prepareResult.envelope.summary}</p>
+              <AirgapInspectionCard
+                inspection={prepareResult.inspection}
+                title={t("airgap.inspection.encodedUnsignedTitle")}
+              />
               <div className="qr-grid">
                 {prepareQrUrls.map((url, i) => (
                   <img key={i} src={url} alt={`Unsigned QR ${i + 1}`} className="qr-thumb" />
@@ -320,11 +376,21 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
           </p>
         )}
 
-        {unsignedLoaded && parsed.envelope && isUnsigned(parsed.envelope) && (
+        {unsignedLoaded && parsed.inspection && (
           <div className="preview-box">
-            <p>{parsed.envelope.summary}</p>
+            <AirgapInspectionCard inspection={parsed.inspection} title={t("airgap.inspection.unsignedTitle")} />
+            {parsed.inspection.tx_type !== 2 && (
+              <p className="warn-text">{t("airgap.inspection.type4QuantumOnly")}</p>
+            )}
             {mode === "signer" && !watchOnly && (
-              <button type="button" className="primary" disabled={busy} onClick={() => void handleSign()}>
+              <button
+                type="button"
+                className="primary"
+                disabled={
+                  busy || parsed.inspection.kind !== "unsigned" || parsed.inspection.tx_type !== 2
+                }
+                onClick={() => void handleSign()}
+              >
                 Sign offline
               </button>
             )}
@@ -333,6 +399,10 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
 
         {signResult && (
           <div className="preview-box">
+            <AirgapInspectionCard
+              inspection={signResult.inspection}
+              title={t("airgap.inspection.signedTitle")}
+            />
             <p>Signed. show to coordinator</p>
             <div className="qr-grid">
               {signQrUrls.map((url, i) => (
@@ -342,10 +412,15 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
           </div>
         )}
 
-        {signedLoaded && parsed.envelope && isSigned(parsed.envelope) && mode === "coordinator" && (
+        {signedLoaded && parsed.inspection && mode === "coordinator" && (
           <div className="preview-box">
-            <p>{parsed.envelope.summary}</p>
-            <button type="button" className="primary" disabled={busy} onClick={() => void handleBroadcast()}>
+            <AirgapInspectionCard inspection={parsed.inspection} />
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || parsed.inspection.kind !== "signed"}
+              onClick={() => void handleBroadcast()}
+            >
               Broadcast to network
             </button>
           </div>

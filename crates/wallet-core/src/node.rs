@@ -1,13 +1,18 @@
 use field::Address;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+#[cfg(target_os = "android")]
+use std::io::Read;
 
 use crate::error::{WalletError, WalletResult};
 #[cfg(target_os = "android")]
 use crate::http_client::blocking_http_client;
 use crate::http_client::shared_http_client;
+use crate::node_capabilities::{NodeApiError, NodeCapabilities};
 use crate::settings::sanitize_node_url;
+
+const MAX_NODE_JSON_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BalanceError {
@@ -99,6 +104,91 @@ fn node_transport_err(url: &str, err: impl std::fmt::Display) -> WalletError {
     WalletError::Node(format!("cannot reach {url}. {err}.{hint}"))
 }
 
+fn decode_http_json<T>(url: &str, status: reqwest::StatusCode, body: &[u8]) -> WalletResult<T>
+where
+    T: DeserializeOwned,
+{
+    if body.len() > MAX_NODE_JSON_BYTES {
+        return Err(WalletError::Node(format!(
+            "{url}: node response exceeds {} bytes",
+            MAX_NODE_JSON_BYTES
+        )));
+    }
+    if !status.is_success() {
+        let fallback = format!("HTTP {}", status.as_u16());
+        let error = serde_json::from_slice::<Value>(body)
+            .map(|value| NodeApiError::from_value(&value, fallback.clone()))
+            .unwrap_or_else(|_| NodeApiError::from_value(&Value::Null, fallback));
+        return Err(WalletError::NodeHttpStatus {
+            status: status.as_u16(),
+            message: error.to_string(),
+        });
+    }
+    serde_json::from_slice(body)
+        .map_err(|error| WalletError::Node(format!("{url}: invalid JSON response: {error}")))
+}
+
+fn oversized_node_response(url: &str) -> WalletError {
+    WalletError::Node(format!(
+        "{url}: node response exceeds {} bytes",
+        MAX_NODE_JSON_BYTES
+    ))
+}
+
+#[cfg(target_os = "android")]
+fn read_blocking_node_body(
+    response: reqwest::blocking::Response,
+    url: &str,
+) -> WalletResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_NODE_JSON_BYTES as u64)
+    {
+        return Err(oversized_node_response(url));
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_NODE_JSON_BYTES as u64) as usize,
+    );
+    response
+        .take(MAX_NODE_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| WalletError::Node(format!("{url}: cannot read response: {error}")))?;
+    if body.len() > MAX_NODE_JSON_BYTES {
+        return Err(oversized_node_response(url));
+    }
+    Ok(body)
+}
+
+#[cfg(not(target_os = "android"))]
+async fn read_async_node_body(mut response: reqwest::Response, url: &str) -> WalletResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_NODE_JSON_BYTES as u64)
+    {
+        return Err(oversized_node_response(url));
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_NODE_JSON_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| WalletError::Node(format!("{url}: cannot read response: {error}")))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_NODE_JSON_BYTES {
+            return Err(oversized_node_response(url));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 async fn http_get_json<T>(url: String) -> WalletResult<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -106,28 +196,29 @@ where
     #[cfg(target_os = "android")]
     {
         return tokio::task::spawn_blocking(move || {
-            blocking_http_client()
+            let response = blocking_http_client()
                 .map_err(WalletError::Node)?
                 .get(&url)
                 .send()
-                .map_err(|e| node_transport_err(&url, e))?
-                .json::<T>()
-                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+                .map_err(|e| node_transport_err(&url, e))?;
+            let status = response.status();
+            let body = read_blocking_node_body(response, &url)?;
+            decode_http_json(&url, status, &body)
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
     }
     #[cfg(not(target_os = "android"))]
     {
-        shared_http_client()
+        let response = shared_http_client()
             .map_err(WalletError::Node)?
             .get(&url)
             .send()
             .await
-            .map_err(|e| node_transport_err(&url, e))?
-            .json::<T>()
-            .await
-            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+            .map_err(|e| node_transport_err(&url, e))?;
+        let status = response.status();
+        let body = read_async_node_body(response, &url).await?;
+        decode_http_json(&url, status, &body)
     }
 }
 
@@ -139,30 +230,31 @@ where
     #[cfg(target_os = "android")]
     {
         return tokio::task::spawn_blocking(move || {
-            blocking_http_client()
+            let response = blocking_http_client()
                 .map_err(WalletError::Node)?
                 .post(&url)
                 .json(&payload)
                 .send()
-                .map_err(|e| node_transport_err(&url, e))?
-                .json::<R>()
-                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+                .map_err(|e| node_transport_err(&url, e))?;
+            let status = response.status();
+            let body = read_blocking_node_body(response, &url)?;
+            decode_http_json(&url, status, &body)
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
     }
     #[cfg(not(target_os = "android"))]
     {
-        shared_http_client()
+        let response = shared_http_client()
             .map_err(WalletError::Node)?
             .post(&url)
             .json(&payload)
             .send()
             .await
-            .map_err(|e| node_transport_err(&url, e))?
-            .json::<R>()
-            .await
-            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+            .map_err(|e| node_transport_err(&url, e))?;
+        let status = response.status();
+        let body = read_async_node_body(response, &url).await?;
+        decode_http_json(&url, status, &body)
     }
 }
 
@@ -173,32 +265,33 @@ where
     #[cfg(target_os = "android")]
     {
         return tokio::task::spawn_blocking(move || {
-            blocking_http_client()
+            let response = blocking_http_client()
                 .map_err(WalletError::Node)?
                 .post(&url)
                 .header("content-type", "text/plain")
                 .body(body)
                 .send()
-                .map_err(|e| node_transport_err(&url, e))?
-                .json::<R>()
-                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+                .map_err(|e| node_transport_err(&url, e))?;
+            let status = response.status();
+            let body = read_blocking_node_body(response, &url)?;
+            decode_http_json(&url, status, &body)
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
     }
     #[cfg(not(target_os = "android"))]
     {
-        shared_http_client()
+        let response = shared_http_client()
             .map_err(WalletError::Node)?
             .post(&url)
             .header("content-type", "text/plain")
             .body(body)
             .send()
             .await
-            .map_err(|e| node_transport_err(&url, e))?
-            .json::<R>()
-            .await
-            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+            .map_err(|e| node_transport_err(&url, e))?;
+        let status = response.status();
+        let body = read_async_node_body(response, &url).await?;
+        decode_http_json(&url, status, &body)
     }
 }
 
@@ -225,6 +318,29 @@ impl NodeClient {
             "node": self.base_url,
             "latest": latest
         }))
+    }
+
+    pub async fn capabilities(&self) -> WalletResult<NodeCapabilities> {
+        let url = format!("{}/query/capabilities", self.base_url);
+        let value: Value = match http_get_json(url).await {
+            Ok(value) => value,
+            Err(WalletError::NodeHttpStatus { status: 404, .. }) => {
+                return Ok(NodeCapabilities::legacy_type2(self.base_url.clone()));
+            }
+            Err(error) => return Err(error),
+        };
+        let ret = value.get("ret").and_then(Value::as_i64).ok_or_else(|| {
+            WalletError::Node("capability response is missing numeric ret".into())
+        })?;
+        if ret != 0 {
+            return Err(WalletError::Node(
+                NodeApiError::from_value(&value, "capability query failed").to_string(),
+            ));
+        }
+        let capabilities: NodeCapabilities = serde_json::from_value(value).map_err(|error| {
+            WalletError::Node(format!("capability response shape invalid: {error}"))
+        })?;
+        capabilities.validate()
     }
 
     pub async fn block_intro(&self, height: u64) -> WalletResult<BlockIntroResponse> {
@@ -272,11 +388,7 @@ impl NodeClient {
         let url = format!("{}/create/transaction", self.base_url);
         let body: BuildTxResponse = http_post_json(url, payload).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(
-                body.err
-                    .or(body.message)
-                    .unwrap_or_else(|| "create transaction failed".into()),
-            ));
+            return Err(WalletError::Node(body.api_error().to_string()));
         }
         Ok(body)
     }
@@ -288,14 +400,14 @@ impl NodeClient {
     pub async fn query_balance_entry(
         &self,
         address: &str,
-        include_diamonds: bool,
+        include_asset_details: bool,
     ) -> WalletResult<BalanceEntry> {
         let mut url = format!(
             "{}/query/balance?unit=mei&address={}",
             self.base_url, address
         );
-        if include_diamonds {
-            url.push_str("&diamonds=true");
+        if include_asset_details {
+            url.push_str("&diamonds=true&assets=true");
         }
         let body: BalanceResponse = http_get_json(url).await?;
         if body.ret != 0 {
@@ -440,11 +552,7 @@ impl NodeClient {
         let url = format!("{}/submit/transaction?hexbody=true", self.base_url);
         let body: SubmitTxResponse = http_post_text_json(url, tx_hex.to_owned()).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(
-                body.err
-                    .or(body.message)
-                    .unwrap_or_else(|| "submit failed".into()),
-            ));
+            return Err(WalletError::Node(body.api_error().to_string()));
         }
         Ok(body)
     }
@@ -598,13 +706,11 @@ fn clean_visual_gene(value: Option<String>) -> Option<String> {
 }
 
 fn clean_node_address(value: Option<String>) -> Option<String> {
-    const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let value = value?;
-    (value.len() >= 26
-        && value.len() <= 45
-        && value.starts_with('1')
-        && value.chars().all(|ch| BASE58.contains(ch)))
-    .then_some(value)
+    value.and_then(|value| {
+        Address::from_readable(value.trim())
+            .ok()
+            .map(|address| address.to_readable())
+    })
 }
 
 fn clean_bid_fee(value: String) -> Option<String> {
@@ -640,6 +746,44 @@ struct BalanceResponse {
     list: Vec<BalanceEntry>,
 }
 
+mod u64_decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireValue {
+        Number(u64),
+        Decimal(String),
+    }
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match WireValue::deserialize(deserializer)? {
+            WireValue::Number(value) => Ok(value),
+            WireValue::Decimal(value) => value.parse::<u64>().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeAssetBalance {
+    /// Serialized as a decimal string so JavaScript cannot lose u64 precision.
+    #[serde(with = "u64_decimal")]
+    pub serial: u64,
+    /// Serialized as a decimal string so JavaScript cannot lose u64 precision.
+    #[serde(with = "u64_decimal")]
+    pub amount: u64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BalanceEntry {
     address: Option<String>,
@@ -649,6 +793,8 @@ pub struct BalanceEntry {
     pub satoshi: u64,
     #[serde(default)]
     pub diamonds: Option<String>,
+    #[serde(default)]
+    pub assets: Vec<NativeAssetBalance>,
 }
 
 impl BalanceEntry {
@@ -661,23 +807,108 @@ impl BalanceEntry {
     pub fn btc_satoshi(&self) -> u64 {
         self.satoshi
     }
+
+    pub fn native_assets(&self) -> WalletResult<Vec<NativeAssetBalance>> {
+        let max_assets = field::BALANCE_ASSET_MAX;
+        if self.assets.len() > max_assets {
+            return Err(WalletError::Node(format!(
+                "native asset list exceeds {max_assets} entries"
+            )));
+        }
+        let mut assets = self.assets.clone();
+        if assets
+            .iter()
+            .any(|asset| asset.serial == 0 || asset.amount == 0)
+        {
+            return Err(WalletError::Node(
+                "native asset balance contains a zero serial or amount".into(),
+            ));
+        }
+        assets.sort_by_key(|asset| asset.serial);
+        if assets
+            .windows(2)
+            .any(|pair| pair[0].serial == pair[1].serial)
+        {
+            return Err(WalletError::Node(
+                "native asset balance contains duplicate serials".into(),
+            ));
+        }
+        Ok(assets)
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildTxResponse {
     pub ret: i32,
+    #[serde(default)]
     pub err: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
     pub hash: Option<String>,
+    #[serde(default, flatten)]
+    pub details: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl BuildTxResponse {
+    pub fn api_error(&self) -> NodeApiError {
+        NodeApiError {
+            ret: Some(self.ret),
+            code: self.code.clone(),
+            stage: self.stage.clone(),
+            message: self
+                .message
+                .clone()
+                .or_else(|| self.error.clone())
+                .or_else(|| self.err.clone())
+                .unwrap_or_else(|| "create transaction failed".into()),
+            details: self.details.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubmitTxResponse {
     pub ret: i32,
+    #[serde(default)]
     pub err: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
     pub hash: Option<String>,
+    #[serde(default, flatten)]
+    pub details: Map<String, Value>,
+}
+
+impl SubmitTxResponse {
+    pub fn api_error(&self) -> NodeApiError {
+        NodeApiError {
+            ret: Some(self.ret),
+            code: self.code.clone(),
+            stage: self.stage.clone(),
+            message: self
+                .message
+                .clone()
+                .or_else(|| self.error.clone())
+                .or_else(|| self.err.clone())
+                .unwrap_or_else(|| "submit failed".into()),
+            details: self.details.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -855,5 +1086,84 @@ mod diamond_metadata_tests {
 
         let error = select_balance_entry(&entries, "1Requested").expect_err("mismatch");
         assert!(error.to_string().contains("requested address"));
+    }
+
+    #[test]
+    fn native_asset_balances_are_sorted_and_consensus_bounded() {
+        let entries = parse_balance_entries(json!([{
+            "address": "1Requested",
+            "hacash": "1",
+            "assets": [
+                { "serial": 9, "amount": 2 },
+                { "serial": 3, "amount": 4 }
+            ]
+        }]));
+        assert_eq!(
+            entries[0].native_assets().unwrap(),
+            [
+                NativeAssetBalance {
+                    serial: 3,
+                    amount: 4
+                },
+                NativeAssetBalance {
+                    serial: 9,
+                    amount: 2
+                }
+            ]
+        );
+
+        let too_many = (1..=field::BALANCE_ASSET_MAX + 1)
+            .map(|serial| json!({ "serial": serial, "amount": 1 }))
+            .collect::<Vec<_>>();
+        let entries = parse_balance_entries(json!([{
+            "address": "1Requested", "hacash": "1", "assets": too_many
+        }]));
+        assert!(entries[0].native_assets().is_err());
+    }
+
+    #[test]
+    fn native_asset_balances_reject_zero_and_duplicate_entries() {
+        for assets in [
+            json!([{ "serial": 0, "amount": 1 }]),
+            json!([{ "serial": 1, "amount": 0 }]),
+            json!([
+                { "serial": 7, "amount": 1 },
+                { "serial": 7, "amount": 2 }
+            ]),
+        ] {
+            let entries = parse_balance_entries(json!([{
+                "address": "1Requested", "hacash": "1", "assets": assets
+            }]));
+            assert!(entries[0].native_assets().is_err());
+        }
+    }
+
+    #[test]
+    fn native_asset_json_preserves_full_u64_precision() {
+        let asset = NativeAssetBalance {
+            serial: u64::MAX,
+            amount: u64::MAX - 1,
+        };
+        assert_eq!(
+            serde_json::to_value(&asset).unwrap(),
+            json!({
+                "serial": u64::MAX.to_string(),
+                "amount": (u64::MAX - 1).to_string()
+            })
+        );
+
+        for wire in [
+            json!({ "serial": 7, "amount": 9 }),
+            json!({ "serial": "7", "amount": "9" }),
+        ] {
+            let decoded: NativeAssetBalance = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                decoded,
+                NativeAssetBalance {
+                    serial: 7,
+                    amount: 9
+                }
+            );
+        }
     }
 }

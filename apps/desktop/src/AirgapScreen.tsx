@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AirgapInspectionCard, useLocale } from "@hacash/wallet-ui";
 import QRCode from "qrcode";
 import { Html5Qrcode } from "html5-qrcode";
 import {
@@ -49,6 +50,7 @@ export default function AirgapScreen({
   setInfo,
   onBroadcast,
 }: Props) {
+  const { t } = useLocale();
   const [mode, setMode] = useState<AirgapMode>("coordinator");
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
@@ -63,9 +65,13 @@ export default function AirgapScreen({
   const [scanning, setScanning] = useState(false);
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const scanPartsRef = useRef<string[]>([]);
+  const scanGeneration = useRef(0);
   const scanMountId = "airgap-qr-reader";
 
   const resetScan = useCallback(() => {
+    scanGeneration.current += 1;
+    scanPartsRef.current = [];
     setScanParts([]);
     setParsed(null);
     setSignResult(null);
@@ -74,27 +80,48 @@ export default function AirgapScreen({
   }, []);
 
   useEffect(() => {
+    let active = true;
     if (!prepareResult) {
       setPrepareQrUrls([]);
-      return;
+      return () => {
+        active = false;
+      };
     }
-    qrDataUrls(prepareResult.qr_parts)
-      .then(setPrepareQrUrls)
-      .catch((e) => setError(String(e)));
+    void qrDataUrls(prepareResult.qr_parts)
+      .then((urls) => {
+        if (active) setPrepareQrUrls(urls);
+      })
+      .catch((error) => {
+        if (active) setError(String(error));
+      });
+    return () => {
+      active = false;
+    };
   }, [prepareResult, setError]);
 
   useEffect(() => {
+    let active = true;
     if (!signResult) {
       setSignQrUrls([]);
-      return;
+      return () => {
+        active = false;
+      };
     }
-    qrDataUrls(signResult.qr_parts)
-      .then(setSignQrUrls)
-      .catch((e) => setError(String(e)));
+    void qrDataUrls(signResult.qr_parts)
+      .then((urls) => {
+        if (active) setSignQrUrls(urls);
+      })
+      .catch((error) => {
+        if (active) setError(String(error));
+      });
+    return () => {
+      active = false;
+    };
   }, [signResult, setError]);
 
   useEffect(() => {
     return () => {
+      scanGeneration.current += 1;
       if (scannerRef.current) {
         scannerRef.current.stop().catch(() => undefined);
         scannerRef.current.clear();
@@ -107,6 +134,7 @@ export default function AirgapScreen({
     setBusy(true);
     clearMessages();
     setPrepareResult(null);
+    setPrepareQrUrls([]);
     resetScan();
     try {
       const result = await api.airgapPrepareSend(sendTo.trim(), Number(sendAmount));
@@ -126,12 +154,17 @@ export default function AirgapScreen({
   async function ingestQrText(text: string) {
     const trimmed = text.trim();
     if (!trimmed) return;
-    const nextParts = scanParts.includes(trimmed) ? scanParts : [...scanParts, trimmed];
+    const currentParts = scanPartsRef.current;
+    if (currentParts.includes(trimmed)) return;
+    const nextParts = [...currentParts, trimmed];
+    scanPartsRef.current = nextParts;
     setScanParts(nextParts);
+    const generation = ++scanGeneration.current;
     try {
       const result = await api.airgapParseQrBatch(nextParts);
-      setParsed(result);
+      if (generation !== scanGeneration.current) return;
       if (result.needs_more_parts) {
+        setParsed(result);
         setInfo(`Chunk ${result.received_parts}/${result.total_parts} captured. scan next QR.`);
         return;
       }
@@ -139,13 +172,18 @@ export default function AirgapScreen({
         setError("QR decoded but envelope missing.");
         return;
       }
+      if (!result.inspection) {
+        setError(t("airgap.inspection.missing"));
+        return;
+      }
+      setParsed(result);
       if (isUnsigned(result.envelope)) {
         setInfo("Unsigned tx loaded. review and sign on offline device.");
       } else if (isSigned(result.envelope)) {
         setInfo("Signed tx loaded. ready to broadcast.");
       }
     } catch (e) {
-      setError(String(e));
+      if (generation === scanGeneration.current) setError(String(e));
     }
   }
 
@@ -182,9 +220,16 @@ export default function AirgapScreen({
   }
 
   async function handleSign() {
-    if (!parsed?.envelope || !isUnsigned(parsed.envelope)) return;
+    if (
+      !parsed?.envelope ||
+      !isUnsigned(parsed.envelope) ||
+      parsed.inspection?.kind !== "unsigned" ||
+      parsed.inspection.tx_type !== 2
+    ) return;
     setBusy(true);
     clearMessages();
+    setSignResult(null);
+    setSignQrUrls([]);
     try {
       const unsigned: AirgapUnsigned = {
         v: parsed.envelope.v,
@@ -197,6 +242,7 @@ export default function AirgapScreen({
         service_fee_treasury: parsed.envelope.service_fee_treasury,
         body_hex: parsed.envelope.body_hex,
         summary: parsed.envelope.summary,
+        tx_type: parsed.envelope.tx_type,
       };
       const result = await api.airgapSignUnsigned(unsigned);
       setSignResult(result);
@@ -209,7 +255,11 @@ export default function AirgapScreen({
   }
 
   async function handleBroadcast() {
-    if (!parsed?.envelope || !isSigned(parsed.envelope)) return;
+    if (
+      !parsed?.envelope ||
+      !isSigned(parsed.envelope) ||
+      parsed.inspection?.kind !== "signed"
+    ) return;
     setBusy(true);
     clearMessages();
     try {
@@ -224,6 +274,7 @@ export default function AirgapScreen({
         service_fee_treasury: parsed.envelope.service_fee_treasury,
         signed_hex: parsed.envelope.signed_hex,
         summary: parsed.envelope.summary,
+        tx_type: parsed.envelope.tx_type,
       };
       const result = await api.airgapBroadcastSigned(signed);
       resetScan();
@@ -237,8 +288,10 @@ export default function AirgapScreen({
     }
   }
 
-  const unsignedLoaded = parsed?.envelope && isUnsigned(parsed.envelope);
-  const signedLoaded = parsed?.envelope && isSigned(parsed.envelope);
+  const unsignedLoaded =
+    parsed?.envelope && isUnsigned(parsed.envelope) && parsed.inspection?.kind === "unsigned";
+  const signedLoaded =
+    parsed?.envelope && isSigned(parsed.envelope) && parsed.inspection?.kind === "signed";
 
   return (
     <section className="panel panel-wide">
@@ -290,18 +343,10 @@ export default function AirgapScreen({
 
           {prepareResult && (
             <div className="preview-card">
-              <h4>{prepareResult.envelope.summary}</h4>
-              <ul>
-                <li>
-                  <strong>From:</strong> <code>{prepareResult.envelope.from}</code>
-                </li>
-                <li>
-                  <strong>To:</strong> <code>{prepareResult.envelope.to}</code>
-                </li>
-                <li>
-                  <strong>Amount:</strong> {prepareResult.envelope.amount_mei} mei
-                </li>
-              </ul>
+              <AirgapInspectionCard
+                inspection={prepareResult.inspection}
+                title={t("airgap.inspection.encodedUnsignedTitle")}
+              />
               <div className="qr-grid">
                 {prepareQrUrls.map((url, i) => (
                   <div key={i} className="qr-card">
@@ -368,23 +413,20 @@ export default function AirgapScreen({
         </div>
       )}
 
-      {unsignedLoaded && parsed.envelope && isUnsigned(parsed.envelope) && (
+      {unsignedLoaded && parsed.inspection && (
         <div className="preview-card">
-          <h4>Unsigned transaction</h4>
-          <p>{parsed.envelope.summary}</p>
-          <ul>
-            <li>
-              <strong>From:</strong> <code>{parsed.envelope.from}</code>
-            </li>
-            <li>
-              <strong>To:</strong> <code>{parsed.envelope.to}</code>
-            </li>
-            <li>
-              <strong>Amount:</strong> {parsed.envelope.amount_mei} mei
-            </li>
-          </ul>
+          <AirgapInspectionCard inspection={parsed.inspection} title={t("airgap.inspection.unsignedTitle")} />
+          {parsed.inspection.tx_type !== 2 && (
+            <p className="warn-box">{t("airgap.inspection.type4QuantumOnly")}</p>
+          )}
           {mode === "signer" && !status.watch_only && (
-            <button className="primary" disabled={busy} onClick={handleSign}>
+            <button
+              className="primary"
+              disabled={
+                busy || parsed.inspection.kind !== "unsigned" || parsed.inspection.tx_type !== 2
+              }
+              onClick={handleSign}
+            >
               Sign offline
             </button>
           )}
@@ -393,6 +435,10 @@ export default function AirgapScreen({
 
       {signResult && (
         <div className="preview-card">
+          <AirgapInspectionCard
+            inspection={signResult.inspection}
+            title={t("airgap.inspection.signedTitle")}
+          />
           <h4>Signed. show to coordinator</h4>
           <div className="qr-grid">
             {signQrUrls.map((url, i) => (
@@ -409,11 +455,15 @@ export default function AirgapScreen({
         </div>
       )}
 
-      {signedLoaded && parsed.envelope && isSigned(parsed.envelope) && mode === "coordinator" && (
+      {signedLoaded && parsed.inspection && mode === "coordinator" && (
         <div className="preview-card">
-          <h4>Signed transaction ready</h4>
-          <p>{parsed.envelope.summary}</p>
-          <button className="primary" disabled={busy} onClick={handleBroadcast}>
+          <h4>{t("airgap.inspection.signedReadyTitle")}</h4>
+          <AirgapInspectionCard inspection={parsed.inspection} />
+          <button
+            className="primary"
+            disabled={busy || parsed.inspection.kind !== "signed"}
+            onClick={handleBroadcast}
+          >
             Broadcast to network
           </button>
         </div>

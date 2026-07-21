@@ -162,6 +162,9 @@ struct StoredUpdateOffer {
 }
 
 const UPDATE_OFFER_TTL: Duration = Duration::from_secs(30 * 60);
+// The download itself has a 30-minute network deadline. Keep the in-flight
+// offer alive slightly longer so final byte validation and cache commit fit.
+const UPDATE_DOWNLOAD_TTL: Duration = Duration::from_secs(35 * 60);
 const MAX_STORED_UPDATE_OFFERS: usize = 8;
 
 #[derive(Default)]
@@ -221,6 +224,7 @@ impl UpdateOfferStore {
             return Err("update offer is already downloading or downloaded".into());
         }
         offer.phase = OfferPhase::Downloading;
+        offer.expires_at = now + UPDATE_DOWNLOAD_TTL;
         Ok(offer.update.clone())
     }
 

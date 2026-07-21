@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { api, type BtcSendPreview, type PlatformSecurityStatus, type WalletSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { isValidHacashAddress } from "../paymentQr";
 import { hapticSuccess } from "../utils/haptic";
 import { maybeSecondFactorGate } from "../utils/secondFactorGate";
 
@@ -22,8 +23,8 @@ export function useBtcSend(opts: {
   const handlePreview = useCallback(async () => {
     const to = recipient.trim();
     const btc = Number(btcAmount);
-    if (!to.startsWith("1")) {
-      showToast("Enter a valid Hacash recipient address (1…).", "error");
+    if (!isValidHacashAddress(to)) {
+      showToast("Enter a valid Hacash recipient address.", "error");
       return;
     }
     if (!Number.isFinite(btc) || btc <= 0) {
@@ -34,6 +35,10 @@ export function useBtcSend(opts: {
     setBusy(true);
     setPreview(null);
     try {
+      const inspected = await api.inspectAddress(to, settings?.network_mode ?? "mainnet");
+      if (!inspected.network_allowed) {
+        throw new Error(inspected.warning || "This address is not enabled on the selected network");
+      }
       const p = await api.previewSendBtc(to, satoshi);
       setPreview(p);
     } catch (e) {
@@ -41,7 +46,7 @@ export function useBtcSend(opts: {
     } finally {
       setBusy(false);
     }
-  }, [recipient, btcAmount, setBusy, showToast]);
+  }, [recipient, btcAmount, setBusy, settings?.network_mode, showToast]);
 
   const handleConfirm = useCallback(async () => {
     if (!preview) return;

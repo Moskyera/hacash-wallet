@@ -1,6 +1,9 @@
 //! Shared Tauri commands backed by `hacash-wallet-core`.
 
 use hacash_wallet_core::hardware::HardwareSigningMode;
+use hacash_wallet_core::node_discovery::{
+    NodeDiscoveryReport, NodeDiscoverySnapshot, discover_node_snapshot,
+};
 use hacash_wallet_core::security::SecurityProfile;
 use hacash_wallet_core::{PrivacySettings, WalletSettings};
 use tauri::{AppHandle, State};
@@ -17,6 +20,17 @@ async fn sync_relay_after_node_change(app: &AppHandle) -> Result<(), String> {
         let _ = app;
         Ok(())
     }
+}
+
+async fn discover_and_commit_nodes(
+    state: &State<'_, AppState>,
+    snapshot: NodeDiscoverySnapshot,
+) -> Result<NodeDiscoveryReport, String> {
+    // Never hold the process-wide wallet lock while probing remote nodes.
+    let report = discover_node_snapshot(&snapshot).await;
+    let mut svc = state.inner.lock().await;
+    svc.commit_node_discovery(&snapshot, report)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -60,15 +74,24 @@ pub fn wallet_lock(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn wallet_balance(app: AppHandle, state: State<'_, AppState>) -> Result<f64, String> {
-    let mut svc = state.inner.lock().await;
-    match svc.balance_mei().await {
+    let (first, discovery_snapshot) = {
+        let mut svc = state.inner.lock().await;
+        let result = svc.balance_mei().await;
+        (result, svc.node_discovery_snapshot())
+    };
+    match first {
         Ok(balance) => Ok(balance),
-        Err(first) if matches!(first, hacash_wallet_core::WalletError::Node(_)) => {
-            let report = svc.find_active_node().await.map_err(|e| e.to_string())?;
+        Err(first)
+            if matches!(
+                first,
+                hacash_wallet_core::WalletError::Node(_)
+                    | hacash_wallet_core::WalletError::NodeHttpStatus { .. }
+            ) =>
+        {
+            let report = discover_and_commit_nodes(&state, discovery_snapshot).await?;
             if !report.switched {
                 return Err(first.to_string());
             }
-            drop(svc);
             sync_relay_after_node_change(&app).await?;
             let mut svc = state.inner.lock().await;
             svc.balance_mei().await.map_err(|e| e.to_string())
@@ -82,15 +105,24 @@ pub async fn wallet_asset_summary(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let mut svc = state.inner.lock().await;
-    let summary = match svc.asset_summary().await {
+    let (first, discovery_snapshot) = {
+        let mut svc = state.inner.lock().await;
+        let result = svc.asset_summary().await;
+        (result, svc.node_discovery_snapshot())
+    };
+    let summary = match first {
         Ok(summary) => summary,
-        Err(first) if matches!(first, hacash_wallet_core::WalletError::Node(_)) => {
-            let report = svc.find_active_node().await.map_err(|e| e.to_string())?;
+        Err(first)
+            if matches!(
+                first,
+                hacash_wallet_core::WalletError::Node(_)
+                    | hacash_wallet_core::WalletError::NodeHttpStatus { .. }
+            ) =>
+        {
+            let report = discover_and_commit_nodes(&state, discovery_snapshot).await?;
             if !report.switched {
                 return Err(first.to_string());
             }
-            drop(svc);
             sync_relay_after_node_change(&app).await?;
             let mut svc = state.inner.lock().await;
             svc.asset_summary().await.map_err(|e| e.to_string())?
@@ -98,6 +130,48 @@ pub async fn wallet_asset_summary(
         Err(error) => return Err(error.to_string()),
     };
     serde_json::to_value(summary).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wallet_node_capabilities(
+    state: State<'_, AppState>,
+) -> Result<hacash_wallet_core::NodeCapabilities, String> {
+    let node_url = {
+        let svc = state.inner.lock().await;
+        svc.get_settings().node_url
+    };
+    let node =
+        hacash_wallet_core::node::NodeClient::new(node_url).map_err(|error| error.to_string())?;
+    node.capabilities().await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn wallet_inspect_address(
+    address: String,
+    network_mode: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<hacash_wallet_core::ParsedAddress, String> {
+    let configured_mode = {
+        let svc = state.inner.lock().await;
+        svc.get_settings().network_mode
+    };
+    let mode = network_mode.unwrap_or(configured_mode);
+    if !matches!(
+        mode.as_str(),
+        hacash_wallet_core::address::MAINNET | hacash_wallet_core::address::TESTNET
+    ) {
+        return Err("network_mode must be mainnet or testnet".into());
+    }
+    hacash_wallet_core::parse_address(&address, &mode).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn wallet_inspect_transaction(
+    body_hex: String,
+    expected_chain_id: Option<u32>,
+) -> Result<hacash_wallet_core::tx_binding::CanonicalTransaction, String> {
+    hacash_wallet_core::tx_binding::inspect_transaction(&body_hex, expected_chain_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -218,10 +292,11 @@ pub async fn wallet_discover_nodes(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let report = {
-        let mut svc = state.inner.lock().await;
-        svc.find_active_node().await.map_err(|e| e.to_string())?
+    let snapshot = {
+        let svc = state.inner.lock().await;
+        svc.node_discovery_snapshot()
     };
+    let report = discover_and_commit_nodes(&state, snapshot).await?;
     if report.switched {
         sync_relay_after_node_change(&app).await?;
     }

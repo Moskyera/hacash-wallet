@@ -1,4 +1,4 @@
-# Hacash Wallet — Mobile
+# Hacash Wallet - Mobile
 
 Tauri 2 mobile shell sharing **`hacash-wallet-core`** via **`wallet-tauri-common`**.
 
@@ -29,7 +29,7 @@ apps/mobile/src-tauri ← Tauri 2 mobile entry point
 apps/mobile/src/      ← React UI (420px mobile layout)
 ```
 
-## Dev — desktop preview (no Android SDK)
+## Dev - desktop preview (no Android SDK)
 
 ```bat
 scripts\DEV-MOBILE.bat
@@ -56,7 +56,7 @@ yarn test
 
 Covers deep-link parsing and WebAuthn gate rules.
 
-## Release — Android
+## Release - Android
 
 Prerequisites: [Tauri mobile prerequisites](https://v2.tauri.app/start/prerequisites/) + Android Studio + NDK.
 
@@ -110,7 +110,7 @@ Keystore: `src-tauri\hacash-wallet-release.jks` (gitignored). **Never commit** `
 
 | Setting | Default |
 |---------|---------|
-| **Hacash node (L1)** | `http://nodeapi.hacash.org` — public node API (balance, send, BTC, HACD) |
+| **Hacash node (L1)** | `http://nodeapi.hacash.org` - public node API (balance, send, BTC, HACD) |
 | **Fast Pay (L2)** | Off until you enable it in the app and configure a hub URL |
 | **Quantum node** | Same as wallet node URL (Settings) |
 
@@ -124,7 +124,7 @@ yarn tauri android dev
 
 USB debugging enabled on phone, or Android emulator running in Android Studio.
 
-## Release — iOS (macOS only)
+## Release - iOS (macOS only)
 
 ```bash
 yarn tauri ios init

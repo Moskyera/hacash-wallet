@@ -1,9 +1,13 @@
+import { IstanbulSafetyPanel } from "@hacash/wallet-ui";
 import { useState } from "react";
-import { Hip23PatternCheck } from "../api";
+import { api, type Hip23PatternCheck } from "../api";
+import { formatInvokeError } from "../formatInvokeError";
 import { ISTANBUL_HEIGHT } from "./types";
 
 type Props = {
   busy: boolean;
+  currentAddress?: string | null;
+  networkMode: "mainnet" | "testnet";
   onValidate: (params: {
     hipTxType: string;
     hipChainHeight: string;
@@ -55,7 +59,12 @@ function renderHip23Result(check: Hip23PatternCheck) {
   );
 }
 
-export default function AdvancedScreen({ busy, onValidate }: Props) {
+export default function AdvancedScreen({
+  busy,
+  currentAddress,
+  networkMode,
+  onValidate,
+}: Props) {
   const [hipTxType, setHipTxType] = useState("3");
   const [hipChainHeight, setHipChainHeight] = useState(String(ISTANBUL_HEIGHT));
   const [hipGasMax, setHipGasMax] = useState("100");
@@ -74,10 +83,17 @@ export default function AdvancedScreen({ busy, onValidate }: Props) {
 
   return (
     <section className="panel">
-      <h2>HIP-23 Type3 pattern validator</h2>
+      <IstanbulSafetyPanel
+        commands={api}
+        networkMode={networkMode}
+        currentAddress={currentAddress}
+        containerClassName="panel-wide"
+        formatError={formatInvokeError}
+      />
+      <h2>Istanbul transaction safety patterns</h2>
       <p className="muted">
-        Validate universal, P2 (HeightScope), and P3 (BalanceFloor) checklist patterns
-        before signing complex Type-3 transactions.
+        Run local compatibility checks for universal, HeightScope and BalanceFloor
+        patterns before a complex Type 3 workflow. This does not sign or broadcast.
       </p>
 
       <div className="form-section">
@@ -246,7 +262,7 @@ export default function AdvancedScreen({ busy, onValidate }: Props) {
           })
         }
       >
-        Run validation
+        Run local pattern checks
       </button>
       {hipResults?.map(renderHip23Result)}
     </section>

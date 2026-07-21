@@ -2,6 +2,7 @@ import {
   computePortfolioUsd,
   HACD_MARKET_REFERENCE_NOTICE,
   maskUsd,
+  NativeAssetBalances,
   useAssetPrices,
 } from "@hacash/wallet-ui";
 import type { ReactNode } from "react";
@@ -80,6 +81,11 @@ export default function BalanceOverview({ assets, hideBalances, topHint }: Props
           <span className="usd">{maskUsd(portfolio?.btcUsd, hideBalances)}</span>
         </div>
       </div>
+
+      <NativeAssetBalances
+        assets={assets?.native_assets ?? []}
+        hidden={hideBalances}
+      />
 
       {!hideBalances && portfolio && hacdCount != null && hacdCount > 0 ? (
         <p className="muted small-note balance-usd-note">{HACD_MARKET_REFERENCE_NOTICE}</p>

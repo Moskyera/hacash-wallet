@@ -1,9 +1,9 @@
-# Hacash Quantum Wallet — Product Design & Fork Plan
+# Hacash Quantum Wallet - Product Design & Fork Plan
 
 | Field | Value |
 |-------|-------|
 | **Document ID** | `DESIGN-HQW-001` |
-| **Status** | Draft — Phase 0 (design only; implementation deferred) |
+| **Status** | Draft - Phase 0 (design only; implementation deferred) |
 | **Author** | Systems architecture (derived from `moskyera-quantum-wallet` codebase audit) |
 | **Date** | 2026-07-12 |
 | **Source repo** | [Moskyera/hacash-wallet](https://github.com/Moskyera/hacash-wallet) (`C:\Users\KQHEX\Documents\moskyera-quantum-wallet`) |
@@ -41,12 +41,12 @@ The existing monorepo already contains a production-grade quantum subsystem:
 
 ### 1.2 Goals
 
-1. **Separate PQ-first product** — new repo `hacash-quantum-wallet`, distinct branding, package IDs, data directory, and release tags.
-2. **Preserve legacy wallet** — no dual-mode UX in one app; legacy repo stays stable and community-operable.
-3. **Reuse proven crypto stack** — `wallet-core` quantum modules, `wallet-tauri-common/quantum_commands.rs`, keystore v3, Type 4 pipeline.
-4. **Clear bridge path** — documented funding flow from legacy wallet → quantum address (existing pattern).
-5. **Fork plan ready** — step-by-step scaffold, PR sequence, rollout phases; implementation deferred.
-6. **Community handoff** — legacy wallet released to community with hub/node/release/docs governance.
+1. **Separate PQ-first product** - new repo `hacash-quantum-wallet`, distinct branding, package IDs, data directory, and release tags.
+2. **Preserve legacy wallet** - no dual-mode UX in one app; legacy repo stays stable and community-operable.
+3. **Reuse proven crypto stack** - `wallet-core` quantum modules, `wallet-tauri-common/quantum_commands.rs`, keystore v3, Type 4 pipeline.
+4. **Clear bridge path** - documented funding flow from legacy wallet → quantum address (existing pattern).
+5. **Fork plan ready** - step-by-step scaffold, PR sequence, rollout phases; implementation deferred.
+6. **Community handoff** - legacy wallet released to community with hub/node/release/docs governance.
 
 ### 1.3 Non-Goals (Phase 0–2)
 
@@ -93,15 +93,15 @@ flowchart TB
     L_Send --> Node
 ```
 
-**Bridge funding (legacy → quantum):** unchanged on-chain mechanics — send **Type 1 HAC** from legacy address to PQC/Hybrid address. Credits the same balance used for Type 4. Documented in `QuantumFundingCard.tsx` and `e2e_fund_quantum.rs`.
+**Bridge funding (legacy → quantum):** unchanged on-chain mechanics - send **Type 1 HAC** from legacy address to PQC/Hybrid address. Credits the same balance used for Type 4. Documented in `QuantumFundingCard.tsx` and `e2e_fund_quantum.rs`.
 
 ### 2.2 Architecture (quantum fork target)
 
 ```mermaid
 flowchart TB
     subgraph UI["React UI (Tauri 2 WebView)"]
-        D["apps/desktop — PQ welcome, Home, Send, Air-gap"]
-        M["apps/mobile — PQ welcome, Pay, More"]
+        D["apps/desktop - PQ welcome, Home, Send, Air-gap"]
+        M["apps/mobile - PQ welcome, Pay, More"]
     end
 
     subgraph Shell["Tauri shell"]
@@ -112,16 +112,16 @@ flowchart TB
     subgraph Common["wallet-tauri-common"]
         QC["quantum_commands.rs"]
         SC["security_commands.rs"]
-        CMD["commands.rs — trimmed subset"]
+        CMD["commands.rs - trimmed subset"]
     end
 
     subgraph Core["wallet-core (shared)"]
         Q["quantum.rs / quantum_vault.rs"]
         N["node.rs"]
         A["airgap.rs"]
-        H["hip23.rs — Type 4 checks"]
-        V["vault.rs — PQ-primary variant"]
-        P["paths.rs — HacashQuantumWallet"]
+        H["hip23.rs - Type 4 checks"]
+        V["vault.rs - PQ-primary variant"]
+        P["paths.rs - HacashQuantumWallet"]
     end
 
     subgraph External["External"]
@@ -225,7 +225,7 @@ sequenceDiagram
 
 #### 2.4.3 Hybrid migration (optional v7)
 
-Users with existing secp256k1 keys use **Hybrid v7** at quantum welcome (import legacy privkey hex or link during create — `quantum_create_hybrid` in `quantum_commands.rs`). Pure PQC v6 remains the recommended default for new PQ-only users.
+Users with existing secp256k1 keys use **Hybrid v7** at quantum welcome (import legacy privkey hex or link during create - `quantum_create_hybrid` in `quantum_commands.rs`). Pure PQC v6 remains the recommended default for new PQ-only users.
 
 ### 2.5 Data isolation
 
@@ -235,7 +235,7 @@ Users with existing secp256k1 keys use **Hybrid v7** at quantum welcome (import 
 | Env override | `HACASH_WALLET_DATA` | `HACASH_QUANTUM_WALLET_DATA` |
 | Vault file | `vault.json` (secp256k1) | `pq-vault.json` or keystore-primary layout |
 | Quantum keystore | `quantum.keystore.enc` (secondary) | Primary identity file |
-| Settings | `settings.json` incl. `quantum_mode` | `settings.json` — no `quantum_mode` flag (always PQ) |
+| Settings | `settings.json` incl. `quantum_mode` | `settings.json` - no `quantum_mode` flag (always PQ) |
 | History | `tx_history.json` | `tx_history.json` (Type 4 focused) |
 
 **Rationale:** side-by-side install on desktop/mobile without overwriting legacy funds or settings.
@@ -296,22 +296,22 @@ The legacy wallet transitions to **community operation** while Moskyera continue
 
 | Gate | Target | Evidence |
 |------|--------|----------|
-| G1 — Reproducible releases | Desktop Windows/Linux + mobile APK from CI | `.github/workflows/release-desktop.yml`, `releases/README.md` |
-| G2 — Operator docs | Hub operators self-serve | `docs/HUB-OPERATOR.md` |
-| G3 — Integration tests | External repo green | `hacash-wallet-integration` |
-| G4 — Mobile Phase 2 | Send + Fast Pay on device | `README.md` checklist |
-| G5 — Security gates | `audit_`, `tier0_`, `stress_` passing | `.github/workflows/ci.yml` |
-| G6 — Governance charter | Published | `docs/COMMUNITY-GOVERNANCE.md` (to author at handoff) |
+| G1 - Reproducible releases | Desktop Windows/Linux + mobile APK from CI | `.github/workflows/release-desktop.yml`, `releases/README.md` |
+| G2 - Operator docs | Hub operators self-serve | `docs/HUB-OPERATOR.md` |
+| G3 - Integration tests | External repo green | `hacash-wallet-integration` |
+| G4 - Mobile Phase 2 | Send + Fast Pay on device | `README.md` checklist |
+| G5 - Security gates | `audit_`, `tier0_`, `stress_` passing | `.github/workflows/ci.yml` |
+| G6 - Governance charter | Published | `docs/COMMUNITY-GOVERNANCE.md` (to author at handoff) |
 
 ### 3.2 Community operation model
 
 ```mermaid
 flowchart TB
     subgraph Roles["Roles"]
-        Maint["Maintainers — merge + release"]
-        HubOp["Hub operators — CSP"]
-        NodeOp["Node runners — fullnode"]
-        Users["Users — wallet clients"]
+        Maint["Maintainers - merge + release"]
+        HubOp["Hub operators - CSP"]
+        NodeOp["Node runners - fullnode"]
+        Users["Users - wallet clients"]
     end
 
     subgraph Infra["Infrastructure"]
@@ -353,11 +353,11 @@ flowchart TB
 
 Publish on [moskyera.github.io](https://moskyera.github.io/):
 
-1. **User guide** — create wallet, Fast Pay, optional Quantum tab (link to bridge doc).
-2. **Operator guide** — excerpt from `docs/HUB-OPERATOR.md`.
-3. **Node setup** — `hacash-fullnodedev` build + `scripts/START-DEV-STACK.bat`.
-4. **Release playbook** — tag, CI, APK signing (`apps/mobile/create-android-keystore.ps1`).
-5. **Governance** — maintainer list, RFC process, veto policy for security releases.
+1. **User guide** - create wallet, Fast Pay, optional Quantum tab (link to bridge doc).
+2. **Operator guide** - excerpt from `docs/HUB-OPERATOR.md`.
+3. **Node setup** - `hacash-fullnodedev` build + `scripts/START-DEV-STACK.bat`.
+4. **Release playbook** - tag, CI, APK signing (`apps/mobile/create-android-keystore.ps1`).
+5. **Governance** - maintainer list, RFC process, veto policy for security releases.
 
 ### 3.6 Moskyera role post-handoff
 
@@ -378,22 +378,22 @@ Publish on [moskyera.github.io](https://moskyera.github.io/):
 | **Secondary:** `wallet-core` quantum API stable (v0.4+ legacy release) | Minimize merge churn |
 | **Do not fork before:** PQ-primary vault design agreed (§2.5, §5.1) | Avoid rework on unlock model |
 
-**Recommended window:** Q4 2026 — after mobile Phase 2 and first community maintainer release.
+**Recommended window:** Q4 2026 - after mobile Phase 2 and first community maintainer release.
 
 ### 4.2 Fork procedure (step-by-step)
 
 1. **Create repo** `Moskyera/hacash-quantum-wallet` (empty, MIT license).
 2. **Snapshot tag** on legacy: `legacy-pre-fork-YYYY-MM-DD` for traceability.
 3. **Copy tree** via `git filter-repo` or manual copy of paths in §2.3 (no `target/`, no `releases/apk-*` inspect dirs).
-4. **Rewrite branding** — all `tauri.conf.json`, `package.json`, icons, `WalletLogo.tsx`.
-5. **Implement data path split** — `paths.rs` → `HacashQuantumWallet`, mobile `lib.rs` data dir init.
-6. **Strip legacy UI** — desktop `App.tsx` nav; mobile `MoreRouter.tsx` pages.
-7. **PQ-primary unlock** — new `pq_wallet.rs` or feature-gated `wallet.rs` (see §5.1).
-8. **Trim Cargo workspace** — remove `l2-fast-pay-hub`, `dust-whisper` members.
-9. **CI green** — clone `hacash-fullnodedev` PQC branch (same as `ci.yml`).
-10. **Integration fork** — `hacash-quantum-wallet-integration` or tagged suite in existing integration repo.
-11. **First release** — `v0.1.0-quantum-desktop` (internal alpha), then mobile APK.
-12. **Publish bridge doc** — cross-link from both READMEs.
+4. **Rewrite branding** - all `tauri.conf.json`, `package.json`, icons, `WalletLogo.tsx`.
+5. **Implement data path split** - `paths.rs` → `HacashQuantumWallet`, mobile `lib.rs` data dir init.
+6. **Strip legacy UI** - desktop `App.tsx` nav; mobile `MoreRouter.tsx` pages.
+7. **PQ-primary unlock** - new `pq_wallet.rs` or feature-gated `wallet.rs` (see §5.1).
+8. **Trim Cargo workspace** - remove `l2-fast-pay-hub`, `dust-whisper` members.
+9. **CI green** - clone `hacash-fullnodedev` PQC branch (same as `ci.yml`).
+10. **Integration fork** - `hacash-quantum-wallet-integration` or tagged suite in existing integration repo.
+11. **First release** - `v0.1.0-quantum-desktop` (internal alpha), then mobile APK.
+12. **Publish bridge doc** - cross-link from both READMEs.
 
 ### 4.3 What to copy verbatim
 
@@ -498,11 +498,11 @@ stateDiagram-v2
 
 Options (decide in Open Questions):
 
-- **A — Keystore-primary:** App passphrase encrypts keystore v3 directly; no secp256k1 `vault.json`.
-- **B — Wrapper vault:** Empty secp256k1 stub removed; `pq-vault.json` wraps keystore v3 (reuse Argon2id/AES-GCM from `vault.rs`).
-- **C — Dual unlock (transitional):** Import legacy wallet + quantum keystore for Hybrid users only.
+- **A - Keystore-primary:** App passphrase encrypts keystore v3 directly; no secp256k1 `vault.json`.
+- **B - Wrapper vault:** Empty secp256k1 stub removed; `pq-vault.json` wraps keystore v3 (reuse Argon2id/AES-GCM from `vault.rs`).
+- **C - Dual unlock (transitional):** Import legacy wallet + quantum keystore for Hybrid users only.
 
-**Recommendation:** **Option B** — maximizes reuse of `vault.rs`, `quantum_vault.rs`, audit tests; clearest break from legacy identity.
+**Recommendation:** **Option B** - maximizes reuse of `vault.rs`, `quantum_vault.rs`, audit tests; clearest break from legacy identity.
 
 ---
 
@@ -677,7 +677,7 @@ PRs target new repo `hacash-quantum-wallet` after creation. Each PR is independe
 
 | Field | Value |
 |-------|-------|
-| **Title** | `feat(core): quantum-product feature — optional legacy deps` |
+| **Title** | `feat(core): quantum-product feature - optional legacy deps` |
 | **Depends on** | PR-3 |
 | **Files** | `crates/wallet-core/Cargo.toml`, `crates/wallet-core/src/lib.rs`, `crates/wallet-core/src/wallet.rs`, `apps/desktop/src-tauri/Cargo.toml`, `apps/mobile/src-tauri/Cargo.toml` |
 | **Description** | Introduce `quantum-product` feature disabling `l2-fast-pay-hub` / `dust-whisper` linkage. Gate `fast_pay`, `messenger`, `hacd_send`, `btc_send` modules with `#[cfg(feature = "legacy")]`. Quantum apps enable `quantum-product` only. |
@@ -688,7 +688,7 @@ PRs target new repo `hacash-quantum-wallet` after creation. Each PR is independe
 
 | Field | Value |
 |-------|-------|
-| **Title** | `feat(core): PQ-primary vault — create/unlock without secp256k1 identity` |
+| **Title** | `feat(core): PQ-primary vault - create/unlock without secp256k1 identity` |
 | **Depends on** | PR-4 |
 | **Files** | `crates/wallet-core/src/wallet.rs`, `crates/wallet-core/src/vault.rs`, `crates/wallet-core/src/quantum_vault.rs`, new `crates/wallet-core/src/pq_wallet.rs`, `crates/wallet-tauri-common/src/commands.rs`, `crates/wallet-core/tests/audit_quantum_smoke.rs`, new `tests/audit_pq_primary_vault.rs` |
 | **Description** | `pq_wallet_create(passphrase, ks_password)` creates PQC v6 keystore as primary identity. Unlock loads `pq-vault.json` + `quantum.keystore.enc` without secp256k1 seed. Hybrid import path preserved. Audit tests for create/unlock/send round-trip. |
@@ -754,7 +754,7 @@ PRs target new repo `hacash-quantum-wallet` after creation. Each PR is independe
 
 | Field | Value |
 |-------|-------|
-| **Title** | `test: quantum fork E2E — fund bridge + Type 4 send` |
+| **Title** | `test: quantum fork E2E - fund bridge + Type 4 send` |
 | **Depends on** | PR-5, PR-9 |
 | **Files** | `crates/wallet-core/examples/e2e_type4_send.rs`, `crates/wallet-core/examples/e2e_fund_quantum.rs` (adapt PQ-primary), optional `../hacash-quantum-wallet-integration/` |
 | **Description** | E2E against local PQC node: create PQ wallet → simulate bridge credit → preflight → send Type 4. CI job `integration-quantum` (optional nightly). |

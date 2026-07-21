@@ -704,7 +704,7 @@ export function useDesktopWallet(
             }
           : null;
         const results = await api.validateHip23(universal, p2, p3);
-        onInfo("HIP-23 pattern validation complete.");
+        onInfo("Istanbul transaction safety pattern checks complete.");
         return results;
       } catch (e) {
         onError(String(e));

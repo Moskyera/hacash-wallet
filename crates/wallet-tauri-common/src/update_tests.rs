@@ -97,6 +97,7 @@ fn staged_part_files_validate_against_trusted_destination_type() {
 fn semver_and_release_tags_are_strict() {
     assert_eq!(parse_semver_triplet("0.1.30"), Some((0, 1, 30)));
     assert_eq!(parse_semver_triplet("v0.1.30-mobile"), Some((0, 1, 30)));
+    assert_eq!(parse_semver_triplet("1.0.0"), Some((1, 0, 0)));
     assert_eq!(parse_semver_triplet("1.2.3.4"), None);
     assert_eq!(parse_semver_triplet("vv1.2.3"), None);
     assert_eq!(parse_semver_triplet("1.2.3-rc1"), None);
@@ -104,6 +105,11 @@ fn semver_and_release_tags_are_strict() {
         parse_release_triplet("v0.1.55-mobile", UpdateChannel::Mobile),
         Some((0, 1, 55))
     );
+    assert_eq!(
+        parse_release_triplet("v1.0.0-mobile", UpdateChannel::Mobile),
+        Some((1, 0, 0))
+    );
+    assert!(is_newer((1, 0, 0), (0, 1, 55)));
     assert_eq!(
         parse_release_triplet("v0.1.55-desktop", UpdateChannel::Mobile),
         None
@@ -456,9 +462,27 @@ fn offer_store_enforces_phase_channel_and_expiry() {
             .download_complete_at(
                 &expired_download,
                 PathBuf::from("expired.msi"),
-                now + UPDATE_OFFER_TTL + Duration::from_secs(1),
+                now + UPDATE_DOWNLOAD_TTL + Duration::from_secs(1),
             )
             .is_err()
+    );
+}
+
+#[test]
+fn beginning_a_download_refreshes_the_offer_deadline() {
+    let store = UpdateOfferStore::new();
+    let now = Instant::now();
+    let id = store.register_at(trusted_update(UpdateChannel::Desktop), now);
+    let delayed_start = now + UPDATE_OFFER_TTL - Duration::from_secs(1);
+    assert!(store.begin_download_at(&id, delayed_start).is_ok());
+    assert!(
+        store
+            .download_complete_at(
+                &id,
+                PathBuf::from("verified-after-delay.msi"),
+                delayed_start + UPDATE_DOWNLOAD_TTL - Duration::from_secs(1),
+            )
+            .is_ok()
     );
 }
 

@@ -1,3 +1,4 @@
+import { isValidHacashAddress } from "@hacash/wallet-ui";
 import { useState } from "react";
 import Toast from "../components/Toast";
 import WalletLogo from "../components/WalletLogo";
@@ -158,13 +159,13 @@ export default function WelcomeScreen({
           />
           <label className="label">Hacash address</label>
           <input
-            placeholder="1ABC…"
+            placeholder="Hacash address"
             value={watchAddress}
             onChange={(e) => setWatchAddress(e.target.value)}
           />
           <button
             className="primary"
-            disabled={busy || !watchAddress.trim().startsWith("1")}
+            disabled={busy || !isValidHacashAddress(watchAddress)}
             onClick={() => void onWatchOnly()}
           >
             Open watch wallet

@@ -1,8 +1,11 @@
 //! Safe RPC failover across user-approved Hacash nodes.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::node::NodeClient;
 use crate::settings::{DEFAULT_NODE_URL, WalletSettings};
@@ -10,6 +13,7 @@ use crate::settings::{DEFAULT_NODE_URL, WalletSettings};
 pub const MAINNET_BLOCK_ONE_HASH: &str =
     "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+const MAX_CONCURRENT_NODE_PROBES: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeCandidateStatus {
@@ -29,6 +33,28 @@ pub struct NodeDiscoveryReport {
     pub candidates: Vec<NodeCandidateStatus>,
 }
 
+/// Immutable node configuration captured while the wallet state lock is held.
+///
+/// Discovery performs network I/O from this snapshot after releasing the lock.
+/// The wallet accepts a discovered fallback only if this configuration is still
+/// current when the probe finishes.
+#[derive(Debug, Clone)]
+pub struct NodeDiscoverySnapshot {
+    pub(crate) settings: WalletSettings,
+    pub(crate) active_node: String,
+    pub(crate) network_mode: String,
+}
+
+impl NodeDiscoverySnapshot {
+    pub(crate) fn new(settings: WalletSettings, active_node: String, network_mode: String) -> Self {
+        Self {
+            settings,
+            active_node,
+            network_mode,
+        }
+    }
+}
+
 pub fn candidate_urls(settings: &WalletSettings) -> Vec<String> {
     let mut urls = vec![settings.node_url.clone()];
     for url in &settings.node_fallback_urls {
@@ -42,11 +68,44 @@ pub fn candidate_urls(settings: &WalletSettings) -> Vec<String> {
     urls
 }
 
+pub async fn discover_node_snapshot(snapshot: &NodeDiscoverySnapshot) -> NodeDiscoveryReport {
+    discover_node_candidates(&snapshot.settings).await
+}
+
 pub async fn discover_node_candidates(settings: &WalletSettings) -> NodeDiscoveryReport {
-    let mut candidates = Vec::new();
-    for url in candidate_urls(settings) {
-        candidates.push(probe_node(&url, &settings.network_mode).await);
+    let urls = candidate_urls(settings);
+    let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_NODE_PROBES));
+    let mut probes = JoinSet::new();
+    for (index, url) in urls.iter().cloned().enumerate() {
+        let limiter = Arc::clone(&limiter);
+        let network_mode = settings.network_mode.clone();
+        let _ = probes.spawn(async move {
+            let Ok(_permit) = limiter.acquire_owned().await else {
+                return (
+                    index,
+                    failed(&url, "node probe concurrency limiter closed".into()),
+                );
+            };
+            let status = probe_node(&url, &network_mode).await;
+            (index, status)
+        });
     }
+
+    let mut ordered = vec![None; urls.len()];
+    while let Some(result) = probes.join_next().await {
+        if let Ok((index, status)) = result {
+            ordered[index] = Some(status);
+        }
+    }
+    let candidates = ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, status)| {
+            status
+                .unwrap_or_else(|| failed(&urls[index], "node probe task did not complete".into()))
+        })
+        .collect();
+
     NodeDiscoveryReport {
         active_node: settings.node_url.clone(),
         switched: false,
@@ -127,8 +186,11 @@ fn network_anchor_matches(network_mode: &str, height: u64, hash: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
-    use axum::{Json, Router, routing::get};
+    use axum::{Json, Router, extract::State, routing::get};
     use serde_json::json;
 
     #[test]
@@ -208,5 +270,79 @@ mod tests {
 
         mainnet_task.abort();
         testnet_task.abort();
+    }
+
+    #[derive(Clone, Default)]
+    struct ProbeLoad {
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    async fn spawn_slow_probe_node(load: ProbeLoad) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/query/latest",
+                get(|State(load): State<ProbeLoad>| async move {
+                    let active = load.active.fetch_add(1, Ordering::SeqCst) + 1;
+                    load.peak.fetch_max(active, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(75)).await;
+                    load.active.fetch_sub(1, Ordering::SeqCst);
+                    Json(json!({ "ret": 0, "height": 100, "diamond": 5 }))
+                }),
+            )
+            .route(
+                "/query/block/intro",
+                get(|| async {
+                    Json(json!({
+                        "ret": 0,
+                        "height": 1,
+                        "hash": "000008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff"
+                    }))
+                }),
+            )
+            .with_state(load);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn discovery_is_bounded_concurrent_and_preserves_candidate_order() {
+        let load = ProbeLoad::default();
+        let mut urls = Vec::new();
+        let mut tasks = Vec::new();
+        for _ in 0..6 {
+            let (url, task) = spawn_slow_probe_node(load.clone()).await;
+            urls.push(url);
+            tasks.push(task);
+        }
+        let settings = WalletSettings {
+            node_url: urls[0].clone(),
+            node_fallback_urls: urls[1..].to_vec(),
+            network_mode: "testnet".into(),
+            ..WalletSettings::default()
+        };
+
+        let report = discover_node_candidates(&settings).await;
+
+        assert_eq!(
+            report
+                .candidates
+                .iter()
+                .map(|candidate| candidate.url.clone())
+                .collect::<Vec<_>>(),
+            urls
+        );
+        assert!(report.candidates.iter().all(|candidate| candidate.online));
+        let peak = load.peak.load(Ordering::SeqCst);
+        assert!(peak > 1, "node probes ran sequentially");
+        assert!(peak <= MAX_CONCURRENT_NODE_PROBES, "probe limit exceeded");
+
+        for task in tasks {
+            task.abort();
+        }
     }
 }

@@ -1,5 +1,5 @@
 # Standalone launcher: Vite (1420) + debug wallet exe
-# Debug hacash-wallet.exe always loads http://127.0.0.1:1420 — not dist/
+# Debug hacash-wallet.exe always loads http://127.0.0.1:1420 - not dist/
 $ErrorActionPreference = "Stop"
 $desktop = $PSScriptRoot
 $exe = Join-Path $desktop "..\..\target\debug\hacash-wallet.exe"

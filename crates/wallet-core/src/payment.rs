@@ -80,6 +80,8 @@ impl PaymentRouter {
     ) -> WalletResult<PaymentPlan> {
         crate::hip23::validate_hac_amount_mei(amount_mei)?;
         options.validate()?;
+        crate::address::require_address_for_network(from, &self.settings.network_mode)?;
+        crate::address::require_address_for_network(to, &self.settings.network_mode)?;
         if !options.force_l1
             && let Some(plan) = self.try_l2_plan(from, to, amount_mei).await?
         {
@@ -127,6 +129,13 @@ impl PaymentRouter {
         to: &str,
         amount_mei: f64,
     ) -> WalletResult<Option<PaymentPlan>> {
+        let from_address = crate::address::parse_address(from, &self.settings.network_mode)?;
+        let to_address = crate::address::parse_address(to, &self.settings.network_mode)?;
+        if !from_address.fast_pay_eligible || !to_address.fast_pay_eligible {
+            // Fast Pay v0 is passive-only. Contracts, P2SH and quantum addresses stay on L1.
+            return Ok(None);
+        }
+
         let hub_url = match &self.settings.l2_hub_url {
             Some(u) => u.clone(),
             None => return Ok(None),
@@ -178,6 +187,14 @@ impl PaymentRouter {
         amount_wire: &str,
         payer_account: &WalletAccount,
     ) -> WalletResult<FastPayExecution> {
+        let payer = crate::address::require_address_for_network(from, &self.settings.network_mode)?;
+        let payee = crate::address::require_address_for_network(to, &self.settings.network_mode)?;
+        if !payer.fast_pay_eligible || !payee.fast_pay_eligible {
+            return Err(WalletError::L2(
+                "Fast Pay v0 supports only passive v0 sender and recipient addresses".into(),
+            ));
+        }
+
         let hub_url = self
             .settings
             .l2_hub_url

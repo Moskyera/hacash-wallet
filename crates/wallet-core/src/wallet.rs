@@ -1,4 +1,5 @@
 mod dapp_service;
+mod network_binding;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -9,8 +10,10 @@ use zeroize::Zeroize;
 
 use crate::account::WalletAccount;
 use crate::airgap::{
-    AIRGAP_VERSION, AirgapEnvelope, AirgapParseResult, AirgapPrepareResult, AirgapSignResult,
-    AirgapSigned, AirgapUnsigned, encode_envelope_qr, parse_airgap_qr_parts, parse_airgap_qr_text,
+    AIRGAP_CLASSIC_L1_TX_TYPE, AIRGAP_VERSION, AirgapEnvelope, AirgapInspection, AirgapParseResult,
+    AirgapPrepareResult, AirgapSignResult, AirgapSigned, AirgapUnsigned, canonical_airgap_summary,
+    canonical_airgap_tx_type, canonicalize_airgap_amount, encode_envelope_qr,
+    parse_airgap_qr_parts, parse_airgap_qr_text,
 };
 pub use crate::assets::AssetSummary;
 use crate::assets::{AssetService, DiamondMetadataReader};
@@ -37,7 +40,7 @@ use crate::fast_pay::{
 use crate::history::{TxHistory, TxRecord, TxStatus};
 use crate::l2_hub::{FastPayExecution, FastPayInboxItem, HubHealth, L2HubClient};
 use crate::node::NodeClient;
-use crate::node_discovery::{NodeDiscoveryReport, discover_node_candidates};
+use crate::node_discovery::{NodeDiscoveryReport, NodeDiscoverySnapshot, discover_node_snapshot};
 use crate::payment::{PaymentPlan, PaymentRail, PaymentRouter};
 use crate::privacy::{PrivacySettings, mask_address, mask_amount, mask_hash};
 use crate::security::{SecurityProfile, UnlockContext, check_send_policy};
@@ -51,6 +54,7 @@ pub struct WalletService {
     vault_cache: Option<EncryptedVault>,
     vault_meta: Option<VaultMetaSnapshot>,
     node: NodeClient,
+    network_binding: Option<network_binding::CachedNetworkBinding>,
     network_mode: String,
     router: PaymentRouter,
     profile: SecurityProfile,
@@ -160,6 +164,7 @@ impl WalletService {
             vault_cache: None,
             vault_meta: None,
             node,
+            network_binding: None,
             network_mode,
             router,
             profile,
@@ -238,21 +243,45 @@ impl WalletService {
         self.node.ping().await
     }
 
-    pub async fn discover_nodes(&self) -> NodeDiscoveryReport {
+    pub fn node_discovery_snapshot(&self) -> NodeDiscoverySnapshot {
+        let active_node = self.node.base_url().to_owned();
+        let network_mode = self.network_mode.clone();
         let mut settings = self.settings.clone();
-        settings.network_mode = self.network_mode.clone();
-        discover_node_candidates(&settings).await
+        settings.node_url = active_node.clone();
+        settings.network_mode = network_mode.clone();
+        NodeDiscoverySnapshot::new(settings, active_node, network_mode)
     }
 
-    /// Select a verified fallback only when the active node is unavailable or on the wrong chain.
-    pub async fn find_active_node(&mut self) -> WalletResult<NodeDiscoveryReport> {
-        let mut report = self.discover_nodes().await;
+    pub async fn discover_nodes(&self) -> NodeDiscoveryReport {
+        discover_node_snapshot(&self.node_discovery_snapshot()).await
+    }
+
+    /// Commit failover from a completed discovery only when its full node
+    /// configuration is still current. A user settings change always wins a
+    /// race with an older background probe.
+    pub fn commit_node_discovery(
+        &mut self,
+        snapshot: &NodeDiscoverySnapshot,
+        mut report: NodeDiscoveryReport,
+    ) -> WalletResult<NodeDiscoveryReport> {
+        let config_unchanged = self.node.base_url() == snapshot.active_node
+            && self.network_mode == snapshot.network_mode
+            && self.settings.node_url == snapshot.settings.node_url
+            && self.settings.node_fallback_urls == snapshot.settings.node_fallback_urls
+            && self.settings.auto_node_failover == snapshot.settings.auto_node_failover;
+        if !config_unchanged {
+            report.active_node = self.node.base_url().to_owned();
+            report.network_mode = self.network_mode.clone();
+            report.switched = false;
+            return Ok(report);
+        }
+
         let current_ok = report
             .candidates
             .iter()
-            .find(|candidate| candidate.url == self.node.base_url())
+            .find(|candidate| candidate.url == snapshot.active_node)
             .is_some_and(|candidate| candidate.online && candidate.network_match);
-        if current_ok || !self.settings.auto_node_failover {
+        if current_ok || !snapshot.settings.auto_node_failover {
             return Ok(report);
         }
 
@@ -264,7 +293,7 @@ impl WalletService {
         else {
             return Ok(report);
         };
-        if next == self.node.base_url() {
+        if next == snapshot.active_node {
             return Ok(report);
         }
         let next_node = NodeClient::new(next.clone())?;
@@ -276,6 +305,7 @@ impl WalletService {
         }
         self.settings.node_fallback_urls.retain(|url| url != &next);
         self.settings.node_url = next.clone();
+        self.invalidate_network_binding();
         self.settings.save()?;
         self.node = next_node;
         self.assets.clear_cache();
@@ -286,10 +316,18 @@ impl WalletService {
         Ok(report)
     }
 
+    /// Select a verified fallback only when the active node is unavailable or on the wrong chain.
+    pub async fn find_active_node(&mut self) -> WalletResult<NodeDiscoveryReport> {
+        let snapshot = self.node_discovery_snapshot();
+        let report = discover_node_snapshot(&snapshot).await;
+        self.commit_node_discovery(&snapshot, report)
+    }
+
     pub fn update_settings(&mut self, mut settings: WalletSettings) -> WalletResult<()> {
         settings.validate_and_normalize()?;
         let node = NodeClient::new(settings.node_url.clone())?;
         settings.save()?;
+        self.invalidate_network_binding();
         self.node = node;
         self.assets.clear_cache();
         self.profile = SecurityProfile::from_name(&settings.security_profile);
@@ -329,6 +367,7 @@ impl WalletService {
         self.settings.save()?;
         self.bills = BillStore::default();
         self.history = TxHistory::default();
+        self.invalidate_network_binding();
         self.node = NodeClient::new(self.settings.node_url.clone())?;
         self.network_mode = std::env::var("HACASH_WALLET_NETWORK")
             .ok()
@@ -722,6 +761,7 @@ impl WalletService {
             hacd_names: snapshot.hacd_names.into_iter().take(8).collect(),
             btc_wallet_satoshi: snapshot.btc_wallet_satoshi,
             btc_channel_satoshi,
+            native_assets: snapshot.native_assets,
         })
     }
 
@@ -738,6 +778,7 @@ impl WalletService {
     ) -> WalletResult<crate::hacd_send::HacdSendPreview> {
         self.touch_auto_lock();
         let from = self.require_address()?;
+        self.require_l1_recipient(to)?;
         crate::hacd_send::preview_hacd_send(&self.node, &from, to, diamond_names).await
     }
 
@@ -748,6 +789,7 @@ impl WalletService {
     ) -> WalletResult<crate::btc_send::BtcSendPreview> {
         self.touch_auto_lock();
         let from = self.require_address()?;
+        self.require_l1_recipient(to)?;
         crate::btc_send::preview_btc_send(&self.node, &from, to, satoshi).await
     }
 
@@ -797,7 +839,7 @@ impl WalletService {
                 &preview.fee_wire,
                 &transfers,
             )?;
-            let signed_hex = self.sign_tx_hex(&body_hex)?;
+            let signed_hex = self.sign_tx_for_network(&body_hex).await?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
             let hash = submitted
@@ -879,7 +921,7 @@ impl WalletService {
                 &preview.diamond_names,
                 &service_fee,
             )?;
-            let signed_hex = self.sign_tx_hex(&body_hex)?;
+            let signed_hex = self.sign_tx_for_network(&body_hex).await?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
             let hash = submitted
@@ -1320,9 +1362,10 @@ impl WalletService {
     }
 
     pub(crate) async fn submit_signed_tx(
-        &self,
+        &mut self,
         signed_hex: &str,
     ) -> WalletResult<crate::node::SubmitTxResponse> {
+        self.ensure_transaction_network_binding(signed_hex).await?;
         whisper_submit_tx_hex(&self.node, &self.settings.dust_whisper, signed_hex).await
     }
 
@@ -1424,7 +1467,7 @@ impl WalletService {
                 }
             })],
         )?;
-        let signed_hex = self.sign_tx_hex(&body_hex)?;
+        let signed_hex = self.sign_tx_for_network(&body_hex).await?;
         let submitted = self.submit_signed_tx(&signed_hex).await?;
         let hash = submitted
             .hash
@@ -1469,7 +1512,7 @@ impl WalletService {
                 "channel_id": encoded_channel_id
             })],
         )?;
-        let signed_hex = self.sign_tx_hex(&body_hex)?;
+        let signed_hex = self.sign_tx_for_network(&body_hex).await?;
         let submitted = self.submit_signed_tx(&signed_hex).await?;
         let hash = submitted
             .hash
@@ -1544,8 +1587,13 @@ impl WalletService {
     ) -> WalletResult<AirgapPrepareResult> {
         self.touch_auto_lock();
         let from = self.require_address()?;
+        let amount = canonicalize_airgap_amount(amount_mei)?;
         let preview = self
-            .preview_send(to, amount_mei, &crate::send_options::SendOptions::default())
+            .preview_send(
+                to,
+                amount.amount_mei,
+                &crate::send_options::SendOptions::default(),
+            )
             .await?;
         if preview.plan.rail != PaymentRail::L1OnChain {
             return Err(WalletError::Policy(
@@ -1573,7 +1621,16 @@ impl WalletService {
         let body_hex = built
             .body
             .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
-        crate::tx_binding::verify_hac_transfers(&body_hex, &from, &preview.fee, &transfers)?;
+        let canonical =
+            crate::tx_binding::verify_hac_transfers(&body_hex, &from, &preview.fee, &transfers)?;
+        if canonical.tx_type != AIRGAP_CLASSIC_L1_TX_TYPE {
+            return Err(WalletError::Policy(format!(
+                "classic air-gap send requires consensus transaction type {AIRGAP_CLASSIC_L1_TX_TYPE}, node built type {}",
+                canonical.tx_type
+            )));
+        }
+        let summary =
+            canonical_airgap_summary(canonical.tx_type, &preview.to, &preview.amount_wire)?;
         let unsigned = AirgapUnsigned {
             v: AIRGAP_VERSION,
             from: from.clone(),
@@ -1584,14 +1641,116 @@ impl WalletService {
             service_fee_mei: preview.plan.fee_breakdown.service_fee_mei.unwrap_or(0.0),
             service_fee_treasury: preview.plan.fee_breakdown.service_fee_treasury,
             body_hex,
-            summary: preview.plan.summary,
-            tx_type: 1,
+            summary,
+            tx_type: canonical.tx_type,
         };
         let envelope = AirgapEnvelope::Unsigned(unsigned.clone());
         let qr_parts = encode_envelope_qr(&envelope)?;
+        let inspection = self.inspect_airgap_envelope(&envelope)?;
         Ok(AirgapPrepareResult {
             envelope: unsigned,
+            inspection,
             qr_parts,
+        })
+    }
+
+    /// Decode and bind every fact displayed before an air-gap signature or
+    /// broadcast. The envelope summary is never trusted as a source of truth.
+    pub fn inspect_airgap_envelope(
+        &self,
+        envelope: &AirgapEnvelope,
+    ) -> WalletResult<AirgapInspection> {
+        let (
+            kind,
+            version,
+            declared_tx_type,
+            from,
+            to,
+            amount_mei,
+            amount_wire,
+            fee,
+            service_fee_mei,
+            service_fee_treasury,
+            transaction_hex,
+        ) = match envelope {
+            AirgapEnvelope::Unsigned(value) => (
+                "unsigned",
+                value.v,
+                value.tx_type,
+                value.from.as_str(),
+                value.to.as_str(),
+                value.amount_mei,
+                value.amount_wire.as_str(),
+                value.fee.as_str(),
+                value.service_fee_mei,
+                value.service_fee_treasury.as_deref(),
+                value.body_hex.as_str(),
+            ),
+            AirgapEnvelope::Signed(value) => (
+                "signed",
+                value.v,
+                value.tx_type,
+                value.from.as_str(),
+                value.to.as_str(),
+                value.amount_mei,
+                value.amount_wire.as_str(),
+                value.fee.as_str(),
+                value.service_fee_mei,
+                value.service_fee_treasury.as_deref(),
+                value.signed_hex.as_str(),
+            ),
+        };
+        let tx_type = canonical_airgap_tx_type(version, declared_tx_type)
+            .map_err(|error| WalletError::Policy(format!("air-gap type policy: {error}")))?;
+        if tx_type == 4 {
+            self.require_quantum_testnet()?;
+        }
+        crate::address::require_address_for_network(from, &self.network_mode)?;
+        crate::address::require_address_for_network(to, &self.network_mode)?;
+        let amount = crate::airgap::validate_airgap_amount_binding(amount_mei, amount_wire)?;
+        let summary = canonical_airgap_summary(tx_type, to, &amount.amount_wire)?;
+        let expected_wallet_fee = crate::send_options::compute_service_fee_mei(amount.amount_mei);
+        let wallet_fee_wire =
+            crate::send_options::format_service_fee_amount_wire(expected_wallet_fee);
+        if service_fee_mei.to_bits() != expected_wallet_fee.to_bits()
+            || service_fee_treasury != Some(crate::send_options::WALLET_TREASURY_ADDRESS)
+        {
+            return Err(WalletError::Policy(
+                "air-gap envelope has an incorrect mandatory wallet fee".into(),
+            ));
+        }
+        let canonical = crate::tx_binding::verify_hac_transfers(
+            transaction_hex,
+            from,
+            fee,
+            &[
+                (to, amount.amount_wire.as_str()),
+                (
+                    crate::send_options::WALLET_TREASURY_ADDRESS,
+                    wallet_fee_wire.as_str(),
+                ),
+            ],
+        )?;
+        if canonical.tx_type != tx_type {
+            return Err(WalletError::Policy(format!(
+                "air-gap transaction type mismatch: envelope represents type {tx_type}, body has type {}",
+                canonical.tx_type
+            )));
+        }
+        Ok(AirgapInspection {
+            kind: kind.into(),
+            tx_type,
+            network_mode: self.network_mode.clone(),
+            from: from.into(),
+            to: to.into(),
+            amount_mei: amount.amount_mei,
+            amount_wire: amount.amount_wire,
+            network_fee: fee.into(),
+            wallet_fee_mei: expected_wallet_fee,
+            wallet_fee_wire,
+            wallet_fee_treasury: crate::send_options::WALLET_TREASURY_ADDRESS.into(),
+            body_sha256: canonical.body_sha256,
+            summary,
         })
     }
 
@@ -1617,11 +1776,18 @@ impl WalletService {
                 "watch-only wallet cannot sign transactions".into(),
             ));
         }
+        let inspection =
+            self.inspect_airgap_envelope(&AirgapEnvelope::Unsigned(unsigned.clone()))?;
+        if inspection.tx_type != AIRGAP_CLASSIC_L1_TX_TYPE {
+            return Err(WalletError::Policy(
+                "Type 4 air-gap transactions require the Quantum Lab signer".into(),
+            ));
+        }
         let unlock_ctx = self.second_factor_from_session()?;
-        let policy_amount = crate::hip23::policy_amount_mei_ceil(unsigned.amount_mei)?;
+        let policy_amount = crate::hip23::policy_amount_mei_ceil(inspection.amount_mei)?;
         check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
         let expected_service_fee =
-            crate::send_options::compute_service_fee_mei(unsigned.amount_mei);
+            crate::send_options::compute_service_fee_mei(inspection.amount_mei);
         if (unsigned.service_fee_mei - expected_service_fee).abs() > 0.000_000_1
             || unsigned.service_fee_treasury.as_deref()
                 != Some(crate::send_options::WALLET_TREASURY_ADDRESS)
@@ -1639,31 +1805,43 @@ impl WalletService {
                 service_fee_wire.as_str(),
             ),
         ];
-        crate::tx_binding::verify_hac_transfers(
+        let canonical = crate::tx_binding::verify_hac_transfers(
             &unsigned.body_hex,
             &unsigned.from,
             &unsigned.fee,
             &transfers,
         )?;
+        let envelope_tx_type =
+            canonical_airgap_tx_type(unsigned.v, unsigned.tx_type).map_err(|error| {
+                WalletError::Policy(format!("air-gap transaction type policy: {error}"))
+            })?;
+        if canonical.tx_type != envelope_tx_type {
+            return Err(WalletError::Policy(format!(
+                "air-gap transaction type mismatch: envelope represents type {envelope_tx_type}, body has type {}",
+                canonical.tx_type
+            )));
+        }
         let signed_hex = self.sign_tx_hex(&unsigned.body_hex)?;
         self.clear_second_factor();
         let signed = AirgapSigned {
             v: AIRGAP_VERSION,
-            tx_type: unsigned.tx_type,
-            from: unsigned.from.clone(),
-            to: unsigned.to.clone(),
-            amount_mei: unsigned.amount_mei,
-            amount_wire: unsigned.amount_wire.clone(),
-            fee: unsigned.fee.clone(),
-            service_fee_mei: unsigned.service_fee_mei,
-            service_fee_treasury: unsigned.service_fee_treasury.clone(),
+            tx_type: inspection.tx_type,
+            from: inspection.from,
+            to: inspection.to,
+            amount_mei: inspection.amount_mei,
+            amount_wire: inspection.amount_wire,
+            fee: inspection.network_fee,
+            service_fee_mei: inspection.wallet_fee_mei,
+            service_fee_treasury: Some(inspection.wallet_fee_treasury),
             signed_hex,
-            summary: unsigned.summary.clone(),
+            summary: inspection.summary,
         };
         let envelope = AirgapEnvelope::Signed(signed.clone());
         let qr_parts = encode_envelope_qr(&envelope)?;
+        let inspection = self.inspect_airgap_envelope(&envelope)?;
         Ok(AirgapSignResult {
             envelope: signed,
+            inspection,
             qr_parts,
         })
     }
@@ -1674,7 +1852,9 @@ impl WalletService {
         signed: &AirgapSigned,
     ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
-        if signed.tx_type == 4 {
+        let inspection = self.inspect_airgap_envelope(&AirgapEnvelope::Signed(signed.clone()))?;
+        let envelope_tx_type = inspection.tx_type;
+        if envelope_tx_type == 4 {
             self.require_quantum_testnet()?;
         }
         let expected_service_fee = crate::send_options::compute_service_fee_mei(signed.amount_mei);
@@ -1702,12 +1882,12 @@ impl WalletService {
                 ),
             ],
         )?;
-        if canonical.tx_type != signed.tx_type {
+        if canonical.tx_type != envelope_tx_type {
             return Err(WalletError::Policy(
                 "air-gap transaction type mismatch".into(),
             ));
         }
-        if signed.tx_type == 4 {
+        if envelope_tx_type == 4 {
             let expected = self
                 .quantum_settings()
                 .active_account
@@ -1722,12 +1902,12 @@ impl WalletService {
             let hash = submitted
                 .hash
                 .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-            let summary = signed.summary.clone();
+            let summary = inspection.summary.clone();
             let _ = self.append_quantum_history(
                 &hash,
-                &signed.from,
-                &signed.to,
-                signed.amount_mei,
+                &inspection.from,
+                &inspection.to,
+                inspection.amount_mei,
                 &summary,
             );
             return Ok(SendResult {
@@ -1750,15 +1930,15 @@ impl WalletService {
         let result = SendResult {
             rail: PaymentRail::L1OnChain,
             tx_hash: hash,
-            summary: signed.summary.clone(),
+            summary: inspection.summary.clone(),
             pending: false,
         };
         self.append_history_if_enabled(
             result.rail,
             &result.tx_hash,
-            &signed.from,
-            &signed.to,
-            signed.amount_mei,
+            &inspection.from,
+            &inspection.to,
+            inspection.amount_mei,
             &result.summary,
         )?;
         Ok(result)
@@ -1766,12 +1946,24 @@ impl WalletService {
 
     pub fn parse_airgap_qr(&mut self, text: &str) -> WalletResult<AirgapParseResult> {
         self.touch_auto_lock();
-        parse_airgap_qr_text(text)
+        let parsed = parse_airgap_qr_text(text)?;
+        self.attach_airgap_inspection(parsed)
     }
 
     pub fn parse_airgap_qr_batch(&mut self, parts: &[String]) -> WalletResult<AirgapParseResult> {
         self.touch_auto_lock();
-        parse_airgap_qr_parts(parts)
+        let parsed = parse_airgap_qr_parts(parts)?;
+        self.attach_airgap_inspection(parsed)
+    }
+
+    fn attach_airgap_inspection(
+        &self,
+        mut parsed: AirgapParseResult,
+    ) -> WalletResult<AirgapParseResult> {
+        if let Some(envelope) = parsed.envelope.as_ref() {
+            parsed.inspection = Some(self.inspect_airgap_envelope(envelope)?);
+        }
+        Ok(parsed)
     }
 
     pub async fn send_hac(
@@ -1840,7 +2032,7 @@ impl WalletService {
                     &preview.fee,
                     &transfers,
                 )?;
-                let signed_hex = self.sign_tx_hex(&body_hex)?;
+                let signed_hex = self.sign_tx_for_network(&body_hex).await?;
                 let submitted = self.submit_signed_tx(&signed_hex).await?;
                 let summary = self.summary_with_whisper_notice(preview.plan.summary, &submitted);
                 let hash = submitted
@@ -2030,6 +2222,11 @@ impl WalletService {
             .as_ref()
             .map(|s| s.address.clone())
             .ok_or(WalletError::Locked)
+    }
+
+    fn require_l1_recipient(&self, address: &str) -> WalletResult<()> {
+        crate::address::require_address_for_network(address, &self.network_mode)?;
+        Ok(())
     }
 
     fn require_signing_account(&self) -> WalletResult<&WalletAccount> {
@@ -2317,6 +2514,52 @@ mod asset_facade_tests {
 }
 
 #[cfg(test)]
+mod node_discovery_commit_tests {
+    use super::*;
+    use crate::node_discovery::{NodeCandidateStatus, NodeDiscoveryReport};
+    use crate::test_support::IsolatedWalletData;
+
+    fn candidate(url: &str, online: bool) -> NodeCandidateStatus {
+        NodeCandidateStatus {
+            url: url.into(),
+            online,
+            network_match: online,
+            height: online.then_some(100),
+            diamond: online.then_some(5),
+            error: (!online).then(|| "offline".into()),
+        }
+    }
+
+    #[test]
+    fn stale_node_configuration_never_switches_to_an_old_candidate() {
+        let _wallet_data = IsolatedWalletData::new();
+        let active = "http://127.0.0.1:30001";
+        let old_fallback = "http://127.0.0.1:30002";
+        let new_fallback = "http://127.0.0.1:30003";
+        let mut wallet = WalletService::new(Some(active.into()), None).unwrap();
+        wallet.settings.node_fallback_urls = vec![old_fallback.into()];
+        let snapshot = wallet.node_discovery_snapshot();
+        let report = NodeDiscoveryReport {
+            active_node: active.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(active, false), candidate(old_fallback, true)],
+        };
+
+        // Simulate a settings update racing with the in-flight network probes.
+        wallet.settings.node_fallback_urls = vec![new_fallback.into()];
+        let committed = wallet
+            .commit_node_discovery(&snapshot, report)
+            .expect("stale discovery must be ignored safely");
+
+        assert!(!committed.switched);
+        assert_eq!(committed.active_node, active);
+        assert_eq!(wallet.node.base_url(), active);
+        assert_eq!(wallet.settings.node_fallback_urls, vec![new_fallback]);
+    }
+}
+
+#[cfg(test)]
 mod quantum_network_policy_tests {
     use super::*;
     use crate::test_support::IsolatedWalletData;
@@ -2395,5 +2638,35 @@ mod quantum_network_policy_tests {
             wallet.network_mode = mode.into();
             assert_testnet_gate(wallet.require_quantum_testnet());
         }
+    }
+}
+
+#[cfg(test)]
+mod l1_recipient_network_policy_tests {
+    use field::Address;
+
+    use super::*;
+    use crate::test_support::IsolatedWalletData;
+
+    #[test]
+    fn mainnet_l1_preview_policy_rejects_quantum_and_accepts_p2sh() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(Some("http://127.0.0.1:1".into()), None)
+            .expect("test wallet service");
+        wallet.network_mode = "mainnet".into();
+
+        let pqc = Address::create_pqckey([6; 20]).to_readable();
+        let hybrid = Address::create_hybrid([7; 20]).to_readable();
+        let p2sh = Address::create_scriptmh([5; 20]).to_readable();
+
+        assert!(matches!(
+            wallet.require_l1_recipient(&pqc),
+            Err(WalletError::Policy(_))
+        ));
+        assert!(matches!(
+            wallet.require_l1_recipient(&hybrid),
+            Err(WalletError::Policy(_))
+        ));
+        assert!(wallet.require_l1_recipient(&p2sh).is_ok());
     }
 }

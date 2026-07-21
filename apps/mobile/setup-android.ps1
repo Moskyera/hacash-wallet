@@ -30,7 +30,7 @@ if ($needsCmdlineTools) {
     Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
     if (Test-Path $cmdlineRoot) { Remove-Item $cmdlineRoot -Recurse -Force }
     New-Item -ItemType Directory -Path $cmdlineRoot -Force | Out-Null
-    # Zip contains a single "cmdline-tools" folder — move its contents to .../latest/
+    # Zip contains a single "cmdline-tools" folder - move its contents to .../latest/
     Move-Item (Join-Path $extractDir "cmdline-tools\*") $cmdlineLatest
     # Newer zips place *.bat at latest/ root; Android expects latest/bin/
     $binDir = Join-Path $cmdlineLatest "bin"

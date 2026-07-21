@@ -33,7 +33,7 @@ export default function SecurityInfoScreen({
           <p>Transactions signed in Rust core. private key never sent to node API.</p>
         </div>
         <div className="security-item done">
-          <h4>HIP-23 pre-sign checks</h4>
+          <h4>Istanbul transaction safety checks</h4>
           <p>Address format, balance, and large-transfer warnings before every send.</p>
         </div>
         <div className={`security-item ${status?.webauthn_enabled ? "done" : "soon"}`}>

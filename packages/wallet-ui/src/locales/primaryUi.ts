@@ -1,6 +1,10 @@
 import type { AppLocale } from "./config";
+import { AIRGAP_UI_COPY } from "./airgapUi";
+import { ISTANBUL_UI_COPY } from "./istanbulUi";
 
 export const primaryUiEn = {
+  ...ISTANBUL_UI_COPY.en,
+  ...AIRGAP_UI_COPY.en,
   "account.pqc": "PQC",
   "account.hybrid": "Hybrid",
   "common.continue": "Continue",
@@ -178,6 +182,8 @@ function translated(overrides: Partial<PrimaryUiCatalog>): PrimaryUiCatalog {
 export const PRIMARY_UI_COPY = {
   en: primaryUiEn,
   el: translated({
+    ...ISTANBUL_UI_COPY.el,
+    ...AIRGAP_UI_COPY.el,
     "account.pqc": "PQC",
     "account.hybrid": "Υβριδικός",
     "common.continue": "Συνέχεια",
@@ -309,6 +315,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportPassphrase": "Κωδικός για αποκρυπτογράφηση και εξαγωγή",
   }),
   "zh-CN": translated({
+    ...ISTANBUL_UI_COPY["zh-CN"],
+    ...AIRGAP_UI_COPY["zh-CN"],
     "account.hybrid": "混合",
     "common.continue": "继续",
     "common.copy": "复制",
@@ -425,6 +433,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackupHint": "导出加密的 JSON 备份。使用相同密码恢复，并在使用后删除备份文件。",
   }),
   ja: translated({
+    ...ISTANBUL_UI_COPY.ja,
+    ...AIRGAP_UI_COPY.ja,
     "account.hybrid": "ハイブリッド",
     "common.continue": "続行",
     "common.copy": "コピー",
@@ -540,6 +550,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackupHint": "暗号化された JSON バックアップを書き出します。同じパスフレーズで復元し、使用後はファイルを削除してください。",
   }),
   tr: translated({
+    ...ISTANBUL_UI_COPY.tr,
+    ...AIRGAP_UI_COPY.tr,
     "account.hybrid": "Hibrit",
     "common.continue": "Devam et",
     "common.copy": "Kopyala",
@@ -650,6 +662,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "Yedeği dışa aktar",
   }),
   vi: translated({
+    ...ISTANBUL_UI_COPY.vi,
+    ...AIRGAP_UI_COPY.vi,
     "account.hybrid": "Kết hợp",
     "common.continue": "Tiếp tục",
     "common.copy": "Sao chép",
@@ -760,6 +774,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "Xuất bản sao lưu",
   }),
   ru: translated({
+    ...ISTANBUL_UI_COPY.ru,
+    ...AIRGAP_UI_COPY.ru,
     "account.hybrid": "Гибридный",
     "common.continue": "Продолжить",
     "common.copy": "Копировать",
@@ -870,6 +886,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "Экспортировать резервную копию",
   }),
   es: translated({
+    ...ISTANBUL_UI_COPY.es,
+    ...AIRGAP_UI_COPY.es,
     "account.hybrid": "Híbrida",
     "common.continue": "Continuar",
     "common.copy": "Copiar",
@@ -980,6 +998,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "Exportar copia de seguridad",
   }),
   fr: translated({
+    ...ISTANBUL_UI_COPY.fr,
+    ...AIRGAP_UI_COPY.fr,
     "account.hybrid": "Hybride",
     "common.continue": "Continuer",
     "common.copy": "Copier",
@@ -1090,6 +1110,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "Exporter la sauvegarde",
   }),
   pt: translated({
+    ...ISTANBUL_UI_COPY.pt,
+    ...AIRGAP_UI_COPY.pt,
     "account.hybrid": "Híbrida",
     "common.continue": "Continuar",
     "common.copy": "Copiar",
@@ -1200,6 +1222,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "Exportar cópia de segurança",
   }),
   ar: translated({
+    ...ISTANBUL_UI_COPY.ar,
+    ...AIRGAP_UI_COPY.ar,
     "account.hybrid": "هجين",
     "common.continue": "متابعة",
     "common.copy": "نسخ",
@@ -1310,6 +1334,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "تصدير نسخة احتياطية",
   }),
   sv: translated({
+    ...ISTANBUL_UI_COPY.sv,
+    ...AIRGAP_UI_COPY.sv,
     "account.hybrid": "Hybrid",
     "common.continue": "Fortsätt",
     "common.copy": "Kopiera",
@@ -1420,6 +1446,8 @@ export const PRIMARY_UI_COPY = {
     "security.exportBackup": "Exportera säkerhetskopia",
   }),
   de: translated({
+    ...ISTANBUL_UI_COPY.de,
+    ...AIRGAP_UI_COPY.de,
     "account.hybrid": "Hybrid",
     "common.continue": "Weiter",
     "common.copy": "Kopieren",
