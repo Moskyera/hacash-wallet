@@ -1,4 +1,4 @@
-import { PAYMENT_ASSETS, type PaymentAsset } from "../utils/paymentAssets";
+import { PAYMENT_ASSETS, type PaymentAsset } from "@hacash/wallet-ui";
 
 type Props = {
   value: PaymentAsset;

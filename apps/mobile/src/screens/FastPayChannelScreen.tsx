@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import HubDiscoveryPanel from "../components/HubDiscoveryPanel";
 import {
   api,
@@ -52,17 +52,25 @@ export default function FastPayChannelScreen({
   const [hubDeposit, setHubDeposit] = useState("0");
   const [preview, setPreview] = useState<ChannelSetupPreview | null>(null);
   const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
+  const inboxRequestRef = useRef<Promise<void> | null>(null);
 
-  const loadInbox = useCallback(async () => {
-    if (fastPay?.state !== "ready") {
-      setInbox([]);
-      return;
-    }
-    try {
-      setInbox(await api.fastPayInbox());
-    } catch {
-      setInbox([]);
-    }
+  const loadInbox = useCallback((): Promise<void> => {
+    if (inboxRequestRef.current) return inboxRequestRef.current;
+    const request = (async () => {
+      if (fastPay?.state !== "ready") {
+        setInbox([]);
+        return;
+      }
+      try {
+        setInbox(await api.fastPayInbox());
+      } catch {
+        setInbox([]);
+      }
+    })().finally(() => {
+      if (inboxRequestRef.current === request) inboxRequestRef.current = null;
+    });
+    inboxRequestRef.current = request;
+    return request;
   }, [fastPay?.state]);
 
   useEffect(() => {

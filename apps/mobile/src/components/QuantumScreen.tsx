@@ -1,3 +1,9 @@
+import {
+  canUseQuantumLabTransactions,
+  QuantumFundingCard,
+  type4Balance,
+  useType4Probe,
+} from "@hacash/wallet-ui";
 import { useCallback, useEffect, useState } from "react";
 import QRCode from "qrcode";
 import {
@@ -10,13 +16,12 @@ import {
   type QuantumSettings,
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { useLocale } from "../locale";
 import { copyWithPrivacyClear } from "../privacy";
 import {
   accountSummaryFromSettings,
   canSendType4,
-  kindLabel,
   MIN_KEYSTORE_PASS,
-  REPLACE_KEYSTORE_WARNING,
   summaryFromAccountInfo,
 } from "../quantumMeta";
 import { maybeSecondFactorGate } from "../utils/secondFactorGate";
@@ -28,6 +33,7 @@ const DEFAULT_TO = "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9";
 type Props = {
   legacyAddress?: string | null;
   nodeUrl?: string;
+  networkMode: "mainnet" | "testnet";
   clipboardClearSecs: number;
   platformSec: PlatformSecurityStatus | null;
   securityProfile?: string | null;
@@ -39,6 +45,7 @@ type Props = {
 export default function QuantumScreen({
   legacyAddress,
   nodeUrl,
+  networkMode,
   clipboardClearSecs,
   platformSec,
   securityProfile,
@@ -46,6 +53,7 @@ export default function QuantumScreen({
   onToast,
   onGoLegacySend,
 }: Props) {
+  const { t } = useLocale();
   const [settings, setSettings] = useState<QuantumSettings | null>(null);
   const [account, setAccount] = useState<QuantumAccountSummary | null>(null);
   const [ksPass, setKsPass] = useState("");
@@ -56,7 +64,6 @@ export default function QuantumScreen({
   const [sendTo, setSendTo] = useState(DEFAULT_TO);
   const [sendAmount, setSendAmount] = useState("0.1");
   const [sendPass, setSendPass] = useState("");
-  const [qBalance, setQBalance] = useState<number | null>(null);
   const [preflight, setPreflight] = useState<QuantumPreflight | null>(null);
   const [sendHash, setSendHash] = useState("");
   const [nodeMetrics, setNodeMetrics] = useState<Record<string, unknown> | null>(null);
@@ -68,24 +75,19 @@ export default function QuantumScreen({
   const [showAirgap, setShowAirgap] = useState(false);
 
   const type4Ready = canSendType4(account);
+  const mainnetBlocked = !canUseQuantumLabTransactions(networkMode);
+  const { probe: balanceProbe, refresh: refreshBalance } = useType4Probe(
+    mainnetBlocked ? null : account?.address,
+    quantumApi.balanceProbe,
+    formatInvokeError,
+  );
 
+  const qBalance = type4Balance(balanceProbe);
   const refreshSettings = useCallback(async () => {
     const s = await quantumApi.getSettings();
     setSettings(s);
     setAccount(accountSummaryFromSettings(s));
   }, []);
-
-  const refreshBalance = useCallback(async () => {
-    if (!account) {
-      setQBalance(null);
-      return;
-    }
-    try {
-      setQBalance(await quantumApi.balance());
-    } catch {
-      setQBalance(null);
-    }
-  }, [account]);
 
   const refreshNode = useCallback(async () => {
     setNodeErr("");
@@ -98,7 +100,7 @@ export default function QuantumScreen({
   }, []);
 
   const runPreflight = useCallback(async () => {
-    if (!account || !type4Ready) {
+    if (!account || !type4Ready || mainnetBlocked) {
       setPreflight(null);
       return;
     }
@@ -117,19 +119,20 @@ export default function QuantumScreen({
         total_mei: 0,
       });
     }
-  }, [account, type4Ready, sendTo, sendAmount, qBalance]);
+  }, [account, type4Ready, mainnetBlocked, sendTo, sendAmount, qBalance]);
 
   useEffect(() => {
     void refreshSettings().catch((e) => onToast(formatInvokeError(e), "error"));
   }, [refreshSettings, onToast]);
 
   useEffect(() => {
-    void refreshBalance();
-  }, [refreshBalance]);
-
-  useEffect(() => {
+    if (mainnetBlocked) {
+      setNodeMetrics(null);
+      setNodeErr("");
+      return;
+    }
     void refreshNode();
-  }, [refreshNode]);
+  }, [mainnetBlocked, refreshNode]);
 
   useEffect(() => {
     const t = window.setTimeout(() => void runPreflight(), 400);
@@ -141,7 +144,7 @@ export default function QuantumScreen({
     try {
       await quantumApi.setMode(on);
       await refreshSettings();
-      onToast(on ? "Quantum mode enabled." : "Quantum mode disabled.", "info");
+      onToast(t(on ? "quantum.modeEnabled" : "quantum.modeDisabled"), "info");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -151,12 +154,12 @@ export default function QuantumScreen({
 
   function confirmReplace(): boolean {
     if (!account) return true;
-    return window.confirm(`${REPLACE_KEYSTORE_WARNING}\n\nContinue?`);
+    return window.confirm(`${t("quantum.replaceWarning")}\n\n${t("common.continue")}?`);
   }
 
   async function createPqc() {
     if (ksPass.length < MIN_KEYSTORE_PASS) {
-      onToast(`Password needs at least ${MIN_KEYSTORE_PASS} characters.`, "error");
+      onToast(t("quantum.passwordMin", { count: MIN_KEYSTORE_PASS }), "error");
       return;
     }
     if (!confirmReplace()) return;
@@ -165,7 +168,7 @@ export default function QuantumScreen({
       const acc = summaryFromAccountInfo(await quantumApi.createPqc(ksPass));
       setAccount(acc);
       await refreshSettings();
-      onToast(`PQC account created.`, "success");
+      onToast(t("quantum.accountCreated", { kind: t("account.pqc") }), "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -175,7 +178,7 @@ export default function QuantumScreen({
 
   async function createHybrid() {
     if (ksPass.length < MIN_KEYSTORE_PASS) {
-      onToast(`Password needs at least ${MIN_KEYSTORE_PASS} characters.`, "error");
+      onToast(t("quantum.passwordMin", { count: MIN_KEYSTORE_PASS }), "error");
       return;
     }
     if (!confirmReplace()) return;
@@ -186,7 +189,7 @@ export default function QuantumScreen({
       );
       setAccount(acc);
       await refreshSettings();
-      onToast(`Hybrid account created.`, "success");
+      onToast(t("quantum.accountCreated", { kind: t("account.hybrid") }), "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -231,9 +234,16 @@ export default function QuantumScreen({
     });
   }
 
+  function allowType4Action(): boolean {
+    if (!mainnetBlocked) return true;
+    onToast(t("quantum.lab.mainnetBlocked"), "error");
+    return false;
+  }
+
   async function prepareAirgapType4() {
+    if (!allowType4Action()) return;
     if (!type4Ready) {
-      onToast("Create or import a PQC/Hybrid account first.", "error");
+      onToast(t("quantum.compatibleAccountRequired"), "error");
       return;
     }
     setBusy(true);
@@ -242,7 +252,7 @@ export default function QuantumScreen({
       setAirgapQr(prep.qr_parts);
       setSignedAirgapQr([]);
       setShowAirgap(true);
-      onToast("Unsigned Type 4 QR ready. scan on offline device.", "success");
+      onToast(t("quantum.unsignedReady"), "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -251,8 +261,9 @@ export default function QuantumScreen({
   }
 
   async function signAirgapType4() {
+    if (!allowType4Action()) return;
     if (!airgapQr.length || !sendPass.trim()) {
-      onToast("Prepare air-gap QR and enter keystore password.", "error");
+      onToast(t("quantum.airgapCredentialsRequired"), "error");
       return;
     }
     setBusy(true);
@@ -260,7 +271,7 @@ export default function QuantumScreen({
       const parsed = await api.airgapParseQrBatch(airgapQr);
       const env = parsed.envelope;
       if (!env || env.kind !== "unsigned") {
-        throw new Error("Expected unsigned Type 4 envelope");
+        throw new Error(t("quantum.expectedUnsigned"));
       }
       const amt = Number(sendAmount);
       await maybeSecondFactor(amt);
@@ -279,7 +290,7 @@ export default function QuantumScreen({
       };
       const signed = await quantumApi.airgapSignType4(unsigned, sendPass);
       setSignedAirgapQr(signed.qr_parts);
-      onToast("Signed Type 4 QR ready. broadcast from online device.", "success");
+      onToast(t("quantum.signedReady"), "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -288,13 +299,14 @@ export default function QuantumScreen({
   }
 
   async function broadcastAirgapType4() {
+    if (!allowType4Action()) return;
     if (!signedAirgapQr.length) return;
     setBusy(true);
     try {
       const parsed = await api.airgapParseQrBatch(signedAirgapQr);
       const env = parsed.envelope;
       if (!env || env.kind !== "signed") {
-        throw new Error("Expected signed Type 4 envelope");
+        throw new Error(t("quantum.expectedSigned"));
       }
       const result = await api.airgapBroadcastSigned({
         v: env.v,
@@ -313,7 +325,7 @@ export default function QuantumScreen({
       setAirgapQr([]);
       setSignedAirgapQr([]);
       setShowAirgap(false);
-      onToast("Type 4 air-gap broadcast complete.", "success");
+      onToast(t("quantum.broadcastComplete"), "success");
       await refreshBalance();
       void runPreflight();
     } catch (e) {
@@ -324,21 +336,22 @@ export default function QuantumScreen({
   }
 
   async function sendType4() {
+    if (!allowType4Action()) return;
     if (!type4Ready) {
-      onToast("Create or import a PQC/Hybrid account first.", "error");
+      onToast(t("quantum.compatibleAccountRequired"), "error");
       return;
     }
     if (!sendPass.trim()) {
-      onToast("Enter keystore password.", "error");
+      onToast(t("quantum.passwordRequired"), "error");
       return;
     }
     if (!preflight?.ok) {
-      onToast(preflight?.errors.join("; ") || "Preflight failed.", "error");
+      onToast(preflight?.errors.join("; ") || t("quantum.preflightFailed"), "error");
       return;
     }
     const amt = Number(sendAmount);
     if (!Number.isFinite(amt) || amt <= 0) {
-      onToast("Enter a valid amount.", "error");
+      onToast(t("quantum.invalidAmount"), "error");
       return;
     }
     setBusy(true);
@@ -347,7 +360,7 @@ export default function QuantumScreen({
       await maybeSecondFactor(amt);
       const res = await quantumApi.sendType4(sendTo.trim(), sendAmount.trim(), sendPass);
       setSendHash(res.hash);
-      onToast("Quantum transaction sent.", "success");
+      onToast(t("quantum.transactionSent"), "success");
       await refreshBalance();
       void runPreflight();
     } catch (e) {
@@ -360,24 +373,31 @@ export default function QuantumScreen({
   async function copyQuantumAddress() {
     if (!account) return;
     await copyWithPrivacyClear(account.address, clipboardClearSecs);
-    onToast("Quantum address copied.", "success");
+    onToast(t("quantum.addressCopied"), "success");
   }
 
   if (!settings) {
     return (
       <div className="card">
-        <p className="muted">Loading quantum settings…</p>
+        <p className="muted">{t("quantum.loadingSettings")}</p>
       </div>
     );
   }
 
   return (
     <>
+      <div className="card quantum-lab-banner">
+        <h2 style={{ marginTop: 0 }}>{t("quantum.lab.title")}</h2>
+        <p className="muted" style={{ marginBottom: "0.5rem" }}>
+          {t("quantum.lab.tagline")}
+        </p>
+        <p className="muted small">{t("quantum.lab.disclaimer")}</p>
+      </div>
       <div className="card quantum-panel">
         <div className="toggle-row">
           <div>
-            <strong>Quantum Mode</strong>
-            <p className="muted">ML-DSA-65 · v6 PQC / v7 Hybrid</p>
+            <strong>{t("quantum.lab.title")}</strong>
+            <p className="muted">{t("quantum.algorithmSummary")}</p>
           </div>
           <label className="quantum-switch">
             <input
@@ -389,10 +409,6 @@ export default function QuantumScreen({
             <span />
           </label>
         </div>
-        <p className="muted small">
-          Experimental Type 4 support. PQC and hybrid signing are implemented, but this wallet has
-          not completed an independent cryptographic audit.
-        </p>
 
         {settings.quantum_mode && (
           <>
@@ -400,67 +416,79 @@ export default function QuantumScreen({
               <div className="quantum-active">
                 <AddressBadge address={account.address} version={account.address_version} kind={account.kind} />
                 <code>{account.address}</code>
-                <span className="muted">{kindLabel(account.kind)}</span>
+                <span className="muted">
+                  {t(account.kind === "hybrid" ? "account.hybrid" : "account.pqc")}
+                </span>
                 <button type="button" className="small" onClick={() => void copyQuantumAddress()}>
-                  Copy
+                  {t("common.copy")}
                 </button>
               </div>
             )}
 
-            <label className="label">Keystore password (≥{MIN_KEYSTORE_PASS} chars)</label>
+            <label className="label">
+              {t("quantum.keystorePasswordMin", { count: MIN_KEYSTORE_PASS })}
+            </label>
             <input type="password" value={ksPass} onChange={(e) => setKsPass(e.target.value)} />
-            <label className="label">Legacy prikey (optional, 64-hex for hybrid)</label>
-            <input value={legacyPrikey} onChange={(e) => setLegacyPrikey(e.target.value)} placeholder="optional" />
+            <label className="label">{t("quantum.legacyPrivateKey")}</label>
+            <input
+              value={legacyPrikey}
+              onChange={(e) => setLegacyPrikey(e.target.value)}
+              placeholder={t("common.optional")}
+            />
 
             <div className="row-btns">
               <button type="button" className="btn-pqc" disabled={busy} onClick={() => void createPqc()}>
-                Create PQC
+                {t("quantum.createPqc")}
               </button>
               <button type="button" className="btn-hybrid" disabled={busy} onClick={() => void createHybrid()}>
-                Create Hybrid
+                {t("quantum.createHybrid")}
               </button>
             </div>
             <button type="button" disabled={busy} onClick={() => setShowKs(true)}>
-              Keystore v3 import/export
+              {t("quantum.keystoreImportExport")}
             </button>
           </>
         )}
       </div>
 
       {settings.quantum_mode && account && (
-        <div className="card">
-          <h2>Fund quantum account</h2>
-          <p className="muted">
-            Send legacy HAC from your main wallet to this quantum address to fund Type 4 sends.
-          </p>
-          <p>
-            Balance: <strong>{qBalance == null ? "N/A" : `${qBalance.toFixed(3)} HAC`}</strong>
-          </p>
-          {legacyAddress && (
-            <p className="muted">
-              Legacy wallet: <code>{legacyAddress}</code>
-            </p>
-          )}
-          {onGoLegacySend && (
-            <button type="button" className="primary" onClick={onGoLegacySend}>
-              Open legacy Pay tab
-            </button>
-          )}
-        </div>
+        <QuantumFundingCard
+          account={{
+            address: account.address,
+            addressVersion: account.address_version,
+            kind: account.kind,
+          }}
+          probe={balanceProbe}
+          legacyAddress={legacyAddress}
+          blocked={mainnetBlocked}
+          blockedMessage={t("quantum.lab.mainnetBlocked")}
+          accountBadge={
+            <AddressBadge
+              address={account.address}
+              version={account.address_version}
+              kind={account.kind}
+            />
+          }
+          onCopyAddress={(address) => copyWithPrivacyClear(address, clipboardClearSecs)}
+          onOpenLegacyFund={onGoLegacySend}
+        />
       )}
 
       {settings.quantum_mode && (
         <div className="card">
-          <h2>Send Type 4</h2>
-          <p className="muted">Node: {nodeUrl ?? "default"}</p>
+          <h2>{t("quantum.sendTitle")}</h2>
+          {mainnetBlocked ? <p className="warn">{t("quantum.lab.mainnetBlocked")}</p> : null}
+          <p className="muted">
+            {t("common.node")}: {nodeUrl ?? t("common.default")}
+          </p>
 
-          <label className="label">To address</label>
+          <label className="label">{t("quantum.toAddress")}</label>
           <input value={sendTo} onChange={(e) => setSendTo(e.target.value)} />
 
-          <label className="label">Amount (HAC)</label>
+          <label className="label">{t("quantum.amountHac")}</label>
           <input value={sendAmount} onChange={(e) => setSendAmount(e.target.value)} />
 
-          <label className="label">Keystore password</label>
+          <label className="label">{t("quantum.keystorePassword")}</label>
           <input type="password" value={sendPass} onChange={(e) => setSendPass(e.target.value)} />
 
           {preflight && (
@@ -472,9 +500,12 @@ export default function QuantumScreen({
               ))}
               {preflight.ok && (
                 <p className="muted">
-                  Preflight OK · balance {preflight.balance_mei.toFixed(3)} HAC · fee ~
-                  {preflight.fee_mei.toFixed(4)} · wallet fee {preflight.service_fee_mei.toFixed(6)} · total ~
-                  {preflight.total_mei.toFixed(4)} HAC
+                  {t("quantum.preflightSummary", {
+                    balance: preflight.balance_mei.toFixed(3),
+                    networkFee: preflight.fee_mei.toFixed(4),
+                    walletFee: preflight.service_fee_mei.toFixed(6),
+                    total: preflight.total_mei.toFixed(4),
+                  })}
                 </p>
               )}
             </div>
@@ -484,39 +515,39 @@ export default function QuantumScreen({
             <button
               type="button"
               className="primary"
-              disabled={busy || !type4Ready || !sendPass || !preflight?.ok}
+              disabled={busy || mainnetBlocked || !type4Ready || !sendPass || !preflight?.ok}
               onClick={() => void sendType4()}
             >
-              Sign & Send
+              {t("quantum.signSend")}
             </button>
           </div>
 
           {sendHash && (
             <div className="quantum-success">
-              <p>Transaction accepted</p>
+              <p>{t("quantum.transactionAccepted")}</p>
               <code>{sendHash}</code>
             </div>
           )}
 
           <div className="row-btns">
-            <button type="button" disabled={busy || !type4Ready} onClick={() => void prepareAirgapType4()}>
-              Air-gap QR (unsigned)
+            <button type="button" disabled={busy || mainnetBlocked || !type4Ready} onClick={() => void prepareAirgapType4()}>
+              {t("quantum.airgapUnsignedAction")}
             </button>
             {showAirgap && airgapQr.length > 0 && (
-              <button type="button" disabled={busy || !sendPass} onClick={() => void signAirgapType4()}>
-                Sign offline
+              <button type="button" disabled={busy || mainnetBlocked || !sendPass} onClick={() => void signAirgapType4()}>
+                {t("quantum.signOffline")}
               </button>
             )}
             {signedAirgapQr.length > 0 && (
-              <button type="button" disabled={busy} onClick={() => void broadcastAirgapType4()}>
-                Broadcast signed
+              <button type="button" disabled={busy || mainnetBlocked} onClick={() => void broadcastAirgapType4()}>
+                {t("quantum.broadcastSigned")}
               </button>
             )}
           </div>
 
           {showAirgap && airgapQrUrls.length > 0 && (
             <div className="preview-box">
-              <p className="muted">Unsigned Type 4. scan on offline signer</p>
+              <p className="muted">{t("quantum.unsignedQrHint")}</p>
               <div className="qr-grid">
                 {airgapQrUrls.map((url, i) => (
                   <img key={i} src={url} alt={`Type4 unsigned ${i + 1}`} className="qr-thumb" />
@@ -527,7 +558,7 @@ export default function QuantumScreen({
 
           {signedAirgapUrls.length > 0 && (
             <div className="preview-box">
-              <p className="muted">Signed Type 4. scan on online coordinator</p>
+              <p className="muted">{t("quantum.signedQrHint")}</p>
               <div className="qr-grid">
                 {signedAirgapUrls.map((url, i) => (
                   <img key={i} src={url} alt={`Type4 signed ${i + 1}`} className="qr-thumb" />
@@ -541,29 +572,37 @@ export default function QuantumScreen({
       {settings.quantum_mode && (
         <div className="card">
           <div className="toggle-row">
-            <strong>Node health</strong>
-            <button type="button" className="small" disabled={busy} onClick={() => void refreshNode()}>
-              Refresh
+            <strong>{t("quantum.nodeHealth")}</strong>
+            <button type="button" className="small" disabled={busy || mainnetBlocked} onClick={() => void refreshNode()}>
+              {t("common.refresh")}
             </button>
           </div>
           {nodeUrl && (
             <p className="muted small">
-              Node: <code>{nodeUrl}</code>
+              {t("common.node")}: <code>{nodeUrl}</code>
             </p>
           )}
+          {mainnetBlocked ? (
+            <p className="warn">{t("quantum.lab.mainnetBlocked")}</p>
+          ) : (
+            <>
           <p className={`quantum-node-status ${nodeMetrics && !nodeErr ? "ok" : "bad"}`}>
             {nodeMetrics && !nodeErr
               ? (() => {
                   const latest = nodeMetrics.latest as { height?: number } | undefined;
                   const h = latest?.height;
-                  return h != null ? `Node reachable · height ${h}` : "Node reachable";
+                  return h != null
+                    ? t("quantum.nodeReachableHeight", { height: h })
+                    : t("quantum.nodeReachable");
                 })()
-              : "Node unreachable"}
+              : t("quantum.nodeUnreachable")}
           </p>
           {nodeMetrics && (
             <pre className="quantum-metrics">{JSON.stringify(nodeMetrics, null, 2)}</pre>
           )}
           {nodeErr && <p className="error">{nodeErr}</p>}
+            </>
+          )}
         </div>
       )}
 
@@ -576,7 +615,7 @@ export default function QuantumScreen({
             setAccount(acc);
             await refreshSettings();
             setShowKs(false);
-            onToast(`Keystore imported: ${acc.address}`, "success");
+            onToast(t("quantum.keystoreImported", { address: acc.address }), "success");
           }}
         />
       )}

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "launchpad-dapp",
+  "description": "Isolated, least-privilege access for the embedded HACD Launchpad",
+  "webviews": ["launchpad"],
+  "remote": {
+    "urls": ["https://hacd.it/*"]
+  },
+  "permissions": ["allow-launchpad-dapp"]
+}

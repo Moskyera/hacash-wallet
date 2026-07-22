@@ -36,6 +36,16 @@ fn default_network_mode() -> String {
 /// Public Hacash L1 node (HTTP only. no valid TLS cert).
 pub const DEFAULT_NODE_URL: &str = "http://nodeapi.hacash.org";
 
+/// Whether a node draft resolves to the exact official endpoint.
+/// Persisted settings are canonicalized by [`validate_node_url`], while this
+/// helper also covers accepted aliases before a draft is saved.
+pub fn is_official_node_url(raw: &str) -> bool {
+    if raw.trim().is_empty() {
+        return false;
+    }
+    validate_node_url(raw).is_ok_and(|url| url == DEFAULT_NODE_URL)
+}
+
 /// Validate and canonicalize a Hacash node endpoint.
 ///
 /// The official node is a temporary exact HTTP exception. Custom remote nodes must use HTTPS;
@@ -367,6 +377,28 @@ mod tests {
     }
 
     #[test]
+    fn official_node_detection_never_accepts_an_empty_or_lookalike_draft() {
+        for official in [
+            DEFAULT_NODE_URL,
+            " https://nodeapi.hacash.org/ ",
+            "nodeapi.hacash.org",
+            "nodeapi.org",
+        ] {
+            assert!(is_official_node_url(official), "{official}");
+        }
+        for other in [
+            "",
+            "   ",
+            "http://nodeapi.hacash.org:8080",
+            "http://nodeapi.hacash.org.evil.example",
+            "http://nodeapi.hacash.org@evil.example",
+            "https://wallet-node.example",
+        ] {
+            assert!(!is_official_node_url(other), "{other}");
+        }
+    }
+
+    #[test]
     fn remote_fast_pay_hubs_require_https() {
         assert!(validate_service_url("http://hub.example", "Fast Pay hub").is_err());
         assert!(validate_service_url("https://hub.example", "Fast Pay hub").is_ok());
@@ -375,12 +407,14 @@ mod tests {
 
     #[test]
     fn fallback_nodes_are_validated_and_deduplicated() {
-        let mut settings = WalletSettings::default();
-        settings.node_fallback_urls = vec![
-            "https://node.example".into(),
-            "https://node.example/".into(),
-            DEFAULT_NODE_URL.into(),
-        ];
+        let mut settings = WalletSettings {
+            node_fallback_urls: vec![
+                "https://node.example".into(),
+                "https://node.example/".into(),
+                DEFAULT_NODE_URL.into(),
+            ],
+            ..WalletSettings::default()
+        };
         settings.validate_and_normalize().unwrap();
         assert_eq!(
             settings.node_fallback_urls,
@@ -390,8 +424,10 @@ mod tests {
 
     #[test]
     fn invalid_network_mode_is_rejected() {
-        let mut settings = WalletSettings::default();
-        settings.network_mode = "unknown".into();
+        let mut settings = WalletSettings {
+            network_mode: "unknown".into(),
+            ..WalletSettings::default()
+        };
         assert!(settings.validate_and_normalize().is_err());
     }
 }

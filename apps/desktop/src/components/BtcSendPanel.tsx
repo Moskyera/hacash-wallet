@@ -125,7 +125,7 @@ export default function BtcSendPanel({
           </p>
           {btc.preview.hip23.errors.length > 0 && (
             <div className="alert">
-              <strong>HIP-23 errors</strong>
+              <strong>Istanbul transaction safety errors</strong>
               <ul>
                 {btc.preview.hip23.errors.map((e) => (
                   <li key={e}>{e}</li>

@@ -6,7 +6,6 @@
   ],
   "webviews": ["main"],
   "permissions": [
-    "biometric:default",
     "deep-link:default",
     "opener:default"
   ]

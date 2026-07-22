@@ -9,14 +9,14 @@ pub mod update_commands;
 pub mod whisper_commands;
 
 #[cfg(target_os = "android")]
+pub mod android_native;
+#[cfg(target_os = "android")]
 pub mod backup_android;
 pub mod backup_commands;
 #[cfg(target_os = "android")]
 pub mod update_android;
 
 pub mod dapp_approval;
-#[cfg(feature = "desktop")]
-pub mod dapp_bridge;
 #[cfg(feature = "desktop")]
 pub mod desktop_commands;
 #[cfg(feature = "desktop")]

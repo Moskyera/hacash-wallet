@@ -11,18 +11,31 @@ import java.io.File
 object BackupExportHelper {
     @JvmStatic
     fun copyFileToDownloads(activity: Activity, sourcePath: String, displayName: String): String {
-        if (displayName.isBlank() || !displayName.endsWith(".json", ignoreCase = true)) {
-            throw IllegalArgumentException("Backup filename must end with .json")
+        if (displayName.isBlank() ||
+            displayName.length > 128 ||
+            displayName != displayName.trim() ||
+            File(displayName).name != displayName ||
+            displayName.any { it == '/' || it.code == 92 || it.isISOControl() } ||
+            !displayName.endsWith(".json", ignoreCase = true)
+        ) {
+            throw IllegalArgumentException("Backup filename must be a safe .json basename")
         }
         val source = File(sourcePath)
         if (!source.isFile) {
             throw IllegalArgumentException("Backup source missing: $sourcePath")
         }
+        if (source.length() > 2L * 1024L * 1024L) {
+            throw IllegalArgumentException("Backup file exceeds the 2 MiB safety limit")
+        }
         val bytes = source.readBytes()
         if (bytes.isEmpty()) {
             throw IllegalArgumentException("Backup file is empty")
         }
-        return writeBytesToDownloads(activity, displayName, bytes)
+        return try {
+            writeBytesToDownloads(activity, displayName, bytes)
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     private fun writeBytesToDownloads(activity: Activity, filename: String, bytes: ByteArray): String {

@@ -153,7 +153,7 @@ pub fn build_type4_unsigned_body_transfers(
     for (to_address, amount_hacash) in transfers {
         let toaddr = Address::from_readable(to_address)
             .map_err(|e| WalletError::Other(format!("recipient invalid: {e}")))?;
-        let hac = Amount::from(*amount_hacash)
+        let hac = Amount::from(amount_hacash)
             .map_err(|e| WalletError::Other(format!("hacash invalid: {e}")))?;
         tx.push_action(Box::new(HacToTrs::create_by(toaddr, hac)))
             .map_err(|e| WalletError::Other(e.to_string()))?;
@@ -282,6 +282,7 @@ impl WalletService {
         to: &str,
         amount_hacash: &str,
     ) -> WalletResult<QuantumPreflight> {
+        self.require_quantum_testnet()?;
         let settings = self.quantum_settings();
         let account = settings
             .active_account
@@ -368,9 +369,8 @@ impl WalletService {
     }
 
     fn require_keystore_json(&self) -> WalletResult<String> {
-        self.quantum_keystore_json().ok_or_else(|| {
-            WalletError::Other("no quantum keystore. create or import first".into())
-        })
+        self.quantum_keystore_json()
+            .ok_or_else(|| WalletError::Other("no quantum keystore. create or import first".into()))
     }
 
     pub fn quantum_create_pqc(&mut self, pass: &str) -> WalletResult<QuantumAccountInfo> {
@@ -432,6 +432,7 @@ impl WalletService {
         keystore_pass: &str,
     ) -> WalletResult<QuantumSendResult> {
         self.touch_auto_lock();
+        self.require_quantum_testnet()?;
         let amount_mei = parse_decimal_hac_mei(amount)?;
         self.ensure_quantum_signing_policy(amount_mei)?;
         let settings = self.quantum_settings();
@@ -479,6 +480,7 @@ impl WalletService {
                 ),
             ],
         )?;
+        self.ensure_transaction_network_binding(&unsigned).await?;
         let param = sdk::SignTxV4Param {
             body: unsigned,
             hybrid_keystore: self.require_keystore_json()?,
@@ -520,51 +522,58 @@ impl WalletService {
         amount_hacash: &str,
     ) -> WalletResult<crate::airgap::AirgapPrepareResult> {
         self.touch_auto_lock();
+        self.require_quantum_testnet()?;
         let settings = self.quantum_settings();
         let from = settings
             .active_account
             .as_ref()
             .ok_or_else(|| WalletError::Other("no quantum account".into()))?;
-        let preflight = self.quantum_preflight_type4(to, amount_hacash).await?;
+        let requested_amount = parse_decimal_hac_mei(amount_hacash)?;
+        let amount = crate::airgap::canonicalize_airgap_amount(requested_amount)?;
+        let preflight = self
+            .quantum_preflight_type4(to, &amount.amount_wire)
+            .await?;
         if !preflight.ok {
             return Err(WalletError::Policy(preflight.errors.join("; ")));
         }
-        let amount_mei = parse_decimal_hac_mei(amount_hacash)?;
         let fee_est = self
-            .estimate_type4_fee(&from.address, to, amount_hacash, None)
+            .estimate_type4_fee(&from.address, to, &amount.amount_wire, None)
             .await?;
-        let amount_wire = crate::hip23::format_mei_for_node(amount_mei);
         let service_fee_wire =
             crate::send_options::format_service_fee_amount_wire(preflight.service_fee_mei);
         let body_hex = build_type4_unsigned_body_transfers(
             &from.address,
             &fee_est.fee_wire,
             &[
-                (to, amount_wire.as_str()),
+                (to, amount.amount_wire.as_str()),
                 (
                     crate::send_options::WALLET_TREASURY_ADDRESS,
                     service_fee_wire.as_str(),
                 ),
             ],
         )?;
+        let summary = crate::airgap::canonical_airgap_summary(4, to, &amount.amount_wire)?;
         let unsigned = crate::airgap::AirgapUnsigned {
             v: crate::airgap::AIRGAP_VERSION,
             from: from.address.clone(),
             to: to.to_owned(),
-            amount_mei,
-            amount_wire,
+            amount_mei: amount.amount_mei,
+            amount_wire: amount.amount_wire,
             fee: fee_est.fee_wire,
             service_fee_mei: preflight.service_fee_mei,
             service_fee_treasury: Some(crate::send_options::WALLET_TREASURY_ADDRESS.into()),
             body_hex,
-            summary: "Type 4 quantum transfer (air-gap)".into(),
+            summary,
             tx_type: 4,
         };
         let qr_parts = crate::airgap::encode_envelope_qr(
             &crate::airgap::AirgapEnvelope::Unsigned(unsigned.clone()),
         )?;
+        let inspection = self
+            .inspect_airgap_envelope(&crate::airgap::AirgapEnvelope::Unsigned(unsigned.clone()))?;
         Ok(crate::airgap::AirgapPrepareResult {
             envelope: unsigned,
+            inspection,
             qr_parts,
         })
     }
@@ -575,12 +584,15 @@ impl WalletService {
         keystore_pass: &str,
     ) -> WalletResult<crate::airgap::AirgapSignResult> {
         self.touch_auto_lock();
-        self.ensure_quantum_signing_policy(unsigned.amount_mei)?;
-        if unsigned.tx_type != 4 {
+        self.require_quantum_testnet()?;
+        let inspection = self
+            .inspect_airgap_envelope(&crate::airgap::AirgapEnvelope::Unsigned(unsigned.clone()))?;
+        if inspection.tx_type != 4 {
             return Err(WalletError::Policy(
                 "air-gap sign expects Type 4 unsigned envelope".into(),
             ));
         }
+        self.ensure_quantum_signing_policy(inspection.amount_mei)?;
         if unsigned.from.is_empty() || unsigned.to.is_empty() {
             return Err(WalletError::Transaction(
                 "airgap unsigned missing addresses".into(),
@@ -600,7 +612,7 @@ impl WalletService {
             )));
         }
         let expected_service_fee =
-            crate::send_options::compute_service_fee_mei(unsigned.amount_mei);
+            crate::send_options::compute_service_fee_mei(inspection.amount_mei);
         if (unsigned.service_fee_mei - expected_service_fee).abs() > 0.000_000_1
             || unsigned.service_fee_treasury.as_deref()
                 != Some(crate::send_options::WALLET_TREASURY_ADDRESS)
@@ -634,21 +646,27 @@ impl WalletService {
         self.clear_second_factor();
         let envelope = crate::airgap::AirgapSigned {
             v: crate::airgap::AIRGAP_VERSION,
-            from: unsigned.from.clone(),
-            to: unsigned.to.clone(),
-            amount_mei: unsigned.amount_mei,
-            amount_wire: unsigned.amount_wire.clone(),
-            fee: unsigned.fee.clone(),
-            service_fee_mei: unsigned.service_fee_mei,
-            service_fee_treasury: unsigned.service_fee_treasury.clone(),
+            from: inspection.from,
+            to: inspection.to,
+            amount_mei: inspection.amount_mei,
+            amount_wire: inspection.amount_wire,
+            fee: inspection.network_fee,
+            service_fee_mei: inspection.wallet_fee_mei,
+            service_fee_treasury: Some(inspection.wallet_fee_treasury),
             signed_hex: signed.body,
-            summary: unsigned.summary.clone(),
+            summary: inspection.summary,
             tx_type: 4,
         };
         let qr_parts = crate::airgap::encode_envelope_qr(&crate::airgap::AirgapEnvelope::Signed(
             envelope.clone(),
         ))?;
-        Ok(crate::airgap::AirgapSignResult { envelope, qr_parts })
+        let inspection =
+            self.inspect_airgap_envelope(&crate::airgap::AirgapEnvelope::Signed(envelope.clone()))?;
+        Ok(crate::airgap::AirgapSignResult {
+            envelope,
+            inspection,
+            qr_parts,
+        })
     }
 
     pub async fn quantum_send_test_tx(

@@ -22,12 +22,10 @@ impl OffChainChannelTransfer {
         let sign_addr = Address::from(addr_bytes);
         let mut matched = false;
         for (i, addr) in self.must_sign_addresses.iter().enumerate() {
-            if addr.as_ref() == sign_addr.as_ref() {
-                if i < self.must_signs.len() {
-                    self.must_signs[i] = sign;
-                    matched = true;
-                    break;
-                }
+            if addr.as_ref() == sign_addr.as_ref() && i < self.must_signs.len() {
+                self.must_signs[i] = sign;
+                matched = true;
+                break;
             }
         }
         if !matched {

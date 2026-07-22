@@ -12,7 +12,7 @@ import {
   l1FeeSpeedLabel,
   railBadgeClass,
 } from "../fastPayUi";
-import type { PaymentAsset } from "../utils/paymentAssets";
+import type { PaymentAsset } from "@hacash/wallet-ui";
 import type { Screen } from "./types";
 
 type Props = {
@@ -379,7 +379,7 @@ export default function SendScreen({
               )}
               {preview.hip23.errors.length > 0 && (
                 <div className="alert">
-                  <strong>HIP-23 errors</strong>
+                  <strong>Istanbul transaction safety errors</strong>
                   <ul>
                     {preview.hip23.errors.map((e) => (
                       <li key={e}>{e}</li>
@@ -389,7 +389,7 @@ export default function SendScreen({
               )}
               {preview.hip23.warnings.length > 0 && (
                 <div className="warn-box">
-                  <strong>HIP-23 warnings</strong>
+                  <strong>Istanbul transaction safety warnings</strong>
                   <ul>
                     {preview.hip23.warnings.map((w) => (
                       <li key={w}>{w}</li>

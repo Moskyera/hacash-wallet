@@ -1,0 +1,198 @@
+name: Release Mobile
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*-mobile"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-mobile-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+  NODE_VERSION: "22.17.0"
+  YARN_VERSION: "1.22.22"
+  ANDROID_NDK_VERSION: "27.2.12479018"
+
+jobs:
+  build-android:
+    name: Signed Android arm64 APK
+    runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify release version and tag
+        run: node scripts/release-version.mjs check
+
+      - name: Require all Android signing secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_EXPECTED_CERT_SHA256"
+
+      - name: Checkout pinned fullnodedev
+        shell: pwsh
+        run: ./scripts/checkout-fullnode.ps1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: yarn
+          cache-dependency-path: apps/mobile/yarn.lock
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install pinned Android SDK, NDK and Rust target
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;${ANDROID_NDK_VERSION}"
+          rustup target add aarch64-linux-android
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-android-arm64
+
+      - name: Install pinned frontend dependencies
+        working-directory: apps/mobile
+        run: |
+          npm install --global yarn@${YARN_VERSION}
+          yarn install --frozen-lockfile --non-interactive
+
+      - name: Initialize generated Android project
+        working-directory: apps/mobile
+        run: yarn run tauri -- android init --ci
+
+      - name: Fetch locked Rust dependencies
+        run: cargo fetch --locked
+
+      - name: Restore release keystore without logging secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYSTORE="${RUNNER_TEMP}/hacash-wallet-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          test -s "$KEYSTORE"
+          case "$ANDROID_KEYSTORE_PASSWORD$ANDROID_KEY_ALIAS" in
+            *$'\n'*|*$'\r'*) echo "Signing values must not contain newlines" >&2; exit 1 ;;
+          esac
+          {
+            printf 'password=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'storeFile=%s\n' "$KEYSTORE"
+          } > apps/mobile/src-tauri/gen/android/keystore.properties
+
+      - name: Build the exact mobile frontend being packaged
+        working-directory: apps/mobile
+        run: yarn build
+
+      - name: Apply and validate Android integration
+        shell: pwsh
+        run: ./apps/mobile/apply-android-patches.ps1
+
+      - name: Build signed Android arm64 release APK
+        working-directory: apps/mobile
+        run: yarn run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
+
+      - name: Revalidate Android integration after Tauri regeneration
+        shell: pwsh
+        run: ./apps/mobile/validate-android-build.ps1
+
+      - name: Select the single release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' APKS < <(find apps/mobile/src-tauri/gen/android/app/build/outputs/apk -type f -iname '*release*.apk' -print0)
+          test "${#APKS[@]}" -eq 1
+          printf 'RELEASE_APK=%s\n' "${APKS[0]}" >> "$GITHUB_ENV"
+
+      - name: Verify signer, package, version, SDK and ABI
+        shell: pwsh
+        run: ./apps/mobile/verify-release-apk.ps1 -ApkPath $env:RELEASE_APK
+
+      - name: Stage signed APK and checksum
+        run: node scripts/release-artifacts.mjs stage-mobile "${RELEASE_APK}" dist-release
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mobile-android-arm64
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish verified mobile release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-android
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify release version and tag
+        run: node scripts/release-version.mjs check
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: mobile-android-arm64
+          path: dist-release
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install Android signature verification tool
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Reverify downloaded APK before publishing
+        shell: pwsh
+        run: |
+          $apks = @(Get-ChildItem -LiteralPath ./dist-release -File -Filter *.apk)
+          if ($apks.Count -ne 1) {
+            throw "Expected exactly one downloaded APK, found $($apks.Count)"
+          }
+          ./apps/mobile/verify-release-apk.ps1 -ApkPath $apks[0].FullName
+
+      - name: Verify downloaded APK checksum
+        run: node scripts/release-artifacts.mjs verify-mobile dist-release
+
+      - name: Publish only the verified signed APK set
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: dist-release/*
+          body: |
+            ### Hacash Wallet Mobile ${{ github.ref_name }}
+
+            - Android 9 or newer
+            - arm64-v8a
+            - Signed APK with pinned release certificate
+
+            A SHA-256 checksum file is included with the APK.

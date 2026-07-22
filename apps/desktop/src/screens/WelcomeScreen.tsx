@@ -1,3 +1,4 @@
+import { isValidHacashAddress } from "@hacash/wallet-ui";
 import { useRef, useState } from "react";
 import WalletLogo from "../components/WalletLogo";
 import { api } from "../api";
@@ -117,14 +118,14 @@ export default function WelcomeScreen({
               <input
                 value={watchAddress}
                 onChange={(e) => setWatchAddress(e.target.value)}
-                placeholder="1YourAddress..."
+                placeholder="Hacash address"
               />
               <p className="muted small-note">
                 Watch-only mode. No private key on this device. cannot send or sign.
               </p>
               <button
                 className="primary auth-submit"
-                disabled={busy || watchAddress.trim().length < 10}
+                disabled={busy || !isValidHacashAddress(watchAddress)}
                 onClick={() => onWatchOnly(watchAddress)}
               >
                 Add watch-only wallet

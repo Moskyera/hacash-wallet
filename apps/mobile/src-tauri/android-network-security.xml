@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The official Hacash node is the sole production cleartext exception. -->
+<!--
+  Cleartext is required only for the official Hacash node API (HTTP, not HTTPS).
+  The same APK is used on stock Android, Honor, and GrapheneOS. There is no separate Graphene build.
+  GrapheneOS: enable Network for this app in App info if balances never load.
+-->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
@@ -13,6 +17,5 @@
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>
-        <domain includeSubdomains="false">10.0.2.2</domain>
     </domain-config>
 </network-security-config>

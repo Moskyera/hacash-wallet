@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import WalletLogo from "./components/WalletLogo";
 import { useToast } from "./hooks/useToast";
+import { useLocale } from "./locale";
 import { useDesktopWallet } from "./hooks/useDesktopWallet";
 import { useHacSend } from "./hooks/useHacSend";
 import DappApprovalPanel from "./components/DappApprovalPanel";
@@ -17,6 +18,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("welcome");
   const [privacyShield, setPrivacyShield] = useState(false);
   const { toast, showToast } = useToast();
+  const { t } = useLocale();
 
   const wallet = useDesktopWallet(showToast, screen, setScreen);
 
@@ -222,8 +224,8 @@ export default function App() {
       {privacyShield && (
         <div className="privacy-shield" aria-hidden="true">
           <div className="privacy-shield-inner">
-            <strong>Wallet hidden</strong>
-            Focus the window to view balances and addresses.
+            <strong>{t("privacy.hidden")}</strong>
+            {t("privacy.focus")}
           </div>
         </div>
       )}
@@ -238,8 +240,8 @@ export default function App() {
         {wallet.status && !wallet.status.locked && (
           <nav>
             {NAV_GROUPS.map((group) => (
-              <div className="nav-group" key={group.label}>
-                <span className="nav-group-label">{group.label}</span>
+              <div className="nav-group" key={group.id}>
+                <span className="nav-group-label">{t(`group.${group.id}`)}</span>
                 {group.items.map((item) => (
                   <button
                     key={item.id}
@@ -252,7 +254,7 @@ export default function App() {
                     }}
                   >
                     <span className="nav-item-mark" aria-hidden>{item.mark}</span>
-                    <span className="nav-item-label">{item.label}</span>
+                    <span className="nav-item-label">{t(`nav.${item.id}`)}</span>
                     {item.id === "fastpay" && (
                       <span className={`nav-fp-badge ${fastPayReady ? "nav-fp-on" : "nav-fp-off"}`}>
                         {fastPayNavHint(wallet.status?.fast_pay_state ?? "no_provider")}

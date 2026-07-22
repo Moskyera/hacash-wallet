@@ -1,0 +1,150 @@
+.dapp-app-selector {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  color: var(--text, #f7f7f7);
+  background: #000;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 14px;
+}
+
+.dapp-app-selector-head h2,
+.dapp-app-selector-head p {
+  margin: 0;
+}
+
+.dapp-app-selector-head h2 {
+  font-size: 1rem;
+}
+
+.dapp-app-selector-head p {
+  margin-top: 0.3rem;
+  color: var(--muted, #999);
+  font-size: 0.8rem;
+}
+
+.dapp-app-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.65rem;
+}
+
+.dapp-app-option {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.7rem;
+  align-items: center;
+  width: 100%;
+  min-height: 74px;
+  margin: 0;
+  padding: 0.75rem;
+  text-align: left;
+  color: inherit;
+  background: #070707;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 12px;
+}
+
+.dapp-app-option:hover:not(:disabled),
+.dapp-app-option.is-selected {
+  border-color: var(--accent, #f7931a);
+  box-shadow: 0 0 0 1px rgba(247, 147, 26, 0.18);
+}
+
+.dapp-app-option:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.dapp-app-mark {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  color: #000;
+  font-weight: 800;
+  background: var(--accent, #f7931a);
+  border-radius: 10px;
+}
+
+.dapp-app-option-copy {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.dapp-app-option-copy small,
+.dapp-app-select-label,
+.dapp-app-connection-copy span {
+  color: var(--muted, #999);
+  font-size: 0.72rem;
+}
+
+.dapp-app-select-label {
+  color: var(--accent, #f7931a);
+  white-space: nowrap;
+}
+
+.dapp-app-connection {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border, #2a2a2a);
+}
+
+.dapp-app-connection-copy {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.dapp-app-status-connected {
+  color: var(--accent, #f7931a) !important;
+}
+
+.dapp-app-status-error {
+  color: var(--accent, #f7931a) !important;
+}
+
+.dapp-app-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dapp-app-actions button {
+  width: auto;
+  margin: 0;
+}
+
+.dapp-app-selector-compact {
+  margin-top: 1rem;
+}
+
+.dapp-app-selector-compact .dapp-app-selector-head p,
+.dapp-app-selector-compact .dapp-app-option-copy small {
+  display: none;
+}
+
+.dapp-app-selector-compact .dapp-app-option {
+  min-height: 56px;
+}
+
+@media (max-width: 560px) {
+  .dapp-app-list {
+    grid-template-columns: 1fr;
+  }
+
+  .dapp-app-connection {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dapp-app-actions,
+  .dapp-app-actions button {
+    width: 100%;
+  }
+}

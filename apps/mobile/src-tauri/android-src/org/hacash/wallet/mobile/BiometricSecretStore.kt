@@ -23,15 +23,27 @@ object BiometricSecretStore {
   @Synchronized
   fun store(activity: Activity, passphrase: String) {
     require(passphrase.isNotEmpty()) { "passphrase is empty" }
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-    val encrypted = cipher.doFinal(passphrase.toByteArray(StandardCharsets.UTF_8))
-    activity.applicationContext
-      .getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
-      .edit()
-      .putString(PREF_CIPHERTEXT, Base64.encodeToString(encrypted, Base64.NO_WRAP))
-      .putString(PREF_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-      .apply()
+    val plain = passphrase.toByteArray(StandardCharsets.UTF_8)
+    try {
+      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+      cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+      val encrypted = cipher.doFinal(plain)
+      val iv = cipher.iv
+      try {
+        val persisted = activity.applicationContext
+          .getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
+          .edit()
+          .putString(PREF_CIPHERTEXT, Base64.encodeToString(encrypted, Base64.NO_WRAP))
+          .putString(PREF_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
+          .commit()
+        check(persisted) { "Could not persist biometric unlock secret" }
+      } finally {
+        encrypted.fill(0)
+        iv.fill(0)
+      }
+    } finally {
+      plain.fill(0)
+    }
   }
 
   @JvmStatic
@@ -42,14 +54,28 @@ object BiometricSecretStore {
       ?: throw IllegalStateException("biometric unlock is not configured")
     val iv = prefs.getString(PREF_IV, null)
       ?: throw IllegalStateException("biometric unlock IV is missing")
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    cipher.init(
-      Cipher.DECRYPT_MODE,
-      getExistingKey(),
-      GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)),
-    )
-    val plain = cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP))
-    return String(plain, StandardCharsets.UTF_8)
+    val encrypted = Base64.decode(ciphertext, Base64.NO_WRAP)
+    try {
+      val ivBytes = Base64.decode(iv, Base64.NO_WRAP)
+      try {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+          Cipher.DECRYPT_MODE,
+          getExistingKey(),
+          GCMParameterSpec(128, ivBytes),
+        )
+        val plain = cipher.doFinal(encrypted)
+        try {
+          return String(plain, StandardCharsets.UTF_8)
+        } finally {
+          plain.fill(0)
+        }
+      } finally {
+        ivBytes.fill(0)
+      }
+    } finally {
+      encrypted.fill(0)
+    }
   }
 
   @JvmStatic
@@ -65,11 +91,12 @@ object BiometricSecretStore {
   @JvmStatic
   @Synchronized
   fun clear(activity: Activity) {
-    activity.applicationContext
+    val cleared = activity.applicationContext
       .getSharedPreferences(PREFS, Activity.MODE_PRIVATE)
       .edit()
       .clear()
-      .apply()
+      .commit()
+    check(cleared) { "Could not clear biometric unlock secret" }
     val keyStore = keyStore()
     if (keyStore.containsAlias(KEY_ALIAS)) {
       keyStore.deleteEntry(KEY_ALIAS)

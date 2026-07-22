@@ -1,4 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
+import type {
+  AirgapInspection,
+  AssetPriceResponse,
+  CanonicalTransaction,
+  HacdDiamondInfo as SharedHacdDiamondInfo,
+  NodeCapabilities,
+  ParsedAddress,
+  Type4ProbeResult,
+} from "@hacash/wallet-ui";
+export type { HacdDiamondBornInfo, HacdDiamondInfo } from "@hacash/wallet-ui";
 
 export type PrivacySettings = {
   hide_balances: boolean;
@@ -344,16 +354,19 @@ export type AirgapEnvelope =
 
 export type AirgapPrepareResult = {
   envelope: AirgapUnsigned;
+  inspection: AirgapInspection;
   qr_parts: string[];
 };
 
 export type AirgapSignResult = {
   envelope: AirgapSigned;
+  inspection: AirgapInspection;
   qr_parts: string[];
 };
 
 export type AirgapParseResult = {
   envelope: AirgapEnvelope | null;
+  inspection?: AirgapInspection | null;
   needs_more_parts: boolean;
   received_parts: number;
   total_parts: number;
@@ -406,33 +419,7 @@ export type QuantumTestResult = {
   metrics: Record<string, unknown>;
 };
 
-export type HacdDiamondBornInfo = {
-  height: number;
-  hash: string;
-};
-
-export type HacdDiamondInfo = {
-  name: string;
-  metadata_source: "configured" | "mainnet" | string;
-  number?: number | null;
-  visual_gene?: string | null;
-  life_gene?: string | null;
-  belong?: string | null;
-  miner?: string | null;
-  bid_fee?: string | null;
-  average_bid_burn?: number | null;
-  born?: HacdDiamondBornInfo | null;
-  prev_hash?: string | null;
-  inscriptions: string[];
-};
-
-export type AssetSummary = {
-  hac_mei: number;
-  hacd_count: number;
-  hacd_names: string[];
-  btc_wallet_satoshi: number;
-  btc_channel_satoshi: number;
-};
+export type AssetSummary = import("@hacash/wallet-ui").AssetSummary;
 
 export type BtcSendPreview = {
   from: string;
@@ -488,7 +475,7 @@ export const quantumApi = {
   sendTestTx: (keystorePassword: string) =>
     invoke<QuantumTestResult>("quantum_send_test_tx", { keystorePassword }),
   nodePing: () => invoke<Record<string, unknown>>("quantum_node_ping"),
-  balance: () => invoke<number>("quantum_balance"),
+  balanceProbe: () => invoke<Type4ProbeResult>("quantum_balance_probe"),
   preflightType4: (toAddress: string, amountHacash: string) =>
     invoke<QuantumPreflight>("quantum_preflight_type4", { toAddress, amountHacash }),
   prepareAirgapType4: (toAddress: string, amountHacash: string) =>
@@ -523,6 +510,19 @@ export const api = {
   updateSettings: (settings: WalletSettings) =>
     invoke<void>("wallet_update_settings", { settings }),
   discoverNodes: () => invoke<NodeDiscoveryReport>("wallet_discover_nodes"),
+  nodeCapabilities: () => invoke<NodeCapabilities>("wallet_node_capabilities"),
+  inspectAddress: (address: string, networkMode?: "mainnet" | "testnet") =>
+    invoke<ParsedAddress>("wallet_inspect_address", {
+      address,
+      networkMode: networkMode ?? null,
+    }),
+  inspectTransaction: (bodyHex: string, expectedChainId?: number) =>
+    invoke<CanonicalTransaction>("wallet_inspect_transaction", {
+      bodyHex,
+      expectedChainId: expectedChainId ?? null,
+    }),
+  fetchAssetPrices: () =>
+    invoke<AssetPriceResponse>("wallet_fetch_asset_prices"),
   webauthnRegisterBegin: (clientOrigin?: string) =>
     invoke<string>("wallet_webauthn_register_begin", { clientOrigin: clientOrigin ?? null }),
   webauthnRegisterFinish: (credentialJson: string) =>
@@ -594,7 +594,7 @@ export const api = {
     invoke<AirgapParseResult>("wallet_airgap_parse_qr", { text }),
   airgapParseQrBatch: (parts: string[]) =>
     invoke<AirgapParseResult>("wallet_airgap_parse_qr_batch", { parts }),
-  queryDiamond: (name: string) => invoke<HacdDiamondInfo>("wallet_query_diamond", { name }),
+  queryDiamond: (name: string) => invoke<SharedHacdDiamondInfo>("wallet_query_diamond", { name }),
   listOwnedDiamonds: () => invoke<string[]>("wallet_list_owned_diamonds"),
   previewSendHacd: (to: string, diamondNames: string[]) =>
     invoke<HacdSendPreview>("wallet_preview_send_hacd", { to, diamondNames }),
@@ -607,24 +607,25 @@ export const api = {
   bumpActivity: () => invoke<void>("wallet_bump_activity"),
   dappConnect: (origin: string) =>
     invoke<{ address?: string; err?: string }>("wallet_dapp_connect", { origin }),
+  dappDisconnect: (origin: string) =>
+    invoke<{ ok: boolean; disconnected: boolean }>("wallet_dapp_disconnect", { origin }),
+  dappHeartbeat: (origin: string) =>
+    invoke<{ ok?: boolean; err?: string }>("wallet_dapp_heartbeat", { origin }),
   dappWallet: (origin: string) =>
     invoke<{ address?: string; err?: string }>("wallet_dapp_wallet", { origin }),
-  dappBridgeStart: () => invoke<number>("wallet_dapp_bridge_start"),
-  dappBridgeStop: () => invoke<void>("wallet_dapp_bridge_stop"),
-  dappBridgeStatus: () =>
-    invoke<{ running: boolean; port: number; url: string; wallet_locked: boolean; address?: string }>(
-      "wallet_dapp_bridge_status",
-    ),
   dappPending: () =>
     invoke<DappApprovalView | null>("wallet_dapp_pending"),
   dappApprove: (id: string) => invoke<void>("wallet_dapp_approve", { id }),
   dappReject: (id: string, reason?: string) =>
     invoke<void>("wallet_dapp_reject", { id, reason: reason ?? null }),
-  checkAppUpdate: (channel: "mobile" | "desktop", currentVersion: string) =>
-    invoke<AppUpdateInfo>("wallet_check_app_update", { channel, currentVersion }),
-  downloadAppUpdate: (url: string, filename: string, sha256: string, expectedSize: number) =>
-    invoke<string>("wallet_download_app_update", { url, filename, sha256, expectedSize }),
-  installDesktopUpdate: (path: string) => invoke<void>("wallet_install_desktop_update", { path }),
+  webviewEval: (label: string, expectedOrigin: string, script: string) =>
+    invoke<void>("wallet_webview_eval", { label, expectedOrigin, script }),
+  checkAppUpdate: (currentVersion: string) =>
+    invoke<AppUpdateInfo>("wallet_check_app_update", { currentVersion }),
+  downloadAppUpdate: (offerId: string) =>
+    invoke<void>("wallet_download_app_update", { offerId }),
+  installDesktopUpdate: (offerId: string) =>
+    invoke<void>("wallet_install_desktop_update", { offerId }),
 };
 
 export type DappApprovalView = {
@@ -636,14 +637,25 @@ export type DappApprovalView = {
   detail: string;
 };
 
-export type AppUpdateInfo = {
+type AppUpdateBase = {
   current_version: string;
   latest_version: string;
-  update_available: boolean;
-  download_url: string | null;
   release_notes: string | null;
-  asset_name: string | null;
-  download_size: number | null;
-  sha256: string | null;
   release_page: string | null;
+  target_os: string;
+  target_arch: string;
 };
+
+export type AppUpdateInfo = AppUpdateBase &
+  (
+    | { status: "up_to_date" }
+    | { status: "available_untrusted"; release_page: string }
+    | { status: "available_manual"; release_page: string }
+    | {
+        status: "available_trusted";
+        release_page: string;
+        offer_id: string;
+        asset_name: string;
+        download_size: number;
+      }
+  );

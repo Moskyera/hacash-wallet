@@ -60,10 +60,11 @@ impl MessengerStore {
             return Ok(Self::default());
         }
         let raw = fs::read(&path).map_err(|e| WalletError::Other(e.to_string()))?;
-        if let Ok(text) = std::str::from_utf8(&raw) {
-            if text.trim_start().starts_with('{') && text.contains("\"messages\"") {
-                return serde_json::from_str(text).map_err(|e| WalletError::Other(e.to_string()));
-            }
+        if let Ok(text) = std::str::from_utf8(&raw)
+            && text.trim_start().starts_with('{')
+            && text.contains("\"messages\"")
+        {
+            return serde_json::from_str(text).map_err(|e| WalletError::Other(e.to_string()));
         }
         match decrypt_store(&raw, &ctx.storage_key) {
             Ok(plain) => {
@@ -304,24 +305,23 @@ pub async fn messenger_poll_inbox(
             added += 1;
         }
 
-        if !ack_ids.is_empty() {
-            if let Ok(challenge) =
+        if !ack_ids.is_empty()
+            && let Ok(challenge) =
                 dust_whisper::messenger_client::fetch_challenge(http, u, my_address).await
-            {
-                let sig = sign_inbox_auth(ctx.account, my_address, &challenge.nonce);
-                let _ = dust_whisper::messenger_client::ack_messages(
-                    http,
-                    u,
-                    &MessengerAckRequest {
-                        to: my_address.to_string(),
-                        claimant_pubkey: claimant_pubkey.clone(),
-                        nonce: challenge.nonce,
-                        signature: sig,
-                        ids: ack_ids.clone(),
-                    },
-                )
-                .await;
-            }
+        {
+            let sig = sign_inbox_auth(ctx.account, my_address, &challenge.nonce);
+            let _ = dust_whisper::messenger_client::ack_messages(
+                http,
+                u,
+                &MessengerAckRequest {
+                    to: my_address.to_string(),
+                    claimant_pubkey: claimant_pubkey.clone(),
+                    nonce: challenge.nonce,
+                    signature: sig,
+                    ids: ack_ids.clone(),
+                },
+            )
+            .await;
         }
     }
 

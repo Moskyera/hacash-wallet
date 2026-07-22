@@ -11,7 +11,9 @@ import QuantumScreen from "../../components/QuantumScreen";
 import WhisperScreen from "../../components/WhisperScreen";
 import { downloadJson } from "../../utils/downloadJson";
 import FastPayChannelScreen from "../FastPayChannelScreen";
+import HacdTab from "../HacdTab";
 import { fastPayMenuBadge } from "../../fastPayUi";
+import { LanguageSwitcher, useLocale } from "../../locale";
 import ContactsScreen from "./ContactsScreen";
 import PrivacyScreen from "./PrivacyScreen";
 import SecurityScreen from "./SecurityScreen";
@@ -27,6 +29,7 @@ type Props = {
 };
 
 export default function MoreRouter({ page, data, actions }: Props) {
+  const { t } = useLocale();
   const {
     history,
     bills,
@@ -70,13 +73,13 @@ export default function MoreRouter({ page, data, actions }: Props) {
   if (page === "menu") {
     return (
       <div className="more-menu">
-        <p className="section-title">Wallet</p>
+        <p className="section-title">{t("more.wallet")}</p>
         <button type="button" onClick={() => onNavigate("history")}>
-          <span>Transaction history</span>
+          <span>{t("more.transactions")}</span>
           <span>{history.length}</span>
         </button>
         <button type="button" onClick={() => onNavigate("bills")}>
-          <span>Dispute bills</span>
+          <span>{t("more.bills")}</span>
           <span>{bills.length}</span>
         </button>
         <button type="button" onClick={() => onNavigate("fastpay")}>
@@ -84,38 +87,52 @@ export default function MoreRouter({ page, data, actions }: Props) {
           <span>{fastPayMenuBadge(fastPay?.state)}</span>
         </button>
         <button type="button" onClick={() => onNavigate("contacts")}>
-          <span>Contacts</span>
+          <span>{t("more.contacts")}</span>
           <span>{contacts.length}</span>
         </button>
+        <button type="button" onClick={() => onNavigate("hacd")}>
+          <span>{t("more.hacd")}</span>
+          <span>◆</span>
+        </button>
+        <button type="button" onClick={() => onNavigate("messages")}>
+          <span>{t("nav.messages")}</span>
+          <span>••</span>
+        </button>
         <button type="button" onClick={() => onNavigate("quantum")}>
-          <span>Quantum (Type 4)</span>
+          <span>{t("more.quantum")}</span>
           <span>◇</span>
         </button>
         <button type="button" onClick={() => onNavigate("airgap")}>
-          <span>Air-gap (L1 QR)</span>
+          <span>{t("more.airgap")}</span>
           <span>◎</span>
         </button>
         <button type="button" onClick={() => onNavigate("launchpad")}>
-          <span>HACD Launchpad</span>
+          <span>{t("more.launchpad")}</span>
           <span className="menu-icon" aria-hidden>
             <HacdLaunchpadIcon />
           </span>
         </button>
         <button type="button" onClick={() => onNavigate("whisper")}>
           <span>DUST Whisper</span>
-          <span>{dustWhisper?.enabled ? "on" : "off"}</span>
+          <span>{dustWhisper?.enabled ? t("status.on") : t("status.off")}</span>
         </button>
-        <p className="section-title">Preferences</p>
+        <p className="section-title">{t("more.preferences")}</p>
+        <div className="card language-card">
+          <h2 className="section-title" style={{ marginTop: 0 }}>
+            {t("more.language")}
+          </h2>
+          <LanguageSwitcher />
+        </div>
         <button type="button" onClick={() => onNavigate("settings")}>
-          <span>Network settings</span>
+          <span>{t("more.network")}</span>
           <span>→</span>
         </button>
         <button type="button" onClick={() => onNavigate("privacy")}>
-          <span>Privacy</span>
+          <span>{t("nav.privacy")}</span>
           <span>→</span>
         </button>
         <button type="button" onClick={() => onNavigate("security")}>
-          <span>Security</span>
+          <span>{t("nav.security")}</span>
           <span>→</span>
         </button>
       </div>
@@ -125,7 +142,7 @@ export default function MoreRouter({ page, data, actions }: Props) {
   return (
     <>
       <button type="button" className="ghost small" onClick={onBack}>
-        ← Back
+        ← {t("more.back")}
       </button>
       {page === "history" && (
         <div className="card">
@@ -261,10 +278,19 @@ export default function MoreRouter({ page, data, actions }: Props) {
           onGoPay={onGoPayPeer}
         />
       )}
+      {page === "hacd" && (
+        <HacdTab
+          locked={!status || status.locked}
+          busy={busy}
+          onToast={onToast}
+          onGoPay={onGoLegacySend}
+        />
+      )}
       {page === "quantum" && (
         <QuantumScreen
           legacyAddress={statusAddress}
           nodeUrl={settings?.node_url}
+          networkMode={settings?.network_mode ?? "mainnet"}
           clipboardClearSecs={clipboardSecs}
           platformSec={platformSec}
           securityProfile={settings?.security_profile}
@@ -283,7 +309,11 @@ export default function MoreRouter({ page, data, actions }: Props) {
         />
       )}
       {page === "launchpad" && (
-        <LaunchpadScreen pauseAutoLockDapp={privacy.pause_auto_lock_dapp ?? true} />
+        <LaunchpadScreen
+          pauseAutoLockDapp={privacy.pause_auto_lock_dapp ?? true}
+          watchOnly={watchOnly}
+          onNotify={onToast}
+        />
       )}
       {page === "contacts" && (
         <ContactsScreen

@@ -86,7 +86,7 @@ impl WebAuthnGate {
     ) -> WalletResult<String> {
         let challenge = random_challenge();
         let (expected_origin, rp_id) = resolve_webauthn_context(client_origin);
-        *self.pending.lock().map_err(|e| lock_err(e))? = Some(CeremonyState {
+        *self.pending.lock().map_err(lock_err)? = Some(CeremonyState {
             challenge_b64: challenge.clone(),
             purpose: "registration".into(),
             expected_origin: expected_origin.clone(),
@@ -154,7 +154,7 @@ impl WebAuthnGate {
     ) -> WalletResult<String> {
         let challenge = random_challenge();
         let (expected_origin, rp_id) = resolve_webauthn_context(client_origin);
-        *self.pending.lock().map_err(|e| lock_err(e))? = Some(CeremonyState {
+        *self.pending.lock().map_err(lock_err)? = Some(CeremonyState {
             challenge_b64: challenge.clone(),
             purpose: "authentication".into(),
             expected_origin,
@@ -219,14 +219,14 @@ impl WebAuthnGate {
         ) {
             let auth_data = decode_b64(auth_b64)?;
             verify_authenticator_data(&auth_data, &state.rp_id)?;
-            if let Some(stored) = stored_cred.as_ref() {
-                if let Some(pk_b64) = &stored.public_key_b64 {
-                    let signature = decode_b64(sig_b64)?;
-                    let client_hash = Sha256::digest(&client_data_bytes);
-                    let mut signed = auth_data.clone();
-                    signed.extend_from_slice(&client_hash);
-                    verify_es256_signature(pk_b64, &signed, &signature)?;
-                }
+            if let Some(stored) = stored_cred.as_ref()
+                && let Some(pk_b64) = &stored.public_key_b64
+            {
+                let signature = decode_b64(sig_b64)?;
+                let client_hash = Sha256::digest(&client_data_bytes);
+                let mut signed = auth_data.clone();
+                signed.extend_from_slice(&client_hash);
+                verify_es256_signature(pk_b64, &signed, &signature)?;
             }
         }
         Ok(())
@@ -395,7 +395,7 @@ fn decode_b64(value: &str) -> WalletResult<Vec<u8>> {
         .map_err(|e| WalletError::Other(e.to_string()))
 }
 
-fn cose_param_bytes<'a>(key: &'a CoseKey, label: i64) -> Option<&'a [u8]> {
+fn cose_param_bytes(key: &CoseKey, label: i64) -> Option<&[u8]> {
     key.params
         .iter()
         .find(|(l, _)| *l == Label::Int(label))
@@ -421,7 +421,7 @@ impl WebAuthnGate {
         let state = self
             .pending
             .lock()
-            .map_err(|e| lock_err(e))?
+            .map_err(lock_err)?
             .take()
             .ok_or_else(|| WalletError::Other("WebAuthn ceremony not started".into()))?;
         if state.purpose != purpose {

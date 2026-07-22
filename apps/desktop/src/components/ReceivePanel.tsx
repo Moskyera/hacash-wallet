@@ -8,7 +8,7 @@ import {
   isValidHacdName,
   normalizeHacdName,
   type PaymentAsset,
-} from "../utils/paymentAssets";
+} from "@hacash/wallet-ui";
 import {
   loadWalletHacdName,
   saveWalletHacdName,

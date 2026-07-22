@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   ChannelInfo,
@@ -85,6 +85,7 @@ export default function FastPayScreen({
   const [channelPreview, setChannelPreview] = useState<ChannelSetupPreview | null>(null);
   const [showFastPayAdvanced, setShowFastPayAdvanced] = useState(false);
   const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
+  const inboxRequestRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     if (!fastPayReady || status?.locked) {
@@ -92,13 +93,20 @@ export default function FastPayScreen({
       return;
     }
     let cancelled = false;
-    const load = async () => {
-      try {
-        const items = await api.fastPayInbox();
-        if (!cancelled) setInbox(items);
-      } catch {
-        if (!cancelled) setInbox([]);
-      }
+    const load = (): Promise<void> => {
+      if (inboxRequestRef.current) return inboxRequestRef.current;
+      const request = (async () => {
+        try {
+          const items = await api.fastPayInbox();
+          if (!cancelled) setInbox(items);
+        } catch {
+          if (!cancelled) setInbox([]);
+        }
+      })().finally(() => {
+        if (inboxRequestRef.current === request) inboxRequestRef.current = null;
+      });
+      inboxRequestRef.current = request;
+      return request;
     };
     void load();
     const timer = window.setInterval(() => void load(), 5000);

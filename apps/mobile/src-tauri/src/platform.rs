@@ -9,8 +9,8 @@ pub struct PlatformSecurityStatus {
     pub biometric_kind: Option<String>,
 }
 
-pub fn platform_security_status(app: &AppHandle) -> PlatformSecurityStatus {
-    let (available, kind) = native_biometric_status(app);
+pub async fn platform_security_status(app: &AppHandle) -> PlatformSecurityStatus {
+    let (available, kind) = native_biometric_status(app).await;
     PlatformSecurityStatus {
         native_biometric_available: available,
         platform: std::env::consts::OS.into(),
@@ -18,30 +18,20 @@ pub fn platform_security_status(app: &AppHandle) -> PlatformSecurityStatus {
     }
 }
 
-pub fn native_biometric_available(app: &AppHandle) -> bool {
+pub async fn verify_native_biometric(app: &AppHandle, message: &str) -> Result<(), String> {
     #[cfg(windows)]
     {
         let _ = app;
-        windows_hello_available()
+        let message = message.to_string();
+        tauri::async_runtime::spawn_blocking(move || windows_hello_verify(&message))
+            .await
+            .map_err(|error| format!("Windows Hello task: {error}"))?
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
     {
-        mobile_biometric_available(app)
+        wallet_tauri_common::android_native::authenticate_strong(app, message).await
     }
-    #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
-    {
-        let _ = app;
-        false
-    }
-}
-
-pub fn verify_native_biometric(app: &AppHandle, message: &str) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        let _ = app;
-        windows_hello_verify(message)
-    }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
     {
         mobile_biometric_verify(app, message)
     }
@@ -52,8 +42,15 @@ pub fn verify_native_biometric(app: &AppHandle, message: &str) -> Result<(), Str
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
-fn native_biometric_status(app: &AppHandle) -> (bool, Option<String>) {
+#[cfg(target_os = "android")]
+async fn native_biometric_status(app: &AppHandle) -> (bool, Option<String>) {
+    wallet_tauri_common::android_native::strong_biometric_status(app)
+        .await
+        .unwrap_or((false, None))
+}
+
+#[cfg(target_os = "ios")]
+async fn native_biometric_status(app: &AppHandle) -> (bool, Option<String>) {
     use tauri_plugin_biometric::BiometricExt;
     match app.biometric().status() {
         Ok(s) => {
@@ -68,17 +65,22 @@ fn native_biometric_status(app: &AppHandle) -> (bool, Option<String>) {
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
-fn mobile_biometric_available(app: &AppHandle) -> bool {
-    native_biometric_status(app).0
-}
-
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn native_biometric_status(_app: &AppHandle) -> (bool, Option<String>) {
-    (native_biometric_available(_app), None)
+async fn native_biometric_status(_app: &AppHandle) -> (bool, Option<String>) {
+    #[cfg(windows)]
+    {
+        let available = tauri::async_runtime::spawn_blocking(windows_hello_available)
+            .await
+            .unwrap_or(false);
+        (available, available.then_some("Windows Hello".to_string()))
+    }
+    #[cfg(not(windows))]
+    {
+        (false, None)
+    }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "ios")]
 fn mobile_biometric_verify(app: &AppHandle, message: &str) -> Result<(), String> {
     use tauri_plugin_biometric::{AuthOptions, BiometricExt};
     app.biometric()
@@ -137,7 +139,7 @@ where
                     "async operation canceled",
                 ));
             }
-            AsyncStatus::Started | _ => {
+            _ => {
                 std::thread::sleep(Duration::from_millis(40));
             }
         }

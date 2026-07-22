@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { api, type BtcSendPreview } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { isValidHacashAddress } from "../paymentQr";
 import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 
 export function useBtcSend(opts: {
@@ -20,8 +21,8 @@ export function useBtcSend(opts: {
   const handlePreview = useCallback(async () => {
     const to = recipient.trim();
     const btc = Number(btcAmount);
-    if (!to.startsWith("1")) {
-      onNotify("Enter a valid Hacash recipient address (1…).", "error");
+    if (!isValidHacashAddress(to)) {
+      onNotify("Enter a valid Hacash recipient address.", "error");
       return;
     }
     if (!Number.isFinite(btc) || btc <= 0) {
@@ -32,6 +33,11 @@ export function useBtcSend(opts: {
     setBusy(true);
     setPreview(null);
     try {
+      const status = await api.status();
+      const inspected = await api.inspectAddress(to, status.network_mode);
+      if (!inspected.network_allowed) {
+        throw new Error(inspected.warning || "This address is not enabled on the selected network");
+      }
       const p = await api.previewSendBtc(to, satoshi);
       setPreview(p);
     } catch (e) {
@@ -64,7 +70,7 @@ export function useBtcSend(opts: {
       setPreview(null);
       setRecipient("");
       setBtcAmount("");
-      onNotify(`BTC sent on chain (${result.rail})`, "success");
+      onNotify(`BTC on Hacash transaction submitted (${result.rail})`, "success");
       await onSent();
     } catch (e) {
       onNotify(formatInvokeError(e), "error");

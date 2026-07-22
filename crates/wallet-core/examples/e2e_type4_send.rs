@@ -69,13 +69,12 @@ fn main() {
         );
         let mut tx = None;
         for _ in 0..40 {
-            if let Ok(response) = client.get(&query_url).send().await {
-                if let Ok(body) = response.json::<serde_json::Value>().await {
-                    if body.get("ret").and_then(|v| v.as_i64()) == Some(0) {
-                        tx = Some(body);
-                        break;
-                    }
-                }
+            if let Ok(response) = client.get(&query_url).send().await
+                && let Ok(body) = response.json::<serde_json::Value>().await
+                && body.get("ret").and_then(|v| v.as_i64()) == Some(0)
+            {
+                tx = Some(body);
+                break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }

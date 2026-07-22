@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hip5MainColors, renderHip5Svg, resolveVisualGene } from "./index";
+import { hip5MainColors, renderHip5Svg, resolveVisualGene } from "@hacash/wallet-ui";
 
 const VALID_VISUAL_GENE = "abcdef0123456789abcd";
 

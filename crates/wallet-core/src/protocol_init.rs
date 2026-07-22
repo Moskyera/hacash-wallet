@@ -12,6 +12,10 @@ pub fn ensure_protocol_setup() {
         // Channel and HACD inscription actions live in the consensus mint crate.
         // They must be registered anywhere the wallet decodes an unsigned body.
         mint::action::register(&mut setup);
+        // Register Istanbul HVM/P2SH action codecs for decode, intent binding and
+        // signing inspection. Do not install VM runtime hooks or execute code in
+        // the wallet; execution and state simulation remain node responsibilities.
+        vm::action::register(&mut setup);
         install_once(setup);
     });
 }

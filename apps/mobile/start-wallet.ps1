@@ -1,4 +1,4 @@
-# Start Hacash Wallet Mobile — Vite + debug exe (reliable desktop preview)
+# Start Hacash Wallet Mobile - Vite + debug exe (reliable desktop preview)
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $mobile "..\..")).Path
@@ -22,7 +22,7 @@ function Stop-PortListener([int]$Port) {
     }
 }
 
-# Stop old wallet only (do NOT kill all node — breaks other tools)
+# Stop old wallet only (do NOT kill all node - breaks other tools)
 Get-Process -Name hacash-wallet-mobile -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 400
 

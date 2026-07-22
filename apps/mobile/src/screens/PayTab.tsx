@@ -20,9 +20,10 @@ import { formatHacMei, maskAddress } from "../privacy";
 import { BIOMETRIC_THRESHOLD_MEI } from "../utils/appConstants";
 import {
   isValidHacdName,
+  isValidHacashAddress,
   normalizeHacdName,
   type PaymentAsset,
-} from "../utils/paymentAssets";
+} from "@hacash/wallet-ui";
 import type { PaymentQrPayload } from "../paymentQr";
 import {
   formatServiceFeeRate,
@@ -531,7 +532,7 @@ export default function PayTab({
           <BtcNetworkNotice onNotify={onToast} />
           <label className="label">Recipient Hacash address</label>
           <input
-            placeholder="1ABC…"
+            placeholder="Hacash address"
             value={btc.recipient}
             onChange={(e) => {
               btc.setRecipient(e.target.value);
@@ -561,7 +562,7 @@ export default function PayTab({
             className="primary"
             disabled={
               busy ||
-              !btc.recipient.trim().startsWith("1") ||
+              !isValidHacashAddress(btc.recipient) ||
               !btc.btcAmount ||
               Number(btc.btcAmount) <= 0
             }

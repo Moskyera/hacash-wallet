@@ -1,6 +1,6 @@
-# Hacash Quantum Wallet — Design Summary
+# Hacash Quantum Wallet - Design Summary
 
-**Document:** `DESIGN-HQW-001` · **Status:** Phase 0 (design only) · **Date:** 2026-07-12  
+**Document:** `DESIGN-HQW-001` · **Status:** Phase 0 (design only) · **Date:** 2026-07-12
 **Full design:** [`hacash-quantum-wallet-design.md`](./hacash-quantum-wallet-design.md)
 
 ---
@@ -9,7 +9,7 @@
 
 **Hacash Quantum Wallet** is a **new, separate product** (`Moskyera/hacash-quantum-wallet`) forked from [Hacash Wallet](https://github.com/Moskyera/hacash-wallet). It is **PQ-first**: welcome screen creates/imports **PQC v6 (ML-DSA-65)** or **Hybrid v7** keystore v3 accounts; **Type 4** send is the default rail.
 
-**Hacash Wallet stays as-is** — legacy secp256k1, Fast Pay, optional Quantum tab — and moves to **community operation** while Moskyera continues completing it as primary work. Quantum fork **implementation is deferred**; this pass delivers design + fork plan only.
+**Hacash Wallet stays as-is** - legacy secp256k1, Fast Pay, optional Quantum tab - and moves to **community operation** while Moskyera continues completing it as primary work. Quantum fork **implementation is deferred**; this pass delivers design + fork plan only.
 
 ---
 
@@ -68,7 +68,7 @@ Documented today in `QuantumFundingCard.tsx` and `e2e_fund_quantum.rs`.
 
 ## Fork timing
 
-**Recommended:** Q4 2026 — after legacy mobile Phase 2 + first community release.  
+**Recommended:** Q4 2026 - after legacy mobile Phase 2 + first community release.
 **Do not fork before:** PQ-primary vault design locked (OQ-1).
 
 ---
@@ -96,25 +96,25 @@ Documented today in `QuantumFundingCard.tsx` and `e2e_fund_quantum.rs`.
 
 ## Quantum v1 scope cuts
 
-**Remove:** Fast Pay, HACD/BTC send, Messenger, Dust Whisper, hub discovery, `quantum_mode` toggle.  
+**Remove:** Fast Pay, HACD/BTC send, Messenger, Dust Whisper, hub discovery, `quantum_mode` toggle.
 **Keep:** Type 4 send, air-gap QR, keystore v3, WebAuthn/biometric gates, node health, security profiles.
 
 ---
 
 ## PR plan (12 ordered PRs)
 
-1. Monorepo scaffold  
-2. Branding + bundle IDs  
-3. `HacashQuantumWallet` data path  
-4. `quantum-product` feature flag  
-5. PQ-primary vault  
-6. Trim Tauri IPC  
-7. Desktop PQ-first UI  
-8. Mobile PQ-first UI  
-9. CI / quantum release workflows  
-10. Bridge + node docs  
-11. E2E integration tests  
-12. Audit gate verification  
+1. Monorepo scaffold
+2. Branding + bundle IDs
+3. `HacashQuantumWallet` data path
+4. `quantum-product` feature flag
+5. PQ-primary vault
+6. Trim Tauri IPC
+7. Desktop PQ-first UI
+8. Mobile PQ-first UI
+9. CI / quantum release workflows
+10. Bridge + node docs
+11. E2E integration tests
+12. Audit gate verification
 
 See full PR details in [design doc §13](./hacash-quantum-wallet-design.md#13-pr-plan-ordered-fork-prs).
 
@@ -122,14 +122,14 @@ See full PR details in [design doc §13](./hacash-quantum-wallet-design.md#13-pr
 
 ## Key decisions
 
-1. Separate repo and product — not dual-mode in one app.  
-2. Legacy wallet unchanged; community handoff planned.  
-3. Legacy remains primary active work until handoff gates met.  
-4. Quantum implementation deferred; design + PR plan now.  
-5. Reuse existing quantum modules and audit tests.  
-6. Distinct data dir and package IDs for side-by-side install.  
-7. Bridge funding via legacy Type 1 HAC (existing on-chain pattern).  
-8. Omit Fast Pay and multi-asset sends in quantum v1.  
+1. Separate repo and product - not dual-mode in one app.
+2. Legacy wallet unchanged; community handoff planned.
+3. Legacy remains primary active work until handoff gates met.
+4. Quantum implementation deferred; design + PR plan now.
+5. Reuse existing quantum modules and audit tests.
+6. Distinct data dir and package IDs for side-by-side install.
+7. Bridge funding via legacy Type 1 HAC (existing on-chain pattern).
+8. Omit Fast Pay and multi-asset sends in quantum v1.
 9. Pin PQC fullnode branch `feature/pqc-phases-1-3`.
 
 ---
@@ -148,7 +148,7 @@ See full PR details in [design doc §13](./hacash-quantum-wallet-design.md#13-pr
 
 ## References
 
-- Legacy repo: https://github.com/Moskyera/hacash-wallet  
-- Community site: https://moskyera.github.io/  
-- Hub operators: `docs/HUB-OPERATOR.md`  
+- Legacy repo: https://github.com/Moskyera/hacash-wallet
+- Community site: https://moskyera.github.io/
+- Hub operators: `docs/HUB-OPERATOR.md`
 - Full design: `docs/hacash-quantum-wallet-design.md`

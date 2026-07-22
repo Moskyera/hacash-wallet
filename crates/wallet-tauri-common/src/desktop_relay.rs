@@ -26,6 +26,12 @@ impl RelayProcess {
     }
 }
 
+impl Default for RelayProcess {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn stop_managed_relay(state: &AppState) -> Result<(), String> {
     let managed = *state.relay.managed.lock().map_err(|e| e.to_string())?;
     if !managed {
@@ -42,7 +48,7 @@ pub async fn sync_managed_relay(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
 
     let (settings, node_url) = {
-        let svc = state.inner.lock().await;
+        let mut svc = state.inner.lock().await;
         (svc.dust_whisper_settings(), svc.status().node_url)
     };
 

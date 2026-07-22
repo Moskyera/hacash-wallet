@@ -47,7 +47,7 @@ async fn whisper_enabled_routes_through_relay() {
     let node_url = format!("http://{node_addr}");
     let (relay_addr, relay_handle) = spawn_relay(node_url.clone()).await;
 
-    let node = NodeClient::new(&node_url);
+    let node = NodeClient::new(&node_url).expect("mock node client");
     let settings = DustWhisperSettings {
         enabled: true,
         relay_urls: vec![format!("http://{relay_addr}")],
@@ -66,7 +66,7 @@ async fn whisper_enabled_routes_through_relay() {
 
 #[tokio::test]
 async fn whisper_without_fallback_returns_error() {
-    let node = NodeClient::new("http://127.0.0.1:1");
+    let node = NodeClient::new("http://127.0.0.1:1").expect("offline node client");
     let settings = DustWhisperSettings {
         enabled: true,
         relay_urls: vec!["http://127.0.0.1:1".into()],

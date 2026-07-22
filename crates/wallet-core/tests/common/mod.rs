@@ -1,3 +1,7 @@
+// Each integration test is a separate crate and intentionally uses only a
+// subset of these shared helpers.
+#![allow(dead_code)]
+
 //! Shared helpers for wallet security audit integration tests.
 
 use std::sync::Mutex;
@@ -12,6 +16,7 @@ static WALLET_DATA_ENV_LOCK: Mutex<()> = Mutex::new(());
 pub fn with_protocol_setup<F: FnOnce()>(f: F) {
     let mut setup = new_standard_protocol_setup(|_, stuff| calculate_hash(stuff));
     mint::action::register(&mut setup);
+    vm::action::register(&mut setup);
     let _guard = install_test_scope(setup);
     f();
 }

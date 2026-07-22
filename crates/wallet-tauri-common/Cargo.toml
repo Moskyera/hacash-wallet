@@ -12,21 +12,17 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-axum = { workspace = true, optional = true }
-tower-http = { workspace = true, features = ["cors"], optional = true }
 uuid = { workspace = true }
 dust-whisper = { path = "../dust-whisper", optional = true }
 
 sha2.workspace = true
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
-ndk-context = "0.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [features]
 default = []
-desktop = ["dep:axum", "dep:tower-http", "dep:dust-whisper"]
+desktop = ["dep:dust-whisper"]
 desktop-platform = []

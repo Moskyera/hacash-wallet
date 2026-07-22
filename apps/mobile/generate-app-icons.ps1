@@ -1,4 +1,4 @@
-# Generate Hacash Wallet launcher icons from glossy symbol only (mosky.png — no text).
+# Generate Hacash Wallet launcher icons from glossy symbol only (mosky.png - no text).
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $icons = Join-Path $mobile "src-tauri\icons"
@@ -104,7 +104,7 @@ yarn tauri icon "src-tauri/icons/icon-manifest.json"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Tauri icon set generated (ico/icns/icon.png)." -ForegroundColor Green
 
-# Tauri CLI does not reliably refresh icons/android/mipmap-* — write glossy mipmaps explicitly.
+# Tauri CLI does not reliably refresh icons/android/mipmap-* - write glossy mipmaps explicitly.
 if (Test-Path $androidRoot) {
     Get-ChildItem -Path $androidRoot -Directory -Filter "mipmap-*" | Remove-Item -Recurse -Force
 }

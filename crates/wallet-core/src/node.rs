@@ -1,40 +1,72 @@
-use std::sync::OnceLock;
-use std::time::Duration;
-
-use serde::Deserialize;
+use field::Address;
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+#[cfg(target_os = "android")]
+use std::io::Read;
 
 use crate::error::{WalletError, WalletResult};
-use crate::settings::{DEFAULT_NODE_URL, sanitize_node_url};
+#[cfg(target_os = "android")]
+use crate::http_client::blocking_http_client;
+use crate::http_client::shared_http_client;
+use crate::node_capabilities::{NodeApiError, NodeCapabilities};
+use crate::settings::sanitize_node_url;
 
-const DEFAULT_NODE: &str = DEFAULT_NODE_URL;
-const USER_AGENT: &str = concat!("HacashWallet/", env!("CARGO_PKG_VERSION"));
+const MAX_NODE_JSON_BYTES: usize = 2 * 1024 * 1024;
 
-fn shared_http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_max_idle_per_host(8)
-            .tcp_keepalive(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(20))
-            .timeout(Duration::from_secs(45))
-            .user_agent(USER_AGENT)
-            // Ignore system/VPN proxy. it often breaks direct node access on mobile.
-            .no_proxy()
-            .build()
-            .expect("http client")
-    })
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BalanceError {
+    UnsupportedAddress { message: String },
+    Node { ret: i32, message: String },
 }
 
-fn blocking_http_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(45))
-        .user_agent(USER_AGENT)
-        .no_proxy()
-        .build()
-        .expect("blocking http client")
+impl From<BalanceError> for WalletError {
+    fn from(error: BalanceError) -> Self {
+        match error {
+            BalanceError::UnsupportedAddress { message } => {
+                WalletError::UnsupportedAddress(message)
+            }
+            BalanceError::Node { ret, message } => {
+                WalletError::Node(format!("{message} (ret={ret})"))
+            }
+        }
+    }
+}
+
+fn classify_balance_error(ret: i32, address: &str, message: String) -> BalanceError {
+    let type4_address = Address::from_readable(address)
+        .map(|parsed| matches!(parsed.version(), Address::PQCKEY | Address::HYBRID))
+        .unwrap_or(false);
+
+    if ret == 1 && type4_address {
+        BalanceError::UnsupportedAddress { message }
+    } else {
+        BalanceError::Node { ret, message }
+    }
+}
+
+fn select_balance_entry(
+    entries: &[BalanceEntry],
+    requested_address: &str,
+) -> WalletResult<BalanceEntry> {
+    if let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.address.as_deref() == Some(requested_address))
+    {
+        return Ok(entry.clone());
+    }
+
+    // Older nodes may omit the address when a single address was requested.
+    // Never accept an explicitly different address or an ambiguous row set.
+    if let [entry] = entries
+        && entry.address.is_none()
+    {
+        return Ok(entry.clone());
+    }
+
+    Err(WalletError::Node(
+        "balance response did not contain the requested address".into(),
+    ))
 }
 
 fn node_reachability_hint(url: &str) -> String {
@@ -72,6 +104,91 @@ fn node_transport_err(url: &str, err: impl std::fmt::Display) -> WalletError {
     WalletError::Node(format!("cannot reach {url}. {err}.{hint}"))
 }
 
+fn decode_http_json<T>(url: &str, status: reqwest::StatusCode, body: &[u8]) -> WalletResult<T>
+where
+    T: DeserializeOwned,
+{
+    if body.len() > MAX_NODE_JSON_BYTES {
+        return Err(WalletError::Node(format!(
+            "{url}: node response exceeds {} bytes",
+            MAX_NODE_JSON_BYTES
+        )));
+    }
+    if !status.is_success() {
+        let fallback = format!("HTTP {}", status.as_u16());
+        let error = serde_json::from_slice::<Value>(body)
+            .map(|value| NodeApiError::from_value(&value, fallback.clone()))
+            .unwrap_or_else(|_| NodeApiError::from_value(&Value::Null, fallback));
+        return Err(WalletError::NodeHttpStatus {
+            status: status.as_u16(),
+            message: error.to_string(),
+        });
+    }
+    serde_json::from_slice(body)
+        .map_err(|error| WalletError::Node(format!("{url}: invalid JSON response: {error}")))
+}
+
+fn oversized_node_response(url: &str) -> WalletError {
+    WalletError::Node(format!(
+        "{url}: node response exceeds {} bytes",
+        MAX_NODE_JSON_BYTES
+    ))
+}
+
+#[cfg(target_os = "android")]
+fn read_blocking_node_body(
+    response: reqwest::blocking::Response,
+    url: &str,
+) -> WalletResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_NODE_JSON_BYTES as u64)
+    {
+        return Err(oversized_node_response(url));
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_NODE_JSON_BYTES as u64) as usize,
+    );
+    response
+        .take(MAX_NODE_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| WalletError::Node(format!("{url}: cannot read response: {error}")))?;
+    if body.len() > MAX_NODE_JSON_BYTES {
+        return Err(oversized_node_response(url));
+    }
+    Ok(body)
+}
+
+#[cfg(not(target_os = "android"))]
+async fn read_async_node_body(mut response: reqwest::Response, url: &str) -> WalletResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_NODE_JSON_BYTES as u64)
+    {
+        return Err(oversized_node_response(url));
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_NODE_JSON_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| WalletError::Node(format!("{url}: cannot read response: {error}")))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_NODE_JSON_BYTES {
+            return Err(oversized_node_response(url));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 async fn http_get_json<T>(url: String) -> WalletResult<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -79,26 +196,29 @@ where
     #[cfg(target_os = "android")]
     {
         return tokio::task::spawn_blocking(move || {
-            blocking_http_client()
+            let response = blocking_http_client()
+                .map_err(WalletError::Node)?
                 .get(&url)
                 .send()
-                .map_err(|e| node_transport_err(&url, e))?
-                .json::<T>()
-                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+                .map_err(|e| node_transport_err(&url, e))?;
+            let status = response.status();
+            let body = read_blocking_node_body(response, &url)?;
+            decode_http_json(&url, status, &body)
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
     }
     #[cfg(not(target_os = "android"))]
     {
-        shared_http_client()
+        let response = shared_http_client()
+            .map_err(WalletError::Node)?
             .get(&url)
             .send()
             .await
-            .map_err(|e| node_transport_err(&url, e))?
-            .json::<T>()
-            .await
-            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+            .map_err(|e| node_transport_err(&url, e))?;
+        let status = response.status();
+        let body = read_async_node_body(response, &url).await?;
+        decode_http_json(&url, status, &body)
     }
 }
 
@@ -110,28 +230,31 @@ where
     #[cfg(target_os = "android")]
     {
         return tokio::task::spawn_blocking(move || {
-            blocking_http_client()
+            let response = blocking_http_client()
+                .map_err(WalletError::Node)?
                 .post(&url)
                 .json(&payload)
                 .send()
-                .map_err(|e| node_transport_err(&url, e))?
-                .json::<R>()
-                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+                .map_err(|e| node_transport_err(&url, e))?;
+            let status = response.status();
+            let body = read_blocking_node_body(response, &url)?;
+            decode_http_json(&url, status, &body)
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
     }
     #[cfg(not(target_os = "android"))]
     {
-        shared_http_client()
+        let response = shared_http_client()
+            .map_err(WalletError::Node)?
             .post(&url)
             .json(&payload)
             .send()
             .await
-            .map_err(|e| node_transport_err(&url, e))?
-            .json::<R>()
-            .await
-            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+            .map_err(|e| node_transport_err(&url, e))?;
+        let status = response.status();
+        let body = read_async_node_body(response, &url).await?;
+        decode_http_json(&url, status, &body)
     }
 }
 
@@ -142,30 +265,33 @@ where
     #[cfg(target_os = "android")]
     {
         return tokio::task::spawn_blocking(move || {
-            blocking_http_client()
+            let response = blocking_http_client()
+                .map_err(WalletError::Node)?
                 .post(&url)
                 .header("content-type", "text/plain")
                 .body(body)
                 .send()
-                .map_err(|e| node_transport_err(&url, e))?
-                .json::<R>()
-                .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+                .map_err(|e| node_transport_err(&url, e))?;
+            let status = response.status();
+            let body = read_blocking_node_body(response, &url)?;
+            decode_http_json(&url, status, &body)
         })
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
     }
     #[cfg(not(target_os = "android"))]
     {
-        shared_http_client()
+        let response = shared_http_client()
+            .map_err(WalletError::Node)?
             .post(&url)
             .header("content-type", "text/plain")
             .body(body)
             .send()
             .await
-            .map_err(|e| node_transport_err(&url, e))?
-            .json::<R>()
-            .await
-            .map_err(|e| WalletError::Node(format!("{url}: {e}")))
+            .map_err(|e| node_transport_err(&url, e))?;
+        let status = response.status();
+        let body = read_async_node_body(response, &url).await?;
+        decode_http_json(&url, status, &body)
     }
 }
 
@@ -175,18 +301,12 @@ pub struct NodeClient {
     http: reqwest::Client,
 }
 
-impl Default for NodeClient {
-    fn default() -> Self {
-        Self::new(DEFAULT_NODE)
-    }
-}
-
 impl NodeClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
-        Self {
+    pub fn new(base_url: impl Into<String>) -> WalletResult<Self> {
+        Ok(Self {
             base_url: sanitize_node_url(&base_url.into()),
-            http: shared_http_client().clone(),
-        }
+            http: shared_http_client().map_err(WalletError::Node)?.clone(),
+        })
     }
 
     pub async fn ping(&self) -> WalletResult<serde_json::Value> {
@@ -198,6 +318,29 @@ impl NodeClient {
             "node": self.base_url,
             "latest": latest
         }))
+    }
+
+    pub async fn capabilities(&self) -> WalletResult<NodeCapabilities> {
+        let url = format!("{}/query/capabilities", self.base_url);
+        let value: Value = match http_get_json(url).await {
+            Ok(value) => value,
+            Err(WalletError::NodeHttpStatus { status: 404, .. }) => {
+                return Ok(NodeCapabilities::legacy_type2(self.base_url.clone()));
+            }
+            Err(error) => return Err(error),
+        };
+        let ret = value.get("ret").and_then(Value::as_i64).ok_or_else(|| {
+            WalletError::Node("capability response is missing numeric ret".into())
+        })?;
+        if ret != 0 {
+            return Err(WalletError::Node(
+                NodeApiError::from_value(&value, "capability query failed").to_string(),
+            ));
+        }
+        let capabilities: NodeCapabilities = serde_json::from_value(value).map_err(|error| {
+            WalletError::Node(format!("capability response shape invalid: {error}"))
+        })?;
+        capabilities.validate()
     }
 
     pub async fn block_intro(&self, height: u64) -> WalletResult<BlockIntroResponse> {
@@ -245,11 +388,7 @@ impl NodeClient {
         let url = format!("{}/create/transaction", self.base_url);
         let body: BuildTxResponse = http_post_json(url, payload).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(
-                body.err
-                    .or(body.message)
-                    .unwrap_or_else(|| "create transaction failed".into()),
-            ));
+            return Err(WalletError::Node(body.api_error().to_string()));
         }
         Ok(body)
     }
@@ -261,28 +400,23 @@ impl NodeClient {
     pub async fn query_balance_entry(
         &self,
         address: &str,
-        include_diamonds: bool,
+        include_asset_details: bool,
     ) -> WalletResult<BalanceEntry> {
         let mut url = format!(
             "{}/query/balance?unit=mei&address={}",
             self.base_url, address
         );
-        if include_diamonds {
-            url.push_str("&diamonds=true");
+        if include_asset_details {
+            url.push_str("&diamonds=true&assets=true");
         }
         let body: BalanceResponse = http_get_json(url).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(format!(
-                "balance query failed ret={}",
-                body.ret
-            )));
+            let node_message = body
+                .err
+                .unwrap_or_else(|| format!("balance query failed (ret={})", body.ret));
+            return Err(classify_balance_error(body.ret, address, node_message).into());
         }
-        body.list
-            .iter()
-            .find(|x| x.address.as_deref() == Some(address))
-            .or_else(|| body.list.first())
-            .cloned()
-            .ok_or_else(|| WalletError::Node("address not in balance response".into()))
+        select_balance_entry(&body.list, address)
     }
 
     pub async fn build_send_diamond_tx(
@@ -418,11 +552,7 @@ impl NodeClient {
         let url = format!("{}/submit/transaction?hexbody=true", self.base_url);
         let body: SubmitTxResponse = http_post_text_json(url, tx_hex.to_owned()).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(
-                body.err
-                    .or(body.message)
-                    .unwrap_or_else(|| "submit failed".into()),
-            ));
+            return Err(WalletError::Node(body.api_error().to_string()));
         }
         Ok(body)
     }
@@ -441,10 +571,9 @@ impl NodeClient {
         let url = format!("{}/query/diamond?name={}", self.base_url, normalized);
         let body: DiamondQueryResponse = http_get_json(url).await?;
         if body.ret != 0 {
-            return Err(WalletError::Node(format!(
-                "diamond '{}' not found (ret={})",
-                normalized, body.ret
-            )));
+            return Err(WalletError::Node(body.err.unwrap_or_else(|| {
+                format!("diamond '{}' not found (ret={})", normalized, body.ret)
+            })));
         }
         Ok(body.into_info(&normalized))
     }
@@ -495,6 +624,8 @@ pub struct DiamondInfo {
 #[derive(Debug, Deserialize)]
 struct DiamondQueryResponse {
     ret: i32,
+    #[serde(default)]
+    err: Option<String>,
     #[allow(dead_code)]
     name: Option<String>,
     number: Option<u64>,
@@ -508,6 +639,13 @@ struct DiamondQueryResponse {
     prev_hash: Option<String>,
     #[serde(default)]
     inscriptions: Vec<String>,
+    #[serde(default)]
+    inscription_items: Vec<DiamondInscriptionItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiamondInscriptionItem {
+    content: Option<String>,
 }
 
 impl DiamondQueryResponse {
@@ -517,7 +655,7 @@ impl DiamondQueryResponse {
             name: requested_name.to_ascii_uppercase(),
             metadata_source: "configured".into(),
             number: self.number,
-            visual_gene: exact_hex(self.visual_gene, 20),
+            visual_gene: clean_visual_gene(self.visual_gene),
             life_gene: exact_hex(self.life_gene, 64),
             belong: clean_node_address(self.belong),
             miner: clean_node_address(self.miner),
@@ -533,7 +671,19 @@ impl DiamondQueryResponse {
             inscriptions: self
                 .inscriptions
                 .into_iter()
+                .chain(
+                    self.inscription_items
+                        .into_iter()
+                        .filter_map(|item| item.content),
+                )
                 .filter_map(clean_inscription)
+                .fold(Vec::new(), |mut values, value| {
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                    values
+                })
+                .into_iter()
                 .take(16)
                 .collect(),
         }
@@ -546,14 +696,21 @@ fn exact_hex(value: Option<String>, expected_len: usize) -> Option<String> {
         .then(|| value.to_ascii_lowercase())
 }
 
-fn clean_node_address(value: Option<String>) -> Option<String> {
-    const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+/// Official nodes/explorers use 18–20 hex visual genes (HIP-5).
+fn clean_visual_gene(value: Option<String>) -> Option<String> {
     let value = value?;
-    (value.len() >= 26
-        && value.len() <= 45
-        && value.starts_with('1')
-        && value.chars().all(|ch| BASE58.contains(ch)))
-    .then_some(value)
+    let lower = value.to_ascii_lowercase();
+    let len = lower.len();
+    ((18..=20).contains(&len) && lower.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(lower)
+}
+
+fn clean_node_address(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        Address::from_readable(value.trim())
+            .ok()
+            .map(|address| address.to_readable())
+    })
 }
 
 fn clean_bid_fee(value: String) -> Option<String> {
@@ -583,18 +740,61 @@ fn clean_inscription(value: String) -> Option<String> {
 #[derive(Debug, Deserialize)]
 struct BalanceResponse {
     ret: i32,
+    #[serde(default)]
+    err: Option<String>,
+    #[serde(default)]
     list: Vec<BalanceEntry>,
+}
+
+mod u64_decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum WireValue {
+        Number(u64),
+        Decimal(String),
+    }
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match WireValue::deserialize(deserializer)? {
+            WireValue::Number(value) => Ok(value),
+            WireValue::Decimal(value) => value.parse::<u64>().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeAssetBalance {
+    /// Serialized as a decimal string so JavaScript cannot lose u64 precision.
+    #[serde(with = "u64_decimal")]
+    pub serial: u64,
+    /// Serialized as a decimal string so JavaScript cannot lose u64 precision.
+    #[serde(with = "u64_decimal")]
+    pub amount: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BalanceEntry {
     address: Option<String>,
     hacash: String,
-    diamond: Option<u32>,
+
     #[serde(default)]
     pub satoshi: u64,
     #[serde(default)]
     pub diamonds: Option<String>,
+    #[serde(default)]
+    pub assets: Vec<NativeAssetBalance>,
 }
 
 impl BalanceEntry {
@@ -607,23 +807,108 @@ impl BalanceEntry {
     pub fn btc_satoshi(&self) -> u64 {
         self.satoshi
     }
+
+    pub fn native_assets(&self) -> WalletResult<Vec<NativeAssetBalance>> {
+        let max_assets = field::BALANCE_ASSET_MAX;
+        if self.assets.len() > max_assets {
+            return Err(WalletError::Node(format!(
+                "native asset list exceeds {max_assets} entries"
+            )));
+        }
+        let mut assets = self.assets.clone();
+        if assets
+            .iter()
+            .any(|asset| asset.serial == 0 || asset.amount == 0)
+        {
+            return Err(WalletError::Node(
+                "native asset balance contains a zero serial or amount".into(),
+            ));
+        }
+        assets.sort_by_key(|asset| asset.serial);
+        if assets
+            .windows(2)
+            .any(|pair| pair[0].serial == pair[1].serial)
+        {
+            return Err(WalletError::Node(
+                "native asset balance contains duplicate serials".into(),
+            ));
+        }
+        Ok(assets)
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildTxResponse {
     pub ret: i32,
+    #[serde(default)]
     pub err: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
     pub body: Option<String>,
+    #[serde(default)]
     pub hash: Option<String>,
+    #[serde(default, flatten)]
+    pub details: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl BuildTxResponse {
+    pub fn api_error(&self) -> NodeApiError {
+        NodeApiError {
+            ret: Some(self.ret),
+            code: self.code.clone(),
+            stage: self.stage.clone(),
+            message: self
+                .message
+                .clone()
+                .or_else(|| self.error.clone())
+                .or_else(|| self.err.clone())
+                .unwrap_or_else(|| "create transaction failed".into()),
+            details: self.details.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SubmitTxResponse {
     pub ret: i32,
+    #[serde(default)]
     pub err: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
     pub hash: Option<String>,
+    #[serde(default, flatten)]
+    pub details: Map<String, Value>,
+}
+
+impl SubmitTxResponse {
+    pub fn api_error(&self) -> NodeApiError {
+        NodeApiError {
+            ret: Some(self.ret),
+            code: self.code.clone(),
+            stage: self.stage.clone(),
+            message: self
+                .message
+                .clone()
+                .or_else(|| self.error.clone())
+                .or_else(|| self.err.clone())
+                .unwrap_or_else(|| "submit failed".into()),
+            details: self.details.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -663,6 +948,7 @@ mod diamond_metadata_tests {
     fn rejects_untrusted_metadata_fields() {
         let response = DiamondQueryResponse {
             ret: 0,
+            err: None,
             name: Some("<script>".into()),
             number: None,
             visual_gene: Some("<svg onload=alert(1)>".into()),
@@ -674,6 +960,7 @@ mod diamond_metadata_tests {
             born: None,
             prev_hash: Some("0".repeat(63)),
             inscriptions: vec!["ok".into(), "bad\ncontrol".into()],
+            inscription_items: vec![],
         };
         let info = response.into_info("WTYU");
         assert_eq!(info.name, "WTYU");
@@ -691,5 +978,192 @@ mod diamond_metadata_tests {
         );
         assert!(is_valid_node_diamond_name("VWMMMM"));
         assert!(!is_valid_node_diamond_name("ABCDEF"));
+    }
+
+    #[test]
+    fn parses_official_balance_error_envelope_without_decode_failure() {
+        let raw = r#"{"err":"address 3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj format invalid","ret":1}"#;
+        let response: BalanceResponse = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(response.ret, 1);
+        assert_eq!(
+            response.err.as_deref(),
+            Some("address 3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj format invalid")
+        );
+        assert!(response.list.is_empty());
+    }
+
+    #[test]
+    fn reads_inscriptions_from_current_official_metadata_shape() {
+        let raw = r#"{
+            "ret": 0,
+            "name": "VWMMMM",
+            "inscription_items": [{"content":"hacds","engraved_type":0}]
+        }"#;
+        let response: DiamondQueryResponse = serde_json::from_str(raw).unwrap();
+        let info = response.into_info("VWMMMM");
+
+        assert_eq!(info.inscriptions, vec!["hacds"]);
+    }
+
+    #[test]
+    fn classifies_type4_balance_rejection_without_matching_node_text() {
+        let error = classify_balance_error(
+            1,
+            "3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj",
+            "address rejected".into(),
+        );
+
+        assert!(matches!(error, BalanceError::UnsupportedAddress { .. }));
+    }
+
+    #[test]
+    fn preserves_non_format_type4_node_errors() {
+        let error = classify_balance_error(
+            2,
+            "3RAj55Bnux2JBJ1W91hHy7Mv3hbHBFxBRj",
+            "node unavailable".into(),
+        );
+
+        assert!(matches!(error, BalanceError::Node { ret: 2, .. }));
+    }
+
+    #[test]
+    fn preserves_regular_node_balance_errors() {
+        let error = classify_balance_error(
+            1,
+            "1MzNY1oA3kfgYi75zquj3SRUPYztzXHzK9",
+            "temporary failure".into(),
+        );
+
+        assert!(matches!(error, BalanceError::Node { ret: 1, .. }));
+    }
+
+    fn parse_balance_entries(value: serde_json::Value) -> Vec<BalanceEntry> {
+        serde_json::from_value::<BalanceResponse>(json!({
+            "ret": 0,
+            "list": value,
+        }))
+        .expect("balance response")
+        .list
+    }
+
+    #[test]
+    fn balance_selector_uses_the_exact_requested_address() {
+        let entries = parse_balance_entries(json!([
+            { "address": "1Other", "hacash": "99" },
+            { "address": "1Requested", "hacash": "7" }
+        ]));
+
+        let selected = select_balance_entry(&entries, "1Requested").expect("exact match");
+        assert_eq!(selected.hacash_mei().unwrap(), 7.0);
+    }
+
+    #[test]
+    fn balance_selector_accepts_only_a_sole_addressless_legacy_row() {
+        let entries = parse_balance_entries(json!([{ "hacash": "7" }]));
+        assert_eq!(
+            select_balance_entry(&entries, "1Requested")
+                .expect("sole legacy row")
+                .hacash_mei()
+                .unwrap(),
+            7.0
+        );
+
+        let ambiguous = parse_balance_entries(json!([
+            { "hacash": "7" },
+            { "hacash": "8" }
+        ]));
+        assert!(select_balance_entry(&ambiguous, "1Requested").is_err());
+    }
+
+    #[test]
+    fn balance_selector_rejects_a_sole_mismatched_address() {
+        let entries = parse_balance_entries(json!([{
+            "address": "1Other",
+            "hacash": "99"
+        }]));
+
+        let error = select_balance_entry(&entries, "1Requested").expect_err("mismatch");
+        assert!(error.to_string().contains("requested address"));
+    }
+
+    #[test]
+    fn native_asset_balances_are_sorted_and_consensus_bounded() {
+        let entries = parse_balance_entries(json!([{
+            "address": "1Requested",
+            "hacash": "1",
+            "assets": [
+                { "serial": 9, "amount": 2 },
+                { "serial": 3, "amount": 4 }
+            ]
+        }]));
+        assert_eq!(
+            entries[0].native_assets().unwrap(),
+            [
+                NativeAssetBalance {
+                    serial: 3,
+                    amount: 4
+                },
+                NativeAssetBalance {
+                    serial: 9,
+                    amount: 2
+                }
+            ]
+        );
+
+        let too_many = (1..=field::BALANCE_ASSET_MAX + 1)
+            .map(|serial| json!({ "serial": serial, "amount": 1 }))
+            .collect::<Vec<_>>();
+        let entries = parse_balance_entries(json!([{
+            "address": "1Requested", "hacash": "1", "assets": too_many
+        }]));
+        assert!(entries[0].native_assets().is_err());
+    }
+
+    #[test]
+    fn native_asset_balances_reject_zero_and_duplicate_entries() {
+        for assets in [
+            json!([{ "serial": 0, "amount": 1 }]),
+            json!([{ "serial": 1, "amount": 0 }]),
+            json!([
+                { "serial": 7, "amount": 1 },
+                { "serial": 7, "amount": 2 }
+            ]),
+        ] {
+            let entries = parse_balance_entries(json!([{
+                "address": "1Requested", "hacash": "1", "assets": assets
+            }]));
+            assert!(entries[0].native_assets().is_err());
+        }
+    }
+
+    #[test]
+    fn native_asset_json_preserves_full_u64_precision() {
+        let asset = NativeAssetBalance {
+            serial: u64::MAX,
+            amount: u64::MAX - 1,
+        };
+        assert_eq!(
+            serde_json::to_value(&asset).unwrap(),
+            json!({
+                "serial": u64::MAX.to_string(),
+                "amount": (u64::MAX - 1).to_string()
+            })
+        );
+
+        for wire in [
+            json!({ "serial": 7, "amount": 9 }),
+            json!({ "serial": "7", "amount": "9" }),
+        ] {
+            let decoded: NativeAssetBalance = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                decoded,
+                NativeAssetBalance {
+                    serial: 7,
+                    amount: 9
+                }
+            );
+        }
     }
 }

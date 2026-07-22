@@ -1,4 +1,4 @@
-# DUST Whisper privacy demo — shows direct read vs relay submit paths.
+# DUST Whisper privacy demo - shows direct read vs relay submit paths.
 # Usage: .\scripts\whisper-privacy-demo.ps1 [-NodeUrl http://nodeapi.hacash.org]
 
 param(

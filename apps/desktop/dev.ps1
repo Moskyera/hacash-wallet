@@ -1,4 +1,4 @@
-# Moskyera Quantum Wallet — hot-reload dev launcher
+# Moskyera Quantum Wallet - hot-reload dev launcher
 $ErrorActionPreference = "Stop"
 $desktop = $PSScriptRoot
 

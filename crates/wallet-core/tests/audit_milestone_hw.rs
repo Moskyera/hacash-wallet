@@ -14,7 +14,7 @@ fn milestone_watch_only_cannot_sign() {
             let addr = svc
                 .import_watch_only("1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS")
                 .unwrap();
-            assert_eq!(svc.status().watch_only, true);
+            assert!(svc.status().watch_only);
             let err = svc.audit_sign_tx_body("00").unwrap_err();
             assert!(matches!(err, WalletError::Policy(_)));
             assert_eq!(svc.status().address.as_deref(), Some(addr.as_str()));

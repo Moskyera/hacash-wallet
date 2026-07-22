@@ -11,7 +11,7 @@ pub struct WalletAccount {
 impl WalletAccount {
     /// Deterministic account from seed text or passphrase (import / legacy recovery only).
     pub fn create(passphrase: &str) -> WalletResult<Self> {
-        let account = Account::create_by(passphrase).map_err(|e| WalletError::Other(e))?;
+        let account = Account::create_by(passphrase).map_err(WalletError::Other)?;
         Ok(Self { account })
     }
 
@@ -21,12 +21,12 @@ impl WalletAccount {
             rand::thread_rng().fill_bytes(buf);
             Ok(())
         })
-        .map_err(|e| WalletError::Other(e))?;
+        .map_err(WalletError::Other)?;
         Ok(Self { account })
     }
 
     pub fn from_secret_hex(secret_hex: &str) -> WalletResult<Self> {
-        let account = Account::create_by(secret_hex).map_err(|e| WalletError::Other(e))?;
+        let account = Account::create_by(secret_hex).map_err(WalletError::Other)?;
         Ok(Self { account })
     }
 

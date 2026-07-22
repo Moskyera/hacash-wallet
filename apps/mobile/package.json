@@ -1,7 +1,7 @@
 {
   "name": "hacash-wallet-mobile",
   "private": true,
-  "version": "0.1.48",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,6 +16,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@hacash/wallet-ui": "file:../../packages/wallet-ui",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-biometric": "~2",
     "@tauri-apps/plugin-deep-link": "~2",

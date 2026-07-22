@@ -15,11 +15,11 @@ pub struct UnlockGuard {
 
 impl UnlockGuard {
     pub fn check_allowed(&self) -> WalletResult<()> {
-        if let Some(until) = self.locked_until {
-            if Instant::now() < until {
-                let secs = (until - Instant::now()).as_secs().max(1);
-                return Err(WalletError::UnlockRateLimited(secs));
-            }
+        if let Some(until) = self.locked_until
+            && Instant::now() < until
+        {
+            let secs = (until - Instant::now()).as_secs().max(1);
+            return Err(WalletError::UnlockRateLimited(secs));
         }
         Ok(())
     }

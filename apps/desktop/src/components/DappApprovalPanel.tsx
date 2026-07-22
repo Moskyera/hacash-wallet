@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Webview } from "@tauri-apps/api/webview";
+import {
+  dappApprovalKindCopy,
+  translatedDappApprovalCopy,
+  type DappApprovalCopy,
+} from "@hacash/wallet-ui";
 import { api, type DappApprovalView } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
+import { useLocale } from "../locale";
 
 type Props = {
   unlocked: boolean;
@@ -10,31 +17,23 @@ type Props = {
 
 const POLL_MS = 400;
 
-type KindMeta = {
-  label: string;
+type KindVisual = {
   glyph: string;
   accent: string;
-  hint: string;
 };
 
-const KIND_META: Record<string, KindMeta> = {
+const KIND_VISUAL: Record<string, KindVisual> = {
   connect: {
-    label: "Connect",
     glyph: "⬡",
     accent: "#f5a623",
-    hint: "The app will be able to request transaction signatures from your wallet.",
   },
   sign: {
-    label: "Sign",
     glyph: "✦",
     accent: "#f5a623",
-    hint: "Review the transaction details before you approve.",
   },
   transfer: {
-    label: "Transfer",
     glyph: "◎",
     accent: "#f5a623",
-    hint: "This will move HAC from your wallet if you accept.",
   },
 };
 
@@ -46,43 +45,73 @@ function hostFromOrigin(origin: string): string {
   }
 }
 
-function metaForKind(kind: string): KindMeta {
-  return (
-    KIND_META[kind] ?? {
-      label: kind,
+function metaForKind(kind: string, copy: DappApprovalCopy) {
+  return {
+    ...dappApprovalKindCopy(kind, copy),
+    ...(KIND_VISUAL[kind] ?? {
       glyph: "◆",
       accent: "#f5a623",
-      hint: "Only approve if you trust this application.",
-    }
-  );
+    }),
+  };
 }
 
 export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
+  const { t } = useLocale();
+  const copy = useMemo(() => translatedDappApprovalCopy(t), [t]);
   const [pending, setPending] = useState<DappApprovalView | null>(null);
   const [busy, setBusy] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
+  const hiddenLaunchpad = useRef(false);
+  const previousId = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!unlocked) {
+      previousId.current = null;
       setPending(null);
       return;
     }
     try {
       const next = await api.dappPending();
+      if (next?.id !== previousId.current) {
+        previousId.current = next?.id ?? null;
+        setShowDetail(false);
+      }
       setPending(next);
-      if (next) setShowDetail(false);
     } catch {
-      setPending(null);
+      // Preserve an active approval across a transient IPC error.
     }
   }, [unlocked]);
 
   useEffect(() => {
     if (!unlocked) return;
-    void api.dappBridgeStart().catch(() => undefined);
     void refresh();
     const id = window.setInterval(() => void refresh(), POLL_MS);
     return () => window.clearInterval(id);
   }, [unlocked, refresh]);
+  useEffect(() => {
+    let cancelled = false;
+    void Webview.getByLabel("launchpad").then(async (webview) => {
+      if (!webview || cancelled) return;
+      if (pending && !hiddenLaunchpad.current) {
+        await webview.hide().catch(() => undefined);
+        hiddenLaunchpad.current = true;
+      } else if (!pending && hiddenLaunchpad.current) {
+        await webview.show().catch(() => undefined);
+        hiddenLaunchpad.current = false;
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pending]);
+
+  useEffect(() => () => {
+    if (!hiddenLaunchpad.current) return;
+    void Webview.getByLabel("launchpad").then((webview) => {
+      void webview?.show().catch(() => undefined);
+    });
+    hiddenLaunchpad.current = false;
+  }, []);
 
   const handleApprove = async () => {
     if (!pending || busy) return;
@@ -99,8 +128,9 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
         }
       }
       await api.dappApprove(pending.id);
+      previousId.current = null;
       setPending(null);
-      onNotify?.("Request approved.", "success");
+      onNotify?.(copy.requestApproved, "success");
       void refresh();
     } catch (e) {
       onNotify?.(formatInvokeError(e), "error");
@@ -113,12 +143,13 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
     if (!pending || busy) return;
     setBusy(true);
     try {
-      await api.dappReject(pending.id, "User declined");
+      await api.dappReject(pending.id, copy.requestDeclined);
+      previousId.current = null;
       setPending(null);
-      onNotify?.("Request declined.", "info");
+      onNotify?.(copy.requestDeclined, "info");
       void refresh();
     } catch (e) {
-      onNotify?.(String(e), "error");
+      onNotify?.(formatInvokeError(e), "error");
     } finally {
       setBusy(false);
     }
@@ -126,7 +157,7 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
 
   if (!pending) return null;
 
-  const meta = metaForKind(pending.kind);
+  const meta = metaForKind(pending.kind, copy);
   const host = hostFromOrigin(pending.origin);
 
   return (
@@ -148,20 +179,18 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
             {meta.glyph}
           </div>
           <div className="dapp-approval-head-text">
-            <span className="dapp-approval-kind">{meta.label}</span>
-            <h2 id="dapp-approval-title">{pending.title}</h2>
+            <h2 id="dapp-approval-title">{meta.label}</h2>
           </div>
         </header>
 
         <div className="dapp-approval-origin-row">
-          <span className="dapp-approval-origin-label">From</span>
+          <span className="dapp-approval-origin-label">{copy.from}</span>
           <span className="dapp-approval-origin-host" title={pending.origin}>
             {host}
           </span>
         </div>
 
-        <p className="dapp-approval-summary">{pending.summary}</p>
-        <p className="dapp-approval-hint">{meta.hint}</p>
+        <p className="dapp-approval-summary">{meta.hint}</p>
 
         {pending.detail ? (
           <div className="dapp-approval-detail-wrap">
@@ -171,7 +200,7 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
               onClick={() => setShowDetail((v) => !v)}
               aria-expanded={showDetail}
             >
-              {showDetail ? "Hide technical details" : "Show technical details"}
+              {showDetail ? copy.hideDetails : copy.showDetails}
             </button>
             {showDetail && (
               <pre className="dapp-approval-detail">{pending.detail}</pre>
@@ -186,7 +215,7 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
             disabled={busy}
             onClick={() => void handleReject()}
           >
-            Decline
+            {copy.decline}
           </button>
           <button
             type="button"
@@ -194,13 +223,11 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
             disabled={busy}
             onClick={() => void handleApprove()}
           >
-            {busy ? "Working…" : "Accept"}
+            {busy ? copy.working : copy.accept}
           </button>
         </footer>
 
-        <p className="dapp-approval-footnote">
-          Only accept requests from sites you trust. Decline if you did not start this action.
-        </p>
+        <p className="dapp-approval-footnote">{copy.approvalFootnote}</p>
       </div>
     </div>
   );

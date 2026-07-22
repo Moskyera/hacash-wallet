@@ -7,6 +7,7 @@ import type { FastPayStatus } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
 import AdvancedScreen from "./AdvancedScreen";
 import FastPayScreen from "./FastPayScreen";
+import HacdScreen from "./HacdScreen";
 import HistoryScreen from "./HistoryScreen";
 import HomeScreen from "./HomeScreen";
 import PrivacyScreen from "./PrivacyScreen";
@@ -321,6 +322,15 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           onNotify={onNotify}
         />
       );
+    case "hacd":
+      return (
+        <HacdScreen
+          locked={!!status?.locked}
+          busy={busy}
+          onNotify={onNotify}
+          onGoSend={() => setScreen("send")}
+        />
+      );
     case "history":
       return (
         <HistoryScreen
@@ -331,7 +341,14 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
         />
       );
     case "advanced":
-      return <AdvancedScreen busy={busy} onValidate={onValidateHip23} />;
+      return (
+        <AdvancedScreen
+          busy={busy}
+          currentAddress={status?.address}
+          networkMode={settings?.network_mode ?? status?.network_mode ?? "mainnet"}
+          onValidate={onValidateHip23}
+        />
+      );
     case "quantum":
       return (
         <QuantumScreen

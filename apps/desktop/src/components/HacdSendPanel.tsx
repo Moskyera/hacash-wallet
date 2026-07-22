@@ -3,7 +3,7 @@ import HacdDiamondVisual from "./HacdDiamondVisual";
 import PaymentQrScanner from "./PaymentQrScanner";
 import { useHacdSend } from "../hooks/useHacdSend";
 import { maskAddress, maskAssetCount } from "../privacy";
-import { normalizeHacdName } from "../utils/paymentAssets";
+import { normalizeHacdName } from "@hacash/wallet-ui";
 
 type Props = {
   active: boolean;
@@ -201,7 +201,7 @@ export default function HacdSendPanel({
           </p>
           {hacd.preview.hip23.errors.length > 0 && (
             <div className="alert">
-              <strong>HIP-23 errors</strong>
+              <strong>Istanbul transaction safety errors</strong>
               <ul>
                 {hacd.preview.hip23.errors.map((e) => (
                   <li key={e}>{e}</li>

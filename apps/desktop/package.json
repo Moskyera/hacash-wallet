@@ -1,7 +1,7 @@
 {
   "name": "hacash-wallet-desktop",
   "private": true,
-  "version": "0.1.48",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@hacash/wallet-ui": "file:../../packages/wallet-ui",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-shell": "^2",
     "html5-qrcode": "^2.3.8",

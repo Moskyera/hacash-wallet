@@ -11,41 +11,42 @@ export type Screen =
   | "security"
   | "privacy"
   | "airgap"
+  | "hacd"
   | "quantum";
 
 export type WelcomeTab = "create" | "import" | "backup" | "watch";
 
 export type NavItem = {
   id: Screen;
-  label: string;
   mark: string;
 };
 
-export const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
+export const NAV_GROUPS: { id: "wallet" | "tools" | "control"; items: NavItem[] }[] = [
   {
-    label: "Wallet",
+    id: "wallet",
     items: [
-      { id: "home", label: "Home", mark: "⌂" },
-      { id: "send", label: "Send assets", mark: "↑" },
-      { id: "receive", label: "Receive", mark: "↓" },
-      { id: "history", label: "History", mark: "≡" },
-      { id: "fastpay", label: "Fast Pay", mark: "⚡" },
+      { id: "home", mark: "⌂" },
+      { id: "send", mark: "↑" },
+      { id: "receive", mark: "↓" },
+      { id: "hacd", mark: "◆" },
+      { id: "history", mark: "≡" },
+      { id: "fastpay", mark: "⚡" },
     ],
   },
   {
-    label: "Tools",
+    id: "tools",
     items: [
-      { id: "quantum", label: "Quantum", mark: "◇" },
-      { id: "airgap", label: "Air-gap QR", mark: "▣" },
+      { id: "quantum", mark: "◇" },
+      { id: "airgap", mark: "▣" },
     ],
   },
   {
-    label: "Control",
+    id: "control",
     items: [
-      { id: "security", label: "Security", mark: "⛨" },
-      { id: "privacy", label: "Privacy", mark: "◐" },
-      { id: "settings", label: "Settings", mark: "⚙" },
-      { id: "advanced", label: "Advanced", mark: "⋯" },
+      { id: "security", mark: "⛨" },
+      { id: "privacy", mark: "◐" },
+      { id: "settings", mark: "⚙" },
+      { id: "advanced", mark: "⋯" },
     ],
   },
 ];

@@ -3,7 +3,7 @@ import { api, type HacdSendPreview, type PlatformSecurityStatus, type WalletSett
 import { maybeSecondFactorGate } from "../utils/secondFactorGate";
 import { formatInvokeError } from "../formatInvokeError";
 import { hapticSuccess } from "../utils/haptic";
-import { isValidHacdName, normalizeHacdName } from "../utils/paymentAssets";
+import { isValidHacdName, normalizeHacdName } from "@hacash/wallet-ui";
 
 export function useHacdSend(opts: {
   active: boolean;

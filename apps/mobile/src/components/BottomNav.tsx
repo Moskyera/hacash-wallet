@@ -1,4 +1,5 @@
-export type TabId = "home" | "pay" | "receive" | "messages" | "more";
+import { useLocale } from "../locale";
+export type TabId = "home" | "pay" | "receive" | "hacd" | "more";
 
 type Props = {
   active: TabId;
@@ -6,17 +7,19 @@ type Props = {
   watchOnly?: boolean;
 };
 
-const ITEMS: { id: TabId; label: string; mark: string }[] = [
-  { id: "home", label: "Home", mark: "⌂" },
-  { id: "pay", label: "Pay", mark: "↑" },
-  { id: "receive", label: "Receive", mark: "↓" },
-  { id: "messages", label: "Chat", mark: "••" },
-  { id: "more", label: "More", mark: "≡" },
+/** ASCII marks stay readable if the device font drops diamond glyphs. */
+const ITEMS: { id: TabId; mark: string }[] = [
+  { id: "home", mark: "H" },
+  { id: "pay", mark: "P" },
+  { id: "receive", mark: "R" },
+  { id: "hacd", mark: "D" },
+  { id: "more", mark: "M" },
 ];
 
 export default function BottomNav({ active, onChange, watchOnly }: Props) {
+  const { t } = useLocale();
   return (
-    <nav className="bottom-nav" aria-label="Main navigation">
+    <nav className="bottom-nav" aria-label={t("nav.mainLabel")}>
       {ITEMS.filter((item) => !(watchOnly && item.id === "pay")).map((item) => (
         <button
           key={item.id}
@@ -26,7 +29,7 @@ export default function BottomNav({ active, onChange, watchOnly }: Props) {
           onClick={() => onChange(item.id)}
         >
           <span className="bottom-nav-icon" aria-hidden>{item.mark}</span>
-          <span>{item.label}</span>
+          <span>{t(`nav.${item.id}`)}</span>
         </button>
       ))}
     </nav>

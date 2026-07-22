@@ -1,4 +1,4 @@
-# Hacash Wallet — Community Handoff Guide
+# Hacash Wallet - Community Handoff Guide
 
 This document describes how the **Hacash Wallet** (`Moskyera/hacash-wallet`) is released and operated by the community while Moskyera continues active development and prepares **Hacash Quantum Wallet** as a separate product (see [`hacash-quantum-wallet-design.md`](./hacash-quantum-wallet-design.md)).
 
@@ -12,7 +12,7 @@ This document describes how the **Hacash Wallet** (`Moskyera/hacash-wallet`) is 
 | L1 send (Types 1–3) | Stable |
 | L2 Fast Pay + hub discovery | Active development |
 | HACD / BTC send | Desktop |
-| Optional Quantum tab (Type 4) | Experimental — requires PQC fullnode |
+| Optional Quantum tab (Type 4) | Experimental - requires PQC fullnode |
 | Mobile (Android) | Active development |
 
 **Hacash Quantum Wallet** will be a **separate app** (PQ-first). This repo remains the legacy + Fast Pay wallet.
@@ -23,8 +23,8 @@ This document describes how the **Hacash Wallet** (`Moskyera/hacash-wallet`) is 
 
 | Platform | Source |
 |----------|--------|
-| Desktop (Windows, Linux) | [GitHub Releases](https://github.com/Moskyera/hacash-wallet/releases) — tags `v*-desktop` |
-| Mobile (Android) | GitHub Releases — tags `v*-mobile` |
+| Desktop (Windows, Linux) | [GitHub Releases](https://github.com/Moskyera/hacash-wallet/releases) - tags `v*-desktop` |
+| Mobile (Android) | GitHub Releases - tags `v*-mobile` |
 | Landing page | [moskyera.github.io](https://moskyera.github.io/) |
 
 ---
@@ -95,7 +95,7 @@ git clone --branch feature/pqc-phases-1-3 https://github.com/Moskyera/fullnodede
 - Keys are encrypted on device (Argon2id + AES-256-GCM).
 - Private keys are never sent to the node API.
 - Export encrypted backups before passphrase changes or wallet deletion.
-- Unsigned Windows binaries may trigger SmartScreen — verify SHA256 from release notes.
+- Unsigned Windows binaries may trigger SmartScreen - verify SHA256 from release notes.
 
 ---
 
@@ -108,12 +108,12 @@ git clone --branch feature/pqc-phases-1-3 https://github.com/Moskyera/fullnodede
 | Breaking API changes | Design note + minor/major version bump |
 | Security issues | Private report to maintainers; coordinated disclosure |
 
-Open question: formal maintainer roster — track in design doc OQ-8.
+Open question: formal maintainer roster - track in design doc OQ-8.
 
 ---
 
 ## Related documents
 
-- [`hacash-quantum-wallet-design.md`](./hacash-quantum-wallet-design.md) — quantum fork plan (deferred implementation)
-- [`hacash-quantum-wallet-design-summary.md`](./hacash-quantum-wallet-design-summary.md) — executive summary
-- [`HUB-OPERATOR.md`](./HUB-OPERATOR.md) — Fast Pay hub operations
+- [`hacash-quantum-wallet-design.md`](./hacash-quantum-wallet-design.md) - quantum fork plan (deferred implementation)
+- [`hacash-quantum-wallet-design-summary.md`](./hacash-quantum-wallet-design-summary.md) - executive summary
+- [`HUB-OPERATOR.md`](./HUB-OPERATOR.md) - Fast Pay hub operations
