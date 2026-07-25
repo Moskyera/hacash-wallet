@@ -18,6 +18,11 @@ uuid = { workspace = true }
 dust-whisper = { path = "../dust-whisper", optional = true }
 
 sha2.workspace = true
+aes-gcm.workspace = true
+argon2.workspace = true
+base64.workspace = true
+hex.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

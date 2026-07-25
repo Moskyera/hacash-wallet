@@ -23,18 +23,14 @@ impl LockedBytes {
     pub fn as_slice(&self) -> &[u8] {
         &self.inner
     }
-
-    pub fn into_string(self) -> String {
-        String::from_utf8_lossy(self.as_slice()).into_owned()
-    }
 }
 
 impl Drop for LockedBytes {
     fn drop(&mut self) {
+        self.inner.zeroize();
         if self.locked {
             unlock_pages(self.inner.as_mut_ptr(), self.inner.len());
         }
-        self.inner.zeroize();
     }
 }
 

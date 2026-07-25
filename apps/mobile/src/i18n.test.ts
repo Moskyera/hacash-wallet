@@ -37,7 +37,7 @@ describe("shared locale catalog", () => {
     const primaryKeys = [
       "quantum.sendTitle",
       "settings.title",
-      "security.privateKey",
+      "security.exportBackup",
       "common.continue",
       "home.refreshing",
       "home.pullToRefresh",
@@ -100,7 +100,7 @@ describe("shared locale catalog", () => {
 
   it("interpolates named parameters without dropping unknown placeholders", () => {
     expect(translate("en", "update.trustedAvailable", { platform: "Windows" })).toBe(
-      "A trusted Windows update is available.",
+      "A Windows update with a published checksum is available.",
     );
     expect(translate("en", "unknown.key", { platform: "Linux" })).toBe("unknown.key");
     expect(translate("en", "update.trustedAvailable")).toContain("{platform}");

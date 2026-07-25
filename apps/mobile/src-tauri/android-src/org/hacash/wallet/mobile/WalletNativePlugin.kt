@@ -21,8 +21,11 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.Cipher
 
 private const val BACKUP_DOWNLOADS_PERMISSION = "backup-downloads"
+internal const val COLD_VAULT_LIFECYCLE_PREFS = "hacash_wallet_security"
+internal const val COLD_VAULT_BACKGROUND_KILL = "cold_vault_background_kill"
 
 @InvokeArg
 class StoreBiometricArgs {
@@ -50,6 +53,11 @@ class AuthenticateStrongArgs {
   lateinit var reason: String
 }
 
+@InvokeArg
+class SetColdVaultLifecycleArgs {
+  var enabled: Boolean = false
+}
+
 /**
  * Native wallet operations bound to Tauri's current Activity.
  *
@@ -66,16 +74,30 @@ class AuthenticateStrongArgs {
   ],
 )
 class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
-  private class PendingInvoke(val invoke: Invoke) {
+  private class PendingInvoke(
+    val invoke: Invoke,
+    private val onComplete: () -> Unit = {},
+  ) {
     private val complete = AtomicBoolean(false)
+
+    fun isComplete(): Boolean = complete.get()
 
     fun resolve(response: JSObject?) {
       if (!complete.compareAndSet(false, true)) return
-      if (response == null) invoke.resolve() else invoke.resolve(response)
+      try {
+        if (response == null) invoke.resolve() else invoke.resolve(response)
+      } finally {
+        onComplete()
+      }
     }
 
     fun reject(message: String) {
-      if (complete.compareAndSet(false, true)) invoke.reject(message)
+      if (!complete.compareAndSet(false, true)) return
+      try {
+        invoke.reject(message)
+      } finally {
+        onComplete()
+      }
     }
   }
 
@@ -87,12 +109,10 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
   private var activePrompt: BiometricPrompt? = null
   private var activeAuthentication: PendingInvoke? = null
 
-  private fun authenticators(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-    BiometricManager.Authenticators.BIOMETRIC_STRONG or
-      BiometricManager.Authenticators.DEVICE_CREDENTIAL
-  } else {
-    BiometricManager.Authenticators.BIOMETRIC_STRONG
-  }
+  // Transaction authorization and Keystore unlock must use a Class 3
+  // biometric. A device PIN/pattern is intentionally not a fallback for a
+  // high-value signing decision.
+  private fun authenticators(): Int = BiometricManager.Authenticators.BIOMETRIC_STRONG
 
   private fun execute(invoke: Invoke, operation: () -> JSObject?) {
     val call = PendingInvoke(invoke)
@@ -121,11 +141,172 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
+  private fun reserveAuthentication(call: PendingInvoke): Boolean {
+    synchronized(this) {
+      if (destroyed.get()) {
+        call.reject("Android Activity is no longer available")
+        return false
+      }
+      if (activeAuthentication != null) {
+        call.reject("Another biometric operation is already active")
+        return false
+      }
+      activeAuthentication = call
+      pending.add(call)
+      return true
+    }
+  }
+
+  private fun executeBiometricExclusive(invoke: Invoke, operation: () -> JSObject?) {
+    val call = PendingInvoke(invoke)
+    if (!reserveAuthentication(call)) return
+    try {
+      worker.execute {
+        try {
+          if (destroyed.get()) {
+            throw IllegalStateException("Android Activity is no longer available")
+          }
+          val response = operation()
+          finishAuthentication(call) { call.resolve(response) }
+        } catch (error: Exception) {
+          finishAuthentication(call) {
+            call.reject(error.message ?: error.javaClass.simpleName)
+          }
+        }
+      }
+    } catch (error: Exception) {
+      finishAuthentication(call) {
+        call.reject(error.message ?: "Android wallet-native worker is unavailable")
+      }
+    }
+  }
+
+  private fun authenticateWithCipher(
+    invoke: Invoke,
+    reason: String,
+    onComplete: () -> Unit = {},
+    prepareCipher: () -> Cipher,
+    useCipher: (Cipher) -> JSObject?,
+  ) {
+    val fragmentActivity = activity as? FragmentActivity
+    if (fragmentActivity == null) {
+      onComplete()
+      invoke.reject("Android Activity does not support biometric authentication")
+      return
+    }
+    val call = PendingInvoke(invoke, onComplete)
+    if (!reserveAuthentication(call)) return
+
+    try {
+      worker.execute {
+        try {
+          if (destroyed.get()) {
+            throw IllegalStateException("Android Activity is no longer available")
+          }
+          val cipher = prepareCipher()
+          activity.runOnUiThread {
+            try {
+              if (destroyed.get() || call.isComplete()) {
+                finishAuthentication(call) {
+                  call.reject("Android Activity is no longer available")
+                }
+                return@runOnUiThread
+              }
+              val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(
+                  result: BiometricPrompt.AuthenticationResult,
+                ) {
+                  val authenticatedCipher = result.cryptoObject?.cipher
+                  if (authenticatedCipher == null) {
+                    finishAuthentication(call) {
+                      call.reject("Biometric authentication returned no cryptographic operation")
+                    }
+                    return
+                  }
+                  synchronized(this@WalletNativePlugin) {
+                    if (activeAuthentication === call) activePrompt = null
+                  }
+                  try {
+                    worker.execute {
+                      try {
+                        if (destroyed.get() || call.isComplete()) {
+                          throw IllegalStateException("Android Activity is no longer available")
+                        }
+                        val response = useCipher(authenticatedCipher)
+                        finishAuthentication(call) { call.resolve(response) }
+                      } catch (error: Exception) {
+                        finishAuthentication(call) {
+                          call.reject(error.message ?: "Biometric cryptographic operation failed")
+                        }
+                      }
+                    }
+                  } catch (error: Exception) {
+                    finishAuthentication(call) {
+                      call.reject(error.message ?: "Android wallet-native worker is unavailable")
+                    }
+                  }
+                }
+
+                override fun onAuthenticationError(
+                  errorCode: Int,
+                  errorMessage: CharSequence,
+                ) {
+                  finishAuthentication(call) {
+                    call.reject(
+                      errorMessage.toString().ifBlank { "Biometric authentication failed" },
+                    )
+                  }
+                }
+              }
+              val prompt = BiometricPrompt(
+                fragmentActivity,
+                ContextCompat.getMainExecutor(activity),
+                callback,
+              )
+              val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                .setTitle("Hacash Wallet")
+                .setDescription(reason)
+                .setConfirmationRequired(true)
+                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+                .setNegativeButtonText("Cancel")
+                .build()
+              synchronized(this@WalletNativePlugin) {
+                if (activeAuthentication === call) activePrompt = prompt
+              }
+              prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
+            } catch (error: Exception) {
+              finishAuthentication(call) {
+                call.reject(error.message ?: "Biometric authentication could not start")
+              }
+            }
+          }
+        } catch (error: Exception) {
+          finishAuthentication(call) {
+            call.reject(error.message ?: "Biometric cryptographic operation could not start")
+          }
+        }
+      }
+    } catch (error: Exception) {
+      finishAuthentication(call) {
+        call.reject(error.message ?: "Android wallet-native worker is unavailable")
+      }
+    }
+  }
+
   @Command
   fun biometricIsConfigured(invoke: Invoke) {
-    execute(invoke) {
+    executeBiometricExclusive(invoke) {
+      val status = BiometricSecretStore.status(activity)
       JSObject().apply {
-        put("configured", BiometricSecretStore.isConfigured(activity))
+        put("configured", status.configured)
+        put("keySecurityLevel", status.keySecurityLevel)
+        put("hardwareBacked", status.hardwareBacked)
+        put("strongBoxBacked", status.strongBoxBacked)
+        put(
+          "authenticationEnforcedBySecureHardware",
+          status.authenticationEnforcedBySecureHardware,
+        )
+        put("authPerUse", status.authPerUse)
       }
     }
   }
@@ -133,34 +314,45 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun biometricStore(invoke: Invoke) {
     val args = invoke.parseArgs(StoreBiometricArgs::class.java)
-    execute(invoke) {
-      try {
-        BiometricSecretStore.store(activity, args.passphrase)
-        null
-      } finally {
-        // Kotlin strings cannot be wiped in place. Drop our reference promptly;
-        // BiometricSecretStore separately wipes every mutable byte buffer.
+    authenticateWithCipher(
+      invoke = invoke,
+      reason = "Enable biometric unlock for Hacash Wallet",
+      onComplete = {
+        // Kotlin strings cannot be wiped in place. Drop this reference on every
+        // success, cancellation, and error path. Mutable byte buffers are wiped
+        // inside BiometricSecretStore.
         args.passphrase = ""
-      }
-    }
+      },
+      prepareCipher = { BiometricSecretStore.prepareEncryption(activity) },
+      useCipher = { cipher ->
+        BiometricSecretStore.encryptAndStore(activity, cipher, args.passphrase)
+        null
+      },
+    )
   }
 
   @Command
   fun biometricLoad(invoke: Invoke) {
-    execute(invoke) {
-      var passphrase = BiometricSecretStore.load(activity)
-      try {
-        JSObject().apply { put("passphrase", passphrase) }
-      } finally {
-        // The JSON bridge requires an immutable String; release this local copy.
-        passphrase = ""
-      }
-    }
+    authenticateWithCipher(
+      invoke = invoke,
+      reason = "Unlock Hacash Wallet",
+      prepareCipher = { BiometricSecretStore.prepareDecryption(activity) },
+      useCipher = { cipher ->
+        var passphrase = BiometricSecretStore.decrypt(activity, cipher)
+        try {
+          JSObject().apply { put("passphrase", passphrase) }
+        } finally {
+          // The JSON bridge requires an immutable String. Release our local
+          // reference immediately after creating the response object.
+          passphrase = ""
+        }
+      },
+    )
   }
 
   @Command
   fun biometricClear(invoke: Invoke) {
-    execute(invoke) {
+    executeBiometricExclusive(invoke) {
       BiometricSecretStore.clear(activity)
       null
     }
@@ -175,11 +367,7 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
         put("available", available)
         put(
           "kind",
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            "Strong biometric or device credential"
-          } else {
-            "Strong biometric"
-          },
+          "Strong biometric",
         )
       }
     }
@@ -252,6 +440,29 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
         }
       }
     }
+  }
+
+  @Command
+  fun setColdVaultLifecycle(invoke: Invoke) {
+    val args = invoke.parseArgs(SetColdVaultLifecycleArgs::class.java)
+    val committed = activity.getSharedPreferences(
+      COLD_VAULT_LIFECYCLE_PREFS,
+      Activity.MODE_PRIVATE,
+    ).edit().putBoolean(COLD_VAULT_BACKGROUND_KILL, args.enabled).commit()
+    if (!committed) {
+      invoke.reject("Cold Vault lifecycle policy could not be persisted")
+      return
+    }
+    invoke.resolve()
+  }
+
+  @Command
+  fun coldVaultLifecycleStatus(invoke: Invoke) {
+    val enabled = activity.getSharedPreferences(
+      COLD_VAULT_LIFECYCLE_PREFS,
+      Activity.MODE_PRIVATE,
+    ).getBoolean(COLD_VAULT_BACKGROUND_KILL, false)
+    invoke.resolve(JSObject().apply { put("enabled", enabled) })
   }
 
   private fun finishAuthentication(call: PendingInvoke, finish: () -> Unit) {

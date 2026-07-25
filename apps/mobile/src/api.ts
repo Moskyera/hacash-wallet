@@ -74,6 +74,8 @@ export type RelayHealthStatus = {
   protocol_version: number | null;
 };
 
+export type SigningPolicy = "software" | "webauthn_gate" | "airgap_only" | "watch_only";
+
 export type WalletSettings = {
   node_url: string;
   node_fallback_urls?: string[];
@@ -86,9 +88,21 @@ export type WalletSettings = {
   biometric_send_enabled?: boolean;
   biometric_unlock_enabled?: boolean;
   security_profile: string;
+  hardware_signing_mode?: SigningPolicy;
   privacy: PrivacySettings;
   dust_whisper?: DustWhisperSettings;
   send?: SendPreferences;
+};
+
+export type BackupPreview = {
+  address: string;
+  format: "full_authenticated" | "legacy_classic_only";
+  version: number;
+  encrypted: boolean;
+  addressVerified: boolean;
+  requiresLegacyConfirmation: boolean;
+  included: string[];
+  warning: string | null;
 };
 
 export type WalletStatus = {
@@ -106,6 +120,8 @@ export type WalletStatus = {
   dust_whisper?: DustWhisperSettings;
   seconds_until_lock: number | null;
   channel_id: string | null;
+  hardware_signing_mode: SigningPolicy;
+  signing_available: boolean;
 };
 
 export type NodeCandidateStatus = {
@@ -217,6 +233,22 @@ export type SendPreview = {
   hip23: Hip23Check;
 };
 
+export type PreparedOperationView = {
+  id: string;
+  digest: string;
+  kind: "hac_l1" | "hacd" | "bridged_btc" | "channel_open" | "channel_close" | string;
+  wallet_address: string;
+  network_mode: string;
+  chain_id: number | null;
+  display: {
+    title: string;
+    summary: string;
+    fields: Array<{ label: string; value: string }>;
+  };
+  authorization_required: boolean;
+  webauthn_required: boolean;
+  expires_in_secs: number;
+};
 export type SendResult = {
   rail: string;
   tx_hash: string;
@@ -255,6 +287,17 @@ export type PlatformSecurityStatus = {
 export type BiometricUnlockStatus = {
   enabled: boolean;
   configured: boolean;
+  keySecurityLevel: string;
+  hardwareBacked: boolean;
+  strongBoxBacked: boolean;
+  authenticationEnforcedBySecureHardware: boolean;
+  authPerUse: boolean;
+};
+
+export type PassphraseChangeOutcome = {
+  biometricUnlockDisabled: boolean;
+  nativeBiometricSecretCleared: boolean;
+  warning: string | null;
 };
 
 export type AssetSummary = import("@hacash/wallet-ui").AssetSummary;
@@ -474,7 +517,8 @@ export const api = {
       bodyHex,
       expectedChainId: expectedChainId ?? null,
     }),
-  resetWallet: () => invoke<void>("wallet_reset"),
+  resetWallet: (currentPassphrase: string | null, confirmationAddress: string) =>
+    invoke<void>("wallet_reset", { currentPassphrase, confirmationAddress }),
   updatePrivacy: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   txHistory: () => invoke<TxRecord[]>("wallet_tx_history"),
@@ -489,21 +533,26 @@ export const api = {
   discoverHubs: () => invoke<HubDiscoveryReport>("wallet_discover_hubs"),
   previewSend: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<SendPreview>("wallet_preview_send", { to, amountMei, sendOptions }),
-  sendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
+  prepareSendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
+    invoke<PreparedOperationView>("wallet_prepare_send_hac", { to, amountMei, sendOptions }),
+  executePreparedHac: (operationId: string) =>
+    invoke<SendResult>("wallet_execute_prepared_hac", { operationId }),  sendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<SendResult>("wallet_send_hac", { to, amountMei, sendOptions }),
   exportBackupToDownloads: (passphrase: string) =>
     invoke<string>("wallet_export_backup_to_downloads", { passphrase }),
-  previewBackup: (json: string) => invoke<string>("wallet_preview_backup", { json }),
-  importBackup: (json: string, passphrase: string, deleteSource?: string | null) =>
+  previewBackup: (json: string) => invoke<BackupPreview>("wallet_preview_backup", { json }),
+  importBackup: (json: string, passphrase: string, deleteSource?: string | null, allowLegacy = false) =>
     invoke<string>("wallet_import_backup", {
       json,
       passphrase,
       deleteSource: deleteSource ?? null,
+      allowLegacy,
     }),
-  exportPrivateKey: (passphrase: string) =>
-    invoke<string>("wallet_export_private_key", { passphrase }),
   changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
-    invoke<void>("wallet_change_passphrase", { oldPassphrase, newPassphrase }),
+    invoke<PassphraseChangeOutcome>("wallet_change_passphrase", {
+      oldPassphrase,
+      newPassphrase,
+    }),
   listBillSummaries: () => invoke<BillSummary[]>("wallet_list_bill_summaries"),
   exportBillJson: (paymentId: string) =>
     invoke<string>("wallet_export_bill_json", { paymentId }),
@@ -511,7 +560,8 @@ export const api = {
   getBillHex: (paymentId: string) => invoke<string>("wallet_get_bill_hex", { paymentId }),
   platformSecurity: () =>
     invoke<PlatformSecurityStatus>("wallet_platform_security_status"),
-  confirmBiometric: () => invoke<void>("wallet_confirm_biometric_native"),
+  confirmBiometric: (operationId: string) =>
+    invoke<void>("wallet_confirm_biometric_native", { operationId }),
   biometricUnlockStatus: () =>
     invoke<BiometricUnlockStatus>("wallet_biometric_unlock_status"),
   enableBiometricUnlock: (passphrase: string) =>
@@ -543,7 +593,10 @@ export const api = {
   listOwnedDiamonds: () => invoke<string[]>("wallet_list_owned_diamonds"),
   previewSendHacd: (to: string, diamondNames: string[]) =>
     invoke<HacdSendPreview>("wallet_preview_send_hacd", { to, diamondNames }),
-  sendHacd: (to: string, diamondNames: string[]) =>
+  prepareSendHacd: (to: string, diamondNames: string[]) =>
+    invoke<PreparedOperationView>("wallet_prepare_send_hacd", { to, diamondNames }),
+  executePreparedHacd: (operationId: string) =>
+    invoke<SendResult>("wallet_execute_prepared_hacd", { operationId }),  sendHacd: (to: string, diamondNames: string[]) =>
     invoke<SendResult>("wallet_send_hacd", { to, diamondNames }),
   channelInfo: () => invoke<ChannelInfo | null>("wallet_channel_info"),
   previewChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
@@ -552,20 +605,34 @@ export const api = {
       userDepositMei,
       hubDepositMei,
     }),
-  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  prepareChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+    invoke<PreparedOperationView>("wallet_prepare_channel_open", { hubAddress, userDepositMei, hubDepositMei }),
+  executePreparedChannelOpen: (operationId: string) =>
+    invoke<string>("wallet_execute_prepared_channel_open", { operationId }),
+  prepareChannelClose: () => invoke<PreparedOperationView>("wallet_prepare_channel_close"),
+  executePreparedChannelClose: (operationId: string) =>
+    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
     invoke<string>("wallet_open_channel", { hubAddress, userDepositMei, hubDepositMei }),
   closeChannel: () => invoke<string>("wallet_close_channel"),
   importWatchOnly: (address: string) => invoke<string>("wallet_import_watch_only", { address }),
   openWatchOnly: () => invoke<string>("wallet_open_watch_only"),
-  setSecurityProfile: (profile: string) => invoke<void>("wallet_set_security_profile", { profile }),
-  setHardwareMode: (mode: string) => invoke<void>("wallet_set_hardware_mode", { mode }),
+  setSecurityProfile: (profile: string, currentPassphrase: string) =>
+    invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
+  setHardwareMode: (mode: SigningPolicy, currentPassphrase: string) =>
+    invoke<void>("wallet_set_hardware_mode", { mode, currentPassphrase }),
   previewSendBtc: (to: string, satoshi: number) =>
     invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
-  sendBtc: (to: string, satoshi: number) =>
+  prepareSendBtc: (to: string, satoshi: number) =>
+    invoke<PreparedOperationView>("wallet_prepare_send_btc", { to, satoshi }),
+  executePreparedBtc: (operationId: string) =>
+    invoke<SendResult>("wallet_execute_prepared_btc", { operationId }),  sendBtc: (to: string, satoshi: number) =>
     invoke<SendResult>("wallet_send_btc", { to, satoshi }),
   airgapPrepareSend: (to: string, amountMei: number) =>
     invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),
-  airgapSignUnsigned: (unsigned: AirgapUnsigned) =>
+  prepareAirgapSign: (unsigned: AirgapUnsigned) =>
+    invoke<PreparedOperationView>("wallet_prepare_airgap_sign", { unsigned }),
+  executePreparedAirgapSign: (operationId: string) =>
+    invoke<AirgapSignResult>("wallet_execute_prepared_airgap_sign", { operationId }),  airgapSignUnsigned: (unsigned: AirgapUnsigned) =>
     invoke<AirgapSignResult>("wallet_airgap_sign_unsigned", { unsigned }),
   airgapBroadcastSigned: (signed: AirgapSigned) =>
     invoke<SendResult>("wallet_airgap_broadcast_signed", { signed }),

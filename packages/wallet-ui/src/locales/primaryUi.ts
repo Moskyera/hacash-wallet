@@ -1,10 +1,12 @@
 import type { AppLocale } from "./config";
 import { AIRGAP_UI_COPY } from "./airgapUi";
+import { HIGH_VALUE_UI_COPY } from "./highValueUi";
 import { ISTANBUL_UI_COPY } from "./istanbulUi";
 
 export const primaryUiEn = {
   ...ISTANBUL_UI_COPY.en,
   ...AIRGAP_UI_COPY.en,
+  ...HIGH_VALUE_UI_COPY.en,
   "account.pqc": "PQC",
   "account.hybrid": "Hybrid",
   "common.continue": "Continue",
@@ -184,6 +186,7 @@ export const PRIMARY_UI_COPY = {
   el: translated({
     ...ISTANBUL_UI_COPY.el,
     ...AIRGAP_UI_COPY.el,
+    ...HIGH_VALUE_UI_COPY.el,
     "account.pqc": "PQC",
     "account.hybrid": "Υβριδικός",
     "common.continue": "Συνέχεια",
@@ -317,6 +320,7 @@ export const PRIMARY_UI_COPY = {
   "zh-CN": translated({
     ...ISTANBUL_UI_COPY["zh-CN"],
     ...AIRGAP_UI_COPY["zh-CN"],
+    ...HIGH_VALUE_UI_COPY["zh-CN"],
     "account.hybrid": "混合",
     "common.continue": "继续",
     "common.copy": "复制",
@@ -435,6 +439,7 @@ export const PRIMARY_UI_COPY = {
   ja: translated({
     ...ISTANBUL_UI_COPY.ja,
     ...AIRGAP_UI_COPY.ja,
+    ...HIGH_VALUE_UI_COPY.ja,
     "account.hybrid": "ハイブリッド",
     "common.continue": "続行",
     "common.copy": "コピー",
@@ -552,6 +557,7 @@ export const PRIMARY_UI_COPY = {
   tr: translated({
     ...ISTANBUL_UI_COPY.tr,
     ...AIRGAP_UI_COPY.tr,
+    ...HIGH_VALUE_UI_COPY.tr,
     "account.hybrid": "Hibrit",
     "common.continue": "Devam et",
     "common.copy": "Kopyala",
@@ -664,6 +670,7 @@ export const PRIMARY_UI_COPY = {
   vi: translated({
     ...ISTANBUL_UI_COPY.vi,
     ...AIRGAP_UI_COPY.vi,
+    ...HIGH_VALUE_UI_COPY.vi,
     "account.hybrid": "Kết hợp",
     "common.continue": "Tiếp tục",
     "common.copy": "Sao chép",
@@ -776,6 +783,7 @@ export const PRIMARY_UI_COPY = {
   ru: translated({
     ...ISTANBUL_UI_COPY.ru,
     ...AIRGAP_UI_COPY.ru,
+    ...HIGH_VALUE_UI_COPY.ru,
     "account.hybrid": "Гибридный",
     "common.continue": "Продолжить",
     "common.copy": "Копировать",
@@ -888,6 +896,7 @@ export const PRIMARY_UI_COPY = {
   es: translated({
     ...ISTANBUL_UI_COPY.es,
     ...AIRGAP_UI_COPY.es,
+    ...HIGH_VALUE_UI_COPY.es,
     "account.hybrid": "Híbrida",
     "common.continue": "Continuar",
     "common.copy": "Copiar",
@@ -1000,6 +1009,7 @@ export const PRIMARY_UI_COPY = {
   fr: translated({
     ...ISTANBUL_UI_COPY.fr,
     ...AIRGAP_UI_COPY.fr,
+    ...HIGH_VALUE_UI_COPY.fr,
     "account.hybrid": "Hybride",
     "common.continue": "Continuer",
     "common.copy": "Copier",
@@ -1112,6 +1122,7 @@ export const PRIMARY_UI_COPY = {
   pt: translated({
     ...ISTANBUL_UI_COPY.pt,
     ...AIRGAP_UI_COPY.pt,
+    ...HIGH_VALUE_UI_COPY.pt,
     "account.hybrid": "Híbrida",
     "common.continue": "Continuar",
     "common.copy": "Copiar",
@@ -1224,6 +1235,7 @@ export const PRIMARY_UI_COPY = {
   ar: translated({
     ...ISTANBUL_UI_COPY.ar,
     ...AIRGAP_UI_COPY.ar,
+    ...HIGH_VALUE_UI_COPY.ar,
     "account.hybrid": "هجين",
     "common.continue": "متابعة",
     "common.copy": "نسخ",
@@ -1336,6 +1348,7 @@ export const PRIMARY_UI_COPY = {
   sv: translated({
     ...ISTANBUL_UI_COPY.sv,
     ...AIRGAP_UI_COPY.sv,
+    ...HIGH_VALUE_UI_COPY.sv,
     "account.hybrid": "Hybrid",
     "common.continue": "Fortsätt",
     "common.copy": "Kopiera",
@@ -1448,6 +1461,7 @@ export const PRIMARY_UI_COPY = {
   de: translated({
     ...ISTANBUL_UI_COPY.de,
     ...AIRGAP_UI_COPY.de,
+    ...HIGH_VALUE_UI_COPY.de,
     "account.hybrid": "Hybrid",
     "common.continue": "Weiter",
     "common.copy": "Kopieren",

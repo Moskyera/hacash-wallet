@@ -24,7 +24,7 @@ import {
   MIN_KEYSTORE_PASS,
   summaryFromAccountInfo,
 } from "../quantumMeta";
-import { maybeSecondFactorGate } from "../utils/secondFactorGate";
+import { needsSecondFactor } from "../utils/secondFactorGate";
 import AddressBadge from "./AddressBadge";
 import KeystoreV3Modal from "./KeystoreV3Modal";
 
@@ -47,9 +47,7 @@ export default function QuantumScreen({
   nodeUrl,
   networkMode,
   clipboardClearSecs,
-  platformSec,
   securityProfile,
-  biometricSendEnabled = true,
   onToast,
   onGoLegacySend,
 }: Props) {
@@ -226,12 +224,10 @@ export default function QuantumScreen({
   }, [signedAirgapQr]);
 
   async function maybeSecondFactor(amount: number) {
-    await maybeSecondFactorGate({
-      amountMei: amount,
-      securityProfile,
-      biometricSendEnabled,
-      nativeBiometricAvailable: platformSec?.native_biometric_available,
-    });
+    if (!needsSecondFactor(amount, securityProfile)) return;
+    throw new Error(
+      "Protected Quantum Lab signing is blocked until authorization can bind to the exact Type 4 body.",
+    );
   }
 
   function allowType4Action(): boolean {

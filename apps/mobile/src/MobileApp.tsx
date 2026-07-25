@@ -19,8 +19,9 @@ import WelcomeScreen from "./screens/WelcomeScreen";
 import MoreRouter, { type MorePage } from "./screens/more/MoreRouter";
 import { loadContacts, type SavedContact } from "./contacts";
 import { formatInvokeError } from "./formatInvokeError";
+import { useLocale } from "./locale";
 import { encodePaymentUri } from "./paymentQr";
-import { copyWithPrivacyClear, maskAddress } from "./privacy";
+import { clearSensitiveClipboard, copyWithPrivacyClear, maskAddress } from "./privacy";
 import { clearAllWalletNames, saveWalletName, walletDisplayName } from "./walletName";
 import { MIN_WALLET_PASS } from "./quantumMeta";
 import { clearDeepLink, parseDeepLinkPay, stashDeepLinkUrl } from "./utils/deepLink";
@@ -28,6 +29,7 @@ import { hapticSuccess } from "./utils/haptic";
 import { PULL_THRESHOLD } from "./utils/appConstants";
 
 export default function MobileApp() {
+  const { t } = useLocale();
   const { toast, showToast } = useToast();
   const session = useWalletSession(showToast);
 
@@ -46,6 +48,7 @@ export default function MobileApp() {
   const pullOffset = useRef(0);
   const deepLinkHandled = useRef(false);
   const bioUnlockPrompted = useRef(false);
+  const backgroundLockRequested = useRef(false);
   const [deepLinkTick, setDeepLinkTick] = useState(0);
   const [biometricUnlock, setBiometricUnlock] = useState<BiometricUnlockStatus | null>(null);
 
@@ -73,25 +76,70 @@ export default function MobileApp() {
   }, [session.settings, syncSendPrefsFromSettings]);
 
   useEffect(() => {
-    if (!session.privacy.screen_privacy || session.authScreen !== "app") {
-      setPrivacyHidden(false);
-      return;
+    if (session.authScreen !== "app") {
+      backgroundLockRequested.current = false;
+      setPrivacyHidden(document.visibilityState === "hidden");
     }
-    const onHide = () => setPrivacyHidden(document.hidden);
-    const onBlur = () => setPrivacyHidden(true);
-    const onFocus = () => setPrivacyHidden(false);
-    document.addEventListener("visibilitychange", onHide);
+
+    const lockForBackground = () => {
+      // Conceal synchronously before any asynchronous IPC can yield.
+      setPrivacyHidden(true);
+      setPassphrase("");
+      setSeed("");
+      void clearSensitiveClipboard();
+
+      if (session.authScreen !== "app" || backgroundLockRequested.current) return;
+      backgroundLockRequested.current = true;
+      void api
+        .lock()
+        .then(() => session.refresh())
+        .catch((error) => {
+          // Fail closed: keep the shield visible until a restart can confirm lock state.
+          showToast("Wallet background lock could not be confirmed: " + formatInvokeError(error), "error");
+        });
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        lockForBackground();
+      } else if (!backgroundLockRequested.current) {
+        setPrivacyHidden(false);
+      }
+    };
+    const onBlur = () => {
+      if (session.privacy.screen_privacy) setPrivacyHidden(true);
+    };
+    const onFocus = () => {
+      if (document.visibilityState !== "hidden" && !backgroundLockRequested.current) {
+        setPrivacyHidden(false);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("freeze", lockForBackground);
+    window.addEventListener("pagehide", lockForBackground);
     window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onFocus);
+    if (document.visibilityState === "hidden") {
+      lockForBackground();
+    }
     return () => {
-      document.removeEventListener("visibilitychange", onHide);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("freeze", lockForBackground);
+      window.removeEventListener("pagehide", lockForBackground);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
     };
-  }, [session.privacy.screen_privacy, session.authScreen]);
+  }, [session.authScreen, session.privacy.screen_privacy, session.refresh, showToast]);
 
   const navigateToPay = useCallback(
     (opts?: { openCamera?: boolean }) => {
+      if (session.status?.hardware_signing_mode === "airgap_only") {
+        payment.setPayScanMode(false);
+        setPayCameraIntent(false);
+        setMorePage("airgap");
+        setTab("more");
+        showToast(t("airgap.coldVaultSignerHint"), "info");
+        return;
+      }
       payment.setPayScanMode(false);
       setPayCameraIntent(false);
       if (opts?.openCamera) {
@@ -100,7 +148,7 @@ export default function MobileApp() {
       }
       setTab("pay");
     },
-    [payment],
+    [payment, session.status?.hardware_signing_mode, showToast, t],
   );
 
   useEffect(() => {
@@ -225,6 +273,28 @@ export default function MobileApp() {
     }
   };
 
+  const handleRestoreBackup = async (
+    json: string,
+    backupPassphrase: string,
+    allowLegacy: boolean,
+  ) => {
+    session.setBusy(true);
+    try {
+      const address = await api.importBackup(json, backupPassphrase, null, allowLegacy);
+      if (session.walletNameDraft.trim()) {
+        saveWalletName(address, session.walletNameDraft);
+      }
+      setPassphrase("");
+      await session.refresh();
+      showToast("Authenticated wallet backup restored.", "success");
+      hapticSuccess();
+    } catch (error) {
+      showToast(formatInvokeError(error), "error");
+    } finally {
+      session.setBusy(false);
+    }
+  };
+
   const handleUnlock = async () => {
     session.setBusy(true);
     try {
@@ -308,23 +378,31 @@ export default function MobileApp() {
     showToast("Address copied.", "success");
   };
 
-  const handleResetWallet = async () => {
-    const ok1 = window.confirm(
-      "Delete this wallet from the phone? You will need your private key to recover funds.",
-    );
-    if (!ok1) return;
-    const ok2 = window.confirm("This cannot be undone. Delete wallet now?");
-    if (!ok2) return;
+  const handleResetWallet = async (
+    currentPassphrase: string | null,
+    confirmationAddress: string,
+  ): Promise<boolean> => {
     session.setBusy(true);
     try {
-      await api.resetWallet();
-      clearAllWalletNames();
-      setPassphrase("");
-      setSeed("");
-      await session.refresh();
-      showToast("Wallet removed. You can create or import a new one.", "success");
-    } catch (e) {
-      showToast(formatInvokeError(e), "error");
+      try {
+        await api.resetWallet(currentPassphrase, confirmationAddress);
+      } catch (error) {
+        showToast(formatInvokeError(error), "error");
+        return false;
+      }
+      try {
+        clearAllWalletNames();
+        setPassphrase("");
+        setSeed("");
+        await session.refresh();
+        showToast("Wallet removed. You can create or import a new one.", "success");
+      } catch (error) {
+        showToast(
+          `Wallet was removed, but the screen could not refresh. Restart the app. ${formatInvokeError(error)}`,
+          "error",
+        );
+      }
+      return true;
     } finally {
       session.setBusy(false);
     }
@@ -385,10 +463,34 @@ export default function MobileApp() {
     }
     session.setBusy(true);
     try {
-      await api.changePassphrase(oldPass, newPass);
-      showToast("Passphrase changed.", "success");
-    } catch (e) {
-      showToast(formatInvokeError(e), "error");
+      let outcome;
+      try {
+        outcome = await api.changePassphrase(oldPass, newPass);
+      } catch (error) {
+        showToast(formatInvokeError(error), "error");
+        return;
+      }
+      let refreshWarning: string | null = null;
+      try {
+        await session.refresh();
+      } catch (error) {
+        refreshWarning = ` Wallet state refresh failed: ${formatInvokeError(error)}`;
+      }
+      if (outcome.nativeBiometricSecretCleared && !refreshWarning) {
+        showToast(
+          "Passphrase changed. Biometric unlock was disabled and its stored unlock secret was removed.",
+          "success",
+        );
+      } else {
+        const cleanupMessage = outcome.nativeBiometricSecretCleared
+          ? "Passphrase changed. Biometric unlock was disabled and its stored unlock secret was removed."
+          : outcome.warning ??
+            "Passphrase changed and biometric unlock was disabled. Open Security and disable biometric unlock again to retry Android Keystore cleanup.";
+        showToast(
+          cleanupMessage + (refreshWarning ?? ""),
+          "error",
+        );
+      }
     } finally {
       session.setBusy(false);
     }
@@ -407,44 +509,56 @@ export default function MobileApp() {
   );
 
   if (session.booting) {
-    return <SplashScreen />;
+    return (
+      <>
+        <SplashScreen />
+        <PrivacyShield active={privacyHidden} />
+      </>
+    );
   }
 
   if (session.authScreen === "welcome") {
     return (
-      <WelcomeScreen
-        walletNameDraft={session.walletNameDraft}
-        setWalletNameDraft={session.setWalletNameDraft}
-        passphrase={passphrase}
-        setPassphrase={setPassphrase}
-        seed={seed}
-        setSeed={setSeed}
-        watchAddress={watchAddress}
-        setWatchAddress={setWatchAddress}
-        busy={session.busy}
-        onCreate={() => void handleCreate()}
-        onImport={() => void handleImport()}
-        onWatchOnly={() => void handleWatchOnly()}
-        toast={toast}
-      />
+      <>
+        <WelcomeScreen
+          walletNameDraft={session.walletNameDraft}
+          setWalletNameDraft={session.setWalletNameDraft}
+          passphrase={passphrase}
+          setPassphrase={setPassphrase}
+          seed={seed}
+          setSeed={setSeed}
+          watchAddress={watchAddress}
+          setWatchAddress={setWatchAddress}
+          busy={session.busy}
+          onCreate={() => void handleCreate()}
+          onImport={() => void handleImport()}
+          onRestoreBackup={(json, value, allowLegacy) => void handleRestoreBackup(json, value, allowLegacy)}
+          onWatchOnly={() => void handleWatchOnly()}
+          toast={toast}
+        />
+        <PrivacyShield active={privacyHidden} />
+      </>
     );
   }
 
   if (session.authScreen === "unlock") {
     const bioReady = bioUnlockReady;
     return (
-      <UnlockScreen
-        displayName={displayName}
-        addressHint={maskAddress(session.status?.address, false)}
-        passphrase={passphrase}
-        setPassphrase={setPassphrase}
-        busy={session.busy}
-        onUnlock={() => void handleUnlock()}
-        biometricUnlockAvailable={bioReady}
-        biometricKind={session.platformSec?.biometric_kind}
-        onBiometricUnlock={() => void handleBiometricUnlock()}
-        toast={toast}
-      />
+      <>
+        <UnlockScreen
+          displayName={displayName}
+          addressHint={maskAddress(session.status?.address, false)}
+          passphrase={passphrase}
+          setPassphrase={setPassphrase}
+          busy={session.busy}
+          onUnlock={() => void handleUnlock()}
+          biometricUnlockAvailable={bioReady}
+          biometricKind={session.platformSec?.biometric_kind}
+          onBiometricUnlock={() => void handleBiometricUnlock()}
+          toast={toast}
+        />
+        <PrivacyShield active={privacyHidden} />
+      </>
     );
   }
 
@@ -585,7 +699,7 @@ export default function MobileApp() {
               onApplyHub: (entry) => handleApplyHub(entry),
               onSaveWalletName: session.handleSaveWalletName,
               onChangePassphrase: (old, neu) => void handleChangePassphrase(old, neu),
-              onResetWallet: () => void handleResetWallet(),
+              onResetWallet: handleResetWallet,
               onLock: () => void session.handleLock(),
               onPersistPrivacy: (p) => void session.persistPrivacy(p),
               onSelectContact: (c) => {
@@ -614,8 +728,10 @@ export default function MobileApp() {
       </main>
 
       <BottomNav active={tab} onChange={handleTabChange} watchOnly={session.watchOnly} />
-      <DappApprovalPanel onNotify={showToast} />
-      <PrivacyShield active={session.privacy.screen_privacy && privacyHidden} />
+      {session.status?.hardware_signing_mode !== "airgap_only" ? (
+        <DappApprovalPanel onNotify={showToast} />
+      ) : null}
+      <PrivacyShield active={privacyHidden} />
       {toast && <Toast message={toast.msg} kind={toast.kind} />}
       <BillDetailModal
         bill={selectedBill}

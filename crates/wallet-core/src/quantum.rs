@@ -244,23 +244,12 @@ pub fn create_hybrid_from_privakey_offline(
 
 impl WalletService {
     pub fn quantum_settings(&self) -> QuantumSettings {
+        // Public address metadata is persisted separately from the encrypted
+        // keystore. Never inspect key material merely to render account state.
         let active_account = self
             .quantum_meta_snapshot()
             .as_ref()
-            .map(|m| summary_from_resolved(m.kind.clone(), m.address.clone(), m.address_version))
-            .or_else(|| {
-                let json = self.quantum_keystore_json();
-                let (active, kind) = json
-                    .as_deref()
-                    .map(parse_keystore_meta)
-                    .unwrap_or((None, None));
-                let (resolved_kind, version) =
-                    resolve_quantum_meta(kind.as_deref(), active.as_deref());
-                match (resolved_kind, active, version) {
-                    (Some(k), Some(a), Some(v)) => Some(summary_from_resolved(k, a, v)),
-                    _ => None,
-                }
-            });
+            .map(|m| summary_from_resolved(m.kind.clone(), m.address.clone(), m.address_version));
         QuantumSettings {
             quantum_mode: self.quantum_mode_enabled(),
             active_account,
@@ -369,11 +358,12 @@ impl WalletService {
     }
 
     fn require_keystore_json(&self) -> WalletResult<String> {
-        self.quantum_keystore_json()
+        self.quantum_keystore_json()?
             .ok_or_else(|| WalletError::Other("no quantum keystore. create or import first".into()))
     }
 
     pub fn quantum_create_pqc(&mut self, pass: &str) -> WalletResult<QuantumAccountInfo> {
+        self.reject_cold_vault_key_access("creating a Quantum key")?;
         self.bump_unlock_activity();
         let (keystore, info) = create_pqc_keystore_offline(pass)?;
         self.store_quantum_keystore_json(keystore)?;
@@ -385,6 +375,7 @@ impl WalletService {
         pass: &str,
         legacy_prikey_hex: Option<&str>,
     ) -> WalletResult<QuantumAccountInfo> {
+        self.reject_cold_vault_key_access("creating a Quantum key")?;
         self.bump_unlock_activity();
         let (keystore, info) = create_hybrid_keystore_offline(pass, legacy_prikey_hex)?;
         self.store_quantum_keystore_json(keystore)?;
@@ -396,6 +387,7 @@ impl WalletService {
         legacy_prikey_hex: &str,
         pass: &str,
     ) -> WalletResult<QuantumAccountInfo> {
+        self.reject_cold_vault_key_access("creating a Quantum key from a private key")?;
         Account::create_by(legacy_prikey_hex).map_err(WalletError::Other)?;
         self.quantum_create_hybrid(pass, Some(legacy_prikey_hex))
     }
@@ -405,6 +397,7 @@ impl WalletService {
         json: &str,
         pass: &str,
     ) -> WalletResult<QuantumAccountInfo> {
+        self.reject_cold_vault_key_access("importing Quantum key material")?;
         self.bump_unlock_activity();
         let (keystore, info) = import_keystore_offline(json, pass)?;
         self.store_quantum_keystore_json(keystore)?;
@@ -416,6 +409,12 @@ impl WalletService {
         pass: &str,
         new_password: Option<&str>,
     ) -> WalletResult<String> {
+        let operation = if new_password.is_some() {
+            "changing a Quantum keystore password"
+        } else {
+            "exporting Quantum key material"
+        };
+        self.reject_cold_vault_key_access(operation)?;
         let json = self.require_keystore_json()?;
         keystore_unlock_blob(&json, pass).map_err(WalletError::Other)?;
         if let Some(np) = new_password {
@@ -431,6 +430,7 @@ impl WalletService {
         amount: &str,
         keystore_pass: &str,
     ) -> WalletResult<QuantumSendResult> {
+        self.reject_cold_vault_key_access("signing a Quantum transaction")?;
         self.touch_auto_lock();
         self.require_quantum_testnet()?;
         let amount_mei = parse_decimal_hac_mei(amount)?;
@@ -583,6 +583,7 @@ impl WalletService {
         unsigned: &crate::airgap::AirgapUnsigned,
         keystore_pass: &str,
     ) -> WalletResult<crate::airgap::AirgapSignResult> {
+        self.reject_cold_vault_key_access("signing a Quantum air-gap transaction")?;
         self.touch_auto_lock();
         self.require_quantum_testnet()?;
         let inspection = self
@@ -673,6 +674,7 @@ impl WalletService {
         &mut self,
         _keystore_pass: &str,
     ) -> WalletResult<QuantumTestResult> {
+        self.reject_cold_vault_key_access("signing a Quantum test transaction")?;
         Err(WalletError::Policy(
             "Unsafe one-click test transfer was removed; use preflight or node diagnostics".into(),
         ))

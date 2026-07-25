@@ -145,6 +145,24 @@ fn android_9_backup_export_has_a_scoped_runtime_permission_flow() {
             "Android backup filename validation is missing {filename_guard}"
         );
     }
+    for streaming_contract in [
+        "MAX_BACKUP_BYTES = 64L * 1024L * 1024L",
+        "source.parentFile != cacheRoot",
+        "Files.isSymbolicLink(requestedSource.toPath())",
+        "FileInputStream(source).use",
+        "copyBounded(input, stream)",
+        "buffer.fill(0)",
+        "MediaStore.Downloads.IS_PENDING",
+        "uri?.let { activity.contentResolver.delete(it, null, null) }",
+        "temporary.renameTo(destination)",
+    ] {
+        assert!(
+            backup_helper.contains(streaming_contract),
+            "Android backup bounded-streaming contract is missing {streaming_contract}"
+        );
+    }
+    assert!(!backup_helper.contains("readBytes()"));
+    assert!(!backup_helper.contains("writeBytes(bytes)"));
 }
 
 #[test]

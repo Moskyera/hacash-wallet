@@ -18,7 +18,12 @@ $commonRust = Join-Path $mobile "..\..\crates\wallet-tauri-common\src"
 $mobileRust = Join-Path $mobile "src-tauri\src"
 $nativePluginSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\WalletNativePlugin.kt"
 $nativePluginGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\WalletNativePlugin.kt"
+$mainActivitySource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\MainActivity.kt"
+$mainActivityGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\MainActivity.kt"
 $biometricStoreSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\BiometricSecretStore.kt"
+$biometricStoreGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\BiometricSecretStore.kt"
+$apkInstallerSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\ApkInstaller.kt"
+$apkInstallerGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\ApkInstaller.kt"
 $backupExportSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\BackupExportHelper.kt"
 $androidPermissions = Join-Path $mobile "src-tauri\android-permissions.xml"
 $mobileCapability = Join-Path $mobile "src-tauri\capabilities\mobile.json"
@@ -250,6 +255,50 @@ foreach ($pluginFile in @($nativePluginSource, $nativePluginGenerated)) {
     }
 }
 
+foreach ($activityFile in @($mainActivitySource, $mainActivityGenerated)) {
+    if (-not (Test-Path $activityFile)) {
+        $errors += "Missing secure Android MainActivity: $activityFile"
+        continue
+    }
+
+    $activitySource = Get-Content $activityFile -Raw
+    if ($activitySource -notmatch 'WindowManager\.LayoutParams\.FLAG_SECURE') {
+        $errors += "Android MainActivity must enforce FLAG_SECURE: $activityFile"
+    }
+}
+
+if ((Test-Path $mainActivitySource) -and (Test-Path $mainActivityGenerated)) {
+    $sourceActivity = (Get-Content $mainActivitySource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedActivity = (Get-Content $mainActivityGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourceActivity -ne $generatedActivity) {
+        $errors += "Generated MainActivity differs from the tracked secure source; rerun apply-android-patches.ps1"
+    }
+}
+
+if ((Test-Path $nativePluginSource) -and (Test-Path $nativePluginGenerated)) {
+    $sourcePlugin = (Get-Content $nativePluginSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedPlugin = (Get-Content $nativePluginGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourcePlugin -ne $generatedPlugin) {
+        $errors += "Generated WalletNativePlugin differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
+if ((Test-Path $biometricStoreSource) -and (Test-Path $biometricStoreGenerated)) {
+    $sourceStore = (Get-Content $biometricStoreSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedStore = (Get-Content $biometricStoreGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourceStore -ne $generatedStore) {
+        $errors += "Generated BiometricSecretStore differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
+if ((Test-Path $apkInstallerSource) -and (Test-Path $apkInstallerGenerated)) {
+    $sourceInstaller = (Get-Content $apkInstallerSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedInstaller = (Get-Content $apkInstallerGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourceInstaller -ne $generatedInstaller) {
+        $errors += "Generated ApkInstaller differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
 if (Test-Path $nativePluginSource) {
     $nativePlugin = Get-Content $nativePluginSource -Raw
     foreach ($permissionContract in @(
@@ -271,6 +320,46 @@ if (Test-Path $biometricStoreSource) {
         ([regex]::Matches($biometricStore, '\.commit\(\)')).Count -lt 2) {
         $errors += "Biometric secret store must durably commit both save and clear operations off the UI thread"
     }
+    foreach ($authPerUseContract in @(
+        'hacash_wallet_biometric_unlock_v3',
+        'hacash_wallet_biometric_unlock_v2',
+        'setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)',
+        'setUserAuthenticationValidityDurationSeconds(-1)'
+    )) {
+        if ($biometricStore -notmatch [regex]::Escape($authPerUseContract)) {
+            $errors += "Biometric secret store is missing auth-per-use contract: $authPerUseContract"
+        }
+    }
+    if ($biometricStore -match 'AUTH_WINDOW_SECONDS') {
+        $errors += "Biometric unlock key must not use a time-based authentication window"
+    }
+}
+
+if (Test-Path $nativePluginSource) {
+    $nativePlugin = Get-Content $nativePluginSource -Raw
+    if ($nativePlugin -notmatch [regex]::Escape('prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))')) {
+        $errors += "Biometric unlock must authenticate the exact Cipher through a CryptoObject"
+    }
+}
+
+if (Test-Path $apkInstallerSource) {
+    $apkInstaller = Get-Content $apkInstallerSource -Raw
+    foreach ($signerContract in @(
+        'verifyPackageIdentityAndSigner(activity, source)',
+        'PackageManager.GET_SIGNING_CERTIFICATES',
+        'candidate.packageName != activity.packageName',
+        'candidateVersion <= installedVersion',
+        'MessageDigest.getInstance("SHA-256")',
+        '.intersect(installedIdentity.currentCertificateSha256)'
+    )) {
+        if ($apkInstaller -notmatch [regex]::Escape($signerContract)) {
+            $errors += "APK installer is missing package/signer verification: $signerContract"
+        }
+    }
+    if ($apkInstaller.IndexOf('verifyPackageIdentityAndSigner(activity, source)') -gt
+        $apkInstaller.IndexOf('Intent(Intent.ACTION_VIEW)')) {
+        $errors += "APK package/signer verification must happen before ACTION_VIEW"
+    }
 }
 
 if (Test-Path $backupExportSource) {
@@ -284,6 +373,24 @@ if (Test-Path $backupExportSource) {
     )) {
         if ($backupExport -notmatch [regex]::Escape($filenameGuard)) {
             $errors += "Backup export filename validation missing: $filenameGuard"
+        }
+    }
+    foreach ($streamingContract in @(
+        'MAX_BACKUP_BYTES = 64L * 1024L * 1024L',
+        'source.parentFile != cacheRoot',
+        'Files.isSymbolicLink(requestedSource.toPath())',
+        'FileInputStream(source).use',
+        'copyBounded(input, stream)',
+        'buffer.fill(0)',
+        'temporary.renameTo(destination)'
+    )) {
+        if ($backupExport -notmatch [regex]::Escape($streamingContract)) {
+            $errors += "Backup export bounded-streaming contract missing: $streamingContract"
+        }
+    }
+    foreach ($forbiddenBuffering in @('readBytes()', 'writeBytes(bytes)')) {
+        if ($backupExport -match [regex]::Escape($forbiddenBuffering)) {
+            $errors += "Backup export must not buffer the full file: $forbiddenBuffering"
         }
     }
 }

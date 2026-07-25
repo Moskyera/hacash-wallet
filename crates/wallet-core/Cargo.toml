@@ -41,7 +41,12 @@ sdk = { path = "../../../hacash-fullnodedev/sdk" }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_System_Memory"] }
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Memory",
+] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

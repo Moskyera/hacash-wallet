@@ -271,15 +271,18 @@ impl WalletSettings {
             self.send = SendPreferences::default();
         }
         self.send.enforce_mandatory_service_fee();
+        // Transaction confirmation is a policy control, not a renderer preference.
+        self.biometric_send_enabled = true;
         if !matches!(self.security_profile.as_str(), "balanced" | "paranoid") {
             self.security_profile = default_security_profile();
         }
         if !matches!(
             self.hardware_signing_mode.as_str(),
-            "software" | "webauthn_gate" | "watch_only"
+            "software" | "webauthn_gate" | "airgap_only" | "watch_only"
         ) {
             self.hardware_signing_mode = default_hardware_mode();
         }
+        self.enforce_hardware_mode_invariants();
     }
 
     pub fn validate_and_normalize(&mut self) -> WalletResult<()> {
@@ -301,11 +304,19 @@ impl WalletSettings {
         }
         if !matches!(
             self.hardware_signing_mode.as_str(),
-            "software" | "webauthn_gate" | "watch_only"
+            "software" | "webauthn_gate" | "airgap_only" | "watch_only"
         ) {
             return Err(WalletError::Policy("unknown hardware signing mode".into()));
         }
+        self.enforce_hardware_mode_invariants();
         Ok(())
+    }
+
+    fn enforce_hardware_mode_invariants(&mut self) {
+        if self.hardware_signing_mode == "airgap_only" {
+            self.security_profile = "paranoid".into();
+            self.biometric_unlock_enabled = false;
+        }
     }
 
     pub fn load() -> WalletResult<Self> {
@@ -316,9 +327,22 @@ impl WalletSettings {
         let raw = fs::read_to_string(&path).map_err(|e| WalletError::Other(e.to_string()))?;
         let mut settings: Self =
             serde_json::from_str(&raw).map_err(|e| WalletError::Other(e.to_string()))?;
-        let before = settings.node_url.clone();
+        let before = (
+            settings.node_url.clone(),
+            settings.security_profile.clone(),
+            settings.hardware_signing_mode.clone(),
+            settings.biometric_send_enabled,
+            settings.biometric_unlock_enabled,
+        );
         settings.normalize();
-        if settings.node_url != before {
+        let after = (
+            settings.node_url.clone(),
+            settings.security_profile.clone(),
+            settings.hardware_signing_mode.clone(),
+            settings.biometric_send_enabled,
+            settings.biometric_unlock_enabled,
+        );
+        if after != before {
             let _ = settings.save();
         }
         Ok(settings)
@@ -327,7 +351,7 @@ impl WalletSettings {
     pub fn save(&self) -> WalletResult<()> {
         let path = settings_path();
         let mut canonical = self.clone();
-        canonical.send.enforce_mandatory_service_fee();
+        canonical.validate_and_normalize()?;
         let json =
             serde_json::to_string(&canonical).map_err(|e| WalletError::Other(e.to_string()))?;
         secure_write(&path, json.as_bytes()).map_err(|e| WalletError::Other(e.to_string()))
@@ -420,6 +444,19 @@ mod tests {
             settings.node_fallback_urls,
             vec!["https://node.example".to_string()]
         );
+    }
+
+    #[test]
+    fn airgap_only_forces_paranoid_and_disables_biometric_unlock() {
+        let mut settings = WalletSettings {
+            hardware_signing_mode: "airgap_only".into(),
+            security_profile: "balanced".into(),
+            biometric_unlock_enabled: true,
+            ..WalletSettings::default()
+        };
+        settings.validate_and_normalize().unwrap();
+        assert_eq!(settings.security_profile, "paranoid");
+        assert!(!settings.biometric_unlock_enabled);
     }
 
     #[test]

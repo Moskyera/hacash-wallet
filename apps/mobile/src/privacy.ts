@@ -44,14 +44,41 @@ export function maskBtcFromSatoshi(satoshi: number | null | undefined, hide: boo
   return formatBtcFromSatoshi(satoshi);
 }
 
+type ClipboardWriter = Pick<Clipboard, "writeText">;
+
+let walletClipboardGeneration = 0;
+let activeWalletClipboardGeneration: number | null = null;
+
+function defaultClipboard(): ClipboardWriter | null {
+  return typeof navigator === "undefined" ? null : navigator.clipboard;
+}
+
+export async function clearSensitiveClipboard(
+  clipboard: ClipboardWriter | null = defaultClipboard(),
+): Promise<boolean> {
+  if (activeWalletClipboardGeneration == null || !clipboard) return false;
+  activeWalletClipboardGeneration = null;
+  try {
+    await clipboard.writeText("");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function copyWithPrivacyClear(
   text: string,
   clipboardClearSecs: number,
+  clipboard: ClipboardWriter | null = defaultClipboard(),
 ): Promise<void> {
-  await navigator.clipboard.writeText(text);
+  if (!clipboard) throw new Error("Clipboard is unavailable");
+  await clipboard.writeText(text);
+  const generation = ++walletClipboardGeneration;
+  activeWalletClipboardGeneration = generation;
   if (clipboardClearSecs > 0) {
-    window.setTimeout(() => {
-      navigator.clipboard.writeText("").catch(() => undefined);
+    globalThis.setTimeout(() => {
+      if (activeWalletClipboardGeneration !== generation) return;
+      void clearSensitiveClipboard(clipboard);
     }, clipboardClearSecs * 1000);
   }
 }

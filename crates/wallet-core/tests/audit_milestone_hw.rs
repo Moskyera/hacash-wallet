@@ -28,7 +28,7 @@ fn milestone_webauthn_gate_blocks_sign_without_ceremony() {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("milestone-pass12").unwrap();
-            svc.set_hardware_signing_mode(HardwareSigningMode::WebAuthnGate)
+            svc.change_hardware_signing_mode("milestone-pass12", HardwareSigningMode::WebAuthnGate)
                 .unwrap();
             let err = svc.audit_sign_tx_body("00").unwrap_err();
             assert!(matches!(err, WalletError::Policy(_)));

@@ -68,6 +68,19 @@ export type FastPayExecution = {
   summary: string;
 };
 
+export type SigningPolicy = "software" | "webauthn_gate" | "airgap_only" | "watch_only";
+
+export type BackupPreview = {
+  address: string;
+  format: "full_authenticated" | "legacy_classic_only";
+  version: number;
+  encrypted: boolean;
+  addressVerified: boolean;
+  requiresLegacyConfirmation: boolean;
+  included: string[];
+  warning: string | null;
+};
+
 export type WalletStatus = {
   has_wallet: boolean;
   locked: boolean;
@@ -82,7 +95,8 @@ export type WalletStatus = {
   l2_bill_count: number;
   auto_lock_secs: number;
   seconds_until_lock: number | null;
-  hardware_signing_mode: string;
+  hardware_signing_mode: SigningPolicy;
+  signing_available: boolean;
   watch_only: boolean;
   privacy: PrivacySettings;
   dust_whisper: DustWhisperSettings;
@@ -145,6 +159,7 @@ export type WalletSettings = {
   channel_id_hex: string | null;
   webauthn_enabled: boolean;
   security_profile: string;
+  hardware_signing_mode: SigningPolicy;
   privacy: PrivacySettings;
   send?: SendPreferences;
 };
@@ -199,6 +214,22 @@ export type SendPreview = {
   send_options: SendOptions;
 };
 
+export type PreparedOperationView = {
+  id: string;
+  digest: string;
+  kind: "hac_l1" | "hacd" | "bridged_btc" | "channel_open" | "channel_close" | string;
+  wallet_address: string;
+  network_mode: string;
+  chain_id: number | null;
+  display: {
+    title: string;
+    summary: string;
+    fields: Array<{ label: string; value: string }>;
+  };
+  authorization_required: boolean;
+  webauthn_required: boolean;
+  expires_in_secs: number;
+};
 export type SendResult = {
   rail: "L2Fast" | "L1OnChain" | "QuantumType4";
   tx_hash: string;
@@ -491,15 +522,14 @@ export const api = {
     invoke<string>("wallet_import", { seed, passphrase }),
   exportBackup: (passphrase: string) =>
     invoke<string>("wallet_export_backup", { passphrase }),
-  previewBackup: (json: string) => invoke<string>("wallet_preview_backup", { json }),
-  importBackup: (json: string, passphrase: string, deleteSource?: string | null) =>
+  previewBackup: (json: string) => invoke<BackupPreview>("wallet_preview_backup", { json }),
+  importBackup: (json: string, passphrase: string, deleteSource?: string | null, allowLegacy = false) =>
     invoke<string>("wallet_import_backup", {
       json,
       passphrase,
       deleteSource: deleteSource ?? null,
+      allowLegacy,
     }),
-  exportPrivateKey: (passphrase: string) =>
-    invoke<string>("wallet_export_private_key", { passphrase }),
   changePassphrase: (oldPassphrase: string, newPassphrase: string) =>
     invoke<void>("wallet_change_passphrase", { oldPassphrase, newPassphrase }),
   unlock: (passphrase: string) => invoke<string>("wallet_unlock", { passphrase }),
@@ -525,12 +555,15 @@ export const api = {
     invoke<AssetPriceResponse>("wallet_fetch_asset_prices"),
   webauthnRegisterBegin: (clientOrigin?: string) =>
     invoke<string>("wallet_webauthn_register_begin", { clientOrigin: clientOrigin ?? null }),
-  webauthnRegisterFinish: (credentialJson: string) =>
-    invoke<void>("wallet_webauthn_register_finish", { credentialJson }),
-  webauthnAuthBegin: (clientOrigin?: string) =>
-    invoke<string>("wallet_webauthn_auth_begin", { clientOrigin: clientOrigin ?? null }),
-  webauthnAuthFinish: (assertionJson: string) =>
-    invoke<void>("wallet_webauthn_auth_finish", { assertionJson }),
+  webauthnRegisterFinish: (credentialJson: string, currentPassphrase: string) =>
+    invoke<void>("wallet_webauthn_register_finish", {
+      credentialJson,
+      currentPassphrase,
+    }),
+  webauthnAuthBegin: (operationId: string, clientOrigin?: string) =>
+    invoke<string>("wallet_webauthn_auth_begin", { operationId, clientOrigin: clientOrigin ?? null }),
+  webauthnAuthFinish: (operationId: string, assertionJson: string) =>
+    invoke<void>("wallet_webauthn_auth_finish", { operationId, assertionJson }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
   discoverHubs: () => invoke<HubDiscoveryReport>("wallet_discover_hubs"),
   fastPayStatus: () => invoke<FastPayStatus>("wallet_fast_pay_status"),
@@ -558,7 +591,13 @@ export const api = {
       userDepositMei,
       hubDepositMei,
     }),
-  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  prepareChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+    invoke<PreparedOperationView>("wallet_prepare_channel_open", { hubAddress, userDepositMei, hubDepositMei }),
+  executePreparedChannelOpen: (operationId: string) =>
+    invoke<string>("wallet_execute_prepared_channel_open", { operationId }),
+  prepareChannelClose: () => invoke<PreparedOperationView>("wallet_prepare_channel_close"),
+  executePreparedChannelClose: (operationId: string) =>
+    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
     invoke<string>("wallet_open_channel", {
       hubAddress,
       userDepositMei,
@@ -569,14 +608,19 @@ export const api = {
     invoke<SendPreview>("wallet_preview_send", { to, amountMei, sendOptions }),
   platformSecurityStatus: () =>
     invoke<PlatformSecurityStatus>("wallet_platform_security_status"),
-  confirmBiometricNative: () => invoke<void>("wallet_confirm_biometric_native"),
+  confirmBiometricNative: (operationId: string) =>
+    invoke<void>("wallet_confirm_biometric_native", { operationId }),
   importWatchOnly: (address: string) => invoke<string>("wallet_import_watch_only", { address }),
   openWatchOnly: () => invoke<string>("wallet_open_watch_only"),
-  setHardwareMode: (mode: string) => invoke<void>("wallet_set_hardware_mode", { mode }),
-  sendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
+  setHardwareMode: (mode: SigningPolicy, currentPassphrase: string) =>
+    invoke<void>("wallet_set_hardware_mode", { mode, currentPassphrase }),
+  prepareSendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
+    invoke<PreparedOperationView>("wallet_prepare_send_hac", { to, amountMei, sendOptions }),
+  executePreparedHac: (operationId: string) =>
+    invoke<SendResult>("wallet_execute_prepared_hac", { operationId }),  sendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<SendResult>("wallet_send_hac", { to, amountMei, sendOptions }),
-  setSecurityProfile: (profile: string) =>
-    invoke<void>("wallet_set_security_profile", { profile }),
+  setSecurityProfile: (profile: string, currentPassphrase: string) =>
+    invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
   updatePrivacySettings: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   updateDustWhisperSettings: (dustWhisper: DustWhisperSettings) =>
@@ -586,7 +630,10 @@ export const api = {
   clearTxHistory: () => invoke<void>("wallet_clear_tx_history"),
   airgapPrepareSend: (to: string, amountMei: number) =>
     invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),
-  airgapSignUnsigned: (unsigned: AirgapUnsigned) =>
+  prepareAirgapSign: (unsigned: AirgapUnsigned) =>
+    invoke<PreparedOperationView>("wallet_prepare_airgap_sign", { unsigned }),
+  executePreparedAirgapSign: (operationId: string) =>
+    invoke<AirgapSignResult>("wallet_execute_prepared_airgap_sign", { operationId }),  airgapSignUnsigned: (unsigned: AirgapUnsigned) =>
     invoke<AirgapSignResult>("wallet_airgap_sign_unsigned", { unsigned }),
   airgapBroadcastSigned: (signed: AirgapSigned) =>
     invoke<SendResult>("wallet_airgap_broadcast_signed", { signed }),
@@ -598,11 +645,17 @@ export const api = {
   listOwnedDiamonds: () => invoke<string[]>("wallet_list_owned_diamonds"),
   previewSendHacd: (to: string, diamondNames: string[]) =>
     invoke<HacdSendPreview>("wallet_preview_send_hacd", { to, diamondNames }),
-  sendHacd: (to: string, diamondNames: string[]) =>
+  prepareSendHacd: (to: string, diamondNames: string[]) =>
+    invoke<PreparedOperationView>("wallet_prepare_send_hacd", { to, diamondNames }),
+  executePreparedHacd: (operationId: string) =>
+    invoke<SendResult>("wallet_execute_prepared_hacd", { operationId }),  sendHacd: (to: string, diamondNames: string[]) =>
     invoke<SendResult>("wallet_send_hacd", { to, diamondNames }),
   previewSendBtc: (to: string, satoshi: number) =>
     invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
-  sendBtc: (to: string, satoshi: number) =>
+  prepareSendBtc: (to: string, satoshi: number) =>
+    invoke<PreparedOperationView>("wallet_prepare_send_btc", { to, satoshi }),
+  executePreparedBtc: (operationId: string) =>
+    invoke<SendResult>("wallet_execute_prepared_btc", { operationId }),  sendBtc: (to: string, satoshi: number) =>
     invoke<SendResult>("wallet_send_btc", { to, satoshi }),
   bumpActivity: () => invoke<void>("wallet_bump_activity"),
   dappConnect: (origin: string) =>

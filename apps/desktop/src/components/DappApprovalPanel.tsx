@@ -7,7 +7,6 @@ import {
 } from "@hacash/wallet-ui";
 import { api, type DappApprovalView } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
-import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 import { useLocale } from "../locale";
 
 type Props = {
@@ -118,14 +117,9 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
     setBusy(true);
     try {
       if (pending.kind === "transfer" || pending.kind === "sign") {
-        const status = await api.status();
-        if (status.webauthn_enabled) {
-          const options = await api.webauthnAuthBegin(webAuthnClientOrigin());
-          const assertion = await runWebAuthnAuth(options);
-          await api.webauthnAuthFinish(assertion);
-        } else {
-          await api.confirmBiometricNative();
-        }
+        throw new Error(
+          "This dApp signing request is blocked until its exact transaction bytes can be prepared and bound to authorization.",
+        );
       }
       await api.dappApprove(pending.id);
       previousId.current = null;

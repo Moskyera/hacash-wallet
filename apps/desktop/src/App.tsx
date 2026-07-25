@@ -162,13 +162,12 @@ export default function App() {
       },
       onCreate: (p: string) => void wallet.handleCreate(p),
       onImport: (s: string, p: string) => void wallet.handleImport(s, p),
-      onImportBackup: (j: string, p: string, d?: string | null) =>
-        void wallet.handleImportBackup(j, p, d),
+      onImportBackup: (j: string, p: string, d?: string | null, allowLegacy = false) =>
+        void wallet.handleImportBackup(j, p, d, allowLegacy),
       onWatchOnly: (a: string) => void wallet.handleWatchOnlyImport(a),
       onUnlock: (p: string) => void wallet.handleUnlock(p),
       onLock: handleLock,
       onOpenQrPay: hacSend.openQrPay,
-      onWebAuthnSession: () => void wallet.handleWebAuthnSession(),
       onEnableFastPay: (d: string) => void wallet.handleEnableFastPay(d),
       onApplyHub: wallet.handleApplyHub,
       onSaveL2Settings: (n: string, h: string, a: string) =>
@@ -180,10 +179,15 @@ export default function App() {
         void wallet.handleOpenChannel(...args),
       onCloseChannel: (cb: Parameters<typeof wallet.handleCloseChannel>[0]) =>
         void wallet.handleCloseChannel(cb),
-      onRegisterWebAuthn: () => void wallet.handleRegisterWebAuthn(),
-      onSetProfile: (p: string) => void wallet.handleSetProfile(p),
-      onSetHardwareMode: (m: "software" | "webauthn_gate" | "watch_only") =>
-        void wallet.handleSetHardwareMode(m),
+      onRegisterWebAuthn: (currentPassphrase: string) =>
+        void wallet.handleRegisterWebAuthn(currentPassphrase),
+      onSetProfile: (p: string, currentPassphrase: string) =>
+        void wallet.handleSetProfile(p, currentPassphrase),
+      onSetHardwareMode: (
+        m: "software" | "webauthn_gate" | "airgap_only" | "watch_only",
+        currentPassphrase: string,
+      ) =>
+        void wallet.handleSetHardwareMode(m, currentPassphrase),
       onSaveSettings: (nodeUrl: string, fallbackUrls: string[], autoFailover: boolean) =>
         void wallet.handleSaveSettings(nodeUrl, fallbackUrls, autoFailover),
       onChangePassphrase: (o: string, n: string, c: string) =>
@@ -298,7 +302,10 @@ export default function App() {
                 </span>
               )}
               {wallet.status.hardware_signing_mode === "webauthn_gate" && (
-                <span className="chip chip-accent">HW gate</span>
+                <span className="chip chip-accent">2FA gate</span>
+              )}
+              {wallet.status.hardware_signing_mode === "airgap_only" && (
+                <span className="chip chip-accent">Cold Vault</span>
               )}
               {wallet.status.seconds_until_lock != null && (
                 <span className="chip">
@@ -324,7 +331,11 @@ export default function App() {
       </main>
 
       <DappApprovalPanel
-        unlocked={!!wallet.status && !wallet.status.locked}
+        unlocked={
+          !!wallet.status &&
+          !wallet.status.locked &&
+          wallet.status.hardware_signing_mode !== "airgap_only"
+        }
         onNotify={(msg, kind) => {
           if (kind === "error") wallet.onError(msg);
           else wallet.onInfo(msg);

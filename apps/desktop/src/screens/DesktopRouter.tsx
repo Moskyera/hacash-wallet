@@ -1,3 +1,4 @@
+import { useLocale } from "@hacash/wallet-ui";
 import AirgapScreen from "../AirgapScreen";
 import { AssetSummary, HubDiscoveryEntry, TxRecord, WalletSettings, WalletStatus } from "../api";
 import { HubFeePayer, L1FeeSpeed, SendPreview } from "../api";
@@ -63,12 +64,16 @@ export type DesktopActions = {
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
   onCreate: (passphrase: string) => void;
   onImport: (seed: string, passphrase: string) => void;
-  onImportBackup: (json: string, passphrase: string, deleteSource?: string | null) => void;
+  onImportBackup: (
+    json: string,
+    passphrase: string,
+    deleteSource?: string | null,
+    allowLegacy?: boolean,
+  ) => void;
   onWatchOnly: (address: string) => void;
   onUnlock: (passphrase: string) => void;
   onLock: () => void;
   onOpenQrPay: () => void;
-  onWebAuthnSession: () => void;
   onEnableFastPay: (userDeposit: string) => void;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
   onSaveL2Settings: (nodeUrl: string, hubUrl: string, hubAddress: string) => void;
@@ -86,9 +91,12 @@ export type DesktopActions = {
     setChannelPreview: (p: import("../api").ChannelSetupPreview | null) => void,
   ) => void;
   onCloseChannel: (setChannelPreview: (p: import("../api").ChannelSetupPreview | null) => void) => void;
-  onRegisterWebAuthn: () => void;
-  onSetProfile: (profile: string) => void;
-  onSetHardwareMode: (mode: "software" | "webauthn_gate" | "watch_only") => void;
+  onRegisterWebAuthn: (currentPassphrase: string) => void;
+  onSetProfile: (profile: string, currentPassphrase: string) => void;
+  onSetHardwareMode: (
+    mode: "software" | "webauthn_gate" | "airgap_only" | "watch_only",
+    currentPassphrase: string,
+  ) => void;
   onSaveSettings: (nodeUrl: string, fallbackUrls: string[], autoFailover: boolean) => void;
   onChangePassphrase: (old: string, newPass: string, confirm: string) => Promise<boolean>;
   onExportBackup: (passphrase: string) => Promise<string | null>;
@@ -124,6 +132,7 @@ type Props = {
 };
 
 export default function DesktopRouter({ screen, data, actions }: Props) {
+  const { t } = useLocale();
   const {
     status,
     settings,
@@ -171,7 +180,6 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     onUnlock,
     onLock,
     onOpenQrPay,
-    onWebAuthnSession,
     onEnableFastPay,
     onApplyHub,
     onSaveL2Settings,
@@ -205,6 +213,27 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     onConfirmSend,
   } = actions;
 
+  const coldBlockedScreen =
+    status?.hardware_signing_mode === "airgap_only" &&
+    (["send", "fastpay", "hacd", "quantum", "settings", "advanced"] as Screen[]).includes(
+      screen,
+    );
+  if (coldBlockedScreen) {
+    return (
+      <section className="panel panel-wide">
+        <h2>{t("security.coldVaultTitle")}</h2>
+        <p className="warn-box">{t("airgap.coldVaultCoordinatorBlocked")}</p>
+        <button
+          type="button"
+          className="primary"
+          onClick={() => setScreen("airgap")}
+        >
+          {t("more.airgap")}
+        </button>
+      </section>
+    );
+  }
+
   switch (screen) {
     case "welcome":
       return (
@@ -234,11 +263,9 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           hideAddresses={hideAddresses}
           fastPayReady={fastPayReady}
           lastTx={lastTx}
-          busy={busy}
           privacy={privacy}
           onNavigate={setScreen}
           onOpenQrPay={onOpenQrPay}
-          onWebAuthnSession={onWebAuthnSession}
           onLock={onLock}
           onNotify={onNotify}
           clearMessages={clearMessages}
@@ -380,20 +407,13 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
             nativeBioAvailable={nativeBioAvailable}
             busy={busy}
             onRegisterWebAuthn={onRegisterWebAuthn}
-            onWebAuthnSession={onWebAuthnSession}
             onSetProfile={onSetProfile}
             onSetHardwareMode={onSetHardwareMode}
           />
           <SecurityScreen
-            watchOnly={!!status?.watch_only}
             busy={busy}
-            setBusy={setBusy}
-            clipboardSecs={privacy.clipboard_clear_secs}
             onChangePassphrase={onChangePassphrase}
             onExportBackup={onExportBackup}
-            onError={onError}
-            onInfo={onInfo}
-            clearMessages={clearMessages}
           />
         </section>
       );
@@ -419,6 +439,8 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           setError={onError}
           setInfo={onInfo}
           onBroadcast={refreshUnlockedData}
+          onLock={onLock}
+          nativeBioAvailable={nativeBioAvailable}
         />
       ) : null;
     default:

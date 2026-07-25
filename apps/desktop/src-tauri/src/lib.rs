@@ -29,15 +29,18 @@ fn wallet_platform_security_status() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-fn wallet_confirm_biometric_native(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let nonce = {
+fn wallet_confirm_biometric_native(
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let challenge = {
         let mut svc = state.inner.blocking_lock();
-        svc.begin_native_biometric().map_err(|e| e.to_string())?
+        svc.begin_prepared_native_authorization(&operation_id)
+            .map_err(|e| e.to_string())?
     };
-    let message = format!("Authorize Hacash Wallet transaction\nReference: {nonce}");
-    platform::verify_native_biometric(&message)?;
+    platform::verify_native_biometric(&challenge.message)?;
     let mut svc = state.inner.blocking_lock();
-    svc.finish_native_biometric(&nonce)
+    svc.finish_prepared_native_authorization(&operation_id, &challenge.nonce)
         .map_err(|e| e.to_string())
 }
 
@@ -50,6 +53,8 @@ pub fn run() {
             let node_override = std::env::var("HACASH_WALLET_NODE_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty());
+            wallet_tauri_common::backup_commands::recover_interrupted_restore()
+                .map_err(|error| format!("backup restore recovery: {error}"))?;
             let mut svc = WalletService::new(node_override, None).map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
@@ -66,7 +71,7 @@ pub fn run() {
         // Backup files and WebAuthn are desktop-only. The Android Downloads helper is not
         // registered until mobile exposes that flow.
         .invoke_handler(wallet_tauri_common::wallet_invoke_handler![
-            wallet_tauri_common::commands::wallet_export_backup,
+            wallet_tauri_common::backup_commands::wallet_export_backup,
             wallet_tauri_common::backup_commands::wallet_preview_backup,
             wallet_tauri_common::backup_commands::wallet_import_backup,
             wallet_tauri_common::security_commands::wallet_webauthn_register_begin,

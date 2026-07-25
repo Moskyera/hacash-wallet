@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type HacdSendPreview, type PlatformSecurityStatus, type WalletSettings } from "../api";
-import { maybeSecondFactorGate } from "../utils/secondFactorGate";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 import { formatInvokeError } from "../formatInvokeError";
 import { hapticSuccess } from "../utils/haptic";
 import { isValidHacdName, normalizeHacdName } from "@hacash/wallet-ui";
@@ -91,21 +91,16 @@ export function useHacdSend(opts: {
 
   const handleConfirm = useCallback(async () => {
     if (!preview) return;
-    try {
-      await maybeSecondFactorGate({
-        amountMei: Number.POSITIVE_INFINITY,
-        securityProfile: settings?.security_profile,
-        biometricSendEnabled: settings?.biometric_send_enabled ?? true,
-        nativeBiometricAvailable: platformSec?.native_biometric_available,
-      });
-    } catch (e) {
-      showToast(formatInvokeError(e), "error");
-      return;
-    }
     setBusy(true);
     try {
       void refresh();
-      const result = await api.sendHacd(preview.to, preview.diamond_names);
+      const prepared = await api.prepareSendHacd(preview.to, preview.diamond_names);
+      await authorizePreparedOperation(
+        prepared,
+        platformSec?.native_biometric_available ?? false,
+        settings?.biometric_send_enabled ?? true,
+      );
+      const result = await api.executePreparedHacd(prepared.id);
       setPreview(null);
       setSelected([]);
       setRecipient("");

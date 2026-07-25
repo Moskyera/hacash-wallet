@@ -14,7 +14,7 @@ mod download;
 pub use download::{
     download_update_file, run_windows_installer, validate_apk_file, validate_downloaded_update,
     validate_release_download_url, validate_windows_exe, validate_windows_msi,
-    verify_downloaded_update,
+    verify_downloaded_update, verify_windows_authenticode_signer,
 };
 use download::{max_update_size, trusted_redirect_url, validate_release_asset_url};
 

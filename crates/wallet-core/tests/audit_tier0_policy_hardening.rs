@@ -14,7 +14,7 @@ fn tier0_paranoid_send_rejects_without_webauthn_ceremony() {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("tier0-passphrase12").unwrap();
-            svc.set_security_profile(SecurityProfile::paranoid())
+            svc.change_security_profile("tier0-passphrase12", SecurityProfile::paranoid())
                 .unwrap();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let err = rt

@@ -12,6 +12,7 @@ import {
   WalletStatus,
   api,
 } from "./api";
+import { authorizePreparedOperation } from "./preparedAuthorization";
 
 type AirgapMode = "coordinator" | "signer";
 
@@ -23,6 +24,8 @@ type Props = {
   setError: (v: string) => void;
   setInfo: (v: string) => void;
   onBroadcast: () => void;
+  onLock: () => void;
+  nativeBioAvailable: boolean;
 };
 
 function isUnsigned(env: AirgapEnvelope): env is AirgapUnsigned & { kind: "unsigned" } {
@@ -49,8 +52,11 @@ export default function AirgapScreen({
   setError,
   setInfo,
   onBroadcast,
+  onLock,
+  nativeBioAvailable,
 }: Props) {
   const { t } = useLocale();
+  const coldVault = status.hardware_signing_mode === "airgap_only";
   const [mode, setMode] = useState<AirgapMode>("coordinator");
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
@@ -68,6 +74,12 @@ export default function AirgapScreen({
   const scanPartsRef = useRef<string[]>([]);
   const scanGeneration = useRef(0);
   const scanMountId = "airgap-qr-reader";
+
+  useEffect(() => {
+    if (coldVault) {
+      setMode("signer");
+    }
+  }, [coldVault]);
 
   const resetScan = useCallback(() => {
     scanGeneration.current += 1;
@@ -244,7 +256,9 @@ export default function AirgapScreen({
         summary: parsed.envelope.summary,
         tx_type: parsed.envelope.tx_type,
       };
-      const result = await api.airgapSignUnsigned(unsigned);
+      const prepared = await api.prepareAirgapSign(unsigned);
+      await authorizePreparedOperation(prepared, nativeBioAvailable);
+      const result = await api.executePreparedAirgapSign(prepared.id);
       setSignResult(result);
       setInfo("Signed. show QR(s) to online coordinator for broadcast.");
     } catch (e) {
@@ -305,6 +319,7 @@ export default function AirgapScreen({
         <button
           type="button"
           className={mode === "coordinator" ? "tab active" : "tab"}
+          disabled={coldVault}
           onClick={() => {
             setMode("coordinator");
             clearMessages();
@@ -324,7 +339,11 @@ export default function AirgapScreen({
         </button>
       </div>
 
-      {mode === "coordinator" && (
+      {coldVault ? (
+        <p className="warn-box">{t("airgap.coldVaultSignerHint")}</p>
+      ) : null}
+
+      {mode === "coordinator" && !coldVault && (
         <>
           <h3>Prepare unsigned send</h3>
           <label>To address</label>
@@ -377,7 +396,9 @@ export default function AirgapScreen({
         <>
           <h3>Scan unsigned QR</h3>
           <p className="muted">
-            {status.watch_only
+            {coldVault
+              ? t("airgap.coldVaultSignerHint")
+              : status.watch_only
               ? "Unlock a signing wallet on an offline machine. watch-only cannot sign."
               : "Device should stay offline. Only L1 body is signed locally."}
           </p>
@@ -419,7 +440,7 @@ export default function AirgapScreen({
           {parsed.inspection.tx_type !== 2 && (
             <p className="warn-box">{t("airgap.inspection.type4QuantumOnly")}</p>
           )}
-          {mode === "signer" && !status.watch_only && (
+          {mode === "signer" && !status.watch_only && status.signing_available && (
             <button
               className="primary"
               disabled={
@@ -452,6 +473,11 @@ export default function AirgapScreen({
               </div>
             ))}
           </div>
+          {coldVault ? (
+            <button type="button" onClick={onLock}>
+              {t("security.lockWallet")}
+            </button>
+          ) : null}
         </div>
       )}
 

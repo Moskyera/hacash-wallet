@@ -4,7 +4,8 @@ import { formatInvokeError } from "../formatInvokeError";
 import { applyPaymentPayload } from "../utils/applyPaymentPayload";
 import { DEFAULT_SERVICE_FEE_RATE } from "../fastPayUi";
 import { hapticSuccess } from "../utils/haptic";
-import { maybeSecondFactorGate } from "../utils/secondFactorGate";
+import { needsSecondFactor } from "../utils/secondFactorGate";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 import type { PaymentQrPayload } from "../paymentQr";
 import type { PlatformSecurityStatus } from "../api";
 
@@ -131,32 +132,29 @@ export function usePaymentFlow(opts: {
     [sendAmount, sendL1FeeSpeed, sendTo, sendOptions, setBusy, showToast],
   );
 
-  const maybeSecondFactor = useCallback(
-    async (amountMei: number): Promise<boolean> => {
-      try {
-        await maybeSecondFactorGate({
-          amountMei,
-          securityProfile: settings?.security_profile,
-          biometricSendEnabled: settings?.biometric_send_enabled ?? true,
-          nativeBiometricAvailable: platformSec?.native_biometric_available,
-        });
-        return true;
-      } catch (e) {
-        showToast(formatInvokeError(e), "error");
-        return false;
-      }
-    },
-    [platformSec, settings, showToast],
-  );
-
   const handleConfirmSend = useCallback(async () => {
     if (!preview) return;
-    const ok = await maybeSecondFactor(preview.amount_mei);
-    if (!ok) return;
     setBusy(true);
     try {
       void refresh();
-      const result = await api.sendHac(preview.to, preview.amount_mei, sendOptions());
+      const protectedSend = needsSecondFactor(preview.amount_mei, settings?.security_profile);
+      let result;
+      if (preview.plan.rail === "L2Fast") {
+        if (protectedSend) {
+          throw new Error(
+            "Protected Fast Pay is blocked until its exact settlement bill can be prepared before authorization. Select Force L1.",
+          );
+        }
+        result = await api.sendHac(preview.to, preview.amount_mei, sendOptions());
+      } else {
+        const prepared = await api.prepareSendHac(preview.to, preview.amount_mei, sendOptions());
+        await authorizePreparedOperation(
+          prepared,
+          platformSec?.native_biometric_available ?? false,
+          settings?.biometric_send_enabled ?? true,
+        );
+        result = await api.executePreparedHac(prepared.id);
+      }
       setPreview(null);
       setSendTo("");
       setSendAmount("");
@@ -172,7 +170,7 @@ export function usePaymentFlow(opts: {
     } finally {
       setBusy(false);
     }
-  }, [maybeSecondFactor, onSent, preview, refresh, sendOptions, setBusy, showToast]);
+  }, [onSent, platformSec, preview, refresh, sendOptions, setBusy, settings, showToast]);
 
   const goToPayContact = useCallback((address: string, label?: string) => {
     setSendTo(address);

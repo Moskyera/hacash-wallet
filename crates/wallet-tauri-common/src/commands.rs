@@ -5,8 +5,10 @@ use hacash_wallet_core::node_discovery::{
     NodeDiscoveryReport, NodeDiscoverySnapshot, discover_node_snapshot,
 };
 use hacash_wallet_core::security::SecurityProfile;
-use hacash_wallet_core::{PrivacySettings, WalletSettings};
+use hacash_wallet_core::{PrivacySettings, WalletService, WalletSettings};
+use serde::Serialize;
 use tauri::{AppHandle, State};
+use zeroize::Zeroizing;
 
 use crate::state::{AppState, WALLET_BUSY_RETRY};
 
@@ -19,6 +21,86 @@ async fn sync_relay_after_node_change(app: &AppHandle) -> Result<(), String> {
     {
         let _ = app;
         Ok(())
+    }
+}
+
+async fn clear_native_biometric_secret(app: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        crate::android_native::biometric_clear(app).await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
+fn require_exact_wallet_address(
+    expected: Option<String>,
+    confirmation: &str,
+) -> Result<(), String> {
+    let expected = expected.ok_or_else(|| "wallet has no signing address".to_string())?;
+    if confirmation != expected {
+        return Err("wallet reset confirmation does not match the current wallet address".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassphraseChangeOutcome {
+    pub biometric_unlock_disabled: bool,
+    pub native_biometric_secret_cleared: bool,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResetWalletKind {
+    Signing,
+    WatchOnly,
+}
+
+fn authorize_wallet_reset(
+    svc: &mut WalletService,
+    current_passphrase: Option<&str>,
+    confirmation_address: &str,
+) -> Result<ResetWalletKind, String> {
+    let status = svc.status();
+    let kind = if status.watch_only {
+        ResetWalletKind::WatchOnly
+    } else {
+        let passphrase = current_passphrase
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "current passphrase is required to reset a signing wallet".to_string()
+            })?;
+        svc.verify_wallet_passphrase(passphrase)
+            .map_err(|error| error.to_string())?;
+        ResetWalletKind::Signing
+    };
+    require_exact_wallet_address(status.address, confirmation_address)?;
+    Ok(kind)
+}
+
+#[cfg(test)]
+mod destructive_confirmation_tests {
+    use super::require_exact_wallet_address;
+
+    const ADDRESS: &str = "18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa";
+
+    #[test]
+    fn reset_confirmation_is_exact_and_has_no_normalization_bypass() {
+        assert!(require_exact_wallet_address(Some(ADDRESS.into()), ADDRESS).is_ok());
+        for rejected in [
+            "",
+            "18ft8iuwkcsjakrqrvvad6btrtt3gtezha",
+            " 18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa",
+            "18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa ",
+        ] {
+            assert!(require_exact_wallet_address(Some(ADDRESS.into()), rejected).is_err());
+        }
+        assert!(require_exact_wallet_address(None, ADDRESS).is_err());
     }
 }
 
@@ -44,6 +126,7 @@ pub fn wallet_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 
 #[tauri::command]
 pub fn wallet_create(passphrase: String, state: State<'_, AppState>) -> Result<String, String> {
+    let passphrase = Zeroizing::new(passphrase);
     let mut svc = state.inner.blocking_lock();
     svc.create_wallet(&passphrase).map_err(|e| e.to_string())
 }
@@ -54,6 +137,8 @@ pub fn wallet_import(
     passphrase: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let seed = Zeroizing::new(seed);
+    let passphrase = Zeroizing::new(passphrase);
     let mut svc = state.inner.blocking_lock();
     svc.import_wallet(&seed, &passphrase)
         .map_err(|e| e.to_string())
@@ -61,6 +146,7 @@ pub fn wallet_import(
 
 #[tauri::command]
 pub fn wallet_unlock(passphrase: String, state: State<'_, AppState>) -> Result<String, String> {
+    let passphrase = Zeroizing::new(passphrase);
     let mut svc = state.inner.blocking_lock();
     svc.unlock(&passphrase).map_err(|e| e.to_string())
 }
@@ -177,7 +263,10 @@ pub fn wallet_inspect_transaction(
 #[tauri::command]
 pub fn wallet_get_settings(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let svc = state.inner.blocking_lock();
-    serde_json::to_value(svc.get_settings()).map_err(|e| e.to_string())
+    let mut settings = svc.get_settings().clone();
+    // Legacy Quantum key material must never cross IPC into JavaScript.
+    settings.quantum_keystore_json = None;
+    serde_json::to_value(settings).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -194,8 +283,37 @@ pub async fn wallet_update_settings(
 }
 
 #[tauri::command]
-pub fn wallet_reset(state: State<'_, AppState>) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
+pub async fn wallet_reset(
+    current_passphrase: Option<String>,
+    confirmation_address: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let current_passphrase = current_passphrase.map(Zeroizing::new);
+    let initial_kind = {
+        let mut svc = state.inner.lock().await;
+        authorize_wallet_reset(
+            &mut svc,
+            current_passphrase.as_ref().map(|value| value.as_str()),
+            &confirmation_address,
+        )?
+    };
+
+    // Do not delete the vault while an obsolete unlock secret remains in the
+    // Android Keystore. A native cleanup failure leaves the wallet intact.
+    clear_native_biometric_secret(&app).await?;
+
+    let mut svc = state.inner.lock().await;
+    // Re-authorize after releasing the mutex for native I/O. This catches an
+    // address, passphrase, or watch-only/signing-mode change before deletion.
+    let final_kind = authorize_wallet_reset(
+        &mut svc,
+        current_passphrase.as_ref().map(|value| value.as_str()),
+        &confirmation_address,
+    )?;
+    if final_kind != initial_kind {
+        return Err("wallet changed while reset authorization was in progress".into());
+    }
     svc.reset_wallet().map_err(|e| e.to_string())
 }
 
@@ -320,33 +438,34 @@ pub async fn wallet_discover_hubs(state: State<'_, AppState>) -> Result<serde_js
 }
 
 #[tauri::command]
-pub fn wallet_export_backup(
-    passphrase: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let svc = state.inner.blocking_lock();
-    svc.export_backup(&passphrase).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn wallet_export_private_key(
-    passphrase: String,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let svc = state.inner.blocking_lock();
-    svc.export_private_key(&passphrase)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn wallet_change_passphrase(
+pub async fn wallet_change_passphrase(
     old_passphrase: String,
     new_passphrase: String,
+    app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    svc.change_passphrase(&old_passphrase, &new_passphrase)
-        .map_err(|e| e.to_string())
+) -> Result<PassphraseChangeOutcome, String> {
+    let old_passphrase = Zeroizing::new(old_passphrase);
+    let new_passphrase = Zeroizing::new(new_passphrase);
+    {
+        let mut svc = state.inner.lock().await;
+        svc.change_passphrase(&old_passphrase, &new_passphrase)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // The core migration disables biometric unlock before it commits the new
+    // vault. Removing the Android Keystore entry is defense in depth: even if
+    // cleanup fails, the old passphrase is both disabled and cryptographically
+    // unable to decrypt the migrated vault.
+    let cleanup = clear_native_biometric_secret(&app).await;
+    Ok(PassphraseChangeOutcome {
+        biometric_unlock_disabled: true,
+        native_biometric_secret_cleared: cleanup.is_ok(),
+        warning: cleanup.err().map(|error| {
+            format!(
+                "passphrase changed and biometric unlock disabled, but Android Keystore cleanup failed: {error}"
+            )
+        }),
+    })
 }
 
 #[tauri::command]
@@ -549,21 +668,53 @@ pub fn wallet_open_watch_only(state: State<'_, AppState>) -> Result<String, Stri
 #[tauri::command]
 pub fn wallet_set_security_profile(
     profile: String,
+    current_passphrase: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let current_passphrase = Zeroizing::new(current_passphrase);
     let mut svc = state.inner.blocking_lock();
     let profile = match profile.as_str() {
         "paranoid" => SecurityProfile::paranoid(),
         _ => SecurityProfile::default(),
     };
-    svc.set_security_profile(profile).map_err(|e| e.to_string())
+    svc.change_security_profile(&current_passphrase, profile)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn wallet_set_hardware_mode(mode: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut svc = state.inner.blocking_lock();
-    let hw = HardwareSigningMode::from_name(&mode);
-    svc.set_hardware_signing_mode(hw).map_err(|e| e.to_string())
+pub async fn wallet_set_hardware_mode(
+    mode: String,
+    current_passphrase: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let current_passphrase = Zeroizing::new(current_passphrase);
+    let hw = match mode.as_str() {
+        "software" => HardwareSigningMode::Software,
+        "webauthn_gate" => HardwareSigningMode::WebAuthnGate,
+        "airgap_only" => HardwareSigningMode::AirgapOnly,
+        "watch_only" => HardwareSigningMode::WatchOnly,
+        _ => return Err("unknown signing policy".into()),
+    };
+
+    if hw == HardwareSigningMode::AirgapOnly {
+        // Authenticate before deleting the convenience credential so a hostile
+        // renderer cannot disable biometric unlock with a guessed passphrase.
+        // The core authenticates again during the atomic policy migration.
+        {
+            let mut svc = state.inner.lock().await;
+            svc.verify_wallet_passphrase(&current_passphrase)
+                .map_err(|error| error.to_string())?;
+        }
+        // Remove the OS-keystore passphrase before committing Cold Vault. A
+        // failed migration may require setup again, but cannot leave a local
+        // unlock shortcut behind an air-gap-only policy.
+        clear_native_biometric_secret(&app).await?;
+    }
+
+    let mut svc = state.inner.lock().await;
+    svc.change_hardware_signing_mode(&current_passphrase, hw)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

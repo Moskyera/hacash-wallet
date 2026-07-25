@@ -4,7 +4,6 @@ import { api, quantumApi, QuantumAccountSummary, QuantumPreflight } from "../api
 import { formatInvokeError } from "../formatInvokeError";
 import { useLocale } from "../locale";
 import { canSendType4 } from "../quantumMeta";
-import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
 import AddressBadge from "./AddressBadge";
 
 const DEFAULT_TO = "";
@@ -24,26 +23,18 @@ type Props = {
 
 async function maybeWebAuthnGate(
   amount: number,
-  webauthnEnabled?: boolean,
+  _webauthnEnabled?: boolean,
   securityProfile?: string,
-  nativeBioAvailable?: boolean,
+  _nativeBioAvailable?: boolean,
   unavailableMessage?: string,
 ) {
   const needs2fa =
     securityProfile === "paranoid" || (securityProfile !== "paranoid" && amount >= 100);
   if (!needs2fa) return;
-  if (webauthnEnabled) {
-    const origin = webAuthnClientOrigin();
-    const options = await api.webauthnAuthBegin(origin);
-    const assertion = await runWebAuthnAuth(options);
-    await api.webauthnAuthFinish(assertion);
-    return;
-  }
-  if (nativeBioAvailable) {
-    await api.confirmBiometricNative();
-    return;
-  }
-  throw new Error(unavailableMessage ?? "Second-factor authentication is required.");
+  throw new Error(
+    unavailableMessage ??
+      "Protected Quantum Lab signing is blocked until authorization can bind to the exact Type 4 body.",
+  );
 }
 
 export default function SendQuantumTx({

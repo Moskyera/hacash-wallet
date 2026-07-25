@@ -1,3 +1,4 @@
+import { MIN_NEW_WALLET_PASSPHRASE_LENGTH } from "@hacash/wallet-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
@@ -14,9 +15,9 @@ import {
   WalletStatus,
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 import { DEFAULT_DUST_WHISPER, DEFAULT_PRIVACY, copyWithPrivacyClear } from "../privacy";
 import {
-  runWebAuthnAuth,
   runWebAuthnRegister,
   webAuthnAvailable,
   webAuthnClientOrigin,
@@ -303,13 +304,20 @@ export function useDesktopWallet(
   );
 
   const handleSetHardwareMode = useCallback(
-    async (mode: "software" | "webauthn_gate" | "watch_only") => {
+    async (
+      mode: "software" | "webauthn_gate" | "airgap_only" | "watch_only",
+      currentPassphrase: string,
+    ) => {
       setBusy(true);
       clearMessages();
       try {
-        await api.setHardwareMode(mode);
+        await api.setHardwareMode(mode, currentPassphrase);
         await refreshStatus();
-        onInfo(`Hardware signing mode: ${mode}`);
+        onInfo(
+          mode === "airgap_only"
+            ? "Cold Vault activated. Only exact, freshly authorized Type 2 air-gap signing is allowed."
+            : `Signing policy: ${mode}`,
+        );
       } catch (e) {
         onError(String(e));
       } finally {
@@ -337,14 +345,19 @@ export function useDesktopWallet(
   );
 
   const handleImportBackup = useCallback(
-    async (json: string, passphrase: string, deleteSource?: string | null) => {
+    async (
+      json: string,
+      passphrase: string,
+      deleteSource?: string | null,
+      allowLegacy = false,
+    ) => {
       setBusy(true);
       clearMessages();
       try {
-        await api.importBackup(json.trim(), passphrase, deleteSource);
+        await api.importBackup(json.trim(), passphrase, deleteSource, allowLegacy);
         await refreshStatus();
         onInfo(
-          "Wallet restored from backup. The backup file was removed when possible. check Downloads if you imported from there.",
+          "Wallet restored from the authenticated backup. If source cleanup was unavailable, remove the original file from Downloads manually.",
         );
       } catch (e) {
         onError(String(e));
@@ -508,11 +521,13 @@ export function useDesktopWallet(
       setBusy(true);
       clearMessages();
       try {
-        const hash = await api.openChannel(
+        const prepared = await api.prepareChannelOpen(
           hubAddress.trim(),
           Number(userDeposit),
           Number(hubDeposit),
         );
+        await authorizePreparedOperation(prepared, nativeBioAvailable);
+        const hash = await api.executePreparedChannelOpen(prepared.id);
         onInfo(`Channel open submitted: ${hash}`);
         setChannelPreview(null);
         await refreshStatus();
@@ -524,7 +539,7 @@ export function useDesktopWallet(
         setBusy(false);
       }
     },
-    [clearMessages, refreshStatus, refreshChannel, refreshBills, onInfo, onError],
+    [clearMessages, nativeBioAvailable, refreshStatus, refreshChannel, refreshBills, onInfo, onError],
   );
 
   const handleCloseChannel = useCallback(
@@ -532,7 +547,9 @@ export function useDesktopWallet(
       setBusy(true);
       clearMessages();
       try {
-        const hash = await api.closeChannel();
+        const prepared = await api.prepareChannelClose();
+        await authorizePreparedOperation(prepared, nativeBioAvailable);
+        const hash = await api.executePreparedChannelClose(prepared.id);
         onInfo(`Channel close submitted: ${hash}`);
         setChannelPreview(null);
         await refreshStatus();
@@ -543,10 +560,10 @@ export function useDesktopWallet(
         setBusy(false);
       }
     },
-    [clearMessages, refreshStatus, refreshChannel, onInfo, onError],
+    [clearMessages, nativeBioAvailable, refreshStatus, refreshChannel, onInfo, onError],
   );
 
-  const handleRegisterWebAuthn = useCallback(async () => {
+  const handleRegisterWebAuthn = useCallback(async (currentPassphrase: string) => {
     if (!webauthnReady) {
       onError("WebAuthn not available in this environment.");
       return;
@@ -557,7 +574,7 @@ export function useDesktopWallet(
       const origin = webAuthnClientOrigin();
       const options = await api.webauthnRegisterBegin(origin);
       const cred = await runWebAuthnRegister(options);
-      await api.webauthnRegisterFinish(cred);
+      await api.webauthnRegisterFinish(cred, currentPassphrase);
       await refreshStatus();
       onInfo("YubiKey / Windows Hello registered.");
     } catch (e) {
@@ -566,24 +583,6 @@ export function useDesktopWallet(
       setBusy(false);
     }
   }, [webauthnReady, clearMessages, refreshStatus, onInfo, onError]);
-
-  const handleWebAuthnSession = useCallback(async () => {
-    if (!webauthnReady || !status?.webauthn_enabled) return;
-    setBusy(true);
-    clearMessages();
-    try {
-      const origin = webAuthnClientOrigin();
-      const options = await api.webauthnAuthBegin(origin);
-      const assertion = await runWebAuthnAuth(options);
-      await api.webauthnAuthFinish(assertion);
-      await refreshStatus();
-      onInfo("WebAuthn verified for this session.");
-    } catch (e) {
-      onError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [webauthnReady, status?.webauthn_enabled, clearMessages, refreshStatus, onInfo, onError]);
 
   const handleSaveSettings = useCallback(
     async (nodeUrl: string, fallbackUrls: string[], autoFailover: boolean) => {
@@ -616,8 +615,10 @@ export function useDesktopWallet(
         onError("New passphrase and confirmation do not match.");
         return false;
       }
-      if (newPassphrase.length < 8) {
-        onError("New passphrase must be at least 8 characters.");
+      if (newPassphrase.length < MIN_NEW_WALLET_PASSPHRASE_LENGTH) {
+        onError(
+          `New passphrase must be at least ${MIN_NEW_WALLET_PASSPHRASE_LENGTH} characters.`,
+        );
         return false;
       }
       setBusy(true);
@@ -646,10 +647,10 @@ export function useDesktopWallet(
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = "hacash-wallet-backup.json";
+        a.download = "hacash-full-backup-v1.json";
         a.click();
         URL.revokeObjectURL(url);
-        onInfo("Backup exported and shown below.");
+        onInfo("Authenticated full-wallet backup exported. Store it offline.");
         return json;
       } catch (e) {
         onError(String(e));
@@ -795,11 +796,11 @@ export function useDesktopWallet(
   }, [status?.address, privacy.clipboard_clear_secs, clearMessages, onInfo, onError]);
 
   const handleSetProfile = useCallback(
-    async (profile: string) => {
+    async (profile: string, currentPassphrase: string) => {
       setBusy(true);
       clearMessages();
       try {
-        await api.setSecurityProfile(profile);
+        await api.setSecurityProfile(profile, currentPassphrase);
         await refreshStatus();
         onInfo(`Security profile set to ${profile}.`);
       } catch (e) {
@@ -861,7 +862,6 @@ export function useDesktopWallet(
     handleOpenChannel,
     handleCloseChannel,
     handleRegisterWebAuthn,
-    handleWebAuthnSession,
     handleSaveSettings,
     handleChangePassphrase,
     handleExportBackup,

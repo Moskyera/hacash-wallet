@@ -10,6 +10,7 @@ use hacash_wallet_core::{WalletError, WalletService};
 use serde::Serialize;
 use tauri::State;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::state::AppState;
 
@@ -56,6 +57,7 @@ pub async fn quantum_create_pqc(
     keystore_password: String,
     state: State<'_, AppState>,
 ) -> Result<QuantumAccountInfo, String> {
+    let keystore_password = Zeroizing::new(keystore_password);
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
         with_unlocked(svc, |s| s.quantum_create_pqc(&keystore_password))
     })
@@ -68,9 +70,14 @@ pub async fn quantum_create_hybrid(
     legacy_prikey_hex: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<QuantumAccountInfo, String> {
+    let keystore_password = Zeroizing::new(keystore_password);
+    let legacy_prikey_hex = legacy_prikey_hex.map(Zeroizing::new);
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
         with_unlocked(svc, |s| {
-            s.quantum_create_hybrid(&keystore_password, legacy_prikey_hex.as_deref())
+            s.quantum_create_hybrid(
+                &keystore_password,
+                legacy_prikey_hex.as_ref().map(|value| value.as_str()),
+            )
         })
     })
     .await
@@ -82,6 +89,8 @@ pub async fn quantum_create_hybrid_from_privakey(
     keystore_password: String,
     state: State<'_, AppState>,
 ) -> Result<QuantumAccountInfo, String> {
+    let legacy_prikey_hex = Zeroizing::new(legacy_prikey_hex);
+    let keystore_password = Zeroizing::new(keystore_password);
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
         with_unlocked(svc, |s| {
             s.quantum_create_hybrid_from_privakey(&legacy_prikey_hex, &keystore_password)
@@ -96,6 +105,8 @@ pub async fn quantum_import_keystore_v3(
     keystore_password: String,
     state: State<'_, AppState>,
 ) -> Result<QuantumAccountInfo, String> {
+    let json = Zeroizing::new(json);
+    let keystore_password = Zeroizing::new(keystore_password);
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
         with_unlocked(svc, |s| {
             s.quantum_import_keystore(&json, &keystore_password)
@@ -110,13 +121,18 @@ pub async fn quantum_export_keystore_v3(
     new_password: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let keystore_password = Zeroizing::new(keystore_password);
+    let new_password = new_password.map(Zeroizing::new);
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
         if svc.status().locked {
             return Err("wallet locked".into());
         }
         svc.bump_unlock_activity();
-        svc.quantum_export_keystore(&keystore_password, new_password.as_deref())
-            .map_err(|e| e.to_string())
+        svc.quantum_export_keystore(
+            &keystore_password,
+            new_password.as_ref().map(|value| value.as_str()),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
 }
@@ -126,9 +142,11 @@ pub async fn quantum_preview_keystore(
     json: String,
     keystore_password: String,
 ) -> Result<QuantumAccountInfo, String> {
-    let pass = keystore_password;
+    let json = Zeroizing::new(json);
+    let keystore_password = Zeroizing::new(keystore_password);
     tokio::task::spawn_blocking(move || {
-        hacash_wallet_core::quantum::preview_keystore(&json, &pass).map_err(|e| e.to_string())
+        hacash_wallet_core::quantum::preview_keystore(&json, &keystore_password)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("preview task failed: {e}"))?
@@ -141,6 +159,7 @@ pub async fn quantum_send_type4(
     keystore_password: String,
     state: State<'_, AppState>,
 ) -> Result<QuantumSendResult, String> {
+    let keystore_password = Zeroizing::new(keystore_password);
     let mut svc = state.inner.lock().await;
     if svc.status().locked {
         return Err("wallet locked".into());
@@ -156,6 +175,7 @@ pub async fn quantum_send_test_tx(
     keystore_password: String,
     state: State<'_, AppState>,
 ) -> Result<QuantumTestResult, String> {
+    let keystore_password = Zeroizing::new(keystore_password);
     let mut svc = state.inner.lock().await;
     if svc.status().locked {
         return Err("wallet locked".into());
@@ -243,6 +263,7 @@ pub async fn quantum_airgap_sign_type4(
     keystore_password: String,
     state: State<'_, AppState>,
 ) -> Result<AirgapSignResult, String> {
+    let keystore_password = Zeroizing::new(keystore_password);
     run_wallet_task(Arc::clone(&state.inner), move |svc| {
         with_unlocked(svc, |s| {
             s.quantum_airgap_sign_type4(&unsigned, &keystore_password)

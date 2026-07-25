@@ -82,7 +82,9 @@ export default function DappApprovalPanel({ onNotify }: Props) {
     try {
       if (approved) {
         if (pending.kind === "transfer" || pending.kind === "sign") {
-          await api.confirmBiometric();
+          throw new Error(
+            "This dApp signing request is blocked until its exact transaction bytes can be prepared and bound to authorization.",
+          );
         }
         await api.dappApprove(pending.id);
         onNotify(copy.requestApproved, "success");

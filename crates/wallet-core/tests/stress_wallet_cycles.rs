@@ -50,26 +50,29 @@ fn stress_passphrase_rotate_chain() {
 }
 
 #[test]
-fn stress_security_profile_toggle() {
-    stress_gate("profile_toggle_50", || {
+fn stress_unauthenticated_security_profile_changes_fail_closed() {
+    stress_gate("profile_unauthenticated_reject_50", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("stress-passphrase-12").unwrap();
             for i in 0..50 {
-                if i % 2 == 0 {
-                    svc.set_security_profile(SecurityProfile::paranoid())
-                        .unwrap();
+                let profile = if i % 2 == 0 {
+                    SecurityProfile::paranoid()
                 } else {
-                    svc.set_security_profile(SecurityProfile::default())
-                        .unwrap();
+                    SecurityProfile::default()
+                };
+                let result = svc.set_security_profile(profile);
+                if i % 2 == 0 {
+                    assert!(result.is_err());
+                } else {
+                    result.unwrap();
                 }
             }
+            svc.change_security_profile("stress-passphrase-12", SecurityProfile::paranoid())
+                .unwrap();
             let mut svc2 = WalletService::new(None, None).unwrap();
             svc2.unlock("stress-passphrase-12").unwrap();
-            assert!(
-                svc2.get_settings().security_profile == "paranoid"
-                    || svc2.get_settings().security_profile == "balanced"
-            );
+            assert_eq!(svc2.get_settings().security_profile, "paranoid");
         });
     });
 }

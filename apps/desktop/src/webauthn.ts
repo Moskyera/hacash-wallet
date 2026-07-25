@@ -45,10 +45,6 @@ function serializeCredential(cred: PublicKeyCredential): string {
     (payload.response as Record<string, unknown>).attestationObject = bufferToBase64Url(
       att.attestationObject,
     );
-    const pk = att.getPublicKey?.();
-    if (pk) {
-      (payload.response as Record<string, unknown>).publicKey = bufferToBase64Url(pk);
-    }
   }
   if ("authenticatorData" in response) {
     const assert = response as AuthenticatorAssertionResponse;

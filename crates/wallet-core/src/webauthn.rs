@@ -1,10 +1,19 @@
 //! WebAuthn ceremony coordinator (YubiKey + Windows Hello via browser API).
-//! Verifies challenge + origin in clientDataJSON; stores credential binding locally.
+//!
+//! Registration accepts only `none` attestation carrying an attested ES256 credential.
+//! Authentication is fail-closed: the credential id, RP id, origin, UP/UV flags,
+//! signature, and authenticator counter are all checked before a ceremony succeeds.
 
-use std::sync::Mutex;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use coset::{CborSerializable, CoseKey, Label, RegisteredLabelWithPrivate, iana};
+use coset::{
+    AsCborValue, CborSerializable, CoseKey, Label, RegisteredLabel, RegisteredLabelWithPrivate,
+    cbor::value::Value, iana,
+};
 use p256::EncodedPoint;
 use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
 use rand::RngCore;
@@ -18,10 +27,23 @@ use crate::error::{WalletError, WalletResult};
 pub const DEFAULT_RP_ID: &str = "localhost";
 pub const DEFAULT_RP_ORIGIN: &str = "http://localhost:1420";
 
+const STORED_CREDENTIAL_VERSION: u8 = 2;
+const MAX_CREDENTIAL_JSON_BYTES: usize = 64 * 1024;
+const MAX_CLIENT_DATA_BYTES: usize = 8 * 1024;
+const MAX_ATTESTATION_OBJECT_BYTES: usize = 32 * 1024;
+const MAX_AUTHENTICATOR_DATA_BYTES: usize = 16 * 1024;
+const MAX_CREDENTIAL_ID_BYTES: usize = 1024;
+const MAX_SIGNATURE_BYTES: usize = 1024;
+const CEREMONY_TTL: Duration = Duration::from_secs(120);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredCredential {
+    pub version: u8,
     pub credential_id_b64: String,
-    pub public_key_b64: Option<String>,
+    pub public_key_cose_b64: String,
+    pub rp_id: String,
+    pub origin: String,
+    pub sign_count: u32,
     pub registered_at: String,
 }
 
@@ -35,21 +57,17 @@ struct CeremonyState {
     purpose: String,
     expected_origin: String,
     rp_id: String,
+    started_at: Instant,
 }
 
-fn resolve_webauthn_context(client_origin: Option<&str>) -> (String, String) {
+fn resolve_webauthn_context(client_origin: Option<&str>) -> WalletResult<(String, String)> {
     if let Some(origin) = client_origin.map(str::trim).filter(|o| !o.is_empty()) {
-        // Android Credential Manager rejects WebView origins like https://tauri.localhost.
-        let normalized = if origin.contains("tauri.localhost") || origin.contains("localhost") {
-            "https://127.0.0.1".to_string()
-        } else {
-            origin.to_string()
-        };
-        if let Some(rp_id) = origin_to_rp_id(&normalized) {
-            return (normalized, rp_id);
-        }
+        let normalized = canonical_web_origin(origin)?;
+        let rp_id = origin_to_rp_id(&normalized)
+            .ok_or_else(|| WalletError::Policy("WebAuthn origin has no RP host".into()))?;
+        return Ok((normalized, rp_id));
     }
-    (DEFAULT_RP_ORIGIN.to_string(), DEFAULT_RP_ID.to_string())
+    Ok((DEFAULT_RP_ORIGIN.to_string(), DEFAULT_RP_ID.to_string()))
 }
 
 fn origin_to_rp_id(origin: &str) -> Option<String> {
@@ -58,10 +76,36 @@ fn origin_to_rp_id(origin: &str) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    Some(match host.as_str() {
-        "127.0.0.1" | "0.0.0.0" => "localhost".to_string(),
-        other => other.to_string(),
-    })
+    Some(host)
+}
+
+fn canonical_web_origin(origin: &str) -> WalletResult<String> {
+    let url = url::Url::parse(origin)
+        .map_err(|_| WalletError::Policy("invalid WebAuthn origin".into()))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| WalletError::Policy("WebAuthn origin has no host".into()))?;
+    let local_http = host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if url.scheme() != "https" && !(url.scheme() == "http" && local_http) {
+        return Err(WalletError::Policy(
+            "WebAuthn origin must be HTTPS or a loopback/localhost HTTP origin".into(),
+        ));
+    }
+    if url.username() != ""
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(WalletError::Policy(
+            "WebAuthn origin must not contain credentials, a path, query, or fragment".into(),
+        ));
+    }
+    Ok(url.origin().ascii_serialization())
 }
 
 fn prefer_platform_authenticator(origin: &str) -> bool {
@@ -84,13 +128,19 @@ impl WebAuthnGate {
         username: &str,
         client_origin: Option<&str>,
     ) -> WalletResult<String> {
+        if username.trim().is_empty() || username.len() > 256 {
+            return Err(WalletError::Policy(
+                "WebAuthn user name must contain 1 to 256 bytes".into(),
+            ));
+        }
         let challenge = random_challenge();
-        let (expected_origin, rp_id) = resolve_webauthn_context(client_origin);
+        let (expected_origin, rp_id) = resolve_webauthn_context(client_origin)?;
         *self.pending.lock().map_err(lock_err)? = Some(CeremonyState {
             challenge_b64: challenge.clone(),
             purpose: "registration".into(),
             expected_origin: expected_origin.clone(),
             rp_id: rp_id.clone(),
+            started_at: Instant::now(),
         });
         let platform = prefer_platform_authenticator(&expected_origin);
         let authenticator_selection = if platform {
@@ -102,7 +152,7 @@ impl WebAuthnGate {
             })
         } else {
             json!({
-                "userVerification": "preferred",
+                "userVerification": "required",
                 "residentKey": "preferred",
                 "requireResidentKey": false
             })
@@ -117,8 +167,7 @@ impl WebAuthnGate {
                     "displayName": "Hacash Wallet User"
                 },
                 "pubKeyCredParams": [
-                    { "type": "public-key", "alg": -7 },
-                    { "type": "public-key", "alg": -257 }
+                    { "type": "public-key", "alg": -7 }
                 ],
                 "authenticatorSelection": authenticator_selection,
                 "timeout": 60000,
@@ -129,22 +178,34 @@ impl WebAuthnGate {
     }
 
     pub fn finish_register(&self, credential_json: &str) -> WalletResult<String> {
+        if credential_json.len() > MAX_CREDENTIAL_JSON_BYTES {
+            return Err(WalletError::Policy(
+                "WebAuthn registration response is too large".into(),
+            ));
+        }
         let state = self.take_pending("registration")?;
         let cred: RegisterCredential =
             serde_json::from_str(credential_json).map_err(|e| WalletError::Other(e.to_string()))?;
+        let credential_id = verify_credential_identity(&cred.id, &cred.raw_id, &cred.typ)?;
         verify_client_data(
             &cred.response.client_data_json,
             &state.challenge_b64,
             "webauthn.create",
             &state.expected_origin,
         )?;
+        let auth_data = parse_none_attestation(&cred.response.attestation_object)?;
+        let registration =
+            verify_registration_authenticator_data(&auth_data, &state.rp_id, &credential_id)?;
         let stored = StoredCredential {
+            version: STORED_CREDENTIAL_VERSION,
             credential_id_b64: cred.raw_id,
-            public_key_b64: cred.response.public_key,
+            public_key_cose_b64: URL_SAFE_NO_PAD.encode(registration.public_key_cose),
+            rp_id: state.rp_id,
+            origin: state.expected_origin,
+            sign_count: registration.sign_count,
             registered_at: chrono::Utc::now().to_rfc3339(),
         };
-        let raw = serde_json::to_string(&stored).map_err(|e| WalletError::Other(e.to_string()))?;
-        Ok(URL_SAFE_NO_PAD.encode(raw.as_bytes()))
+        encode_stored_credential(&stored)
     }
 
     pub fn begin_auth(
@@ -152,13 +213,37 @@ impl WebAuthnGate {
         credential_id_b64: &str,
         client_origin: Option<&str>,
     ) -> WalletResult<String> {
-        let challenge = random_challenge();
-        let (expected_origin, rp_id) = resolve_webauthn_context(client_origin);
+        self.begin_auth_inner(credential_id_b64, client_origin, None)
+    }
+
+    /// Start a fresh authentication whose opaque WebAuthn challenge also
+    /// contains the server-side digest of one prepared operation.
+    pub fn begin_auth_bound(
+        &self,
+        credential_id_b64: &str,
+        client_origin: Option<&str>,
+        operation_digest: &[u8; 32],
+    ) -> WalletResult<String> {
+        self.begin_auth_inner(credential_id_b64, client_origin, Some(operation_digest))
+    }
+
+    fn begin_auth_inner(
+        &self,
+        credential_id_b64: &str,
+        client_origin: Option<&str>,
+        operation_digest: Option<&[u8; 32]>,
+    ) -> WalletResult<String> {
+        decode_credential_id(credential_id_b64)?;
+        let challenge = operation_digest
+            .map(random_bound_challenge)
+            .unwrap_or_else(random_challenge);
+        let (expected_origin, rp_id) = resolve_webauthn_context(client_origin)?;
         *self.pending.lock().map_err(lock_err)? = Some(CeremonyState {
             challenge_b64: challenge.clone(),
             purpose: "authentication".into(),
             expected_origin,
             rp_id: rp_id.clone(),
+            started_at: Instant::now(),
         });
         let options = json!({
             "publicKey": {
@@ -175,61 +260,65 @@ impl WebAuthnGate {
         serde_json::to_string(&options).map_err(|e| WalletError::Other(e.to_string()))
     }
 
-    pub fn finish_auth(&self, assertion_json: &str, stored_b64: Option<&str>) -> WalletResult<()> {
+    pub fn clear_pending(&self) -> WalletResult<()> {
+        *self.pending.lock().map_err(lock_err)? = None;
+        Ok(())
+    }
+
+    pub fn finish_auth(
+        &self,
+        assertion_json: &str,
+        stored_b64: Option<&str>,
+    ) -> WalletResult<String> {
+        if assertion_json.len() > MAX_CREDENTIAL_JSON_BYTES {
+            return Err(WalletError::Policy(
+                "WebAuthn authentication response is too large".into(),
+            ));
+        }
         let state = self.take_pending("authentication")?;
+        let stored_b64 = stored_b64
+            .ok_or_else(|| WalletError::Policy("WebAuthn credential is not registered".into()))?;
+        let mut stored = load_stored_credential(stored_b64)?;
+        validate_stored_credential(&stored)?;
+        if stored.rp_id != state.rp_id || stored.origin != state.expected_origin {
+            return Err(WalletError::Policy(
+                "WebAuthn RP/origin differs from the registered credential".into(),
+            ));
+        }
+
         let cred: AuthCredential =
             serde_json::from_str(assertion_json).map_err(|e| WalletError::Other(e.to_string()))?;
-        let client_data_bytes = decode_b64(&cred.response.client_data_json)?;
+        let credential_id = verify_credential_identity(&cred.id, &cred.raw_id, &cred.typ)?;
+        if credential_id != decode_credential_id(&stored.credential_id_b64)? {
+            return Err(WalletError::Policy(
+                "WebAuthn credential id does not match the registered credential".into(),
+            ));
+        }
+        let client_data_bytes = decode_b64_limited(
+            &cred.response.client_data_json,
+            MAX_CLIENT_DATA_BYTES,
+            "clientDataJSON",
+        )?;
         verify_client_data_bytes(
             &client_data_bytes,
             &state.challenge_b64,
             "webauthn.get",
             &state.expected_origin,
         )?;
-
-        let stored_cred = stored_b64.map(load_stored_credential).transpose()?;
-
-        if stored_cred
-            .as_ref()
-            .and_then(|s| s.public_key_b64.as_ref())
-            .is_some()
-        {
-            let auth_b64 = cred.response.authenticator_data.as_ref().ok_or_else(|| {
-                WalletError::Policy(
-                    "authenticatorData required when credential has public key".into(),
-                )
-            })?;
-            let sig_b64 = cred.response.signature.as_ref().ok_or_else(|| {
-                WalletError::Policy("signature required when credential has public key".into())
-            })?;
-            let auth_data = decode_b64(auth_b64)?;
-            verify_authenticator_data(&auth_data, &state.rp_id)?;
-            let pk_b64 = stored_cred
-                .as_ref()
-                .and_then(|s| s.public_key_b64.as_ref())
-                .expect("checked above");
-            let signature = decode_b64(sig_b64)?;
-            let client_hash = Sha256::digest(&client_data_bytes);
-            let mut signed = auth_data.clone();
-            signed.extend_from_slice(&client_hash);
-            verify_es256_signature(pk_b64, &signed, &signature)?;
-        } else if let (Some(auth_b64), Some(sig_b64)) = (
-            cred.response.authenticator_data.as_ref(),
-            cred.response.signature.as_ref(),
-        ) {
-            let auth_data = decode_b64(auth_b64)?;
-            verify_authenticator_data(&auth_data, &state.rp_id)?;
-            if let Some(stored) = stored_cred.as_ref()
-                && let Some(pk_b64) = &stored.public_key_b64
-            {
-                let signature = decode_b64(sig_b64)?;
-                let client_hash = Sha256::digest(&client_data_bytes);
-                let mut signed = auth_data.clone();
-                signed.extend_from_slice(&client_hash);
-                verify_es256_signature(pk_b64, &signed, &signature)?;
-            }
-        }
-        Ok(())
+        let auth_data = decode_b64_limited(
+            &cred.response.authenticator_data,
+            MAX_AUTHENTICATOR_DATA_BYTES,
+            "authenticatorData",
+        )?;
+        let auth = verify_assertion_authenticator_data(&auth_data, &state.rp_id)?;
+        let signature =
+            decode_b64_limited(&cred.response.signature, MAX_SIGNATURE_BYTES, "signature")?;
+        let client_hash = Sha256::digest(&client_data_bytes);
+        let mut signed = auth_data;
+        signed.extend_from_slice(&client_hash);
+        verify_es256_signature(&stored.public_key_cose_b64, &signed, &signature)?;
+        advance_sign_count(&mut stored, auth.sign_count)?;
+        encode_stored_credential(&stored)
     }
 }
 
@@ -241,8 +330,11 @@ impl Default for WebAuthnGate {
 
 #[derive(Deserialize)]
 struct RegisterCredential {
+    id: String,
     #[serde(rename = "rawId")]
     raw_id: String,
+    #[serde(rename = "type")]
+    typ: String,
     response: RegisterResponse,
 }
 
@@ -250,12 +342,17 @@ struct RegisterCredential {
 struct RegisterResponse {
     #[serde(rename = "clientDataJSON")]
     client_data_json: String,
-    #[serde(rename = "publicKey")]
-    public_key: Option<String>,
+    #[serde(rename = "attestationObject")]
+    attestation_object: String,
 }
 
 #[derive(Deserialize)]
 struct AuthCredential {
+    id: String,
+    #[serde(rename = "rawId")]
+    raw_id: String,
+    #[serde(rename = "type")]
+    typ: String,
     response: AuthResponse,
 }
 
@@ -264,8 +361,8 @@ struct AuthResponse {
     #[serde(rename = "clientDataJSON")]
     client_data_json: String,
     #[serde(rename = "authenticatorData")]
-    authenticator_data: Option<String>,
-    signature: Option<String>,
+    authenticator_data: String,
+    signature: String,
 }
 
 #[derive(Deserialize)]
@@ -274,6 +371,18 @@ struct ClientData {
     typ: String,
     challenge: String,
     origin: String,
+    #[serde(default, rename = "crossOrigin")]
+    cross_origin: bool,
+}
+
+struct AuthenticatorHeader {
+    flags: u8,
+    sign_count: u32,
+}
+
+struct RegistrationData {
+    public_key_cose: Vec<u8>,
+    sign_count: u32,
 }
 
 fn verify_client_data(
@@ -282,7 +391,7 @@ fn verify_client_data(
     expected_type: &str,
     expected_origin: &str,
 ) -> WalletResult<()> {
-    let bytes = decode_b64(client_data_b64)?;
+    let bytes = decode_b64_limited(client_data_b64, MAX_CLIENT_DATA_BYTES, "clientDataJSON")?;
     verify_client_data_bytes(&bytes, expected_challenge, expected_type, expected_origin)
 }
 
@@ -292,56 +401,134 @@ fn verify_client_data_bytes(
     expected_type: &str,
     expected_origin: &str,
 ) -> WalletResult<()> {
-    let parsed: ClientData =
-        serde_json::from_slice(bytes).map_err(|e| WalletError::Other(e.to_string()))?;
+    let parsed: ClientData = serde_json::from_slice(bytes)
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn clientDataJSON: {e}")))?;
     if parsed.typ != expected_type {
         return Err(WalletError::Policy("invalid WebAuthn ceremony type".into()));
     }
     if parsed.challenge != expected_challenge {
         return Err(WalletError::Policy("WebAuthn challenge mismatch".into()));
     }
-    if !origins_match(&parsed.origin, expected_origin) {
+    if parsed.cross_origin {
+        return Err(WalletError::Policy(
+            "cross-origin WebAuthn ceremonies are not allowed".into(),
+        ));
+    }
+    let actual_origin = canonical_web_origin(&parsed.origin)?;
+    if actual_origin != expected_origin {
         return Err(WalletError::Policy(format!(
-            "unexpected origin: {} (expected {})",
-            parsed.origin, expected_origin
+            "unexpected origin: {actual_origin} (expected {expected_origin})"
         )));
     }
     Ok(())
 }
 
-fn origins_match(actual: &str, expected: &str) -> bool {
-    if actual == expected {
-        return true;
+fn verify_credential_identity(id: &str, raw_id: &str, typ: &str) -> WalletResult<Vec<u8>> {
+    if typ != "public-key" {
+        return Err(WalletError::Policy(
+            "WebAuthn credential type must be public-key".into(),
+        ));
     }
-    normalize_origin(actual) == normalize_origin(expected)
+    let raw_id_bytes = decode_credential_id(raw_id)?;
+    if decode_credential_id(id)? != raw_id_bytes {
+        return Err(WalletError::Policy(
+            "WebAuthn credential id and rawId differ".into(),
+        ));
+    }
+    Ok(raw_id_bytes)
 }
 
-fn normalize_origin(origin: &str) -> String {
-    let Ok(url) = url::Url::parse(origin) else {
-        return origin.to_string();
-    };
-    let host = url.host_str().unwrap_or("");
-    let normalized_host = match host {
-        "127.0.0.1" => "localhost",
-        "0.0.0.0" => "localhost",
-        other => other,
-    };
-    format!(
-        "{}://{}{}",
-        url.scheme(),
-        normalized_host,
-        url.port()
-            .filter(|port| match url.scheme() {
-                "http" => *port != 80,
-                "https" => *port != 443,
-                _ => true,
-            })
-            .map(|port| format!(":{port}"))
-            .unwrap_or_default()
-    )
+fn decode_credential_id(value: &str) -> WalletResult<Vec<u8>> {
+    if value.is_empty() || value.len() > MAX_CREDENTIAL_ID_BYTES * 2 {
+        return Err(WalletError::Policy(
+            "WebAuthn credential id has an invalid length".into(),
+        ));
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| WalletError::Policy("WebAuthn credential id is not base64url".into()))?;
+    if bytes.is_empty()
+        || bytes.len() > MAX_CREDENTIAL_ID_BYTES
+        || URL_SAFE_NO_PAD.encode(&bytes) != value
+    {
+        return Err(WalletError::Policy(
+            "WebAuthn credential id is not canonical base64url".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
-fn verify_authenticator_data(auth_data: &[u8], rp_id: &str) -> WalletResult<()> {
+fn parse_none_attestation(attestation_b64: &str) -> WalletResult<Vec<u8>> {
+    let bytes = decode_b64_limited(
+        attestation_b64,
+        MAX_ATTESTATION_OBJECT_BYTES,
+        "attestationObject",
+    )?;
+    let mut reader = bytes.as_slice();
+    let value: Value = coset::cbor::de::from_reader(&mut reader)
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn attestation object: {e}")))?;
+    if !reader.is_empty() {
+        return Err(WalletError::Policy(
+            "WebAuthn attestation object has trailing data".into(),
+        ));
+    }
+    let Value::Map(entries) = value else {
+        return Err(WalletError::Policy(
+            "WebAuthn attestation object must be a CBOR map".into(),
+        ));
+    };
+    let mut fmt = None;
+    let mut auth_data = None;
+    let mut att_stmt_empty = None;
+    for (key, value) in entries {
+        let Value::Text(key) = key else {
+            return Err(WalletError::Policy(
+                "WebAuthn attestation object has a non-text key".into(),
+            ));
+        };
+        match (key.as_str(), value) {
+            ("fmt", Value::Text(value)) => {
+                if fmt.replace(value).is_some() {
+                    return Err(WalletError::Policy(
+                        "WebAuthn attestation object contains a duplicate fmt".into(),
+                    ));
+                }
+            }
+            ("authData", Value::Bytes(value)) => {
+                if auth_data.replace(value).is_some() {
+                    return Err(WalletError::Policy(
+                        "WebAuthn attestation object contains duplicate authData".into(),
+                    ));
+                }
+            }
+            ("attStmt", Value::Map(value)) => {
+                if att_stmt_empty.replace(value.is_empty()).is_some() {
+                    return Err(WalletError::Policy(
+                        "WebAuthn attestation object contains duplicate attStmt".into(),
+                    ));
+                }
+            }
+            ("fmt" | "authData" | "attStmt", _) => {
+                return Err(WalletError::Policy(
+                    "WebAuthn attestation object contains an invalid field".into(),
+                ));
+            }
+            _ => {
+                return Err(WalletError::Policy(
+                    "WebAuthn attestation object contains an unexpected field".into(),
+                ));
+            }
+        }
+    }
+    if fmt.as_deref() != Some("none") || att_stmt_empty != Some(true) {
+        return Err(WalletError::Policy(
+            "only WebAuthn none attestation is supported".into(),
+        ));
+    }
+    auth_data.ok_or_else(|| WalletError::Policy("WebAuthn attestation lacks authData".into()))
+}
+
+fn verify_authenticator_header(auth_data: &[u8], rp_id: &str) -> WalletResult<AuthenticatorHeader> {
     if auth_data.len() < 37 {
         return Err(WalletError::Policy("authenticatorData too short".into()));
     }
@@ -353,67 +540,259 @@ fn verify_authenticator_data(auth_data: &[u8], rp_id: &str) -> WalletResult<()> 
     if flags & 0x01 == 0 {
         return Err(WalletError::Policy("WebAuthn user not present".into()));
     }
+    if flags & 0x04 == 0 {
+        return Err(WalletError::Policy(
+            "WebAuthn user verification required".into(),
+        ));
+    }
+    if flags & 0x10 != 0 && flags & 0x08 == 0 {
+        return Err(WalletError::Policy(
+            "WebAuthn backup-state flag is inconsistent".into(),
+        ));
+    }
+    Ok(AuthenticatorHeader {
+        flags,
+        sign_count: u32::from_be_bytes(
+            auth_data[33..37]
+                .try_into()
+                .map_err(|_| WalletError::Policy("invalid WebAuthn signature counter".into()))?,
+        ),
+    })
+}
+
+fn verify_registration_authenticator_data(
+    auth_data: &[u8],
+    rp_id: &str,
+    expected_credential_id: &[u8],
+) -> WalletResult<RegistrationData> {
+    let header = verify_authenticator_header(auth_data, rp_id)?;
+    if header.flags & 0x40 == 0 {
+        return Err(WalletError::Policy(
+            "WebAuthn registration lacks attested credential data".into(),
+        ));
+    }
+    let credential_len_offset = 37 + 16;
+    if auth_data.len() < credential_len_offset + 2 {
+        return Err(WalletError::Policy(
+            "WebAuthn attested credential data is truncated".into(),
+        ));
+    }
+    let credential_len = u16::from_be_bytes([
+        auth_data[credential_len_offset],
+        auth_data[credential_len_offset + 1],
+    ]) as usize;
+    if credential_len == 0 || credential_len > MAX_CREDENTIAL_ID_BYTES {
+        return Err(WalletError::Policy(
+            "WebAuthn attested credential id has an invalid length".into(),
+        ));
+    }
+    let credential_start = credential_len_offset + 2;
+    let credential_end = credential_start
+        .checked_add(credential_len)
+        .ok_or_else(|| {
+            WalletError::Policy("WebAuthn attested credential length overflow".into())
+        })?;
+    if credential_end > auth_data.len()
+        || auth_data[credential_start..credential_end] != *expected_credential_id
+    {
+        return Err(WalletError::Policy(
+            "WebAuthn attested credential id does not match rawId".into(),
+        ));
+    }
+
+    let mut key_reader = &auth_data[credential_end..];
+    let key_value: Value = coset::cbor::de::from_reader(&mut key_reader)
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn COSE key: {e}")))?;
+    let cose = CoseKey::from_cbor_value(key_value)
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn COSE key: {e}")))?;
+    validate_cose_es256(&cose)?;
+    verify_extensions(header.flags, key_reader)?;
+    let public_key_cose = cose
+        .to_vec()
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn COSE key: {e}")))?;
+    Ok(RegistrationData {
+        public_key_cose,
+        sign_count: header.sign_count,
+    })
+}
+
+fn verify_assertion_authenticator_data(
+    auth_data: &[u8],
+    rp_id: &str,
+) -> WalletResult<AuthenticatorHeader> {
+    let header = verify_authenticator_header(auth_data, rp_id)?;
+    if header.flags & 0x40 != 0 {
+        return Err(WalletError::Policy(
+            "WebAuthn assertion unexpectedly contains attested credential data".into(),
+        ));
+    }
+    verify_extensions(header.flags, &auth_data[37..])?;
+    Ok(header)
+}
+
+fn verify_extensions(flags: u8, bytes: &[u8]) -> WalletResult<()> {
+    if flags & 0x80 == 0 {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        return Err(WalletError::Policy(
+            "WebAuthn authenticatorData has undeclared trailing data".into(),
+        ));
+    }
+    let mut reader = bytes;
+    let value: Value = coset::cbor::de::from_reader(&mut reader)
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn extensions: {e}")))?;
+    if !reader.is_empty() || !matches!(value, Value::Map(_)) {
+        return Err(WalletError::Policy(
+            "WebAuthn extensions must be one CBOR map".into(),
+        ));
+    }
     Ok(())
 }
 
-fn verify_es256_signature(pk_b64: &str, signed: &[u8], signature: &[u8]) -> WalletResult<()> {
-    let pk_bytes = decode_b64(pk_b64)?;
-    let cose = CoseKey::from_slice(&pk_bytes).map_err(|e| WalletError::Policy(e.to_string()))?;
-    if cose.alg != Some(RegisteredLabelWithPrivate::Assigned(iana::Algorithm::ES256)) {
+fn validate_cose_es256(cose: &CoseKey) -> WalletResult<VerifyingKey> {
+    if cose.kty != RegisteredLabel::Assigned(iana::KeyType::EC2)
+        || cose.alg != Some(RegisteredLabelWithPrivate::Assigned(iana::Algorithm::ES256))
+        || cose_param_i64(cose, -1) != Some(iana::EllipticCurve::P_256 as i64)
+        || cose
+            .params
+            .iter()
+            .any(|(label, _)| *label == Label::Int(-4))
+    {
         return Err(WalletError::Policy(
-            "unsupported WebAuthn public key algorithm".into(),
+            "WebAuthn credential must be a public P-256 ES256 key".into(),
         ));
     }
-    let x = cose_param_bytes(&cose, -2)
-        .ok_or_else(|| WalletError::Policy("COSE key missing x coordinate".into()))?;
-    let y = cose_param_bytes(&cose, -3)
-        .ok_or_else(|| WalletError::Policy("COSE key missing y coordinate".into()))?;
-    let mut uncompressed = vec![0x04];
+    if !cose.key_ops.is_empty()
+        && !cose
+            .key_ops
+            .contains(&RegisteredLabel::Assigned(iana::KeyOperation::Verify))
+    {
+        return Err(WalletError::Policy(
+            "WebAuthn credential key does not permit verification".into(),
+        ));
+    }
+    let x = cose_param_bytes(cose, -2)
+        .filter(|coordinate| coordinate.len() == 32)
+        .ok_or_else(|| WalletError::Policy("COSE key has an invalid x coordinate".into()))?;
+    let y = cose_param_bytes(cose, -3)
+        .filter(|coordinate| coordinate.len() == 32)
+        .ok_or_else(|| WalletError::Policy("COSE key has an invalid y coordinate".into()))?;
+    let mut uncompressed = Vec::with_capacity(65);
+    uncompressed.push(0x04);
     uncompressed.extend_from_slice(x);
     uncompressed.extend_from_slice(y);
     let point =
         EncodedPoint::from_bytes(&uncompressed).map_err(|e| WalletError::Policy(e.to_string()))?;
-    let verifying_key =
-        VerifyingKey::from_encoded_point(&point).map_err(|e| WalletError::Policy(e.to_string()))?;
-    let sig = Signature::from_der(signature).or_else(|_| {
-        Signature::from_slice(signature)
-            .map_err(|e| WalletError::Policy(format!("invalid ES256 signature: {e}")))
-    })?;
+    VerifyingKey::from_encoded_point(&point)
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn P-256 key: {e}")))
+}
+
+fn verify_es256_signature(pk_b64: &str, signed: &[u8], signature: &[u8]) -> WalletResult<()> {
+    let pk_bytes = decode_b64_limited(pk_b64, 2048, "stored COSE public key")?;
+    let cose = CoseKey::from_slice(&pk_bytes)
+        .map_err(|e| WalletError::Policy(format!("invalid stored WebAuthn COSE key: {e}")))?;
+    let verifying_key = validate_cose_es256(&cose)?;
+    let sig = Signature::from_der(signature)
+        .map_err(|e| WalletError::Policy(format!("invalid WebAuthn ES256 signature: {e}")))?;
     verifying_key
         .verify(signed, &sig)
         .map_err(|e| WalletError::Policy(format!("WebAuthn signature invalid: {e}")))?;
     Ok(())
 }
 
-fn decode_b64(value: &str) -> WalletResult<Vec<u8>> {
-    URL_SAFE_NO_PAD
+fn decode_b64_limited(value: &str, max_decoded: usize, field: &str) -> WalletResult<Vec<u8>> {
+    let max_encoded = max_decoded.saturating_mul(4) / 3 + 4;
+    if value.is_empty() || value.len() > max_encoded {
+        return Err(WalletError::Policy(format!(
+            "WebAuthn {field} has an invalid length"
+        )));
+    }
+    let bytes = URL_SAFE_NO_PAD
         .decode(value)
-        .or_else(|_| {
-            use base64::engine::general_purpose::STANDARD;
-            STANDARD.decode(value)
-        })
-        .map_err(|e| WalletError::Other(e.to_string()))
+        .map_err(|_| WalletError::Policy(format!("WebAuthn {field} is not base64url")))?;
+    if bytes.is_empty() || bytes.len() > max_decoded {
+        return Err(WalletError::Policy(format!(
+            "WebAuthn {field} has an invalid length"
+        )));
+    }
+    Ok(bytes)
 }
 
 fn cose_param_bytes(key: &CoseKey, label: i64) -> Option<&[u8]> {
     key.params
         .iter()
-        .find(|(l, _)| *l == Label::Int(label))
-        .and_then(|(_, v)| v.as_bytes().map(|b| b.as_slice()))
+        .find(|(candidate, _)| *candidate == Label::Int(label))
+        .and_then(|(_, value)| value.as_bytes().map(Vec::as_slice))
+}
+
+fn cose_param_i64(key: &CoseKey, label: i64) -> Option<i64> {
+    key.params
+        .iter()
+        .find(|(candidate, _)| *candidate == Label::Int(label))
+        .and_then(|(_, value)| match value {
+            Value::Integer(value) => i64::try_from(*value).ok(),
+            _ => None,
+        })
 }
 
 fn load_stored_credential(stored_b64: &str) -> WalletResult<StoredCredential> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(stored_b64)
-        .map_err(|e| WalletError::Other(e.to_string()))?;
-    let raw = String::from_utf8(bytes).map_err(|e| WalletError::Other(e.to_string()))?;
-    serde_json::from_str(&raw).map_err(|e| WalletError::Other(e.to_string()))
+    let bytes = decode_b64_limited(stored_b64, 16 * 1024, "stored credential")?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        WalletError::Policy(
+            "stored WebAuthn credential is legacy, corrupt, or missing key material; re-register it"
+                .into(),
+        )
+    })
+}
+
+fn encode_stored_credential(stored: &StoredCredential) -> WalletResult<String> {
+    let raw = serde_json::to_vec(stored).map_err(|e| WalletError::Other(e.to_string()))?;
+    Ok(URL_SAFE_NO_PAD.encode(raw))
+}
+
+fn validate_stored_credential(stored: &StoredCredential) -> WalletResult<()> {
+    if stored.version != STORED_CREDENTIAL_VERSION {
+        return Err(WalletError::Policy(
+            "legacy WebAuthn credential must be re-registered".into(),
+        ));
+    }
+    decode_credential_id(&stored.credential_id_b64)?;
+    let origin = canonical_web_origin(&stored.origin)?;
+    if origin != stored.origin || origin_to_rp_id(&origin).as_deref() != Some(&stored.rp_id) {
+        return Err(WalletError::Policy(
+            "stored WebAuthn RP/origin binding is invalid".into(),
+        ));
+    }
+    let public_key =
+        decode_b64_limited(&stored.public_key_cose_b64, 2048, "stored COSE public key")?;
+    let cose = CoseKey::from_slice(&public_key)
+        .map_err(|e| WalletError::Policy(format!("invalid stored WebAuthn COSE key: {e}")))?;
+    validate_cose_es256(&cose)?;
+    Ok(())
+}
+
+fn advance_sign_count(stored: &mut StoredCredential, next: u32) -> WalletResult<()> {
+    if (stored.sign_count != 0 || next != 0) && next <= stored.sign_count {
+        return Err(WalletError::Policy(
+            "WebAuthn signature counter did not increase; credential cloning is possible".into(),
+        ));
+    }
+    stored.sign_count = next;
+    Ok(())
 }
 
 fn random_challenge() -> String {
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
+}
+
+fn random_bound_challenge(operation_digest: &[u8; 32]) -> String {
+    let mut bytes = [0u8; 64];
+    rand::thread_rng().fill_bytes(&mut bytes[..32]);
+    bytes[32..].copy_from_slice(operation_digest);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 impl WebAuthnGate {
@@ -429,6 +808,11 @@ impl WebAuthnGate {
                 "WebAuthn ceremony purpose mismatch".into(),
             ));
         }
+        if state.started_at.elapsed() > CEREMONY_TTL {
+            return Err(WalletError::Policy(
+                "WebAuthn ceremony expired; start a new verification".into(),
+            ));
+        }
         Ok(state)
     }
 }
@@ -438,13 +822,38 @@ fn lock_err<T>(e: std::sync::PoisonError<T>) -> WalletError {
 }
 
 pub fn credential_id_from_store(stored_b64: &str) -> WalletResult<String> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(stored_b64)
-        .map_err(|e| WalletError::Other(e.to_string()))?;
-    let raw = String::from_utf8(bytes).map_err(|e| WalletError::Other(e.to_string()))?;
-    let stored: StoredCredential =
-        serde_json::from_str(&raw).map_err(|e| WalletError::Other(e.to_string()))?;
+    let stored = load_stored_credential(stored_b64)?;
+    validate_stored_credential(&stored)?;
     Ok(stored.credential_id_b64)
+}
+
+/// Stable digest of the immutable parts of a registered credential.
+///
+/// The signature counter is deliberately excluded so a successful assertion can
+/// advance it without changing the vault's authenticated policy. Every field is
+/// length-prefixed to avoid ambiguous concatenation.
+pub fn credential_binding_sha256(stored_b64: &str) -> WalletResult<String> {
+    let stored = load_stored_credential(stored_b64)?;
+    validate_stored_credential(&stored)?;
+    let credential_id = decode_credential_id(&stored.credential_id_b64)?;
+    let public_key =
+        decode_b64_limited(&stored.public_key_cose_b64, 2048, "stored COSE public key")?;
+
+    let mut digest = Sha256::new();
+    digest.update(b"hacash-wallet-webauthn-binding-v1");
+    hash_binding_field(&mut digest, &credential_id)?;
+    hash_binding_field(&mut digest, &public_key)?;
+    hash_binding_field(&mut digest, stored.rp_id.as_bytes())?;
+    hash_binding_field(&mut digest, stored.origin.as_bytes())?;
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn hash_binding_field(digest: &mut Sha256, value: &[u8]) -> WalletResult<()> {
+    let len = u32::try_from(value.len())
+        .map_err(|_| WalletError::Policy("WebAuthn binding field is too large".into()))?;
+    digest.update(len.to_be_bytes());
+    digest.update(value);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -453,96 +862,33 @@ mod tests {
 
     #[test]
     fn challenge_is_url_safe() {
-        let c = random_challenge();
-        assert!(!c.contains('+'));
-        assert!(!c.contains('/'));
-        assert_eq!(c.len(), 43);
+        let challenge = random_challenge();
+        assert!(!challenge.contains('+'));
+        assert!(!challenge.contains('/'));
+        assert_eq!(challenge.len(), 43);
     }
 
     #[test]
-    fn register_options_include_require_resident_key() {
-        let gate = WebAuthnGate::new().unwrap();
-        let options_json = gate
-            .begin_register("1TestAddr", Some("https://tauri.localhost"))
+    fn prepared_challenge_is_fresh_and_contains_exact_operation_digest() {
+        let digest = [0x5au8; 32];
+        let first = URL_SAFE_NO_PAD
+            .decode(random_bound_challenge(&digest))
             .unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&options_json).unwrap();
-        let sel = &parsed["publicKey"]["authenticatorSelection"];
-        assert_eq!(sel["requireResidentKey"], false);
-        assert_eq!(sel["residentKey"], "preferred");
-    }
-
-    #[test]
-    fn register_ceremony_roundtrip() {
-        let gate = WebAuthnGate::new().unwrap();
-        let options_json = gate.begin_register("1TestAddr", None).unwrap();
-        assert!(options_json.contains("publicKey"));
-
-        let parsed: serde_json::Value = serde_json::from_str(&options_json).unwrap();
-        let challenge = parsed["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let client_data = json!({
-            "type": "webauthn.create",
-            "challenge": challenge,
-            "origin": DEFAULT_RP_ORIGIN
-        });
-        let client_data_b64 = URL_SAFE_NO_PAD.encode(client_data.to_string().as_bytes());
-        let cred_json = json!({
-            "rawId": "dGVzdA",
-            "response": {
-                "clientDataJSON": client_data_b64,
-                "publicKey": null
-            }
-        })
-        .to_string();
-
-        let stored = gate.finish_register(&cred_json).unwrap();
-        assert!(!stored.is_empty());
-        let cred_id = credential_id_from_store(&stored).unwrap();
-        assert_eq!(cred_id, "dGVzdA");
-    }
-
-    #[test]
-    fn accepts_localhost_origin_alias() {
-        let gate = WebAuthnGate::new().unwrap();
-        let options_json = gate
-            .begin_register("1TestAddr", Some("http://127.0.0.1:1420"))
+        let second = URL_SAFE_NO_PAD
+            .decode(random_bound_challenge(&digest))
             .unwrap();
-        let challenge = serde_json::from_str::<serde_json::Value>(&options_json).unwrap()
-            ["publicKey"]["challenge"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let client_data = json!({
-            "type": "webauthn.create",
-            "challenge": challenge,
-            "origin": "http://localhost:1420"
-        });
-        let client_data_b64 = URL_SAFE_NO_PAD.encode(client_data.to_string().as_bytes());
-        let cred_json = json!({
-            "rawId": "dGVzdA",
-            "response": { "clientDataJSON": client_data_b64, "publicKey": null }
-        })
-        .to_string();
-        assert!(gate.finish_register(&cred_json).is_ok());
+        assert_eq!(&first[32..], digest.as_slice());
+        assert_eq!(&second[32..], digest.as_slice());
+        assert_ne!(&first[..32], &second[..32]);
     }
 
     #[test]
-    fn rejects_challenge_mismatch() {
+    fn expired_ceremony_is_rejected() {
         let gate = WebAuthnGate::new().unwrap();
-        gate.begin_register("1Test", None).unwrap();
-        let client_data = json!({
-            "type": "webauthn.create",
-            "challenge": "wrong",
-            "origin": DEFAULT_RP_ORIGIN
-        });
-        let client_data_b64 = URL_SAFE_NO_PAD.encode(client_data.to_string().as_bytes());
-        let cred_json = json!({
-            "rawId": "dGVzdA",
-            "response": { "clientDataJSON": client_data_b64, "publicKey": null }
-        })
-        .to_string();
-        assert!(gate.finish_register(&cred_json).is_err());
+        gate.begin_register("1TestAddr", None).unwrap();
+        gate.pending.lock().unwrap().as_mut().unwrap().started_at =
+            Instant::now() - CEREMONY_TTL - Duration::from_secs(1);
+        let error = gate.finish_register("{}").unwrap_err().to_string();
+        assert!(error.contains("expired"), "unexpected error: {error}");
     }
 }

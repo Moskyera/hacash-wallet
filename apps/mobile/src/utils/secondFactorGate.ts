@@ -1,4 +1,3 @@
-import { api } from "../api";
 import { BIOMETRIC_THRESHOLD_MEI } from "./appConstants";
 
 export function needsSecondFactor(
@@ -17,18 +16,9 @@ export async function maybeSecondFactorGate(opts: {
   biometricSendEnabled?: boolean;
   nativeBiometricAvailable?: boolean;
 }): Promise<void> {
-  const {
-    amountMei,
-    securityProfile,
-    biometricSendEnabled = true,
-    nativeBiometricAvailable,
-  } = opts;
+  const { amountMei, securityProfile } = opts;
   if (!needsSecondFactor(amountMei, securityProfile)) return;
-
-  if (nativeBiometricAvailable && biometricSendEnabled) {
-    await api.confirmBiometric();
-    return;
-  }
-
-  throw new Error("Enable biometric confirm in Security for large sends");
+  throw new Error(
+    "Protected signing requires an exact prepared operation; this legacy authorization path is blocked.",
+  );
 }

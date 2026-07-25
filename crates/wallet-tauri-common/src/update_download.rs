@@ -353,10 +353,93 @@ pub async fn download_update_file(
     result
 }
 
+fn normalize_certificate_sha256(raw: &str) -> Option<String> {
+    if !raw.chars().all(|character| {
+        character.is_ascii_hexdigit()
+            || character.is_ascii_whitespace()
+            || matches!(character, ':' | '-')
+    }) {
+        return None;
+    }
+    let normalized = raw
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    (normalized.len() == 64).then_some(normalized)
+}
+
+fn pinned_windows_update_signer() -> Result<String, String> {
+    let configured = option_env!("WINDOWS_UPDATE_SIGNER_SHA256").unwrap_or("");
+    normalize_certificate_sha256(configured).ok_or_else(|| {
+        "automatic Windows install is disabled because this build has no valid pinned publisher certificate; use the official release page and verify the publisher manually".into()
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub fn verify_windows_authenticode_signer(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let expected = pinned_windows_update_signer()?;
+    let system_root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| "Windows system directory is unavailable".to_string())?;
+    let powershell = std::path::PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if !powershell.is_file() {
+        return Err("Windows signature verification service is unavailable".into());
+    }
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$signature = Get-AuthenticodeSignature -LiteralPath $env:HACASH_UPDATE_PATH
+if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { exit 10 }
+$hasher = [Security.Cryptography.SHA256]::Create()
+try { $digest = $hasher.ComputeHash($signature.SignerCertificate.RawData) } finally { $hasher.Dispose() }
+$hex = -join ($digest | ForEach-Object { $_.ToString('x2') })
+[Console]::Out.Write($hex)
+"#;
+    let output = std::process::Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .env("HACASH_UPDATE_PATH", path.as_os_str())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|error| format!("Windows publisher verification failed: {error}"))?;
+    if !output.status.success() {
+        return Err("Windows rejected the installer's Authenticode signature".into());
+    }
+    if output.stdout.len() > 128 {
+        return Err("Windows publisher verification returned an invalid result".into());
+    }
+    let actual = std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(normalize_certificate_sha256)
+        .ok_or_else(|| "Windows publisher verification returned an invalid result".to_string())?;
+    if actual != expected {
+        return Err("the installer was signed by an unexpected publisher certificate".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn verify_windows_authenticode_signer(_path: &std::path::Path) -> Result<(), String> {
+    Err("Authenticode verification is only supported on Windows".into())
+}
+
 #[cfg(target_os = "windows")]
 pub fn run_windows_installer(path: &std::path::Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x00000008;
+    validate_downloaded_update(path)?;
+    verify_windows_authenticode_signer(path)?;
     let path_str = path.to_string_lossy().to_string();
     if path.extension().and_then(|s| s.to_str()) == Some("exe") {
         std::process::Command::new(&path_str)
@@ -385,7 +468,9 @@ mod timeout_tests {
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
-    use super::{DOWNLOAD_TIMEOUTS, DownloadTimeouts, download_http_client};
+    use super::{
+        DOWNLOAD_TIMEOUTS, DownloadTimeouts, download_http_client, normalize_certificate_sha256,
+    };
 
     fn spawn_stalling_server(send_headers: bool) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind timeout test server");
@@ -454,5 +539,23 @@ mod timeout_tests {
         assert!(error.is_timeout(), "unexpected request error: {error}");
         assert!(started.elapsed() < Duration::from_secs(1));
         server.join().expect("timeout test server");
+    }
+
+    #[test]
+    fn publisher_fingerprint_parser_is_strict_and_canonical() {
+        let plain = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(normalize_certificate_sha256(plain).as_deref(), Some(plain));
+        let separated = plain
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap())
+            .collect::<Vec<_>>()
+            .join(":");
+        assert_eq!(
+            normalize_certificate_sha256(&separated).as_deref(),
+            Some(plain)
+        );
+        assert!(normalize_certificate_sha256("g123").is_none());
+        assert!(normalize_certificate_sha256(&format!("{plain}00")).is_none());
     }
 }

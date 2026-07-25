@@ -3,7 +3,7 @@ import { api, type BtcSendPreview, type PlatformSecurityStatus, type WalletSetti
 import { formatInvokeError } from "../formatInvokeError";
 import { isValidHacashAddress } from "../paymentQr";
 import { hapticSuccess } from "../utils/haptic";
-import { maybeSecondFactorGate } from "../utils/secondFactorGate";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 
 export function useBtcSend(opts: {
   active: boolean;
@@ -50,21 +50,16 @@ export function useBtcSend(opts: {
 
   const handleConfirm = useCallback(async () => {
     if (!preview) return;
-    try {
-      await maybeSecondFactorGate({
-        amountMei: Number.POSITIVE_INFINITY,
-        securityProfile: settings?.security_profile,
-        biometricSendEnabled: settings?.biometric_send_enabled ?? true,
-        nativeBiometricAvailable: platformSec?.native_biometric_available,
-      });
-    } catch (e) {
-      showToast(formatInvokeError(e), "error");
-      return;
-    }
     setBusy(true);
     try {
       void refresh();
-      const result = await api.sendBtc(preview.to, preview.satoshi);
+      const prepared = await api.prepareSendBtc(preview.to, preview.satoshi);
+      await authorizePreparedOperation(
+        prepared,
+        platformSec?.native_biometric_available ?? false,
+        settings?.biometric_send_enabled ?? true,
+      );
+      const result = await api.executePreparedBtc(prepared.id);
       setPreview(null);
       setRecipient("");
       setBtcAmount("");

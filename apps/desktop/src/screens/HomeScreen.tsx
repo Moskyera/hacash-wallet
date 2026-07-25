@@ -12,11 +12,9 @@ type Props = {
   hideAddresses: boolean;
   fastPayReady: boolean;
   lastTx: string;
-  busy: boolean;
   privacy: PrivacySettings;
   onNavigate: (screen: Screen) => void;
   onOpenQrPay: () => void;
-  onWebAuthnSession: () => void;
   onLock: () => void;
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
   clearMessages: () => void;
@@ -29,11 +27,9 @@ export default function HomeScreen({
   hideAddresses,
   fastPayReady,
   lastTx,
-  busy,
   privacy,
   onNavigate,
   onOpenQrPay,
-  onWebAuthnSession,
   onLock,
   onNotify,
   clearMessages,
@@ -65,11 +61,6 @@ export default function HomeScreen({
         {!status?.watch_only && <button onClick={onOpenQrPay}>Scan QR & Pay</button>}
         <button onClick={() => onNavigate("fastpay")}>Fast Pay</button>
         <button onClick={() => onNavigate("receive")}>Receive</button>
-        {status?.webauthn_enabled && (
-          <button disabled={busy} onClick={onWebAuthnSession}>
-            Verify WebAuthn (session)
-          </button>
-        )}
         <button onClick={onLock}>Lock</button>
       </div>
       {lastTx && (

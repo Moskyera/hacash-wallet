@@ -1,31 +1,16 @@
-import { useRef, useState } from "react";
-import { api } from "../api";
-import { formatInvokeError } from "../formatInvokeError";
+import { useState } from "react";
 import { useLocale } from "../locale";
-import { copyWithPrivacyClear } from "../privacy";
 
 type Props = {
-  watchOnly: boolean;
   busy: boolean;
-  setBusy: (b: boolean) => void;
-  clipboardSecs: number;
   onChangePassphrase: (old: string, newPass: string, confirm: string) => Promise<boolean>;
   onExportBackup: (passphrase: string) => Promise<string | null>;
-  onError: (msg: string) => void;
-  onInfo: (msg: string) => void;
-  clearMessages: () => void;
 };
 
 export default function SecurityScreen({
-  watchOnly,
   busy,
-  setBusy,
-  clipboardSecs,
   onChangePassphrase,
   onExportBackup,
-  onError,
-  onInfo,
-  clearMessages,
 }: Props) {
   const { t } = useLocale();
   const [oldPassphrase, setOldPassphrase] = useState("");
@@ -33,9 +18,6 @@ export default function SecurityScreen({
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
   const [exportPassphrase, setExportPassphrase] = useState("");
   const [backupJson, setBackupJson] = useState("");
-  const [privateKeyPass, setPrivateKeyPass] = useState("");
-  const [privateKey, setPrivateKey] = useState<string | null>(null);
-  const privateKeyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   return (
     <>
@@ -110,66 +92,6 @@ export default function SecurityScreen({
           rows={8}
           aria-label={t("security.exportedBackupJson")}
         />
-      )}
-
-      <hr className="divider" />
-
-      <h3>{t("security.privateKey")}</h3>
-      <p className="muted">{t("security.privateKeyDesktopHint")}</p>
-      <label>{t("security.passphrase")}</label>
-      <input
-        type="password"
-        value={privateKeyPass}
-        onChange={(e) => setPrivateKeyPass(e.target.value)}
-      />
-      <button
-        type="button"
-        disabled={busy || watchOnly || !privateKeyPass}
-        onClick={() => {
-          setBusy(true);
-          clearMessages();
-          void api
-            .exportPrivateKey(privateKeyPass)
-            .then((hex) => {
-              setPrivateKey(hex);
-              setPrivateKeyPass("");
-              onInfo(t("security.privateKeyRevealed"));
-              if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
-              privateKeyTimer.current = setTimeout(() => setPrivateKey(null), 60_000);
-            })
-            .catch((e) => onError(formatInvokeError(e)))
-            .finally(() => setBusy(false));
-        }}
-      >
-        {t("security.revealPrivateKey")}
-      </button>
-      {privateKey && (
-        <>
-          <p className="mono small" style={{ wordBreak: "break-all", marginTop: "0.75rem" }}>
-            {privateKey}
-          </p>
-          <div className="actions-row" style={{ marginTop: "0.5rem" }}>
-            <button
-              type="button"
-              onClick={() =>
-                void copyWithPrivacyClear(privateKey, clipboardSecs).then(() =>
-                  onInfo(t("security.privateKeyCopied")),
-                )
-              }
-            >
-              {t("common.copy")}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setPrivateKey(null);
-                if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
-              }}
-            >
-              {t("common.hide")}
-            </button>
-          </div>
-        </>
       )}
     </>
   );
