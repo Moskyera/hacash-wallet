@@ -165,6 +165,50 @@ fn android_9_backup_export_has_a_scoped_runtime_permission_flow() {
     assert!(!backup_helper.contains("writeBytes(bytes)"));
 }
 
+/// The Kotlin helper accepts a source file only if its parent is exactly
+/// `activity.cacheDir`, the app's private cache. Tauri's Android path resolver maps
+/// `cache_dir()` to `getExternalCacheDir` and only `app_cache_dir()` to `getCacheDir`,
+/// so staging with `cache_dir()` makes every Android backup export fail. Nothing
+/// asserted that the two sides agreed, which is how it shipped.
+#[test]
+fn backup_export_stages_the_file_where_the_native_helper_accepts_it() {
+    let root = repo_root();
+    let export = read(&root, "crates/wallet-tauri-common/src/backup_commands.rs");
+    let backup_helper = read(
+        &root,
+        "apps/mobile/src-tauri/android-src/org/hacash/wallet/mobile/BackupExportHelper.kt",
+    );
+
+    let staging = export
+        .split_once("pub async fn wallet_export_backup_to_downloads(")
+        .expect("backup export command")
+        .1
+        .split_once("copy_backup_file_to_downloads")
+        .expect("native copy call")
+        .0;
+
+    assert!(
+        staging.contains("app.path().app_cache_dir()"),
+        "the backup must be staged with app_cache_dir(), which is the private cache the \
+         native helper requires"
+    );
+    assert!(
+        !staging.contains("app.path().cache_dir()"),
+        "cache_dir() is the EXTERNAL cache on Android; the native helper rejects it and \
+         the encrypted key must not be staged on shared storage"
+    );
+    assert!(
+        backup_helper.contains("val cacheRoot = activity.cacheDir.canonicalFile"),
+        "the native helper must keep pinning the private cache as the only valid parent"
+    );
+    // The update flow shares this constraint, so it must not regress either.
+    let update = read(&root, "crates/wallet-tauri-common/src/update_commands.rs");
+    assert!(
+        !update.contains("app.path().cache_dir()"),
+        "the APK update download must stay in the private cache as well"
+    );
+}
+
 #[test]
 fn windows_android_release_fallback_reuses_the_verified_native_library() {
     let root = repo_root();

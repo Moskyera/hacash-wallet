@@ -32,10 +32,21 @@ object BackupExportHelper {
         val requestedSource = File(sourcePath)
         val source = requestedSource.canonicalFile
         val cacheRoot = activity.cacheDir.canonicalFile
-        if (Files.isSymbolicLink(requestedSource.toPath()) ||
-            source.parentFile != cacheRoot ||
-            !source.isFile
-        ) {
+        // Each rejection reports its own reason. Collapsing them into one "source
+        // missing" message hid a real bug for a whole release: the Rust side staged
+        // the file in the external cache, so the parent never matched and every
+        // export failed while appearing to be a missing-file problem.
+        if (Files.isSymbolicLink(requestedSource.toPath())) {
+            throw IllegalArgumentException("Backup source must not be a symbolic link: $sourcePath")
+        }
+        if (source.parentFile != cacheRoot) {
+            throw IllegalArgumentException(
+                "Backup source must be staged in the app private cache directory " +
+                    "$cacheRoot, got ${source.parent}. The Rust side must use " +
+                    "app_cache_dir(), not cache_dir()",
+            )
+        }
+        if (!source.isFile) {
             throw IllegalArgumentException("Backup source missing: $sourcePath")
         }
         val expectedLength = source.length()

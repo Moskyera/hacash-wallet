@@ -31,7 +31,14 @@ pub async fn wallet_export_backup_to_downloads(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let filename = format!("hacash-full-backup-v1-{stamp}.json");
-    let cache_dir = app.path().cache_dir().map_err(|e| e.to_string())?;
+    // Must be app_cache_dir, not cache_dir. On Android the two are different
+    // directories: cache_dir resolves to getExternalCacheDir, which lives on shared
+    // storage, while app_cache_dir resolves to getCacheDir, the app's private cache.
+    // The native helper only accepts a source staged directly in activity.cacheDir,
+    // so staging in the external cache made every Android export fail with a
+    // misleading "Backup source missing" error. Private storage is also the right
+    // place for a file that holds the encrypted key, however briefly.
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
     let cache_path = cache_dir.join(&filename);
     if json.len() > bundle::MAX_BACKUP_ENVELOPE_BYTES {
