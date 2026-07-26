@@ -251,8 +251,30 @@ awkward: Cold Vault promises that only a fresh approved offline signature can mo
 funds, and that promise is false when anyone who guesses the phrase can sign
 without the app. Offering it would be a lie.
 
-If you recover one, move the funds to a newly generated wallet. Nothing else
-fixes it.
+### If you have funds in a legacy brainwallet
+
+This wallet cannot recover them for you, and there is one specific mistake to
+avoid while you work out how.
+
+**Do not type or paste your phrase into a website.** Not a SHA-256 calculator,
+not a key converter, not a recovery helper. A page that computes your key can
+also keep it, and you have no way to tell which pages do. Sites exist for no
+purpose other than collecting exactly that input. Treating your phrase as
+something you can paste into a search box is how these balances usually
+disappear, not the weak hashing itself.
+
+What to do instead:
+
+1. Derive the key on a machine with no network connection, using a tool you can
+   inspect or already trust. The derivation is a single SHA-256 of the exact
+   phrase text, byte for byte, which is what the upstream Hacash tooling does.
+2. Import the resulting 64-character key here, together with the address, as any
+   other key.
+3. Send the entire balance to a newly created wallet, straight away.
+4. Never reuse the phrase or the address for anything.
+
+Step 3 is not optional housekeeping. Until it is done, the funds are protected
+only by the secrecy of a phrase that is, by construction, guessable.
 
 ## 12. Air-gapped signing
 
