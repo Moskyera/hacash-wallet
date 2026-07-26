@@ -102,6 +102,8 @@ commands.allow = [
   "wallet_execute_prepared_channel_close",
   "wallet_prepare_airgap_sign",
   "wallet_execute_prepared_airgap_sign",
+  "wallet_prepare_cold_vault_activation",
+  "wallet_execute_prepared_cold_vault_activation",
   "wallet_send_hacd",
   "wallet_set_hardware_mode",
   "wallet_set_security_profile",

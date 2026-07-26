@@ -60,9 +60,23 @@ export function formatCountdown(secs: number | null | undefined): string {
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
-export function isValidImportSeed(seed: string): boolean {
-  const trimmed = seed.trim();
-  if (!trimmed) return false;
-  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return true;
-  return trimmed.length >= 8;
+/// A real Hacash secret key. It is the only thing importable: this wallet has no
+/// path that derives a key from text.
+export function isSecretHexSeed(seed: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(compactSeed(seed));
+}
+
+/** Hex digit count with all whitespace ignored, so a key pasted across lines counts. */
+export function compactSeed(seed: string): string {
+  return seed.replace(/\s+/g, "");
+}
+
+/**
+ * An all-hex input that is not exactly 64 characters is a mistyped or truncated
+ * private key. Reporting the character count tells the user what to fix, which a
+ * generic "invalid key" message does not.
+ */
+export function looksLikeMistypedKey(seed: string): boolean {
+  const compact = compactSeed(seed);
+  return compact.length >= 32 && /^[0-9a-fA-F]+$/.test(compact) && compact.length !== 64;
 }

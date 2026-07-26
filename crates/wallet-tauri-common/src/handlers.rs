@@ -54,6 +54,8 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::prepared_commands::wallet_execute_prepared_channel_close,
             wallet_tauri_common::prepared_commands::wallet_prepare_airgap_sign,
             wallet_tauri_common::prepared_commands::wallet_execute_prepared_airgap_sign,
+            wallet_tauri_common::prepared_commands::wallet_prepare_cold_vault_activation,
+            wallet_tauri_common::prepared_commands::wallet_execute_prepared_cold_vault_activation,
             wallet_tauri_common::commands::wallet_query_diamond,
             wallet_tauri_common::commands::wallet_list_owned_diamonds,
             wallet_tauri_common::commands::wallet_preview_send_hacd,

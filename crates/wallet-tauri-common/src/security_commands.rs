@@ -28,6 +28,27 @@ pub fn wallet_webauthn_register_finish(
         .map_err(|e| e.to_string())
 }
 
+/// Let the currently registered authenticator approve its own replacement.
+#[tauri::command]
+pub fn wallet_webauthn_replacement_begin(
+    client_origin: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.webauthn_replacement_auth_begin(client_origin.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn wallet_webauthn_replacement_finish(
+    assertion_json: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.webauthn_replacement_auth_finish(&assertion_json)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn wallet_webauthn_auth_begin(
     operation_id: String,

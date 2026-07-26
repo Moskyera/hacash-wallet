@@ -1,8 +1,10 @@
 import {
+  HOW_IT_WORKS_URL,
   IstanbulSafetyPanel,
   OFFICIAL_NODE_URL,
   isOfficialNodeUrl,
 } from "@hacash/wallet-ui";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
@@ -111,6 +113,20 @@ export default function SettingsScreen({
         containerClassName="card"
         formatError={formatInvokeError}
       />
+      <div className="card">
+        <h2>{t("docs.howItWorks")}</h2>
+        <p className="muted small">{t("docs.howItWorksHint")}</p>
+        <button
+          type="button"
+          onClick={() => {
+            void openUrl(HOW_IT_WORKS_URL).catch((error) =>
+              onToast(formatInvokeError(error), "error"),
+            );
+          }}
+        >
+          {t("docs.howItWorks")}
+        </button>
+      </div>
       <div className="card">
         <h2>{t("settings.network")}</h2>
         <p className="muted small">

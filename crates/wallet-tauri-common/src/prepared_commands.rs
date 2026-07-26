@@ -1,7 +1,10 @@
 //! Exact prepared-operation commands. Execution accepts only an opaque id;
 //! transaction bytes and economic fields remain in wallet-core memory.
 
-use tauri::State;
+use std::sync::Arc;
+
+use tauri::{AppHandle, State};
+use zeroize::Zeroizing;
 
 use crate::state::AppState;
 
@@ -162,4 +165,54 @@ pub fn wallet_execute_prepared_airgap_sign(
         .execute_prepared_airgap_sign(&operation_id)
         .map_err(|error| error.to_string())?;
     serde_json::to_value(result).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn wallet_prepare_cold_vault_activation(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut service = state.inner.lock().await;
+    let prepared = service
+        .prepare_cold_vault_activation()
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(prepared).map_err(|error| error.to_string())
+}
+
+/// Irreversible. Runs only after the platform ceremony has approved this exact
+/// activation ticket.
+#[tauri::command]
+pub async fn wallet_execute_prepared_cold_vault_activation(
+    operation_id: String,
+    current_passphrase: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let current_passphrase = Zeroizing::new(current_passphrase);
+    // Gate the shell-side pre-step on the ceremony having really happened, so a
+    // hostile renderer cannot delete the OS unlock secret on its own.
+    {
+        let service = state.inner.lock().await;
+        if !service.cold_vault_activation_is_authorized(&operation_id) {
+            return Err(
+                "no freshly authorized cold vault activation is pending for this operation".into(),
+            );
+        }
+    }
+    // Remove the OS-keystore passphrase before committing Cold Vault. A failed
+    // migration may require biometric setup again, but must never leave a local
+    // unlock shortcut behind an air-gap-only policy.
+    crate::commands::clear_native_biometric_secret(&app).await?;
+    // Activation re-encrypts the vault, which means three Argon2id derivations,
+    // one of them at the paranoid cost. That is seconds of pure CPU, so it must
+    // not run on an async runtime thread: doing so blocks every other command,
+    // including the status poll, and the window looks frozen.
+    let inner = Arc::clone(&state.inner);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut service = inner.blocking_lock();
+        service
+            .execute_prepared_cold_vault_activation(&operation_id, &current_passphrase)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("cold vault activation task failed: {error}"))?
 }

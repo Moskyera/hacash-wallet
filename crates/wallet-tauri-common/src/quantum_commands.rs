@@ -137,19 +137,22 @@ pub async fn quantum_export_keystore_v3(
     .await
 }
 
+/// Keystore preview is password verification against caller-supplied ciphertext.
+/// It must never be an anonymous oracle: the core requires a live signing
+/// session, refuses once the vault is cold, and rate-limits every attempt.
 #[tauri::command]
 pub async fn quantum_preview_keystore(
     json: String,
     keystore_password: String,
+    state: State<'_, AppState>,
 ) -> Result<QuantumAccountInfo, String> {
     let json = Zeroizing::new(json);
     let keystore_password = Zeroizing::new(keystore_password);
-    tokio::task::spawn_blocking(move || {
-        hacash_wallet_core::quantum::preview_keystore(&json, &keystore_password)
+    run_wallet_task(Arc::clone(&state.inner), move |svc| {
+        svc.quantum_preview_keystore(&json, &keystore_password)
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("preview task failed: {e}"))?
 }
 
 #[tauri::command]

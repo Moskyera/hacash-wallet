@@ -6,6 +6,7 @@ import { useLocale } from "./locale";
 import { useDesktopWallet } from "./hooks/useDesktopWallet";
 import { useHacSend } from "./hooks/useHacSend";
 import DappApprovalPanel from "./components/DappApprovalPanel";
+import PreparedOperationConfirm from "./components/PreparedOperationConfirm";
 import DesktopRouter from "./screens/DesktopRouter";
 import { NAV_GROUPS, formatCountdown, type Screen } from "./screens/types";
 import {
@@ -161,7 +162,8 @@ export default function App() {
         else wallet.onInfo(msg);
       },
       onCreate: (p: string) => void wallet.handleCreate(p),
-      onImport: (s: string, p: string) => void wallet.handleImport(s, p),
+      onImport: (s: string, p: string, expected: string) =>
+        void wallet.handleImport(s, p, expected),
       onImportBackup: (j: string, p: string, d?: string | null, allowLegacy = false) =>
         void wallet.handleImportBackup(j, p, d, allowLegacy),
       onWatchOnly: (a: string) => void wallet.handleWatchOnlyImport(a),
@@ -307,6 +309,14 @@ export default function App() {
               {wallet.status.hardware_signing_mode === "airgap_only" && (
                 <span className="chip chip-accent">Cold Vault</span>
               )}
+              {wallet.status.legacy_key_derivation != null && (
+                <span
+                  className="chip chip-warn"
+                  title="This key was derived from a recovery phrase with one unsalted SHA-256. Anyone who guesses the phrase can spend from it without this device. Move the funds to a newly generated wallet."
+                >
+                  Guessable key
+                </span>
+              )}
               {wallet.status.seconds_until_lock != null && (
                 <span className="chip">
                   Lock {formatCountdown(wallet.status.seconds_until_lock)}
@@ -341,6 +351,8 @@ export default function App() {
           else wallet.onInfo(msg);
         }}
       />
+
+      <PreparedOperationConfirm />
     </div>
   );
 }

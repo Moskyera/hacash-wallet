@@ -423,3 +423,27 @@
   border: 1px dashed var(--border);
   border-radius: var(--radius);
 }
+/* Authoritative view of a prepared operation, shown before the platform
+   ceremony. The WebAuthn prompt cannot display operation detail, so this is the
+   only place the user ever sees what they are approving. */
+.prepared-confirm {
+  z-index: 400;
+}
+.prepared-confirm-fields {
+  margin: 16px 0;
+  display: grid;
+  gap: 8px;
+}
+.prepared-confirm-fields > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 40%) 1fr;
+  gap: 12px;
+  align-items: baseline;
+}
+.prepared-confirm-fields dt {
+  font-size: 12px;
+}
+.prepared-confirm-fields dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}

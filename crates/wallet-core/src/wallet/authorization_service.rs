@@ -52,6 +52,21 @@ pub(super) enum PreparedExecution {
     AirgapClassic {
         unsigned: crate::airgap::AirgapUnsigned,
     },
+    ColdVaultActivation {
+        current_hardware_mode: String,
+    },
+}
+
+/// Domain separator for the irreversible cold vault transition. The renderer
+/// never supplies these bytes: they are rebuilt from authenticated vault state.
+const COLD_VAULT_ACTIVATION_DOMAIN: &[u8] = b"hacash-cold-vault-activation-v1\0";
+
+fn cold_vault_activation_canonical(current_hardware_mode: &str) -> Vec<u8> {
+    let mut canonical = COLD_VAULT_ACTIVATION_DOMAIN.to_vec();
+    canonical.extend_from_slice(current_hardware_mode.as_bytes());
+    canonical.push(0);
+    canonical.extend_from_slice(HardwareSigningMode::AirgapOnly.as_str().as_bytes());
+    canonical
 }
 
 pub(super) type SessionAuthorization = PreparedOperationState<PreparedExecution>;
@@ -73,6 +88,26 @@ impl PreparedAirgapSigningPermit {
         {
             return Err(WalletError::Policy(
                 "cold vault requires a fresh platform factor for this exact air-gap operation"
+                    .into(),
+            ));
+        }
+        Ok(Self(()))
+    }
+}
+
+/// Unforgeable outside this child module. Activating the cold vault is
+/// irreversible, so it may only proceed once the exact activation ticket has
+/// been consumed together with a fresh platform-authenticator ceremony.
+pub(super) struct ColdVaultActivationPermit(());
+
+impl ColdVaultActivationPermit {
+    fn after_consumed_ticket(assurance: Option<AssuranceMethod>) -> WalletResult<Self> {
+        if !matches!(
+            assurance,
+            Some(AssuranceMethod::NativeBiometric | AssuranceMethod::WebAuthn)
+        ) {
+            return Err(WalletError::Policy(
+                "cold vault activation is irreversible and requires a fresh platform factor for this exact activation"
                     .into(),
             ));
         }
@@ -723,6 +758,130 @@ impl WalletService {
         }
         result
     }
+    /// Stage the irreversible cold vault transition for review. No key material
+    /// and no passphrase is touched here: the ticket only commits to the exact
+    /// policy change, so the platform ceremony that follows signs over *this*
+    /// activation and nothing else.
+    pub fn prepare_cold_vault_activation(&mut self) -> WalletResult<PreparedOperationView> {
+        self.touch_auto_lock();
+        self.clear_prepared_operation();
+        let address = self.require_address()?;
+        let current_mode = self.authenticated_signing_mode()?;
+        match current_mode {
+            HardwareSigningMode::AirgapOnly => {
+                return Err(WalletError::Policy(
+                    "cold vault is already active for this vault".into(),
+                ));
+            }
+            HardwareSigningMode::WatchOnly => {
+                return Err(WalletError::Policy(
+                    "a watch-only wallet holds no key to move into a cold vault".into(),
+                ));
+            }
+            HardwareSigningMode::Software | HardwareSigningMode::WebAuthnGate => {}
+        }
+        // Cold Vault's whole promise is that only a freshly authorized offline
+        // signature can move funds. That promise is false for a key derived from
+        // a guessable phrase: whoever guesses it signs without this app at all.
+        // Offering Cold Vault here would be a lie, so refuse and say why.
+        if self.legacy_key_derivation().is_some() {
+            return Err(WalletError::Policy(
+                "this key was derived from a recovery phrase, so Cold Vault cannot protect it; sweep the funds to a newly generated wallet instead"
+                    .into(),
+            ));
+        }
+        // Amount-based policy is irrelevant here: the transition itself is the
+        // irreversible act, so it always demands the strongest factor on record.
+        let requirement = if self.load_webauthn_credential()?.is_some() {
+            AuthorizationRequirement::WebAuthn
+        } else {
+            AuthorizationRequirement::AnyPlatformFactor
+        };
+        let display = TrustedOperationDisplay {
+            title: "Activate Cold Vault".into(),
+            summary:
+                "Permanent: this vault will afterwards sign only exact, freshly authorized offline Type 2 transactions."
+                    .into(),
+            fields: vec![
+                field("Wallet", &address),
+                field("Network", &self.network_mode),
+                field("Current signing policy", current_mode.as_str()),
+                field("New signing policy", HardwareSigningMode::AirgapOnly.as_str()),
+                field("Reversible", "No"),
+                field("Biometric unlock", "Deleted"),
+                field("Online signing", "Blocked forever"),
+                // Stated in the ceremony itself: the policy is bound to this vault
+                // file, not to the key. Any backup taken before now still restores
+                // an online wallet for the same address on any device.
+                field("Older backups", "Still sign online for this address"),
+            ],
+        };
+        let canonical = cold_vault_activation_canonical(current_mode.as_str());
+        self.store_prepared_canonical(
+            OperationKind::ColdVaultActivation,
+            &address,
+            &canonical,
+            display,
+            requirement,
+            PreparedExecution::ColdVaultActivation {
+                current_hardware_mode: current_mode.as_str().into(),
+            },
+        )
+    }
+
+    /// Consume the exact activation ticket and perform the irreversible
+    /// migration. Every exit path erases session grants.
+    pub fn execute_prepared_cold_vault_activation(
+        &mut self,
+        operation_id: &str,
+        current_passphrase: &str,
+    ) -> WalletResult<()> {
+        let result = (|| {
+            let (payload, assurance) =
+                self.take_prepared(operation_id, OperationKind::ColdVaultActivation)?;
+            let PreparedExecution::ColdVaultActivation {
+                current_hardware_mode,
+            } = payload
+            else {
+                return Err(WalletError::Policy(
+                    "prepared cold vault payload mismatch".into(),
+                ));
+            };
+            let permit = ColdVaultActivationPermit::after_consumed_ticket(assurance)?;
+            if self.authenticated_signing_mode()?.as_str() != current_hardware_mode {
+                return Err(WalletError::Policy(
+                    "signing policy changed after cold vault activation was prepared".into(),
+                ));
+            }
+            self.verify_wallet_passphrase(current_passphrase)?;
+            let current_vault = self.vault_snapshot()?;
+            let (_, credential) = current_vault.policy_for_migration()?;
+            let _ = permit;
+            self.migrate_vault_encryption(
+                current_passphrase,
+                current_passphrase,
+                crate::security::SecurityProfile::paranoid(),
+                HardwareSigningMode::AirgapOnly,
+                credential.as_deref(),
+                true,
+            )
+        })();
+        self.clear_session_authorizations();
+        result
+    }
+
+    /// Non-consuming: does a freshly authorized activation ticket for exactly
+    /// `operation_id` exist right now? The shell uses this to gate the one
+    /// irreversible pre-step it must perform itself — deleting the OS unlock
+    /// secret — so that step can never run on an unapproved request.
+    pub fn cold_vault_activation_is_authorized(&self, operation_id: &str) -> bool {
+        self.unlocked.as_ref().is_some_and(|session| {
+            session
+                .authorization
+                .is_authorized_for(operation_id, OperationKind::ColdVaultActivation)
+        })
+    }
+
     fn authorization_requirement(
         &self,
         policy_amount_mei: u64,
@@ -754,9 +913,28 @@ impl WalletService {
         requirement: AuthorizationRequirement,
         payload: PreparedExecution,
     ) -> WalletResult<PreparedOperationView> {
+        let bytes = match hex::decode(body_hex) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = self.webauthn.clear_pending();
+                return Err(WalletError::Transaction(error.to_string()));
+            }
+        };
+        self.store_prepared_canonical(kind, wallet_address, &bytes, display, requirement, payload)
+    }
+
+    /// Bind a ticket to canonical bytes that are not a transaction body (policy
+    /// transitions). Callers must build those bytes from authenticated state.
+    fn store_prepared_canonical(
+        &mut self,
+        kind: OperationKind,
+        wallet_address: &str,
+        canonical: &[u8],
+        display: TrustedOperationDisplay,
+        requirement: AuthorizationRequirement,
+        payload: PreparedExecution,
+    ) -> WalletResult<PreparedOperationView> {
         self.webauthn.clear_pending()?;
-        let bytes =
-            hex::decode(body_hex).map_err(|error| WalletError::Transaction(error.to_string()))?;
         let chain_id = match self.network_mode.as_str() {
             "mainnet" => Some(0),
             "testnet" => Some(1),
@@ -772,7 +950,7 @@ impl WalletService {
                 wallet_address,
                 &network_mode,
                 chain_id,
-                &bytes,
+                canonical,
                 display,
                 requirement,
                 payload,

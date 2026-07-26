@@ -1627,3 +1627,18 @@ button:disabled {
 .language-card {
   margin-bottom: 0.75rem;
 }
+
+/* Authoritative view of a prepared operation, shown before the biometric
+   prompt. Without it the trusted display never reaches the screen. */
+.prepared-confirm-fields {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0;
+}
+.prepared-confirm-fields > div {
+  display: grid;
+  gap: 2px;
+}
+.prepared-confirm-fields .mono {
+  overflow-wrap: anywhere;
+}

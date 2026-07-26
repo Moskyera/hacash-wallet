@@ -5,6 +5,7 @@ import BillDetailModal from "./components/BillDetailModal";
 import DappApprovalPanel from "./components/DappApprovalPanel";
 import PrivacyShield from "./components/PrivacyShield";
 import Toast from "./components/Toast";
+import PreparedOperationConfirm from "./components/PreparedOperationConfirm";
 import SplashScreen from "./components/SplashScreen";
 import WalletLogo from "./components/WalletLogo";
 import { usePaymentFlow } from "./hooks/usePaymentFlow";
@@ -254,10 +255,10 @@ export default function MobileApp() {
     }
   };
 
-  const handleImport = async () => {
+  const handleImport = async (expectedAddress: string) => {
     session.setBusy(true);
     try {
-      const address = await api.import(seed, passphrase);
+      const address = await api.import(seed, passphrase, expectedAddress);
       if (session.walletNameDraft.trim()) {
         saveWalletName(address, session.walletNameDraft);
       }
@@ -531,7 +532,7 @@ export default function MobileApp() {
           setWatchAddress={setWatchAddress}
           busy={session.busy}
           onCreate={() => void handleCreate()}
-          onImport={() => void handleImport()}
+          onImport={(expected) => void handleImport(expected)}
           onRestoreBackup={(json, value, allowLegacy) => void handleRestoreBackup(json, value, allowLegacy)}
           onWatchOnly={() => void handleWatchOnly()}
           toast={toast}
@@ -740,6 +741,8 @@ export default function MobileApp() {
         onExportJson={(id) => api.exportBillJson(id)}
         onGetHex={(id) => api.getBillHex(id)}
       />
+
+      <PreparedOperationConfirm />
     </div>
   );
 }

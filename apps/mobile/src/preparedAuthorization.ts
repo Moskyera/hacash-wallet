@@ -1,4 +1,5 @@
 import { api, type PreparedOperationView } from "./api";
+import { requestPreparedConfirmation } from "./preparedConfirm";
 
 export async function authorizePreparedOperation(
   prepared: PreparedOperationView,
@@ -6,6 +7,11 @@ export async function authorizePreparedOperation(
   biometricSendEnabled: boolean,
 ): Promise<void> {
   if (!prepared.authorization_required) return;
+  // Show the core's description before the biometric prompt, so approval is
+  // never given to a bare fingerprint request with no stated purpose.
+  if (!(await requestPreparedConfirmation(prepared))) {
+    throw new Error("Operation cancelled. Nothing was signed.");
+  }
   if (prepared.webauthn_required) {
     throw new Error(
       "This exact operation requires WebAuthn. Use the desktop wallet or change the authenticated security policy.",

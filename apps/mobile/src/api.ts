@@ -115,6 +115,8 @@ export type WalletStatus = {
   l2_enabled: boolean;
   fast_pay_state: string;
   fast_pay_message: string;
+  /** Non-null when the key was derived from a guessable phrase. */
+  legacy_key_derivation: string | null;
   watch_only: boolean;
   privacy: PrivacySettings;
   dust_whisper?: DustWhisperSettings;
@@ -491,8 +493,8 @@ export type DappApprovalView = {
 export const api = {
   status: () => invoke<WalletStatus>("wallet_status"),
   create: (passphrase: string) => invoke<string>("wallet_create", { passphrase }),
-  import: (seed: string, passphrase: string) =>
-    invoke<string>("wallet_import", { seed, passphrase }),
+  import: (seed: string, passphrase: string, expectedAddress: string) =>
+    invoke<string>("wallet_import", { seed, passphrase, expectedAddress }),
   unlock: (passphrase: string) => invoke<string>("wallet_unlock", { passphrase }),
   lock: () => invoke<void>("wallet_lock"),
   balance: () => invoke<number>("wallet_balance"),
@@ -620,6 +622,15 @@ export const api = {
     invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
   setHardwareMode: (mode: SigningPolicy, currentPassphrase: string) =>
     invoke<void>("wallet_set_hardware_mode", { mode, currentPassphrase }),
+  // Cold Vault is irreversible, so it has its own prepared ceremony instead of
+  // being reachable through setHardwareMode.
+  prepareColdVaultActivation: () =>
+    invoke<PreparedOperationView>("wallet_prepare_cold_vault_activation"),
+  executePreparedColdVaultActivation: (operationId: string, currentPassphrase: string) =>
+    invoke<void>("wallet_execute_prepared_cold_vault_activation", {
+      operationId,
+      currentPassphrase,
+    }),
   previewSendBtc: (to: string, satoshi: number) =>
     invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
   prepareSendBtc: (to: string, satoshi: number) =>

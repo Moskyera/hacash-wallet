@@ -102,6 +102,8 @@ export type WalletStatus = {
   dust_whisper: DustWhisperSettings;
   fast_pay_state: FastPayStatus["state"];
   fast_pay_message: string;
+  /** Non-null when the key was derived from a guessable phrase. */
+  legacy_key_derivation: string | null;
 }
 
 export type PlatformSecurityStatus = {
@@ -518,8 +520,8 @@ export const quantumApi = {
 export const api = {
   status: () => invoke<WalletStatus>("wallet_status"),
   create: (passphrase: string) => invoke<string>("wallet_create", { passphrase }),
-  import: (seed: string, passphrase: string) =>
-    invoke<string>("wallet_import", { seed, passphrase }),
+  import: (seed: string, passphrase: string, expectedAddress: string) =>
+    invoke<string>("wallet_import", { seed, passphrase, expectedAddress }),
   exportBackup: (passphrase: string) =>
     invoke<string>("wallet_export_backup", { passphrase }),
   previewBackup: (json: string) => invoke<BackupPreview>("wallet_preview_backup", { json }),
@@ -560,6 +562,11 @@ export const api = {
       credentialJson,
       currentPassphrase,
     }),
+  // Replacing a registered authenticator needs the outgoing one to approve.
+  webauthnReplacementBegin: (clientOrigin?: string) =>
+    invoke<string>("wallet_webauthn_replacement_begin", { clientOrigin: clientOrigin ?? null }),
+  webauthnReplacementFinish: (assertionJson: string) =>
+    invoke<void>("wallet_webauthn_replacement_finish", { assertionJson }),
   webauthnAuthBegin: (operationId: string, clientOrigin?: string) =>
     invoke<string>("wallet_webauthn_auth_begin", { operationId, clientOrigin: clientOrigin ?? null }),
   webauthnAuthFinish: (operationId: string, assertionJson: string) =>
@@ -614,6 +621,15 @@ export const api = {
   openWatchOnly: () => invoke<string>("wallet_open_watch_only"),
   setHardwareMode: (mode: SigningPolicy, currentPassphrase: string) =>
     invoke<void>("wallet_set_hardware_mode", { mode, currentPassphrase }),
+  // Cold Vault is irreversible, so it has its own prepared ceremony instead of
+  // being reachable through setHardwareMode.
+  prepareColdVaultActivation: () =>
+    invoke<PreparedOperationView>("wallet_prepare_cold_vault_activation"),
+  executePreparedColdVaultActivation: (operationId: string, currentPassphrase: string) =>
+    invoke<void>("wallet_execute_prepared_cold_vault_activation", {
+      operationId,
+      currentPassphrase,
+    }),
   prepareSendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<PreparedOperationView>("wallet_prepare_send_hac", { to, amountMei, sendOptions }),
   executePreparedHac: (operationId: string) =>

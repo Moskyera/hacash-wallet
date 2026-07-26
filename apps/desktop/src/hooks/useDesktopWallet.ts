@@ -18,6 +18,7 @@ import { formatInvokeError } from "../formatInvokeError";
 import { authorizePreparedOperation } from "../preparedAuthorization";
 import { DEFAULT_DUST_WHISPER, DEFAULT_PRIVACY, copyWithPrivacyClear } from "../privacy";
 import {
+  runWebAuthnAuth,
   runWebAuthnRegister,
   webAuthnAvailable,
   webAuthnClientOrigin,
@@ -311,32 +312,40 @@ export function useDesktopWallet(
       setBusy(true);
       clearMessages();
       try {
+        if (mode === "airgap_only") {
+          // Irreversible, so it needs a platform ceremony bound to this exact
+          // activation, not just the passphrase.
+          const prepared = await api.prepareColdVaultActivation();
+          await authorizePreparedOperation(prepared, nativeBioAvailable);
+          await api.executePreparedColdVaultActivation(prepared.id, currentPassphrase);
+          await refreshStatus();
+          onInfo(
+            "Cold Vault activated. Only exact, freshly authorized Type 2 air-gap signing is allowed.",
+          );
+          return;
+        }
         await api.setHardwareMode(mode, currentPassphrase);
         await refreshStatus();
-        onInfo(
-          mode === "airgap_only"
-            ? "Cold Vault activated. Only exact, freshly authorized Type 2 air-gap signing is allowed."
-            : `Signing policy: ${mode}`,
-        );
+        onInfo(`Signing policy: ${mode}`);
       } catch (e) {
-        onError(String(e));
+        onError(formatInvokeError(e));
       } finally {
         setBusy(false);
       }
     },
-    [clearMessages, refreshStatus, onInfo, onError],
+    [clearMessages, nativeBioAvailable, refreshStatus, onInfo, onError],
   );
 
   const handleImport = useCallback(
-    async (importSeed: string, importPassphrase: string) => {
+    async (importSeed: string, importPassphrase: string, expectedAddress: string) => {
       setBusy(true);
       clearMessages();
       try {
-        await api.import(importSeed.trim(), importPassphrase);
+        await api.import(importSeed.trim(), importPassphrase, expectedAddress);
         await refreshStatus();
         onInfo("Wallet imported. Unlock with your new passphrase.");
       } catch (e) {
-        onError(String(e));
+        onError(formatInvokeError(e));
       } finally {
         setBusy(false);
       }
@@ -572,13 +581,25 @@ export function useDesktopWallet(
     clearMessages();
     try {
       const origin = webAuthnClientOrigin();
+      // Swapping an existing authenticator must be approved by that authenticator,
+      // so a stolen passphrase cannot hand the second factor to someone else.
+      const replacing = (await api.status()).webauthn_enabled;
+      if (replacing) {
+        const approval = await api.webauthnReplacementBegin(origin);
+        const assertion = await runWebAuthnAuth(approval);
+        await api.webauthnReplacementFinish(assertion);
+      }
       const options = await api.webauthnRegisterBegin(origin);
       const cred = await runWebAuthnRegister(options);
       await api.webauthnRegisterFinish(cred, currentPassphrase);
       await refreshStatus();
-      onInfo("YubiKey / Windows Hello registered.");
+      onInfo(
+        replacing
+          ? "Authenticator replaced. The previous key approved the change and no longer works."
+          : "YubiKey / Windows Hello registered.",
+      );
     } catch (e) {
-      onError(String(e));
+      onError(formatInvokeError(e));
     } finally {
       setBusy(false);
     }

@@ -12,6 +12,26 @@ import { useLocale } from "../locale";
 
 const MAX_BACKUP_FILE_BYTES = 64 * 1024 * 1024;
 
+/** Hex digit count with whitespace ignored, so a key pasted across lines counts. */
+function compactSeed(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+/** A real Hacash secret key. It is the only thing this wallet can import. */
+function isSecretHexSeed(value: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(compactSeed(value));
+}
+
+/**
+ * An all-hex input that is not exactly 64 characters is a mistyped or truncated
+ * private key. Hashing it would silently create a valid-looking wallet at a
+ * different address, so it must be reported, never offered as a recovery.
+ */
+function looksLikeMistypedKey(value: string): boolean {
+  const compact = compactSeed(value);
+  return compact.length >= 32 && /^[0-9a-fA-F]+$/.test(compact) && compact.length !== 64;
+}
+
 type WelcomeTab = "create" | "import" | "backup" | "watch";
 
 type Props = {
@@ -25,7 +45,7 @@ type Props = {
   setWatchAddress: (v: string) => void;
   busy: boolean;
   onCreate: () => void;
-  onImport: () => void;
+  onImport: (expectedAddress: string) => void;
   onRestoreBackup: (json: string, passphrase: string, allowLegacy: boolean) => void;
   onWatchOnly: () => void;
   toast: { msg: string; kind: ToastKind } | null;
@@ -55,6 +75,7 @@ export default function WelcomeScreen({
   const [backupPreview, setBackupPreview] = useState<BackupPreview | null>(null);
   const [backupError, setBackupError] = useState<string | null>(null);
   const [legacyLossAccepted, setLegacyLossAccepted] = useState(false);
+  const [importExpectedAddress, setImportExpectedAddress] = useState("");
   const backupInputRef = useRef<HTMLInputElement>(null);
 
   const loadBackupFile = async (file: File) => {
@@ -176,12 +197,26 @@ export default function WelcomeScreen({
             </>
           )}
           {scanError ? <p className="warn-text">{scanError}</p> : null}
-          <label className="label">Secret hex or legacy passphrase</label>
+          <label className="label">Private key (64-char hex)</label>
           <textarea
-            placeholder="64 character hex or old passphrase"
+            placeholder="64 character hex secret"
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
           />
+          <label className="label">Address of the wallet you are importing</label>
+          <input
+            placeholder="Hacash address this key belongs to"
+            value={importExpectedAddress}
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            onChange={(e) => setImportExpectedAddress(e.target.value)}
+          />
+          <p className="muted small">
+            A mistyped key is usually still a valid key, just a different wallet.
+            Checking it against your address turns a silent wrong wallet into a
+            clear error.
+          </p>
           <label className="label">Passphrase</label>
           <input
             type="password"
@@ -189,10 +224,22 @@ export default function WelcomeScreen({
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
+          {seed.trim() && !isSecretHexSeed(seed) ? (
+            <p className="warn-text">
+              {looksLikeMistypedKey(seed)
+                ? `A private key is exactly 64 hex characters and you entered ${compactSeed(seed).length}. Check for missing or extra characters.`
+                : "A private key is exactly 64 hex characters (0-9, a-f). This wallet cannot turn a phrase or passphrase into a key."}
+            </p>
+          ) : null}
           <button
             className="primary"
-            disabled={busy || !seed.trim() || passphrase.length < MIN_NEW_WALLET_PASSPHRASE_LENGTH}
-            onClick={() => void onImport()}
+            disabled={
+              busy ||
+              !isSecretHexSeed(seed) ||
+              !isValidHacashAddress(importExpectedAddress.trim()) ||
+              passphrase.length < MIN_NEW_WALLET_PASSPHRASE_LENGTH
+            }
+            onClick={() => void onImport(importExpectedAddress.trim())}
           >
             Import
           </button>

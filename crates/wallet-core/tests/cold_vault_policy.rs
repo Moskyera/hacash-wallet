@@ -72,17 +72,43 @@ fn activate_cold_vault() -> (WalletService, String, AirgapUnsigned) {
     let signing_account = WalletAccount::create_random().unwrap();
     let secret = signing_account.secret_hex();
     let mut wallet = WalletService::new(None, None).unwrap();
-    let address = wallet.import_wallet(&secret, PASSPHRASE).unwrap();
+    let address = wallet
+        .import_wallet(&secret, PASSPHRASE, &signing_account.address())
+        .unwrap();
     let unsigned = unsigned_type2(&address);
 
     wallet.set_biometric_unlock_enabled(true).unwrap();
     wallet.confirm_biometric_for_send().unwrap();
     wallet.dapp_connect(DAPP_ORIGIN).unwrap();
     assert!(wallet.dapp_session_active());
-    wallet
-        .change_hardware_signing_mode(PASSPHRASE, HardwareSigningMode::AirgapOnly)
-        .unwrap();
+    approve_and_activate_cold_vault(&mut wallet, PASSPHRASE);
     (wallet, address, unsigned)
+}
+
+/// The production activation path: stage the exact ticket, run the platform
+/// ceremony bound to it, then consume it.
+fn approve_and_activate_cold_vault(wallet: &mut WalletService, passphrase: &str) {
+    let prepared = wallet.prepare_cold_vault_activation().unwrap();
+    assert!(prepared.authorization_required);
+    let challenge = wallet
+        .begin_prepared_native_authorization(&prepared.id)
+        .unwrap();
+    wallet
+        .finish_prepared_native_authorization(&prepared.id, &challenge.nonce)
+        .unwrap();
+    wallet
+        .execute_prepared_cold_vault_activation(&prepared.id, passphrase)
+        .unwrap();
+}
+
+fn signing_wallet() -> (WalletService, String) {
+    let signing_account = WalletAccount::create_random().unwrap();
+    let secret = signing_account.secret_hex();
+    let mut wallet = WalletService::new(None, None).unwrap();
+    let address = wallet
+        .import_wallet(&secret, PASSPHRASE, &signing_account.address())
+        .unwrap();
+    (wallet, address)
 }
 
 #[test]
@@ -107,6 +133,217 @@ fn activation_is_authenticated_paranoid_and_clears_all_grants() {
                 assert!(!factors.biometric_ok);
                 assert!(!factors.yubikey_ok);
                 assert!(wallet.set_biometric_unlock_enabled(true).is_err());
+            });
+        });
+    });
+}
+
+#[test]
+fn the_correct_passphrase_alone_can_never_activate_the_cold_vault() {
+    tier0_gate("cold_vault_activation_needs_fresh_ceremony", || {
+        with_isolated_wallet_dir(|| {
+            with_protocol_setup(|| {
+                let (mut wallet, _) = signing_wallet();
+
+                // The legacy passphrase-only entrypoint is closed for good.
+                assert!(
+                    wallet
+                        .change_hardware_signing_mode(
+                            PASSPHRASE,
+                            HardwareSigningMode::AirgapOnly
+                        )
+                        .is_err()
+                );
+                assert!(
+                    wallet
+                        .set_hardware_signing_mode(HardwareSigningMode::AirgapOnly)
+                        .is_err()
+                );
+                assert_eq!(wallet.status().hardware_signing_mode, "software");
+
+                // A staged ticket without a ceremony is worthless, even with the
+                // right passphrase, and consuming it does not leave it replayable.
+                let prepared = wallet.prepare_cold_vault_activation().unwrap();
+                assert!(prepared.authorization_required);
+                assert!(!wallet.cold_vault_activation_is_authorized(&prepared.id));
+                assert!(
+                    wallet
+                        .execute_prepared_cold_vault_activation(&prepared.id, PASSPHRASE)
+                        .is_err()
+                );
+                assert!(
+                    wallet
+                        .execute_prepared_cold_vault_activation(&prepared.id, PASSPHRASE)
+                        .is_err()
+                );
+                assert_eq!(wallet.status().hardware_signing_mode, "software");
+
+                // An approved ticket authorizes only its own id.
+                let prepared = wallet.prepare_cold_vault_activation().unwrap();
+                let challenge = wallet
+                    .begin_prepared_native_authorization(&prepared.id)
+                    .unwrap();
+                wallet
+                    .finish_prepared_native_authorization(&prepared.id, &challenge.nonce)
+                    .unwrap();
+                assert!(wallet.cold_vault_activation_is_authorized(&prepared.id));
+                assert!(!wallet.cold_vault_activation_is_authorized("attacker-operation"));
+                assert!(
+                    wallet
+                        .execute_prepared_cold_vault_activation("attacker-operation", PASSPHRASE)
+                        .is_err()
+                );
+                assert_eq!(wallet.status().hardware_signing_mode, "software");
+                assert!(!wallet.cold_vault_activation_is_authorized(&prepared.id));
+
+                // Staging any other operation invalidates an approved activation.
+                let prepared = wallet.prepare_cold_vault_activation().unwrap();
+                let challenge = wallet
+                    .begin_prepared_native_authorization(&prepared.id)
+                    .unwrap();
+                wallet
+                    .finish_prepared_native_authorization(&prepared.id, &challenge.nonce)
+                    .unwrap();
+                let unsigned = unsigned_type2(wallet.status().address.as_deref().unwrap());
+                wallet.prepare_airgap_sign(&unsigned).unwrap();
+                assert!(!wallet.cold_vault_activation_is_authorized(&prepared.id));
+                assert!(
+                    wallet
+                        .execute_prepared_cold_vault_activation(&prepared.id, PASSPHRASE)
+                        .is_err()
+                );
+                assert_eq!(wallet.status().hardware_signing_mode, "software");
+
+                // Only the full ceremony succeeds, and only once.
+                approve_and_activate_cold_vault(&mut wallet, PASSPHRASE);
+                assert_eq!(wallet.status().hardware_signing_mode, "airgap_only");
+                assert!(wallet.prepare_cold_vault_activation().is_err());
+            });
+        });
+    });
+}
+
+#[test]
+fn an_approved_activation_ticket_still_fails_on_a_wrong_passphrase_and_is_burned() {
+    tier0_gate("cold_vault_activation_passphrase_bound", || {
+        with_isolated_wallet_dir(|| {
+            with_protocol_setup(|| {
+                let (mut wallet, _) = signing_wallet();
+                let prepared = wallet.prepare_cold_vault_activation().unwrap();
+                let challenge = wallet
+                    .begin_prepared_native_authorization(&prepared.id)
+                    .unwrap();
+                wallet
+                    .finish_prepared_native_authorization(&prepared.id, &challenge.nonce)
+                    .unwrap();
+                assert!(
+                    wallet
+                        .execute_prepared_cold_vault_activation(&prepared.id, "wrong-passphrase")
+                        .is_err()
+                );
+                assert_eq!(wallet.status().hardware_signing_mode, "software");
+                // The ceremony does not survive the failed attempt.
+                assert!(!wallet.cold_vault_activation_is_authorized(&prepared.id));
+                assert!(
+                    wallet
+                        .execute_prepared_cold_vault_activation(&prepared.id, PASSPHRASE)
+                        .is_err()
+                );
+                assert_eq!(wallet.status().hardware_signing_mode, "software");
+            });
+        });
+    });
+}
+
+/// Exact argument list of the call starting at `start`, by paren depth.
+fn call_arguments(source: &str, start: usize) -> &str {
+    let open = start + source[start..].find('(').expect("call has no argument list");
+    let mut depth = 0usize;
+    for (offset, character) in source[open..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &source[open..open + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced call arguments at byte {start}");
+}
+
+#[test]
+fn only_the_authorized_path_can_migrate_a_vault_into_cold_mode() {
+    tier0_gate("cold_vault_single_activation_path", || {
+        let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let wallet = std::fs::read_to_string(crate_root.join("src/wallet.rs")).unwrap();
+        let service =
+            std::fs::read_to_string(crate_root.join("src/wallet/authorization_service.rs")).unwrap();
+
+        // Passphrase change, profile change, legacy unlock migration, policy
+        // change and WebAuthn registration must all carry the vault's existing
+        // mode forward. None of them may introduce the irreversible cold mode.
+        let mut audited = 0;
+        for (index, _) in wallet.match_indices("self.migrate_vault_encryption(") {
+            let arguments = call_arguments(&wallet, index);
+            assert!(
+                !arguments.contains("AirgapOnly"),
+                "wallet.rs migrates a vault into cold mode outside the authorized path: {arguments}"
+            );
+            audited += 1;
+        }
+        assert!(audited >= 5, "expected every migration call to be audited");
+
+        // Exactly one call may target cold mode, and only after the activation
+        // ticket has been consumed together with its platform ceremony.
+        let permit = service
+            .find("ColdVaultActivationPermit::after_consumed_ticket")
+            .expect("cold vault activation permit is gone");
+        let migration = service
+            .find("self.migrate_vault_encryption(")
+            .expect("authorized activation no longer migrates the vault");
+        assert!(
+            migration > permit,
+            "the vault migration must follow the consumed-ticket permit"
+        );
+        assert!(call_arguments(&service, migration).contains("HardwareSigningMode::AirgapOnly"));
+        assert_eq!(service.matches("self.migrate_vault_encryption(").count(), 1);
+    });
+}
+
+#[test]
+fn activation_display_names_the_irreversible_consequences() {
+    tier0_gate("cold_vault_activation_trusted_display", || {
+        with_isolated_wallet_dir(|| {
+            with_protocol_setup(|| {
+                let (mut wallet, address) = signing_wallet();
+                let prepared = wallet.prepare_cold_vault_activation().unwrap();
+                let rendered = format!(
+                    "{}|{}|{}",
+                    prepared.display.title,
+                    prepared.display.summary,
+                    prepared
+                        .display
+                        .fields
+                        .iter()
+                        .map(|entry| format!("{}={}", entry.label, entry.value))
+                        .collect::<Vec<_>>()
+                        .join("|")
+                );
+                assert!(rendered.contains(&address));
+                assert!(rendered.contains("airgap_only"));
+                assert!(rendered.contains("Reversible=No"));
+                // The ceremony must not overstate its own scope: the honest limit
+                // is that older backups of the same key still sign online.
+                assert!(rendered.contains("Older backups"));
+                // The OS prompt the user actually reads must carry the same facts.
+                let challenge = wallet
+                    .begin_prepared_native_authorization(&prepared.id)
+                    .unwrap();
+                assert!(challenge.message.contains("Cold Vault"));
+                assert_eq!(challenge.operation_digest, prepared.digest);
             });
         });
     });

@@ -6,12 +6,17 @@ import { useRef, useState } from "react";
 import WalletLogo from "../components/WalletLogo";
 import { api, type BackupPreview } from "../api";
 import { readBackupJsonFile } from "../utils/readBackupFile";
-import { isValidImportSeed, type WelcomeTab } from "./types";
+import {
+  compactSeed,
+  isSecretHexSeed,
+  looksLikeMistypedKey,
+  type WelcomeTab,
+} from "./types";
 
 type Props = {
   busy: boolean;
   onCreate: (passphrase: string) => void;
-  onImport: (seed: string, passphrase: string) => void;
+  onImport: (seed: string, passphrase: string, expectedAddress: string) => void;
   onImportBackup: (
     json: string,
     passphrase: string,
@@ -31,6 +36,10 @@ export default function WelcomeScreen({
   const [welcomeTab, setWelcomeTab] = useState<WelcomeTab>("create");
   const [passphrase, setPassphrase] = useState("");
   const [importSeed, setImportSeed] = useState("");
+  const [importExpectedAddress, setImportExpectedAddress] = useState("");
+  const mistypedKey = looksLikeMistypedKey(importSeed);
+  const legacyPhrase =
+    importSeed.trim().length > 0 && !isSecretHexSeed(importSeed) && !mistypedKey;
   const [importPassphrase, setImportPassphrase] = useState("");
   const [watchAddress, setWatchAddress] = useState("");
   const [backupJson, setBackupJson] = useState("");
@@ -144,14 +153,27 @@ export default function WelcomeScreen({
 
           {welcomeTab === "import" && (
             <>
-              <label>Secret hex or legacy passphrase seed</label>
+              <label>Private key (64-char hex)</label>
               <textarea
                 className="textarea"
                 value={importSeed}
                 onChange={(e) => setImportSeed(e.target.value)}
-                placeholder="64-char hex secret, or legacy passphrase"
+                placeholder="64-char hex secret"
                 rows={3}
               />
+              <label>Address of the wallet you are importing</label>
+              <input
+                value={importExpectedAddress}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="Hacash address this key belongs to"
+                onChange={(e) => setImportExpectedAddress(e.target.value)}
+              />
+              <p className="muted small-note">
+                A mistyped key is usually still a valid key, just a different
+                wallet. Checking it against your address is what turns a silent
+                wrong wallet into a clear error.
+              </p>
               <label>New passphrase for this device</label>
               <input
                 type="password"
@@ -159,12 +181,24 @@ export default function WelcomeScreen({
                 onChange={(e) => setImportPassphrase(e.target.value)}
                 placeholder={`Minimum ${MIN_NEW_WALLET_PASSPHRASE_LENGTH} characters`}
               />
+              {importSeed.trim() && !isSecretHexSeed(importSeed) ? (
+                <p className="warn-box">
+                  {looksLikeMistypedKey(importSeed)
+                    ? `A private key is exactly 64 hex characters and you entered ${compactSeed(importSeed).length}. Check for missing or extra characters.`
+                    : "A private key is exactly 64 hex characters (0-9, a-f). This wallet cannot turn a phrase or passphrase into a key."}
+                </p>
+              ) : null}
               <button
                 className="primary auth-submit"
                 disabled={
-                  busy || !isValidImportSeed(importSeed) || importPassphrase.length < MIN_NEW_WALLET_PASSPHRASE_LENGTH
+                  busy ||
+                  !isSecretHexSeed(importSeed) ||
+                  !isValidHacashAddress(importExpectedAddress.trim()) ||
+                  importPassphrase.length < MIN_NEW_WALLET_PASSPHRASE_LENGTH
                 }
-                onClick={() => onImport(importSeed, importPassphrase)}
+                onClick={() =>
+                  onImport(importSeed, importPassphrase, importExpectedAddress.trim())
+                }
               >
                 Import wallet
               </button>

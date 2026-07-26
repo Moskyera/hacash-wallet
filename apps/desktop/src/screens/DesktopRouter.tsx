@@ -63,7 +63,7 @@ export type DesktopActions = {
   onInfo: (msg: string) => void;
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
   onCreate: (passphrase: string) => void;
-  onImport: (seed: string, passphrase: string) => void;
+  onImport: (seed: string, passphrase: string, expectedAddress: string) => void;
   onImportBackup: (
     json: string,
     passphrase: string,

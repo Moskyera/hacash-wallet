@@ -457,7 +457,8 @@ pub(crate) fn preview(raw: &str) -> BackupResult<BackupPreview> {
                 "Encrypted messenger history when present".into(),
             ],
             warning: Some(
-                "The displayed address is verified only after the backup passphrase authenticates the bundle. Device-bound biometric unlock, external WebAuthn authenticator private keys, and local transaction display history are not transferred."
+                "The displayed address is verified only after the backup passphrase authenticates the bundle. Device-bound biometric unlock, external WebAuthn authenticator private keys, and local transaction display history are not transferred. \
+                 Restoring also rolls security policy back to whatever it was when the backup was taken: if Cold Vault was activated or a WebAuthn authenticator was replaced afterwards, this restore undoes that and re-enables the older state, including the older signature counter. Restore an old backup only if you intend that."
                     .into(),
             ),
         });
@@ -474,7 +475,7 @@ pub(crate) fn preview(raw: &str) -> BackupResult<BackupPreview> {
         requires_legacy_confirmation: true,
         included: vec!["Classic signing vault only".into()],
         warning: Some(
-            "Legacy backup: restores only the classic signing key. It does not contain the Quantum keystore, L2 dispute bills, settings, biometric configuration, messenger data, or transaction history. Continue only if you accept those losses."
+            "Legacy backup: restores only the classic signing key. It does not contain the Quantum keystore, L2 dispute bills, settings, biometric configuration, messenger data, or transaction history. It also carries no security policy, so the restored wallet is an ordinary online software wallet even if this key was later moved into Cold Vault or put behind a WebAuthn gate. Continue only if you accept those losses."
                 .into(),
         ),
     })
@@ -1781,6 +1782,112 @@ mod tests {
                 .contains("KDF")
         );
         assert!(decode_b64_limited(&"A".repeat(100), 2, "fixture").is_err());
+    }
+
+    /// `HACASH_WALLET_DATA` is process-global, so the tests that redirect the
+    /// wallet root must not run concurrently with each other.
+    static WALLET_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_isolated_wallet_root<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = WALLET_ROOT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("wallet-data");
+        fs::create_dir_all(&root).expect("wallet root");
+        // SAFETY: test-only redirection of the wallet data root.
+        unsafe { std::env::set_var("HACASH_WALLET_DATA", &root) };
+        let result = f();
+        unsafe { std::env::remove_var("HACASH_WALLET_DATA") };
+        drop(dir);
+        result
+    }
+
+    fn wipe_wallet_root() {
+        let root = paths::wallet_data_root();
+        for entry in fs::read_dir(&root).expect("read wallet root") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                fs::remove_dir_all(&path).expect("remove dir");
+            } else {
+                fs::remove_file(&path).expect("remove file");
+            }
+        }
+    }
+
+    /// The whole point of a backup: the two functions the IPC layer actually
+    /// calls must survive a full export, wipe and restore, and the restored
+    /// wallet must open with the same key. Everything below these two is covered
+    /// by the tests above; this covers the seam.
+    #[test]
+    fn export_and_restore_round_trip_recovers_the_same_wallet() {
+        with_isolated_wallet_root(|| {
+            let mut service = WalletService::new(None, None).expect("service");
+            let address = service.create_wallet(TEST_PASS).expect("create wallet");
+
+            let bundle = export_bundle(&mut service, TEST_PASS).expect("export");
+            let preview = preview(&bundle).expect("preview");
+            assert_eq!(preview.format, "full_authenticated");
+            assert_eq!(preview.address, address);
+            assert!(!preview.requires_legacy_confirmation);
+
+            // Restoring over a live wallet is refused; rollback must go through
+            // an explicit reset first.
+            let error = restore(&mut service, &bundle, TEST_PASS, false).unwrap_err();
+            assert!(error.to_string().contains("only into an empty wallet profile"));
+
+            service.lock();
+            drop(service);
+            wipe_wallet_root();
+
+            let mut restored_into = WalletService::new(None, None).expect("service");
+            assert!(!restored_into.status().has_wallet);
+            let restored = restore(&mut restored_into, &bundle, TEST_PASS, false).expect("restore");
+            assert_eq!(restored, address);
+
+            // The restored vault really opens with the same passphrase and key.
+            let mut reopened = WalletService::new(None, None).expect("service");
+            assert!(reopened.status().has_wallet);
+            assert_eq!(reopened.unlock(TEST_PASS).expect("unlock"), address);
+            assert!(reopened.status().signing_available);
+        });
+    }
+
+    #[test]
+    fn a_wrong_passphrase_or_tampered_bundle_never_replaces_a_wallet() {
+        with_isolated_wallet_root(|| {
+            let mut service = WalletService::new(None, None).expect("service");
+            let address = service.create_wallet(TEST_PASS).expect("create wallet");
+            let bundle = export_bundle(&mut service, TEST_PASS).expect("export");
+            service.lock();
+            drop(service);
+            wipe_wallet_root();
+
+            let mut target = WalletService::new(None, None).expect("service");
+            assert!(
+                restore(&mut target, &bundle, "wrong-passphrase-value", false)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("authentication failed")
+            );
+            // A failed restore must leave the profile untouched, not half-written.
+            assert!(!target.status().has_wallet);
+
+            let mut envelope: BackupEnvelope = serde_json::from_str(&bundle).unwrap();
+            let mut raw = BASE64.decode(envelope.ciphertext_b64.as_bytes()).unwrap();
+            let last = raw.len() - 1;
+            raw[last] ^= 1;
+            envelope.ciphertext_b64 = BASE64.encode(&raw);
+            let tampered = serde_json::to_string(&envelope).unwrap();
+            assert!(restore(&mut target, &tampered, TEST_PASS, false).is_err());
+            assert!(!target.status().has_wallet);
+
+            // Only the untouched bundle works, proving the wipe really happened.
+            assert_eq!(
+                restore(&mut target, &bundle, TEST_PASS, false).expect("restore"),
+                address
+            );
+        });
     }
 
     #[cfg(unix)]

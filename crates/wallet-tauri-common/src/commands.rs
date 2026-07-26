@@ -24,7 +24,7 @@ async fn sync_relay_after_node_change(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-async fn clear_native_biometric_secret(app: &AppHandle) -> Result<(), String> {
+pub(crate) async fn clear_native_biometric_secret(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         crate::android_native::biometric_clear(app).await
@@ -135,12 +135,13 @@ pub fn wallet_create(passphrase: String, state: State<'_, AppState>) -> Result<S
 pub fn wallet_import(
     seed: String,
     passphrase: String,
+    expected_address: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let seed = Zeroizing::new(seed);
     let passphrase = Zeroizing::new(passphrase);
     let mut svc = state.inner.blocking_lock();
-    svc.import_wallet(&seed, &passphrase)
+    svc.import_wallet(&seed, &passphrase, &expected_address)
         .map_err(|e| e.to_string())
 }
 
@@ -685,7 +686,6 @@ pub fn wallet_set_security_profile(
 pub async fn wallet_set_hardware_mode(
     mode: String,
     current_passphrase: String,
-    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let current_passphrase = Zeroizing::new(current_passphrase);
@@ -697,19 +697,14 @@ pub async fn wallet_set_hardware_mode(
         _ => return Err("unknown signing policy".into()),
     };
 
+    // Cold Vault is irreversible, so a correct passphrase is not sufficient
+    // authority. It has its own prepared, ceremony-bound command pair.
     if hw == HardwareSigningMode::AirgapOnly {
-        // Authenticate before deleting the convenience credential so a hostile
-        // renderer cannot disable biometric unlock with a guessed passphrase.
-        // The core authenticates again during the atomic policy migration.
-        {
-            let mut svc = state.inner.lock().await;
-            svc.verify_wallet_passphrase(&current_passphrase)
-                .map_err(|error| error.to_string())?;
-        }
-        // Remove the OS-keystore passphrase before committing Cold Vault. A
-        // failed migration may require setup again, but cannot leave a local
-        // unlock shortcut behind an air-gap-only policy.
-        clear_native_biometric_secret(&app).await?;
+        return Err(
+            "cold vault activation must use wallet_prepare_cold_vault_activation and \
+             wallet_execute_prepared_cold_vault_activation"
+                .into(),
+        );
     }
 
     let mut svc = state.inner.lock().await;

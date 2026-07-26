@@ -52,8 +52,9 @@ use crate::webauthn::WebAuthnGate;
 
 const MAX_UNLOCK_LIFETIME: Duration = Duration::from_secs(15 * 60);
 const COLD_VAULT_UNLOCK_LIFETIME: Duration = Duration::from_secs(2 * 60);
-const MAX_LEGACY_BRAINWALLET_SEED_CHARS: usize = 1024;
-pub const LEGACY_BRAINWALLET_ACKNOWLEDGEMENT: &str = "I UNDERSTAND LEGACY BRAINWALLET RISK";
+/// How long the outgoing authenticator's approval of its own replacement stays
+/// usable. Short enough that it cannot be harvested and used much later.
+const WEBAUTHN_REPLACEMENT_APPROVAL_TTL: Duration = Duration::from_secs(120);
 
 pub struct WalletService {
     vault_path: PathBuf,
@@ -69,6 +70,13 @@ pub struct WalletService {
     history: TxHistory,
     webauthn: WebAuthnGate,
     unlock_guard: UnlockGuard,
+    /// Separate backoff for keystore-password attempts, so the wallet can never
+    /// be used as a fast offline oracle against a Quantum keystore file.
+    quantum_keystore_guard: UnlockGuard,
+    /// Set only by a verified assertion from the *currently registered*
+    /// authenticator, and consumed by the next registration. Replacing a second
+    /// factor is otherwise a way to swap the factor out with the passphrase only.
+    webauthn_replacement_approved_at: Option<Instant>,
     assets: AssetService,
     quantum_keystore_mem: Option<String>,
     unlocked: Option<UnlockedSession>,
@@ -121,6 +129,9 @@ pub struct WalletStatus {
     pub dust_whisper: DustWhisperSettings,
     pub fast_pay_state: String,
     pub fast_pay_message: String,
+    /// `Some` when the key was derived from a guessable phrase. The UI must warn
+    /// permanently and must not present this wallet as protected custody.
+    pub legacy_key_derivation: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -193,6 +204,8 @@ impl WalletService {
             history,
             webauthn: WebAuthnGate::new()?,
             unlock_guard: UnlockGuard::default(),
+            quantum_keystore_guard: UnlockGuard::default(),
+            webauthn_replacement_approved_at: None,
             assets: AssetService::default(),
             quantum_keystore_mem: None,
             unlocked: None,
@@ -263,6 +276,9 @@ impl WalletService {
             dust_whisper: self.settings.dust_whisper.clone(),
             fast_pay_state: fast_pay.state.as_str().to_string(),
             fast_pay_message: fast_pay.message,
+            legacy_key_derivation: meta
+                .as_ref()
+                .and_then(|m| m.legacy_key_derivation.clone()),
         }
     }
 
@@ -481,7 +497,19 @@ impl WalletService {
         Ok(address)
     }
 
-    pub fn import_wallet(&mut self, seed: &str, passphrase: &str) -> WalletResult<String> {
+    /// Import a 32-byte secret key.
+    ///
+    /// `expected_address` is required because a mistyped key is usually still a
+    /// perfectly valid key, just a different one. Length checks cannot catch that:
+    /// change one digit of a 64-character key and you silently land on someone
+    /// else's empty address and conclude your funds are gone. Anyone importing a
+    /// key is recovering a specific wallet and knows which.
+    pub fn import_wallet(
+        &mut self,
+        seed: &str,
+        passphrase: &str,
+        expected_address: &str,
+    ) -> WalletResult<String> {
         if self.vault_path.exists() {
             return Err(WalletError::Vault(
                 "wallet already exists. remove vault first".into(),
@@ -491,18 +519,43 @@ impl WalletService {
             return Err(WalletError::Vault("seed is required".into()));
         }
         validate_new_passphrase(passphrase)?;
-        let trimmed = seed.trim();
-        if trimmed.chars().all(|c| c.is_ascii_hexdigit()) && trimmed.len() != 64 {
+        // Whitespace cannot be part of a hex key, so ignoring it is unambiguous and
+        // lets a key pasted across lines work instead of failing confusingly.
+        let compact: String = seed.chars().filter(|c| !c.is_whitespace()).collect();
+        let all_hex = compact.chars().all(|c| c.is_ascii_hexdigit());
+        // Report a near-miss key as a near-miss key. Calling it a brainwallet phrase
+        // would push the user toward hashing it, which silently produces a valid
+        // wallet at a different address than the one they are trying to recover.
+        if all_hex && compact.chars().count() != 64 {
+            return Err(WalletError::Vault(format!(
+                "a private key must be exactly 64 hex characters; this is {}. check for missing or extra characters",
+                compact.chars().count()
+            )));
+        }
+        // Anything else would previously fall through to a single unsalted SHA-256
+        // of the text, producing a brainwallet: a key anyone who guesses the phrase
+        // can reproduce. That derivation is no longer reachable from this wallet at
+        // all, so say plainly what is required instead of offering an alternative.
+        if !all_hex {
             return Err(WalletError::Vault(
-                "hex secret must be exactly 64 characters".into(),
+                "a private key is exactly 64 hex characters. this wallet cannot derive a key from a phrase or passphrase"
+                    .into(),
             ));
         }
-        let account = if is_secret_hex(seed) {
-            WalletAccount::from_secret_hex(seed.trim())?
-        } else {
-            WalletAccount::create(seed.trim())?
-        };
+        let expected_address = expected_address.trim();
+        if expected_address.is_empty() {
+            return Err(WalletError::Vault(
+                "the address of the wallet you are importing is required".into(),
+            ));
+        }
+        crate::address::require_address_for_network(expected_address, &self.network_mode)?;
+        let account = WalletAccount::from_secret_hex(&compact)?;
         let address = account.address();
+        if address != expected_address {
+            return Err(WalletError::Vault(
+                "this private key does not belong to that address. check both for typos".into(),
+            ));
+        }
         let mut secret = account.secret_hex();
         let vault = EncryptedVault::encrypt(&secret, &address, passphrase, &self.profile.name)?;
         secret.zeroize();
@@ -510,6 +563,19 @@ impl WalletService {
         self.settings.save()?;
         self.unlock(passphrase)?;
         Ok(address)
+    }
+
+    /// `Some(marker)` when this wallet's key came from a guessable phrase.
+    pub fn legacy_key_derivation(&self) -> Option<String> {
+        if let Some(meta) = self.vault_meta.as_ref() {
+            return meta.legacy_key_derivation.clone();
+        }
+        if !self.vault_path.exists() {
+            return None;
+        }
+        self.read_vault()
+            .ok()
+            .and_then(|vault| vault.legacy_key_derivation().map(str::to_owned))
     }
 
     pub fn export_backup(&self, passphrase: &str) -> WalletResult<String> {
@@ -989,6 +1055,15 @@ impl WalletService {
                 "a signing vault cannot be converted to watch-only mode".into(),
             ));
         }
+        if mode == HardwareSigningMode::AirgapOnly {
+            // Irreversible, so a correct passphrase alone is never enough: route
+            // through the prepared ticket that a fresh platform ceremony binds to
+            // this exact activation.
+            return Err(WalletError::Policy(
+                "cold vault activation requires a prepared, freshly authorized activation ticket"
+                    .into(),
+            ));
+        }
         self.verify_wallet_passphrase(current_passphrase)?;
         let current_vault = self.vault_snapshot()?;
         let (current_mode, credential) = current_vault.policy_for_migration()?;
@@ -1040,6 +1115,25 @@ impl WalletService {
         }
     }
 
+    /// Test helper that drives the real prepared activation ceremony.
+    ///
+    /// It is not a bypass: it calls the same begin/finish pair the shell calls,
+    /// and the shell is what interposes the OS verification between them. The
+    /// nonce is already returned to the in-process caller in production, so this
+    /// grants nothing that `begin_prepared_native_authorization` does not.
+    #[doc(hidden)]
+    pub fn audit_activate_cold_vault(&mut self, current_passphrase: &str) -> WalletResult<()> {
+        let prepared = self.prepare_cold_vault_activation()?;
+        if prepared.webauthn_required {
+            return Err(WalletError::Policy(
+                "this vault requires a WebAuthn ceremony to activate the cold vault".into(),
+            ));
+        }
+        let challenge = self.begin_prepared_native_authorization(&prepared.id)?;
+        self.finish_prepared_native_authorization(&prepared.id, &challenge.nonce)?;
+        self.execute_prepared_cold_vault_activation(&prepared.id, current_passphrase)
+    }
+
     /// Test-only bypass. production apps must use `finish_native_biometric`.
     #[doc(hidden)]
     pub fn confirm_biometric_for_send(&mut self) -> WalletResult<()> {
@@ -1051,6 +1145,7 @@ impl WalletService {
 
     pub fn lock(&mut self) {
         let _ = self.webauthn.clear_pending();
+        self.webauthn_replacement_approved_at = None;
         self.unlocked = None;
         self.assets.clear_cache();
         self.quantum_keystore_mem = None;
@@ -1088,12 +1183,71 @@ impl WalletService {
         self.webauthn.begin_register(&address, client_origin)
     }
 
+    /// Begin the ceremony that lets the *current* authenticator approve its own
+    /// replacement. Without this, a stolen passphrase would be enough to swap the
+    /// second factor for one the attacker controls.
+    pub fn webauthn_replacement_auth_begin(
+        &mut self,
+        client_origin: Option<&str>,
+    ) -> WalletResult<String> {
+        self.webauthn_replacement_approved_at = None;
+        let credential = self.load_webauthn_credential()?.ok_or_else(|| {
+            WalletError::Policy(
+                "no WebAuthn authenticator is registered; register one instead of replacing".into(),
+            )
+        })?;
+        let credential_id = crate::webauthn::credential_id_from_store(&credential)?;
+        self.webauthn.begin_auth(&credential_id, client_origin)
+    }
+
+    /// Record that the outgoing authenticator approved being replaced.
+    ///
+    /// Deliberately does not set `webauthn_verified`: approving a key rotation is
+    /// not consent to sign a transaction.
+    pub fn webauthn_replacement_auth_finish(&mut self, assertion_json: &str) -> WalletResult<()> {
+        let stored = self.load_webauthn_credential()?.ok_or_else(|| {
+            WalletError::Policy("no WebAuthn authenticator is registered".into())
+        })?;
+        let updated = match self.webauthn.finish_auth(assertion_json, Some(&stored)) {
+            Ok(updated) => updated,
+            Err(error) => {
+                self.webauthn_replacement_approved_at = None;
+                return Err(error);
+            }
+        };
+        let mut vault = self.vault_snapshot()?;
+        vault.update_webauthn_counter_credential(&updated)?;
+        self.persist_vault(vault)?;
+        self.webauthn_replacement_approved_at = Some(Instant::now());
+        Ok(())
+    }
+
+    fn take_webauthn_replacement_approval(&mut self) -> WalletResult<()> {
+        let approved_at = self.webauthn_replacement_approved_at.take().ok_or_else(|| {
+            WalletError::Policy(
+                "replacing a registered WebAuthn authenticator requires approval from the current authenticator"
+                    .into(),
+            )
+        })?;
+        if approved_at.elapsed() > WEBAUTHN_REPLACEMENT_APPROVAL_TTL {
+            return Err(WalletError::Policy(
+                "the current authenticator's approval expired; approve the replacement again".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn webauthn_register_finish(
         &mut self,
         credential_json: &str,
         current_passphrase: &str,
     ) -> WalletResult<()> {
         self.verify_wallet_passphrase(current_passphrase)?;
+        // Registering the first authenticator is a pure upgrade. Replacing an
+        // existing one is a downgrade risk, so the outgoing key must consent.
+        if self.load_webauthn_credential()?.is_some() {
+            self.take_webauthn_replacement_approval()?;
+        }
         let credential = self.webauthn.finish_register(credential_json)?;
         let current_vault = self.vault_snapshot()?;
         let target_profile =
@@ -2763,6 +2917,7 @@ impl WalletService {
     }
 
     fn clear_session_authorizations(&mut self) {
+        self.webauthn_replacement_approved_at = None;
         if let Some(session) = &mut self.unlocked {
             session.webauthn_verified = false;
             session.biometric_verified = false;
@@ -2902,11 +3057,6 @@ fn format_amount_mei(amount_mei: f64) -> String {
     crate::hip23::format_mei_for_node(amount_mei)
 }
 
-fn is_secret_hex(seed: &str) -> bool {
-    let s = seed.trim();
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 fn random_biometric_nonce() -> String {
     use rand::RngCore;
     let mut buf = [0u8; 16];
@@ -2917,6 +3067,40 @@ fn random_biometric_nonce() -> String {
 impl WalletService {
     /// Type 4 support is an experimental Quantum Lab feature. Keep this guard
     /// at the core boundary so direct IPC calls cannot enable it on mainnet.
+    /// A live signing session is required. `Exhausted` and watch-only sessions
+    /// hold no key, so they must not reach key-material code paths either.
+    pub(crate) fn require_unlocked_signing_session(&self) -> WalletResult<()> {
+        let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
+        match session.key {
+            SessionKey::Signing(_) => Ok(()),
+            SessionKey::WatchOnly => Err(WalletError::Policy(
+                "watch-only wallet cannot access key material".into(),
+            )),
+            SessionKey::Exhausted => Err(WalletError::Policy(
+                "signing session is exhausted; unlock again".into(),
+            )),
+        }
+    }
+
+    /// Exponential backoff shared by every keystore-password attempt. Callers
+    /// must report the outcome with [`Self::record_quantum_keystore_attempt`].
+    pub(crate) fn check_quantum_keystore_attempt_allowed(&self) -> WalletResult<()> {
+        self.quantum_keystore_guard.check_allowed()
+    }
+
+    pub(crate) fn record_quantum_keystore_attempt(&mut self, accepted: bool) {
+        if accepted {
+            self.quantum_keystore_guard.record_success();
+        } else {
+            self.quantum_keystore_guard.record_failure();
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn audit_quantum_keystore_failures(&self) -> u32 {
+        self.quantum_keystore_guard.audit_failures()
+    }
+
     pub(crate) fn require_quantum_testnet(&self) -> WalletResult<()> {
         if self.network_mode == "testnet" {
             return Ok(());
@@ -3068,7 +3252,7 @@ mod vault_migration_tests {
         let mut wallet = WalletService::new(None, None).unwrap();
         wallet.create_wallet(OLD_PASS).unwrap();
         wallet
-            .change_hardware_signing_mode(OLD_PASS, HardwareSigningMode::AirgapOnly)
+            .audit_activate_cold_vault(OLD_PASS)
             .unwrap();
 
         let session = wallet.unlocked.as_ref().unwrap();
@@ -3104,6 +3288,7 @@ mod vault_migration_tests {
             OLD_PASS,
             "paranoid",
             "webauthn_gate",
+            None,
             None,
         )
         .unwrap();
@@ -3226,7 +3411,7 @@ mod vault_migration_tests {
             .unwrap();
 
         wallet
-            .change_hardware_signing_mode(OLD_PASS, HardwareSigningMode::AirgapOnly)
+            .audit_activate_cold_vault(OLD_PASS)
             .unwrap();
         assert!(wallet.quantum_keystore_mem.is_none());
         assert!(

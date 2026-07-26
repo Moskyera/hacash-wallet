@@ -95,21 +95,48 @@ describe("Android private-screen hardening", () => {
   it("removes Android biometric unlock before Cold Vault activation", () => {
     const mobileRust = read("src-tauri/src/lib.rs");
     const commonCommands = read("../../crates/wallet-tauri-common/src/commands.rs");
-    const coldStart = commonCommands.indexOf("if hw == HardwareSigningMode::AirgapOnly");
-    const migrationStart = commonCommands.indexOf(
-      "svc.change_hardware_signing_mode",
-      coldStart,
-    );
-    const coldBranch = commonCommands.slice(coldStart, migrationStart);
+    const prepared = read("../../crates/wallet-tauri-common/src/prepared_commands.rs");
 
     expect(mobileRust).toContain(
       'if svc.get_settings().hardware_signing_mode == "airgap_only"',
     );
     expect(mobileRust).toContain('if signing_policy == "airgap_only"');
     expect(mobileRust).toContain("biometric_store::clear(&app).await");
+
+    // The passphrase-only entrypoint must refuse Cold Vault outright.
+    const coldStart = commonCommands.indexOf("if hw == HardwareSigningMode::AirgapOnly");
+    const migrationStart = commonCommands.indexOf("svc.change_hardware_signing_mode", coldStart);
+    const coldBranch = commonCommands.slice(coldStart, migrationStart);
     expect(coldStart).toBeGreaterThanOrEqual(0);
-    expect(coldBranch).toContain("verify_wallet_passphrase(&current_passphrase)");
-    expect(coldBranch).toContain("clear_native_biometric_secret(&app).await?");
+    expect(coldBranch).toContain("return Err(");
+    expect(coldBranch).not.toContain("clear_native_biometric_secret");
+
+    // Activation lives behind the prepared ceremony, and the OS unlock secret is
+    // deleted only after that ceremony is confirmed and before the migration.
+    const activation = prepared.slice(
+      prepared.indexOf("pub async fn wallet_execute_prepared_cold_vault_activation("),
+    );
+    expect(activation.indexOf("cold_vault_activation_is_authorized")).toBeGreaterThanOrEqual(0);
+    expect(activation.indexOf("clear_native_biometric_secret(&app).await?")).toBeGreaterThan(
+      activation.indexOf("cold_vault_activation_is_authorized"),
+    );
+    expect(activation.indexOf("execute_prepared_cold_vault_activation(&operation_id")).toBeGreaterThan(
+      activation.indexOf("clear_native_biometric_secret(&app).await?"),
+    );
+  });
+
+  it("activates Cold Vault only through the prepared ceremony", () => {
+    const securityScreen = read("src/screens/more/SecurityScreen.tsx");
+
+    expect(securityScreen).not.toContain('.setHardwareMode("airgap_only"');
+    expect(securityScreen).toContain("api.prepareColdVaultActivation()");
+    expect(securityScreen).toContain("api.confirmBiometric(prepared.id)");
+    expect(securityScreen).toContain(
+      "api.executePreparedColdVaultActivation(prepared.id, passphrase)",
+    );
+    // Mobile cannot run a WebAuthn ceremony, so a WebAuthn-bound vault must be
+    // told to activate on desktop rather than silently downgrading the factor.
+    expect(securityScreen).toContain("prepared.webauthn_required");
   });
 
   it("keeps Cold Vault in signer-only mode and gates a second signature", () => {

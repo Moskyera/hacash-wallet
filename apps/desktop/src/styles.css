@@ -399,6 +399,8 @@ input {
 .chip-accent { color: var(--accent); border-color: rgba(245, 166, 35, 0.35); }
 .chip-ok { color: #ffd18a; border-color: rgba(245,166,35,0.45); }
 .chip-bad { color: #ffd18a; border-color: rgba(245,166,35,0.45); }
+/* Permanent, non-dismissable marker for a key that is weak by construction. */
+.chip-warn { color: #ff9c8a; border-color: rgba(255, 120, 100, 0.55); }
 
 .relay-status-list {
   display: flex;

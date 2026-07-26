@@ -29,6 +29,7 @@ pub enum OperationKind {
     AirgapClassic,
     DappTransaction,
     QuantumType4,
+    ColdVaultActivation,
 }
 
 impl OperationKind {
@@ -44,6 +45,7 @@ impl OperationKind {
             Self::AirgapClassic => "airgap_classic",
             Self::DappTransaction => "dapp_transaction",
             Self::QuantumType4 => "quantum_type4",
+            Self::ColdVaultActivation => "cold_vault_activation",
         }
     }
 }
@@ -119,6 +121,18 @@ struct PreparedOperation<T> {
     webauthn_pending: bool,
     created_at: Instant,
     payload: T,
+}
+
+impl<T> PreparedOperation<T> {
+    /// The single source of truth for "has the exact ceremony happened".
+    fn satisfies_requirement(&self) -> bool {
+        matches!(
+            (self.requirement, self.assurance),
+            (AuthorizationRequirement::None, _)
+                | (AuthorizationRequirement::AnyPlatformFactor, Some(_))
+                | (AuthorizationRequirement::WebAuthn, Some(AssuranceMethod::WebAuthn))
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -309,22 +323,33 @@ impl<T> PreparedOperationState<T> {
                 "prepared operation type mismatch; request was invalidated".into(),
             ));
         }
-        match (operation.requirement, operation.assurance) {
-            (AuthorizationRequirement::None, assurance) => {
-                Ok((operation.payload, assurance, operation.view))
-            }
-            (AuthorizationRequirement::AnyPlatformFactor, Some(assurance)) => {
-                Ok((operation.payload, Some(assurance), operation.view))
-            }
-            (AuthorizationRequirement::WebAuthn, Some(AssuranceMethod::WebAuthn)) => Ok((
-                operation.payload,
-                Some(AssuranceMethod::WebAuthn),
-                operation.view,
-            )),
-            _ => Err(WalletError::Policy(
+        if !operation.satisfies_requirement() {
+            return Err(WalletError::Policy(
                 "fresh authorization for this exact operation is required".into(),
-            )),
+            ));
         }
+        Ok((operation.payload, operation.assurance, operation.view))
+    }
+
+    /// Non-consuming check that the live ticket is exactly `operation_id` of
+    /// `kind` and already carries the assurance its requirement demands.
+    ///
+    /// This grants nothing and reveals nothing about the payload. It exists so a
+    /// shell can perform an irreversible pre-step (deleting an OS unlock secret
+    /// before an irreversible policy migration) only once the ceremony has
+    /// really happened for this exact operation.
+    pub fn is_authorized_for(&self, operation_id: &str, kind: OperationKind) -> bool {
+        self.is_authorized_for_at(operation_id, kind, Instant::now())
+    }
+
+    fn is_authorized_for_at(&self, operation_id: &str, kind: OperationKind, now: Instant) -> bool {
+        let Some(operation) = self.current.as_ref() else {
+            return false;
+        };
+        elapsed_at(operation.created_at, now) <= PREPARED_OPERATION_TTL
+            && constant_time_eq(operation.view.id.as_bytes(), operation_id.as_bytes())
+            && operation.view.kind == kind
+            && operation.satisfies_requirement()
     }
 
     pub fn clear(&mut self) {
@@ -580,6 +605,49 @@ mod tests {
             a,
             operation_digest(OperationKind::HacL1, "1A", "mainnet", Some(0), b"mutated")
         );
+    }
+
+    #[test]
+    fn authorization_probe_never_reports_an_unapproved_or_foreign_ticket() {
+        let base = Instant::now();
+        let mut state = PreparedOperationState::default();
+        let view = prepare(
+            &mut state,
+            "1Recipient",
+            AuthorizationRequirement::AnyPlatformFactor,
+            base,
+        );
+        assert!(!state.is_authorized_for(&view.id, OperationKind::HacL1));
+        let challenge = state.begin_native(&view.id).unwrap();
+        assert!(!state.is_authorized_for(&view.id, OperationKind::HacL1));
+        state.finish_native(&view.id, &challenge.nonce).unwrap();
+
+        assert!(state.is_authorized_for(&view.id, OperationKind::HacL1));
+        assert!(!state.is_authorized_for("attacker", OperationKind::HacL1));
+        assert!(!state.is_authorized_for(&view.id, OperationKind::ColdVaultActivation));
+        assert!(!state.is_authorized_for_at(
+            &view.id,
+            OperationKind::HacL1,
+            base + PREPARED_OPERATION_TTL + Duration::from_secs(1)
+        ));
+        state.clear();
+        assert!(!state.is_authorized_for(&view.id, OperationKind::HacL1));
+    }
+
+    #[test]
+    fn authorization_probe_rejects_native_factor_when_webauthn_is_required() {
+        let base = Instant::now();
+        let mut state = PreparedOperationState::default();
+        let view = prepare(
+            &mut state,
+            "1Recipient",
+            AuthorizationRequirement::WebAuthn,
+            base,
+        );
+        state.begin_webauthn(&view.id).unwrap();
+        assert!(!state.is_authorized_for(&view.id, OperationKind::HacL1));
+        state.finish_webauthn(&view.id).unwrap();
+        assert!(state.is_authorized_for(&view.id, OperationKind::HacL1));
     }
 
     #[test]

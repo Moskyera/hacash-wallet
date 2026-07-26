@@ -76,7 +76,7 @@ fn audit_import_duplicate_vault_rejected() {
             svc.create_wallet("passphrase12345").unwrap();
             svc.lock();
             let seed = WalletAccount::create("seed2").unwrap().secret_hex();
-            assert!(svc.import_wallet(&seed, "newpass1234").is_err());
+            assert!(svc.import_wallet(&seed, "newpass1234", "1Any").is_err());
         });
     });
 }

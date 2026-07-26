@@ -40,7 +40,17 @@ pub struct VaultMetadata {
     pub webauthn_credential_b64: Option<String>,
     #[serde(default)]
     pub webauthn_credential_binding_sha256: Option<String>,
+    /// Set only when the private key was derived from a human-chosen phrase
+    /// instead of a random secret. Such a key is reproducible by anyone who
+    /// guesses the phrase, so the fact must survive every migration, passphrase
+    /// change and backup round-trip. Absent for every normal vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_key_derivation: Option<String>,
 }
+
+/// The only accepted value of [`VaultMetadata::legacy_key_derivation`]: the
+/// upstream `Account::create_by_password` derivation, a single unsalted SHA-256.
+pub const LEGACY_DERIVATION_BRAINWALLET_SHA256: &str = "brainwallet_sha256";
 
 const SAFE_LEGACY_HARDWARE_MODE: &str = "webauthn_gate";
 
@@ -69,6 +79,27 @@ impl EncryptedVault {
             security_profile,
             "software",
             None,
+            None,
+        )
+    }
+
+    /// Encrypt a key that was derived from a human-chosen phrase. The weakness is
+    /// recorded in authenticated metadata so it can never be quietly lost.
+    pub fn encrypt_legacy_derived(
+        secret_hex: &str,
+        address: &str,
+        passphrase: &str,
+        security_profile: &str,
+        derivation: &str,
+    ) -> WalletResult<Self> {
+        Self::encrypt_with_policy(
+            secret_hex,
+            address,
+            passphrase,
+            security_profile,
+            "software",
+            None,
+            Some(derivation),
         )
     }
 
@@ -79,7 +110,15 @@ impl EncryptedVault {
         security_profile: &str,
         hardware_signing_mode: &str,
         webauthn_credential_b64: Option<&str>,
+        legacy_key_derivation: Option<&str>,
     ) -> WalletResult<Self> {
+        if let Some(derivation) = legacy_key_derivation
+            && derivation != LEGACY_DERIVATION_BRAINWALLET_SHA256
+        {
+            return Err(WalletError::Vault(
+                "unknown legacy key derivation marker".into(),
+            ));
+        }
         let kdf = KdfParams::try_from_profile(security_profile)?;
         validate_signing_policy(security_profile, hardware_signing_mode)?;
         let webauthn_credential_binding_sha256 = webauthn_credential_b64
@@ -99,6 +138,7 @@ impl EncryptedVault {
             hardware_signing_mode: hardware_signing_mode.into(),
             webauthn_credential_b64: webauthn_credential_b64.map(str::to_owned),
             webauthn_credential_binding_sha256,
+            legacy_key_derivation: legacy_key_derivation.map(str::to_owned),
         };
 
         let aad = vault_aad(&metadata);
@@ -204,6 +244,9 @@ impl EncryptedVault {
             security_profile,
             hardware_signing_mode,
             webauthn_credential_b64,
+            // A weak derivation is a permanent property of the key, not of this
+            // vault file. No migration may launder it away.
+            self.metadata.legacy_key_derivation.as_deref(),
         );
         secret.zeroize();
         let mut replacement = replacement?;
@@ -337,7 +380,12 @@ impl EncryptedVault {
                 .metadata
                 .webauthn_credential_binding_sha256
                 .clone(),
+            legacy_key_derivation: self.metadata.legacy_key_derivation.clone(),
         }
+    }
+
+    pub fn legacy_key_derivation(&self) -> Option<&str> {
+        self.metadata.legacy_key_derivation.as_deref()
     }
 
     pub fn salt(&self) -> &[u8; SALT_LEN] {
@@ -366,6 +414,7 @@ pub struct VaultMetaSnapshot {
     pub hardware_signing_mode: String,
     pub webauthn_credential_b64: Option<String>,
     pub webauthn_credential_binding_sha256: Option<String>,
+    pub legacy_key_derivation: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -399,7 +448,8 @@ fn validate_vault_blob(blob: &VaultBlob) -> WalletResult<()> {
         + metadata
             .webauthn_credential_binding_sha256
             .as_ref()
-            .map_or(0, String::len);
+            .map_or(0, String::len)
+        + metadata.legacy_key_derivation.as_ref().map_or(0, String::len);
     if metadata_bytes > MAX_METADATA_TEXT_BYTES {
         return Err(WalletError::Vault(
             "vault metadata exceeds safe limit".into(),
@@ -417,6 +467,18 @@ fn validate_vault_blob(blob: &VaultBlob) -> WalletResult<()> {
         if metadata.version >= 3 {
             validate_signing_policy(&metadata.security_profile, &metadata.hardware_signing_mode)?;
             validate_webauthn_binding_metadata(metadata)?;
+        }
+    }
+    if let Some(derivation) = metadata.legacy_key_derivation.as_deref() {
+        if metadata.version < 3 {
+            return Err(WalletError::Vault(
+                "legacy derivation marker requires an authenticated vault version".into(),
+            ));
+        }
+        if derivation != LEGACY_DERIVATION_BRAINWALLET_SHA256 {
+            return Err(WalletError::Vault(
+                "unknown legacy key derivation marker".into(),
+            ));
         }
     }
 
@@ -504,6 +566,13 @@ fn vault_aad(metadata: &VaultMetadata) -> Vec<u8> {
                 .unwrap_or("none")
                 .as_bytes(),
         );
+        // Appended only when present, so the AAD of every vault written before
+        // this field existed stays byte-identical and keeps decrypting. Adding,
+        // removing or editing the marker on an existing vault breaks GCM.
+        if let Some(derivation) = metadata.legacy_key_derivation.as_deref() {
+            push_aad_field(&mut aad, b"legacy-key-derivation");
+            push_aad_field(&mut aad, derivation.as_bytes());
+        }
         return aad;
     }
     Vec::new()
@@ -878,6 +947,7 @@ impl EncryptedVault {
             hardware_signing_mode: String::new(),
             webauthn_credential_b64: webauthn_credential_b64.map(str::to_owned),
             webauthn_credential_binding_sha256: None,
+            legacy_key_derivation: None,
         };
         let key = with_locked_passphrase(passphrase, |p| derive_key(p, &salt, &kdf))?;
         let cipher = Aes256Gcm::new_from_slice(key.0.as_slice())
@@ -980,6 +1050,7 @@ mod tests {
             "balanced",
             "software",
             Some(&credential),
+            None,
         )
         .unwrap();
 
@@ -1017,6 +1088,7 @@ mod tests {
             "balanced",
             "software",
             Some(&credential),
+            None,
         )
         .unwrap();
         let binding = vault.metadata.webauthn_credential_binding_sha256.clone();

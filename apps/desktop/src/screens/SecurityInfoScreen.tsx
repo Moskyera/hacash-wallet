@@ -28,6 +28,7 @@ export default function SecurityInfoScreen({
   const [currentPassphrase, setCurrentPassphrase] = useState("");
   const [coldVaultConfirmation, setColdVaultConfirmation] = useState("");
   const coldVault = status?.hardware_signing_mode === "airgap_only";
+  const legacyKey = status?.legacy_key_derivation != null;
   const freshFactorAvailable = !!status?.webauthn_enabled || nativeBioAvailable;
   const runAuthenticated = (action: (passphrase: string) => void) => {
     const passphrase = currentPassphrase;
@@ -119,6 +120,9 @@ export default function SecurityInfoScreen({
 
       <h3>{t("security.signingPolicy")}</h3>
       <p className="muted">{t("security.softwareKeyCustodyHint")}</p>
+      {legacyKey ? (
+        <p className="warn-box">{t("security.legacyBrainwalletKeyWarning")}</p>
+      ) : null}
       <div className="actions-row">
         <button
           className={status?.hardware_signing_mode === "software" ? "primary" : ""}

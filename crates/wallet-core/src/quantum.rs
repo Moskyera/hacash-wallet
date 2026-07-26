@@ -392,20 +392,46 @@ impl WalletService {
         self.quantum_create_hybrid(pass, Some(legacy_prikey_hex))
     }
 
+    /// Inspect a keystore file the user is about to import.
+    ///
+    /// This confirms whether a supplied password decrypts a supplied keystore,
+    /// which is exactly the primitive an attacker needs. It is therefore treated
+    /// as key-material access: it requires a live signing session, is refused
+    /// once the vault is cold, and every attempt goes through the same
+    /// exponential backoff as unlocking. The returned info is public material
+    /// only (address and public keys).
+    pub fn quantum_preview_keystore(
+        &mut self,
+        json: &str,
+        pass: &str,
+    ) -> WalletResult<QuantumAccountInfo> {
+        self.reject_cold_vault_key_access("previewing Quantum key material")?;
+        self.require_unlocked_signing_session()?;
+        self.check_quantum_keystore_attempt_allowed()?;
+        self.bump_unlock_activity();
+        let result = preview_keystore(json, pass);
+        self.record_quantum_keystore_attempt(result.is_ok());
+        result
+    }
+
     pub fn quantum_import_keystore(
         &mut self,
         json: &str,
         pass: &str,
     ) -> WalletResult<QuantumAccountInfo> {
         self.reject_cold_vault_key_access("importing Quantum key material")?;
+        self.require_unlocked_signing_session()?;
+        self.check_quantum_keystore_attempt_allowed()?;
         self.bump_unlock_activity();
-        let (keystore, info) = import_keystore_offline(json, pass)?;
+        let imported = import_keystore_offline(json, pass);
+        self.record_quantum_keystore_attempt(imported.is_ok());
+        let (keystore, info) = imported?;
         self.store_quantum_keystore_json(keystore)?;
         Ok(info)
     }
 
     pub fn quantum_export_keystore(
-        &self,
+        &mut self,
         pass: &str,
         new_password: Option<&str>,
     ) -> WalletResult<String> {
@@ -415,8 +441,12 @@ impl WalletService {
             "exporting Quantum key material"
         };
         self.reject_cold_vault_key_access(operation)?;
+        self.require_unlocked_signing_session()?;
+        self.check_quantum_keystore_attempt_allowed()?;
         let json = self.require_keystore_json()?;
-        keystore_unlock_blob(&json, pass).map_err(WalletError::Other)?;
+        let unlocked = keystore_unlock_blob(&json, pass);
+        self.record_quantum_keystore_attempt(unlocked.is_ok());
+        unlocked.map_err(WalletError::Other)?;
         if let Some(np) = new_password {
             let exp = export_hybrid_keystore(&json, pass, np).map_err(WalletError::Other)?;
             return Ok(exp.json);

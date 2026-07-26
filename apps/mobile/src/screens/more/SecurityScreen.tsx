@@ -50,6 +50,7 @@ export default function SecurityScreen({
   const [resetPassphrase, setResetPassphrase] = useState("");
   const [resetAddress, setResetAddress] = useState("");
   const coldVault = status?.hardware_signing_mode === "airgap_only";
+  const legacyKey = status?.legacy_key_derivation != null;
   const freshFactorAvailable = platformSec?.native_biometric_available === true;
 
   useEffect(() => {
@@ -218,6 +219,9 @@ export default function SecurityScreen({
       <div className="card">
         <h2>{t("security.signingPolicy")}</h2>
         <p className="muted small">{t("security.softwareKeyCustodyHint")}</p>
+        {legacyKey ? (
+          <p className="warn-text">{t("security.legacyBrainwalletKeyWarning")}</p>
+        ) : null}
         <h3>{t("security.coldVaultTitle")}</h3>
         {coldVault ? (
           <>
@@ -259,8 +263,16 @@ export default function SecurityScreen({
                 setColdVaultPassphrase("");
                 setColdVaultConfirmation("");
                 setBusy(true);
-                void api
-                  .setHardwareMode("airgap_only", passphrase)
+                // Irreversible, so the core requires a platform ceremony bound to
+                // this exact activation before it will accept the passphrase.
+                void (async () => {
+                  const prepared = await api.prepareColdVaultActivation();
+                  if (prepared.webauthn_required) {
+                    throw new Error(t("security.coldVaultWebauthnRequired"));
+                  }
+                  await api.confirmBiometric(prepared.id);
+                  await api.executePreparedColdVaultActivation(prepared.id, passphrase);
+                })()
                   .then(() => onRefresh())
                   .then(() => api.biometricUnlockStatus())
                   .then((nextStatus) => {

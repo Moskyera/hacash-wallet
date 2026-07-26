@@ -6,7 +6,6 @@ use std::fmt::Debug;
 
 use common::{tier0_gate, with_isolated_wallet_dir};
 use hacash_wallet_core::airgap::{AIRGAP_VERSION, AirgapUnsigned};
-use hacash_wallet_core::hardware::HardwareSigningMode;
 use hacash_wallet_core::{WalletError, WalletService};
 
 const WALLET_PASS: &str = "cold-quantum-wallet-pass-01";
@@ -49,9 +48,7 @@ fn cold_vault_rejects_every_quantum_secret_entrypoint_before_work() {
             let account = wallet.quantum_create_pqc(QUANTUM_PASS).unwrap();
             let exported = wallet.quantum_export_keystore(QUANTUM_PASS, None).unwrap();
 
-            wallet
-                .change_hardware_signing_mode(WALLET_PASS, HardwareSigningMode::AirgapOnly)
-                .unwrap();
+            wallet.audit_activate_cold_vault(WALLET_PASS).unwrap();
             assert!(wallet.status().signing_available);
 
             // Invalid attacker-controlled inputs prove the policy check occurs
@@ -95,9 +92,7 @@ fn cold_unlock_and_wallet_password_rotation_never_read_quantum_sidecar() {
             let mut wallet = WalletService::new(None, None).unwrap();
             wallet.create_wallet(WALLET_PASS).unwrap();
             let account = wallet.quantum_create_pqc(QUANTUM_PASS).unwrap();
-            wallet
-                .change_hardware_signing_mode(WALLET_PASS, HardwareSigningMode::AirgapOnly)
-                .unwrap();
+            wallet.audit_activate_cold_vault(WALLET_PASS).unwrap();
             wallet.lock();
             drop(wallet);
 
