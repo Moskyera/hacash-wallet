@@ -13,6 +13,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "This policy cannot be downgraded in the app. To return to an online software wallet, recover the funds into a new wallet from independently stored recovery material.",
     "security.coldVaultActivationHint": "Use this only on a dedicated device that will remain offline. Activation forces the Paranoid profile, removes biometric unlock and permanently disables every direct signing path for this vault.",
     "security.coldVaultSoftwareLimit": "This is a one-way policy change. It improves software-wallet isolation but does not make a general-purpose device equivalent to a hardware-wallet secure element.",
+    "security.coldVaultBackupFirst":
+      "Export a full backup before you activate, and store it offline. Activation deletes the biometric unlock secret, so if this device is lost the encrypted backup plus your passphrase is the only way back to the key. Be aware of the trade-off: a backup taken now still restores an online wallet for this same address, so treat it like the key itself.",
     "security.coldVaultConfirmLabel": "Type ENABLE COLD VAULT to confirm",
     "security.coldVaultActivate": "Activate Cold Vault",
     "security.coldVaultFactorRequired": "Enable a strong device biometric or register WebAuthn first.",
@@ -35,6 +37,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Αυτή η πολιτική δεν υποβαθμίζεται μέσα από την εφαρμογή. Για επιστροφή σε online wallet, μεταφέρετε τα κεφάλαια σε νέο wallet με ανεξάρτητα αποθηκευμένο υλικό ανάκτησης.",
     "security.coldVaultActivationHint": "Χρησιμοποιήστε το μόνο σε αποκλειστική συσκευή που θα παραμένει offline. Η ενεργοποίηση επιβάλλει Paranoid, αφαιρεί το βιομετρικό ξεκλείδωμα και απενεργοποιεί μόνιμα κάθε άμεση διαδρομή υπογραφής αυτού του vault.",
     "security.coldVaultSoftwareLimit": "Η αλλαγή είναι μονόδρομη. Βελτιώνει την απομόνωση του software wallet, αλλά δεν κάνει μια συσκευή γενικής χρήσης ισοδύναμη με secure element hardware wallet.",
+    "security.coldVaultBackupFirst":
+      "Πάρε πλήρες backup πριν την ενεργοποίηση και κράτα το offline. Η ενεργοποίηση διαγράφει το βιομετρικό ξεκλείδωμα, οπότε αν χαθεί η συσκευή το κρυπτογραφημένο backup μαζί με το passphrase είναι ο μόνος δρόμος πίσω στο κλειδί. Πρόσεξε το αντιστάθμισμα: ένα backup που παίρνεις τώρα επαναφέρει ακόμα online wallet για την ίδια διεύθυνση, άρα φύλαξέ το σαν το ίδιο το κλειδί.",
     "security.coldVaultConfirmLabel": "Πληκτρολογήστε ENABLE COLD VAULT για επιβεβαίωση",
     "security.coldVaultActivate": "Ενεργοποίηση Cold Vault",
     "security.coldVaultFactorRequired": "Ενεργοποιήστε ισχυρό βιομετρικό έλεγχο συσκευής ή καταχωρίστε πρώτα WebAuthn.",
@@ -57,6 +61,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "此策略无法在应用内降级。若要恢复在线软件钱包，请使用独立保存的恢复资料把资金恢复到新钱包。",
     "security.coldVaultActivationHint": "仅在长期离线的专用设备上使用。启用后会强制使用 Paranoid 配置、移除生物识别解锁，并永久禁用此保险库的所有直接签名路径。",
     "security.coldVaultSoftwareLimit": "这是单向策略变更。它能增强软件钱包隔离，但不能让通用设备等同于硬件钱包的安全元件。",
+    "security.coldVaultBackupFirst":
+      "启用前请导出完整备份并离线保存。启用会删除生物识别解锁密钥，因此若设备丢失，加密备份加上您的密码短语是找回私钥的唯一途径。请注意代价：现在导出的备份仍可为同一地址恢复出联网钱包，请将其视同私钥本身来保管。",
     "security.coldVaultConfirmLabel": "输入 ENABLE COLD VAULT 以确认",
     "security.coldVaultActivate": "启用冷库",
     "security.coldVaultFactorRequired": "请先启用强生物识别或注册 WebAuthn。",
@@ -79,6 +85,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "このポリシーはアプリ内で元に戻せません。オンラインウォレットへ戻すには、別に保管した復旧情報から新しいウォレットへ資金を復旧してください。",
     "security.coldVaultActivationHint": "常時オフラインにする専用端末だけで使用してください。有効化すると Paranoid が強制され、生体認証による解除が削除され、この保管庫の直接署名経路が永久に無効になります。",
     "security.coldVaultSoftwareLimit": "これは一方向の変更です。ソフトウェアウォレットの分離は強化されますが、汎用端末がハードウェアウォレットのセキュアエレメントと同等になるわけではありません。",
+    "security.coldVaultBackupFirst":
+      "有効化する前に完全バックアップを書き出し、オフラインで保管してください。有効化すると生体認証の解除情報が削除されるため、端末を失った場合は暗号化バックアップとパスフレーズだけが鍵に戻る手段です。トレードオフに注意してください。今取るバックアップは同じアドレスのオンラインウォレットを復元できるため、鍵そのものと同じように扱ってください。",
     "security.coldVaultConfirmLabel": "確認のため ENABLE COLD VAULT と入力",
     "security.coldVaultActivate": "Cold Vault を有効化",
     "security.coldVaultFactorRequired": "強力な端末生体認証を有効にするか、先に WebAuthn を登録してください。",
@@ -101,6 +109,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Bu politika uygulama içinde düşürülemez. Çevrim içi cüzdana dönmek için bağımsız saklanan kurtarma verileriyle fonları yeni bir cüzdana kurtarın.",
     "security.coldVaultActivationHint": "Yalnızca çevrim dışı kalacak özel bir cihazda kullanın. Etkinleştirme Paranoid profilini zorunlu kılar, biyometrik kilit açmayı kaldırır ve bu kasa için tüm doğrudan imzalama yollarını kalıcı olarak kapatır.",
     "security.coldVaultSoftwareLimit": "Bu tek yönlü bir değişikliktir. Yazılım cüzdanı yalıtımını artırır ancak genel amaçlı cihazı donanım cüzdanının güvenli öğesine eşdeğer yapmaz.",
+    "security.coldVaultBackupFirst":
+      "Etkinleştirmeden önce tam bir yedek alın ve çevrimdışı saklayın. Etkinleştirme biyometrik kilit açma sırrını siler; cihaz kaybolursa şifreli yedek ve passphrase anahtara dönmenin tek yoludur. Ödünü bilin: şimdi alınan bir yedek aynı adres için hâlâ çevrimiçi bir cüzdan geri yükler, bu yüzden onu anahtarın kendisi gibi koruyun.",
     "security.coldVaultConfirmLabel": "Onaylamak için ENABLE COLD VAULT yazın",
     "security.coldVaultActivate": "Cold Vault'u etkinleştir",
     "security.coldVaultFactorRequired": "Önce güçlü cihaz biyometrisini etkinleştirin veya WebAuthn kaydedin.",
@@ -123,6 +133,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Không thể hạ chính sách này trong ứng dụng. Muốn trở lại ví trực tuyến, hãy khôi phục tiền vào ví mới bằng dữ liệu khôi phục được lưu độc lập.",
     "security.coldVaultActivationHint": "Chỉ dùng trên thiết bị chuyên dụng luôn ngoại tuyến. Kích hoạt sẽ bắt buộc hồ sơ Paranoid, xóa mở khóa sinh trắc học và vô hiệu hóa vĩnh viễn mọi đường ký trực tiếp của kho này.",
     "security.coldVaultSoftwareLimit": "Đây là thay đổi một chiều. Nó tăng cách ly cho ví phần mềm nhưng không biến thiết bị đa dụng thành phần tử bảo mật của ví phần cứng.",
+    "security.coldVaultBackupFirst":
+      "Hãy xuất bản sao lưu đầy đủ trước khi bật và lưu ngoại tuyến. Việc bật sẽ xóa khóa mở bằng sinh trắc học, nên nếu mất thiết bị thì bản sao lưu đã mã hóa cùng passphrase là cách duy nhất để lấy lại khóa. Lưu ý điểm đánh đổi: bản sao lưu lấy lúc này vẫn phục hồi được ví trực tuyến cho cùng địa chỉ, hãy bảo vệ nó như chính khóa.",
     "security.coldVaultConfirmLabel": "Nhập ENABLE COLD VAULT để xác nhận",
     "security.coldVaultActivate": "Kích hoạt Cold Vault",
     "security.coldVaultFactorRequired": "Hãy bật sinh trắc học mạnh của thiết bị hoặc đăng ký WebAuthn trước.",
@@ -145,6 +157,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Эту политику нельзя ослабить в приложении. Для возврата к онлайн-кошельку восстановите средства в новый кошелёк из отдельно сохранленных данных восстановления.",
     "security.coldVaultActivationHint": "Используйте только на отдельном устройстве, которое останется офлайн. Активация принудительно включает Paranoid, удаляет биометрическую разблокировку и навсегда отключает все прямые пути подписи этого хранилища.",
     "security.coldVaultSoftwareLimit": "Это одностороннее изменение. Оно усиливает изоляцию программного кошелька, но не делает обычное устройство эквивалентом защищённого элемента аппаратного кошелька.",
+    "security.coldVaultBackupFirst":
+      "Экспортируйте полную резервную копию перед активацией и храните её офлайн. Активация удаляет секрет биометрической разблокировки, поэтому при утере устройства зашифрованная копия вместе с парольной фразой остаётся единственным путём к ключу. Учтите компромисс: копия, сделанная сейчас, по-прежнему восстанавливает онлайн-кошелёк для того же адреса, поэтому обращайтесь с ней как с самим ключом.",
     "security.coldVaultConfirmLabel": "Введите ENABLE COLD VAULT для подтверждения",
     "security.coldVaultActivate": "Включить Cold Vault",
     "security.coldVaultFactorRequired": "Сначала включите сильную биометрию устройства или зарегистрируйте WebAuthn.",
@@ -167,6 +181,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Esta política no puede rebajarse en la aplicación. Para volver a un monedero en línea, recupere los fondos en uno nuevo usando material de recuperación guardado por separado.",
     "security.coldVaultActivationHint": "Úselo solo en un dispositivo dedicado que permanecerá sin conexión. La activación fuerza Paranoid, elimina el desbloqueo biométrico y desactiva permanentemente todas las rutas de firma directa de esta bóveda.",
     "security.coldVaultSoftwareLimit": "Es un cambio unidireccional. Mejora el aislamiento del monedero de software, pero no convierte un dispositivo general en el elemento seguro de un monedero físico.",
+    "security.coldVaultBackupFirst":
+      "Exporta una copia de seguridad completa antes de activar y guárdala sin conexión. La activación borra el secreto de desbloqueo biométrico, así que si pierdes el dispositivo la copia cifrada junto con tu frase de contraseña es la única vía de vuelta a la clave. Ten en cuenta la contrapartida: una copia hecha ahora todavía restaura una cartera en línea para esta misma dirección, así que trátala como la clave misma.",
     "security.coldVaultConfirmLabel": "Escriba ENABLE COLD VAULT para confirmar",
     "security.coldVaultActivate": "Activar Cold Vault",
     "security.coldVaultFactorRequired": "Active primero una biometría fuerte del dispositivo o registre WebAuthn.",
@@ -189,6 +205,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Cette politique ne peut pas être abaissée dans l'application. Pour revenir à un portefeuille en ligne, récupérez les fonds dans un nouveau portefeuille avec des éléments de récupération stockés séparément.",
     "security.coldVaultActivationHint": "Utilisez cette option uniquement sur un appareil dédié qui restera hors ligne. L'activation impose Paranoid, supprime le déverrouillage biométrique et désactive définitivement toutes les voies de signature directe de ce coffre.",
     "security.coldVaultSoftwareLimit": "Ce changement est à sens unique. Il améliore l'isolation du portefeuille logiciel sans rendre un appareil général équivalent à l'élément sécurisé d'un portefeuille matériel.",
+    "security.coldVaultBackupFirst":
+      "Exportez une sauvegarde complète avant d'activer et conservez-la hors ligne. L'activation supprime le secret de déverrouillage biométrique, donc si l'appareil est perdu, la sauvegarde chiffrée et votre phrase secrète sont le seul retour vers la clé. Notez le compromis : une sauvegarde faite maintenant restaure encore un portefeuille en ligne pour cette même adresse, traitez-la donc comme la clé elle-même.",
     "security.coldVaultConfirmLabel": "Saisissez ENABLE COLD VAULT pour confirmer",
     "security.coldVaultActivate": "Activer Cold Vault",
     "security.coldVaultFactorRequired": "Activez d'abord une biométrie forte de l'appareil ou enregistrez WebAuthn.",
@@ -211,6 +229,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Esta política não pode ser reduzida na aplicação. Para voltar a uma carteira online, recupere os fundos numa nova carteira com material de recuperação guardado separadamente.",
     "security.coldVaultActivationHint": "Use apenas num dispositivo dedicado que permanecerá offline. A ativação força Paranoid, remove o desbloqueio biométrico e desativa permanentemente todas as vias de assinatura direta deste cofre.",
     "security.coldVaultSoftwareLimit": "Esta é uma alteração de sentido único. Melhora o isolamento da carteira de software, mas não torna um dispositivo geral equivalente ao elemento seguro de uma carteira de hardware.",
+    "security.coldVaultBackupFirst":
+      "Exporte uma cópia de segurança completa antes de ativar e guarde-a offline. A ativação apaga o segredo de desbloqueio biométrico, por isso se perder o dispositivo a cópia cifrada com a sua frase de acesso é o único caminho de volta à chave. Atenção ao compromisso: uma cópia feita agora ainda restaura uma carteira online para este mesmo endereço, trate-a como a própria chave.",
     "security.coldVaultConfirmLabel": "Escreva ENABLE COLD VAULT para confirmar",
     "security.coldVaultActivate": "Ativar Cold Vault",
     "security.coldVaultFactorRequired": "Ative primeiro uma biometria forte do dispositivo ou registe WebAuthn.",
@@ -233,6 +253,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "لا يمكن خفض هذه السياسة داخل التطبيق. للعودة إلى محفظة متصلة، استعد الأموال في محفظة جديدة باستخدام مواد استرداد محفوظة بشكل مستقل.",
     "security.coldVaultActivationHint": "استخدمه فقط على جهاز مخصص سيبقى دون اتصال. يفرض التفعيل ملف Paranoid ويحذف فتح القفل بالبصمة ويعطل نهائياً كل مسارات التوقيع المباشر لهذا الخزنة.",
     "security.coldVaultSoftwareLimit": "هذا تغيير أحادي الاتجاه. يحسن عزل المحفظة البرمجية لكنه لا يجعل الجهاز العام مكافئاً للعنصر الآمن في محفظة عتادية.",
+    "security.coldVaultBackupFirst":
+      "قم بتصدير نسخة احتياطية كاملة قبل التفعيل واحفظها دون اتصال. التفعيل يحذف سر فتح القفل بالمقاييس الحيوية، فإذا فُقد الجهاز تكون النسخة المشفّرة مع عبارة المرور هي الطريق الوحيد للعودة إلى المفتاح. انتبه للمقايضة: النسخة التي تأخذها الآن ما زالت تستعيد محفظة متصلة لنفس العنوان، فتعامل معها كأنها المفتاح نفسه.",
     "security.coldVaultConfirmLabel": "اكتب ENABLE COLD VAULT للتأكيد",
     "security.coldVaultActivate": "تفعيل Cold Vault",
     "security.coldVaultFactorRequired": "فعّل أولاً بصمة قوية للجهاز أو سجّل WebAuthn.",
@@ -255,6 +277,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Policyn kan inte sänkas i appen. För att återgå till en onlineplånbok måste medlen återställas i en ny plånbok med separat lagrat återställningsmaterial.",
     "security.coldVaultActivationHint": "Använd endast på en dedikerad enhet som förblir offline. Aktivering tvingar Paranoid, tar bort biometrisk upplåsning och stänger permanent alla direkta signeringsvägar för detta valv.",
     "security.coldVaultSoftwareLimit": "Detta är en enkelriktad ändring. Den förbättrar isoleringen av programvaruplånboken men gör inte en allmän enhet likvärdig med ett säkert element i en hårdvaruplånbok.",
+    "security.coldVaultBackupFirst":
+      "Exportera en fullständig säkerhetskopia innan du aktiverar och förvara den offline. Aktiveringen tar bort den biometriska upplåsningsnyckeln, så om enheten försvinner är den krypterade kopian tillsammans med din lösenfras enda vägen tillbaka till nyckeln. Tänk på avvägningen: en kopia tagen nu återställer fortfarande en onlineplånbok för samma adress, så behandla den som nyckeln själv.",
     "security.coldVaultConfirmLabel": "Skriv ENABLE COLD VAULT för att bekräfta",
     "security.coldVaultActivate": "Aktivera Cold Vault",
     "security.coldVaultFactorRequired": "Aktivera först stark enhetsbiometri eller registrera WebAuthn.",
@@ -277,6 +301,8 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.coldVaultRecoveryOnly": "Diese Richtlinie kann in der App nicht herabgesetzt werden. Für ein Online-Wallet müssen die Mittel mit separat verwahrtem Wiederherstellungsmaterial in ein neues Wallet wiederhergestellt werden.",
     "security.coldVaultActivationHint": "Nur auf einem dedizierten, dauerhaft offline bleibenden Gerät verwenden. Die Aktivierung erzwingt Paranoid, entfernt biometrisches Entsperren und deaktiviert dauerhaft jeden direkten Signaturpfad dieses Vaults.",
     "security.coldVaultSoftwareLimit": "Dies ist eine unumkehrbare Richtlinienänderung. Sie verbessert die Isolation des Software-Wallets, macht ein Universalgerät aber nicht zum Secure Element eines Hardware-Wallets.",
+    "security.coldVaultBackupFirst":
+      "Exportieren Sie vor der Aktivierung eine vollständige Sicherung und bewahren Sie sie offline auf. Die Aktivierung löscht das biometrische Entsperrgeheimnis, wenn das Gerät also verloren geht, sind die verschlüsselte Sicherung und Ihre Passphrase der einzige Weg zurück zum Schlüssel. Beachten Sie den Kompromiss: eine jetzt erstellte Sicherung stellt weiterhin eine Online-Wallet für dieselbe Adresse wieder her, behandeln Sie sie daher wie den Schlüssel selbst.",
     "security.coldVaultConfirmLabel": "Zur Bestätigung ENABLE COLD VAULT eingeben",
     "security.coldVaultActivate": "Cold Vault aktivieren",
     "security.coldVaultFactorRequired": "Zuerst starke Gerätebiometrie aktivieren oder WebAuthn registrieren.",

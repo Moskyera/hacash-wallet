@@ -17,7 +17,7 @@ import type { L1FeeSpeed } from "../api";
 import { resolveDustWhisper } from "../dustWhisper";
 import type { SavedContact } from "../contacts";
 import { formatHacMei, maskAddress } from "../privacy";
-import { BIOMETRIC_THRESHOLD_MEI } from "../utils/appConstants";
+import { needsSecondFactor } from "../utils/secondFactorGate";
 import {
   isValidHacdName,
   isValidHacashAddress,
@@ -341,9 +341,25 @@ export default function PayTab({
               {preview.plan.rail === "L1OnChain" && whisperActive ? (
                 <p className="muted small">Broadcast via DUST Whisper relay.</p>
               ) : null}
-              {platformSec?.native_biometric_available && preview.amount_mei >= BIOMETRIC_THRESHOLD_MEI && (
-                <p className="muted">Biometric confirmation required.</p>
-              )}
+              {/* This is the notice read at the moment of paying, so it has to match the
+                  core exactly: the raw threshold comparison ignored the security profile,
+                  the hardware signing mode, and the core's rounding up of the policed
+                  amount. It also stayed silent when a factor was required but the device
+                  had no way to provide one, which is precisely when a warning matters. */}
+              {needsSecondFactor(
+                preview.amount_mei,
+                settings?.security_profile,
+                settings?.hardware_signing_mode,
+              ) ? (
+                platformSec?.native_biometric_available ? (
+                  <p className="muted">Biometric confirmation required.</p>
+                ) : (
+                  <p className="error">
+                    This amount requires a device factor, and no biometric sensor was
+                    detected. The send will be refused.
+                  </p>
+                )
+              ) : null}
               <button
                 className="primary"
                 disabled={busy || !preview.hip23.ok}

@@ -673,6 +673,21 @@ pub fn wallet_set_security_profile(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let current_passphrase = Zeroizing::new(current_passphrase);
+    // Paranoid sets yubikey_required, so every send then demands a WebAuthn ceremony
+    // that Android cannot perform: selecting it here stops every send on the device
+    // until the profile is changed back. The mobile interface disables the control,
+    // but a disabled button is a suggestion, not a policy. Cold Vault still reaches
+    // the paranoid profile, because migrate_vault_encryption sets it directly and
+    // never passes through this command.
+    #[cfg(target_os = "android")]
+    {
+        if profile == "paranoid" {
+            return Err("Paranoid requires a WebAuthn ceremony for every send, which Android \
+                 cannot complete. Enable it on the desktop wallet, or use Cold Vault for an \
+                 offline mobile signer."
+                .into());
+        }
+    }
     let mut svc = state.inner.blocking_lock();
     let profile = match profile.as_str() {
         "paranoid" => SecurityProfile::paranoid(),

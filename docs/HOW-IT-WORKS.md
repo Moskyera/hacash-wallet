@@ -147,14 +147,27 @@ did not see. It can annoy you, it cannot redirect your money.
 
 ## 7. Your choice of security policy
 
-- **Software (default).** The key is protected by your passphrase. Above a
-  configurable amount, a device factor is required for each payment.
+- **Software (default).** The key is protected by your passphrase. A device
+  factor is required for every payment **above 99 HAC**. At or below that, while
+  the wallet is unlocked, the payment is signed with no further confirmation.
+  Please read that twice, because it is the rule that decides your daily
+  experience. The limit is fixed in the app, no setting lowers it, and it applies
+  per payment rather than per day, so several payments just under it ask for
+  nothing.
 - **Security-key gate (WebAuthn).** Every payment requires a security key or
-  Windows Hello. Important: this is a *gate in front of a software key*, not
-  hardware custody. It stops someone who only has your passphrase; it does not
-  move the key into hardware.
+  Windows Hello. Fast Pay is refused outright in this mode: its settlement bill
+  is cosigned by the payment hub, so the wallet cannot bind your approval to the
+  exact bill, and refusing is the honest answer. Use Force L1 instead. Important:
+  this is a *gate in front of a software key*, not hardware custody. It stops
+  someone who only has your passphrase; it does not move the key into hardware.
 - **Cold Vault (air-gap only).** See below.
 - **Watch-only.** An address with no key. It can show balances and nothing else.
+
+There is also a stricter **Paranoid** profile that asks for a factor on
+effectively every payment, but it demands a security key, which a phone cannot
+provide. Android refuses it for that reason rather than letting you lock yourself
+out of sending. So if you want every payment on a phone confirmed, Cold Vault is
+the only option today. That gap is real and we are not going to pretend otherwise.
 
 Replacing a registered security key requires approval from the key you are
 replacing. Otherwise someone with just your passphrase could swap your second

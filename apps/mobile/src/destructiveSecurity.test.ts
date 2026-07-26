@@ -48,6 +48,25 @@ describe("destructive wallet IPC", () => {
     );
   });
 
+  // Closing a Fast Pay channel signs a real settlement, so it belongs in the prepared
+  // ceremony. The unprepared api.closeChannel() can never succeed anyway: the core
+  // passes the second-factor threshold itself as the policed amount, so the requirement
+  // is never None and the call is always refused. A control that always errors is worse
+  // than no control, because the working one lives on another screen.
+  it("closes a Fast Pay channel through the prepared ceremony, not the dead path", () => {
+    const session = read("hooks/useWalletSession.ts");
+
+    const disable = session
+      .split("const handleDisableFastPay = useCallback", 2)[1]
+      ?.split("const handleClearHistory", 1)[0];
+
+    expect(disable).toBeTruthy();
+    expect(disable).toContain("api.prepareChannelClose()");
+    expect(disable).toContain("authorizePreparedOperation(");
+    expect(disable).toContain("api.executePreparedChannelClose(prepared.id)");
+    expect(disable).not.toContain("api.closeChannel()");
+  });
+
   it("surfaces the biometric cleanup result after a passphrase change", () => {
     const app = read("MobileApp.tsx");
 

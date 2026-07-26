@@ -810,6 +810,17 @@ impl WalletService {
                 field("Reversible", "No"),
                 field("Biometric unlock", "Deleted"),
                 field("Online signing", "Blocked forever"),
+                // The unlock factor and the signing factor are not the same set. An
+                // Android screen lock can unlock the wallet, and the user is told so,
+                // but it is refused for authorizing a signature. Stating it here is
+                // the difference between an informed choice and a surprise later.
+                // Scoped to Android on purpose: this display is also shown on desktop,
+                // where Windows Hello may legitimately be configured with a PIN, so a
+                // blanket claim that a PIN is refused would be false there.
+                field(
+                    "Future signing",
+                    "A fresh device factor every time. On Android, fingerprint or face only, not the phone PIN",
+                ),
                 // Stated in the ceremony itself: the policy is bound to this vault
                 // file, not to the key. Any backup taken before now still restores
                 // an online wallet for the same address on any device.

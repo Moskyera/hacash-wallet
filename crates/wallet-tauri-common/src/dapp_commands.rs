@@ -97,6 +97,24 @@ pub async fn wallet_dapp_transfer(
     let origin = trusted_caller_origin(&origin, &webview, false)?;
     let detail =
         hacash_wallet_core::dapp::describe_txobj_for_approval(&txobj).map_err(|e| e.to_string())?;
+    // Refuse before asking. Approving a sheet for an operation that policy will reject
+    // teaches the user that approval dialogs are noise.
+    //
+    // The connection check has to come first, and stay first. An origin that never
+    // connected must not learn anything about wallet state, and must not be able to
+    // raise an approval sheet either. The same refusal shape as dapp_transfer is used
+    // so the dApp API contract does not change.
+    //
+    // This block must stay scoped. Holding the wallet mutex across require_approval
+    // would hold it for the whole 120 second approval window, and the sync commands
+    // that use blocking_lock would freeze the interface thread.
+    {
+        let svc = state.inner.lock().await;
+        if !svc.dapp_session_is_authorized(&origin) {
+            return Ok(serde_json::json!({ "err": "Wallet not connected", "ret": 1 }));
+        }
+        svc.check_dapp_signing_policy().map_err(|e| e.to_string())?;
+    }
     require_approval(
         &state,
         &origin,
@@ -131,6 +149,16 @@ pub async fn wallet_dapp_sign_tx(
     } else {
         "Approve transaction signature"
     };
+    // Same reasons as wallet_dapp_transfer: connection first so an unconnected origin
+    // learns nothing and cannot raise a sheet, then policy, and the block stays scoped
+    // so the wallet mutex is never held across the approval window.
+    {
+        let svc = state.inner.lock().await;
+        if !svc.dapp_session_is_authorized(&origin) {
+            return Ok(serde_json::json!({ "err": "Wallet not connected", "ret": 1 }));
+        }
+        svc.check_dapp_signing_policy().map_err(|e| e.to_string())?;
+    }
     require_approval(
         &state,
         &origin,

@@ -90,3 +90,63 @@ fn passphrase_change_disables_and_clears_biometric_unlock() {
         );
     }
 }
+
+/// Both dApp signing commands must settle three things before they ask the user for
+/// anything: that the origin actually connected, and that policy will not refuse the
+/// operation anyway. Consent requested for an operation that cannot proceed teaches the
+/// user that approval dialogs are noise, and an unconnected origin must learn nothing
+/// about wallet state.
+///
+/// The order is the contract, so this asserts positions, not just presence.
+#[test]
+fn dapp_signing_checks_connection_and_policy_before_requesting_consent() {
+    let root = repo_root();
+    let dapp = read(&root, "crates/wallet-tauri-common/src/dapp_commands.rs");
+
+    for command in [
+        "pub async fn wallet_dapp_transfer(",
+        "pub async fn wallet_dapp_sign_tx(",
+    ] {
+        let body = command_body(&dapp, command);
+
+        let connection = body
+            .find("dapp_session_is_authorized(&origin)")
+            .unwrap_or_else(|| panic!("{command} must check the dApp session first"));
+        let policy = body
+            .find("check_dapp_signing_policy()")
+            .unwrap_or_else(|| panic!("{command} must check signing policy before consent"));
+        let approval = body
+            .find("require_approval(")
+            .unwrap_or_else(|| panic!("{command} must still request approval"));
+
+        assert!(
+            connection < policy,
+            "{command} must not reveal policy state to an origin that never connected"
+        );
+        assert!(
+            policy < approval,
+            "{command} must refuse before raising the approval sheet, not after"
+        );
+        assert!(
+            body.contains(r#"{ "err": "Wallet not connected", "ret": 1 }"#),
+            "{command} must keep the existing unconnected response shape"
+        );
+    }
+
+    // The wallet mutex must never be held across the approval await: require_approval
+    // waits up to 120 seconds, and the sync commands use blocking_lock, so holding it
+    // would freeze the interface thread rather than fail cleanly.
+    let transfer = command_body(&dapp, "pub async fn wallet_dapp_transfer(");
+    let guard_block = transfer
+        .split_once("let svc = state.inner.lock().await;")
+        .expect("scoped pre-check guard")
+        .1;
+    let block_end = guard_block.find('}').expect("pre-check block must close");
+    let approval_offset = guard_block
+        .find("require_approval(")
+        .expect("approval call after the pre-check");
+    assert!(
+        block_end < approval_offset,
+        "the pre-check guard must be dropped before require_approval is awaited"
+    );
+}

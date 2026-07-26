@@ -162,11 +162,19 @@ export const primaryUiEn = {
   "security.biometricUnlockEnabled": "Biometric unlock enabled.",
   "security.biometricUnlockDisabled": "Biometric unlock disabled.",
   "security.biometricConfirm": "Biometric confirmation",
-  "security.biometricConfirmSends": "Confirm sends of {amount} HAC or more with {kind}.",
-  "security.noBiometricLargeSend": "No biometric sensor was detected. Large sends may fail without biometric confirmation.",
+  "security.biometricConfirmSends":
+    "HAC sends above {amount} HAC require {kind}. Below that, a HAC send is signed with no confirmation while the wallet is unlocked. Diamond and bridged Bitcoin sends always require it, whatever the amount.",
+  "security.biometricConfirmEvery":
+    "Every payment requires {kind}, whatever the amount.",
+  "security.noBiometricLargeSend":
+    "No biometric sensor was detected. HAC sends above {amount} HAC, and every Diamond or bridged Bitcoin send, will be refused because this device cannot confirm them.",
+  "security.noBiometricAnySend":
+    "No biometric sensor was detected. Every payment will be refused, because this policy needs a confirmation this device cannot provide.",
   "security.useBiometricForSends": "Use biometric confirmation for sends",
   "security.biometricConfirmOn": "Biometric confirmation enabled.",
   "security.biometricConfirmOff": "Biometric confirmation disabled.",
+  "security.signingRefusesScreenLock":
+    "Your phone PIN, pattern or password is not accepted for approving a send. Only a fingerprint or face is.",
   "security.testBiometric": "Test biometric authentication",
   "security.biometricTestOk": "Biometric test successful.",
   "security.lockWallet": "Lock wallet",
@@ -313,6 +321,18 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Ενεργοποίηση βιομετρικού ξεκλειδώματος",
     "security.disableBiometricUnlock": "Απενεργοποίηση βιομετρικού ξεκλειδώματος",
     "security.biometricConfirm": "Βιομετρική επιβεβαίωση",
+    "security.biometricConfirmSends":
+      "Οι αποστολές HAC πάνω από {amount} HAC απαιτούν {kind}. Κάτω από αυτό, μια αποστολή HAC υπογράφεται χωρίς επιβεβαίωση όσο το wallet είναι ξεκλείδωτο. Οι αποστολές Diamond και bridged Bitcoin απαιτούν πάντα επιβεβαίωση, ανεξάρτητα από το ποσό.",
+    "security.biometricConfirmEvery":
+      "Κάθε πληρωμή απαιτεί {kind}, ανεξάρτητα από το ποσό.",
+    "security.noBiometricLargeSend":
+      "Δεν βρέθηκε βιομετρικός αισθητήρας. Οι αποστολές HAC πάνω από {amount} HAC, και κάθε αποστολή Diamond ή bridged Bitcoin, θα απορρίπτονται, γιατί η συσκευή δεν μπορεί να τις επιβεβαιώσει.",
+    "security.noBiometricAnySend":
+      "Δεν βρέθηκε βιομετρικός αισθητήρας. Κάθε πληρωμή θα απορρίπτεται, γιατί αυτή η πολιτική απαιτεί επιβεβαίωση που η συσκευή δεν μπορεί να δώσει.",
+    "security.biometricConfirmOn": "Η βιομετρική επιβεβαίωση είναι ενεργή.",
+    "security.biometricConfirmOff": "Η βιομετρική επιβεβαίωση δεν είναι διαθέσιμη.",
+    "security.signingRefusesScreenLock":
+      "Το PIN, το μοτίβο ή ο κωδικός του κινητού δεν γίνεται δεκτός για την έγκριση αποστολής. Μόνο δακτυλικό ή πρόσωπο.",
     "security.useBiometricForSends": "Χρήση βιομετρικής επιβεβαίωσης στις αποστολές",
     "security.testBiometric": "Δοκιμή βιομετρικού ελέγχου",
     "security.biometricTestOk": "Η βιομετρική δοκιμή πέτυχε.",
@@ -436,6 +456,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "启用生物识别解锁",
     "security.disableBiometricUnlock": "停用生物识别解锁",
     "security.biometricConfirm": "生物识别确认",
+    "security.signingRefusesScreenLock":
+      "批准发送时不接受手机的 PIN 码、图案或密码，只接受指纹或人脸。",
     "security.useBiometricForSends": "发送时使用生物识别确认",
     "security.testBiometric": "测试生物识别",
     "security.lockWallet": "锁定钱包",
@@ -556,6 +578,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "生体認証ロック解除を有効化",
     "security.disableBiometricUnlock": "生体認証ロック解除を無効化",
     "security.biometricConfirm": "生体認証による確認",
+    "security.signingRefusesScreenLock":
+      "送金の承認では端末の PIN、パターン、パスワードは使えません。指紋または顔認証のみです。",
     "security.useBiometricForSends": "送信時に生体認証を使用",
     "security.testBiometric": "生体認証をテスト",
     "security.lockWallet": "ウォレットをロック",
@@ -672,6 +696,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Biyometrik kilit açmayı etkinleştir",
     "security.disableBiometricUnlock": "Biyometrik kilit açmayı kapat",
     "security.biometricConfirm": "Biyometrik onay",
+    "security.signingRefusesScreenLock":
+      "Gönderimi onaylamak için telefonun PIN'i, deseni veya şifresi kabul edilmez. Yalnızca parmak izi veya yüz.",
     "security.useBiometricForSends": "Gönderimlerde biyometrik onay kullan",
     "security.testBiometric": "Biyometriyi test et",
     "security.lockWallet": "Cüzdanı kilitle",
@@ -787,6 +813,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Bật mở khóa sinh trắc học",
     "security.disableBiometricUnlock": "Tắt mở khóa sinh trắc học",
     "security.biometricConfirm": "Xác nhận sinh trắc học",
+    "security.signingRefusesScreenLock":
+      "Mã PIN, hình mở khóa hoặc mật khẩu của điện thoại không được chấp nhận để phê duyệt giao dịch gửi. Chỉ vân tay hoặc khuôn mặt.",
     "security.useBiometricForSends": "Dùng sinh trắc học khi gửi",
     "security.testBiometric": "Kiểm tra sinh trắc học",
     "security.lockWallet": "Khóa ví",
@@ -902,6 +930,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Включить биометрическую разблокировку",
     "security.disableBiometricUnlock": "Выключить биометрическую разблокировку",
     "security.biometricConfirm": "Биометрическое подтверждение",
+    "security.signingRefusesScreenLock":
+      "PIN-код, графический ключ или пароль телефона не принимаются для подтверждения отправки. Только отпечаток или лицо.",
     "security.useBiometricForSends": "Использовать биометрию при отправке",
     "security.testBiometric": "Проверить биометрию",
     "security.lockWallet": "Заблокировать кошелёк",
@@ -1017,6 +1047,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Activar desbloqueo biométrico",
     "security.disableBiometricUnlock": "Desactivar desbloqueo biométrico",
     "security.biometricConfirm": "Confirmación biométrica",
+    "security.signingRefusesScreenLock":
+      "El PIN, el patrón o la contraseña del teléfono no se aceptan para aprobar un envío. Solo huella o rostro.",
     "security.useBiometricForSends": "Usar biometría para los envíos",
     "security.testBiometric": "Probar biometría",
     "security.lockWallet": "Bloquear monedero",
@@ -1132,6 +1164,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Activer le déverrouillage biométrique",
     "security.disableBiometricUnlock": "Désactiver le déverrouillage biométrique",
     "security.biometricConfirm": "Confirmation biométrique",
+    "security.signingRefusesScreenLock":
+      "Le code PIN, le schéma ou le mot de passe du téléphone n'est pas accepté pour approuver un envoi. Uniquement l'empreinte ou le visage.",
     "security.useBiometricForSends": "Utiliser la biométrie pour les envois",
     "security.testBiometric": "Tester la biométrie",
     "security.lockWallet": "Verrouiller le portefeuille",
@@ -1247,6 +1281,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Ativar desbloqueio biométrico",
     "security.disableBiometricUnlock": "Desativar desbloqueio biométrico",
     "security.biometricConfirm": "Confirmação biométrica",
+    "security.signingRefusesScreenLock":
+      "O PIN, o padrão ou a senha do telefone não são aceites para aprovar um envio. Apenas impressão digital ou rosto.",
     "security.useBiometricForSends": "Usar biometria nos envios",
     "security.testBiometric": "Testar biometria",
     "security.lockWallet": "Bloquear carteira",
@@ -1362,6 +1398,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "تفعيل الفتح بالمقاييس الحيوية",
     "security.disableBiometricUnlock": "تعطيل الفتح بالمقاييس الحيوية",
     "security.biometricConfirm": "التأكيد بالمقاييس الحيوية",
+    "security.signingRefusesScreenLock":
+      "لا يُقبل رقم PIN أو النمط أو كلمة مرور الهاتف للموافقة على الإرسال. البصمة أو الوجه فقط.",
     "security.useBiometricForSends": "استخدام المقاييس الحيوية عند الإرسال",
     "security.testBiometric": "اختبار المقاييس الحيوية",
     "security.lockWallet": "قفل المحفظة",
@@ -1477,6 +1515,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Aktivera biometrisk upplåsning",
     "security.disableBiometricUnlock": "Inaktivera biometrisk upplåsning",
     "security.biometricConfirm": "Biometrisk bekräftelse",
+    "security.signingRefusesScreenLock":
+      "Telefonens PIN, mönster eller lösenord godtas inte för att godkänna en betalning. Endast fingeravtryck eller ansikte.",
     "security.useBiometricForSends": "Använd biometri vid sändning",
     "security.testBiometric": "Testa biometri",
     "security.lockWallet": "Lås plånbok",
@@ -1592,6 +1632,8 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Biometrisches Entsperren aktivieren",
     "security.disableBiometricUnlock": "Biometrisches Entsperren deaktivieren",
     "security.biometricConfirm": "Biometrische Bestätigung",
+    "security.signingRefusesScreenLock":
+      "Die PIN, das Muster oder das Passwort des Telefons wird für die Freigabe einer Zahlung nicht akzeptiert. Nur Fingerabdruck oder Gesicht.",
     "security.useBiometricForSends": "Biometrie beim Senden verwenden",
     "security.testBiometric": "Biometrie testen",
     "security.lockWallet": "Wallet sperren",

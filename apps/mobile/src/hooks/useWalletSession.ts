@@ -13,6 +13,7 @@ import {
 } from "../api";
 import { hasWhisperRelays, resolveDustWhisper } from "../dustWhisper";
 import { formatInvokeError } from "../formatInvokeError";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 import { DEFAULT_PRIVACY } from "../privacy";
 import { loadWalletName, saveWalletName } from "../walletName";
 
@@ -208,17 +209,28 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
   const handleDisableFastPay = useCallback(async () => {
     setBusy(true);
     try {
-      await api.closeChannel();
+      // closeChannel() can never succeed: the core passes the second-factor
+      // threshold itself as the policed amount, so the requirement is never None
+      // and the unprepared path is always refused. Closing a channel signs a real
+      // settlement, so it belongs in the prepared ceremony, which is what the Fast
+      // Pay screen already does.
+      const prepared = await api.prepareChannelClose();
+      await authorizePreparedOperation(
+        prepared,
+        platformSec?.native_biometric_available ?? false,
+        settings?.biometric_send_enabled ?? true,
+      );
+      const tx = await api.executePreparedChannelClose(prepared.id);
       const fp = await api.fastPayStatus();
       setFastPay(fp);
       await refresh();
-      showToast("Fast Pay disabled.", "info");
+      showToast(`Fast Pay disabled (${tx.slice(0, 12)}…)`, "success");
     } catch (e) {
       showToast(formatInvokeError(e), "error");
     } finally {
       setBusy(false);
     }
-  }, [refresh, showToast]);
+  }, [platformSec, refresh, settings, showToast]);
 
   const handleClearHistory = useCallback(async () => {
     setBusy(true);

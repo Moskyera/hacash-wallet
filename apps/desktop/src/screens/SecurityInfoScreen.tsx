@@ -155,6 +155,9 @@ export default function SecurityInfoScreen({
           <>
             <p>{t("security.coldVaultActivationHint")}</p>
             <p className="warn-box">{t("security.coldVaultSoftwareLimit")}</p>
+            {/* Desktop runs the same irreversible activation as mobile, so it needs
+                the same warning to take a backup first. */}
+            <p className="warn-box">{t("security.coldVaultBackupFirst")}</p>
             <label>{t("security.coldVaultConfirmLabel")}</label>
             <input
               value={coldVaultConfirmation}

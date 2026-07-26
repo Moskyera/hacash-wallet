@@ -40,6 +40,8 @@ describe("shared locale catalog", () => {
       "security.exportBackup",
       // A safety warning nobody can read is not a warning.
       "security.biometricScreenLockWarning",
+      "security.signingRefusesScreenLock",
+      "security.coldVaultBackupFirst",
       "common.continue",
       "home.refreshing",
       "home.pullToRefresh",

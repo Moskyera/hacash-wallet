@@ -209,6 +209,45 @@ fn backup_export_stages_the_file_where_the_native_helper_accepts_it() {
     );
 }
 
+/// The mobile Security screen only disables the Paranoid button. A disabled control is
+/// a suggestion, not a policy, so the command has to refuse it as well: Paranoid demands
+/// a WebAuthn ceremony for every send that Android cannot perform, which would stop every
+/// send on the device. Compiled out on desktop, so this asserts the source contract.
+#[test]
+fn android_refuses_the_paranoid_profile_at_the_command_layer() {
+    let root = repo_root();
+    let commands = read(&root, "crates/wallet-tauri-common/src/commands.rs");
+
+    let profile_command = commands
+        .split_once("pub fn wallet_set_security_profile(")
+        .expect("security profile command")
+        .1
+        .split_once("svc.change_security_profile(")
+        .expect("profile change call")
+        .0;
+
+    assert!(
+        profile_command.contains("#[cfg(target_os = \"android\")]"),
+        "the refusal must be Android-only, since desktop can complete the WebAuthn ceremony"
+    );
+    assert!(
+        profile_command.contains("if profile == \"paranoid\""),
+        "the command must reject the paranoid profile on Android before applying it"
+    );
+    assert!(
+        profile_command.contains("return Err("),
+        "rejecting means returning an error, not silently substituting another profile"
+    );
+
+    // Cold Vault legitimately runs on the paranoid profile, and it must keep working.
+    // It reaches that profile through the vault migration, never through this command.
+    let wallet = read(&root, "crates/wallet-core/src/wallet.rs");
+    assert!(
+        wallet.contains("target_profile = SecurityProfile::paranoid();"),
+        "Cold Vault must keep setting the paranoid profile directly in the migration"
+    );
+}
+
 #[test]
 fn windows_android_release_fallback_reuses_the_verified_native_library() {
     let root = repo_root();

@@ -52,6 +52,10 @@ export default function SecurityScreen({
   const coldVault = status?.hardware_signing_mode === "airgap_only";
   const legacyKey = status?.legacy_key_derivation != null;
   const freshFactorAvailable = platformSec?.native_biometric_available === true;
+  // The amount threshold governs HAC only, and only on the balanced profile. A Cold
+  // Vault requires a factor for every signature, and Paranoid lowers the threshold to
+  // effectively every payment, so neither can be described with a number.
+  const everyPaymentNeedsFactor = coldVault || status?.security_profile === "paranoid";
 
   useEffect(() => {
     void api.biometricUnlockStatus().then(setBioUnlockStatus).catch(() => setBioUnlockStatus(null));
@@ -232,6 +236,10 @@ export default function SecurityScreen({
           <>
             <p className="muted small">{t("security.coldVaultActivationHint")}</p>
             <p className="warn-text">{t("security.coldVaultSoftwareLimit")}</p>
+            {/* Irreversible, and it deletes the biometric unlock secret. Anyone who
+                has not exported a backup first is one lost phone away from losing
+                the key, so say it before the passphrase field, not after. */}
+            <p className="warn-text">{t("security.coldVaultBackupFirst")}</p>
             <label className="label">{t("security.currentPassphrase")}</label>
             <input
               type="password"
@@ -368,15 +376,38 @@ export default function SecurityScreen({
       </div>
       <div className="card">
         <h2>{t("security.biometricConfirm")}</h2>
+        {/* Two things the old copy got wrong. The core requires a factor when the
+            amount rounded up reaches the threshold, so the honest boundary is
+            "above threshold - 1". And the amount threshold only governs HAC: a
+            Cold Vault or the Paranoid profile needs a factor for every payment,
+            whatever the amount, so quoting a number there states the rule
+            backwards. */}
         <p className="muted small">
           {platformSec?.native_biometric_available
-            ? t("security.biometricConfirmSends", {
-                amount: BIOMETRIC_THRESHOLD_MEI,
-                kind: platformSec.biometric_kind ?? t("security.biometric"),
-              })
-            : t("security.noBiometricLargeSend")}
+            ? everyPaymentNeedsFactor
+              ? t("security.biometricConfirmEvery", {
+                  kind: platformSec.biometric_kind ?? t("security.biometric"),
+                })
+              : t("security.biometricConfirmSends", {
+                  amount: BIOMETRIC_THRESHOLD_MEI - 1,
+                  kind: platformSec.biometric_kind ?? t("security.biometric"),
+                })
+            : everyPaymentNeedsFactor
+            ? t("security.noBiometricAnySend")
+            : t("security.noBiometricLargeSend", {
+                amount: BIOMETRIC_THRESHOLD_MEI - 1,
+              })}
         </p>
-        <p className="muted small">{t("security.biometricConfirmOn")}</p>
+        {/* Without a sensor there is nothing to confirm with, so saying it is
+            enabled contradicts the line above it. */}
+        <p className="muted small">
+          {platformSec?.native_biometric_available
+            ? t("security.biometricConfirmOn")
+            : t("security.biometricConfirmOff")}
+        </p>
+        {platformSec?.native_biometric_available ? (
+          <p className="muted small">{t("security.signingRefusesScreenLock")}</p>
+        ) : null}
         {/* Never use the production send authorization as a biometric test. */}
       </div>
       <button type="button" onClick={() => void onLock()}>

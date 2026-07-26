@@ -338,6 +338,21 @@ fn activation_display_names_the_irreversible_consequences() {
                 // The ceremony must not overstate its own scope: the honest limit
                 // is that older backups of the same key still sign online.
                 assert!(rendered.contains("Older backups"));
+                // Unlock and signing do not accept the same factors. The screen lock
+                // can unlock the wallet but is refused for authorizing a signature,
+                // so the irreversible choice must name what signing will need.
+                assert!(
+                    rendered.contains("Future signing"),
+                    "display must state which factors can still sign: {rendered}"
+                );
+                // Scoped to Android deliberately: the same display is shown on desktop,
+                // where Windows Hello may be configured with a PIN, so the claim must
+                // not be a blanket one.
+                assert!(
+                    rendered.contains("not the phone PIN"),
+                    "display must state that the Android screen lock cannot authorize a \
+                     signature: {rendered}"
+                );
                 // The OS prompt the user actually reads must carry the same facts.
                 let challenge = wallet
                     .begin_prepared_native_authorization(&prepared.id)
