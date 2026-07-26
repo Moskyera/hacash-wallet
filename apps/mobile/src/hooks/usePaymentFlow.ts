@@ -137,7 +137,11 @@ export function usePaymentFlow(opts: {
     setBusy(true);
     try {
       void refresh();
-      const protectedSend = needsSecondFactor(preview.amount_mei, settings?.security_profile);
+      const protectedSend = needsSecondFactor(
+        preview.amount_mei,
+        settings?.security_profile,
+        settings?.hardware_signing_mode,
+      );
       let result;
       if (preview.plan.rail === "L2Fast") {
         if (protectedSend) {

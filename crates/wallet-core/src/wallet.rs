@@ -2574,6 +2574,16 @@ impl WalletService {
         }
         // Single-use second factor: consumed before signing (enterprise per-tx model).
         self.clear_second_factor();
+        // Both UIs use this unprepared command only for the Fast Pay rail, and that rail
+        // hands the account to the hub router, which cosigns the settlement bill itself.
+        // It therefore never reaches sign_tx_hex_in_context and never hits
+        // check_signing_allowed_in_context, the only place that enforces the hardware
+        // signing mode for a signature. Without this barrier a webauthn_gate wallet
+        // signs an L2 bill with no ceremony while promising one for every payment, and a
+        // balanced wallet accepts a session-level biometric for a large send instead of
+        // one bound to that exact bill. Anything that needs a factor must go through the
+        // prepared ceremony, which is what the three sibling call sites already require.
+        self.protected_unprepared_signing_block("HAC send", policy_amount)?;
         let from = self.require_address()?;
         let preview = self.preview_send(to, amount_mei, &options).await?;
         let pending_key = self.begin_pending_history(preview.plan.rail, &from, to, amount_mei)?;

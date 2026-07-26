@@ -167,9 +167,15 @@ export function useHacSend(opts: {
     void refreshHistory();
     try {
       const amount = Number(sendAmount);
+      // Mirror of authorization_requirement() in wallet-core. A hardware gate and a
+      // Cold Vault need a factor for every amount, and the core rounds the policed
+      // amount up, so 99.5 needs one too. Being more permissive here just turns a
+      // usable "Select Force L1" hint into a raw policy error at the moment of paying.
       const needsAuthorization =
+        status?.hardware_signing_mode === "webauthn_gate" ||
+        status?.hardware_signing_mode === "airgap_only" ||
         status?.security_profile === "paranoid" ||
-        (status?.security_profile !== "paranoid" && amount >= 100);
+        Math.ceil(amount) >= 100;
       let result;
       if (preview?.plan.rail === "L2Fast") {
         if (needsAuthorization) {
