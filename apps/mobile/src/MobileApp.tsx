@@ -348,8 +348,16 @@ export default function MobileApp() {
 
   useEffect(() => {
     if (!bioUnlockReady || bioUnlockPrompted.current || session.busy) return;
-    bioUnlockPrompted.current = true;
-    const t = window.setTimeout(() => void handleBiometricUnlock(), 400);
+    // Arm the once-only latch when the prompt actually fires, not when it is
+    // scheduled. This effect depends on `busy`, so any unrelated busy change
+    // during the delay runs the cleanup and cancels the pending timeout. Setting
+    // the latch up front made that cancellation permanent: the effect re-ran,
+    // saw the latch, and returned, so the prompt never appeared at all.
+    const t = window.setTimeout(() => {
+      if (bioUnlockPrompted.current) return;
+      bioUnlockPrompted.current = true;
+      void handleBiometricUnlock();
+    }, 400);
     return () => window.clearTimeout(t);
   }, [bioUnlockReady, session.busy]);
 

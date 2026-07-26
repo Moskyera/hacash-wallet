@@ -25,6 +25,17 @@ object BiometricSecretStore {
   private const val PREF_IV = "iv"
   private const val PREF_VERSION = "version"
   private const val CURRENT_VERSION = 3
+
+  /**
+   * Seconds one authentication covers, restored from the released v0.1.55 policy.
+   *
+   * A per-use key (window 0, biometric only) is stronger, but it did not work on
+   * device: enabling it failed outright. This is the policy that shipped and
+   * worked. The cost is stated plainly in docs/HOW-IT-WORKS.md: one biometric
+   * covers key use for this many seconds, and the device credential is accepted,
+   * so the phone PIN or pattern can unlock the wallet.
+   */
+  private const val AUTH_WINDOW_SECONDS = 30
   private val AAD = "HacashWallet|biometric-unlock|v3".toByteArray(StandardCharsets.UTF_8)
 
   data class Status(
@@ -232,7 +243,7 @@ object BiometricSecretStore {
   private fun getExistingKey(): SecretKey {
     val key = keyStore().getKey(CURRENT_KEY_ALIAS, null) as? SecretKey
       ?: throw IllegalStateException("Android Keystore key is missing")
-    check(isAuthPerUse(keyInfo(key))) { "Android Keystore key is not auth-per-use" }
+    check(isPolicyAcceptable(keyInfo(key))) { "Android Keystore key policy does not match this build" }
     return key
   }
 
@@ -241,9 +252,25 @@ object BiometricSecretStore {
       .getKeySpec(key, KeyInfo::class.java) as KeyInfo
   }
 
+  /** Reported to the UI: does every single use need a fresh authentication? */
   private fun isAuthPerUse(keyInfo: KeyInfo): Boolean {
     return keyInfo.isUserAuthenticationRequired &&
-      keyInfo.userAuthenticationValidityDurationSeconds == -1
+      keyInfo.userAuthenticationValidityDurationSeconds <= 0
+  }
+
+  /**
+   * Does this key match the policy this build creates?
+   *
+   * Callers delete the key when this is false, so it must accept the policy in
+   * `generateKey` exactly. It accepts per-use keys too, so a key written by a
+   * build that used the stricter policy keeps working instead of being wiped.
+   * A window longer than intended is still rejected: that would let one
+   * authentication cover more use than this build ever asked for.
+   */
+  private fun isPolicyAcceptable(keyInfo: KeyInfo): Boolean {
+    if (!keyInfo.isUserAuthenticationRequired) return false
+    val window = keyInfo.userAuthenticationValidityDurationSeconds
+    return window <= AUTH_WINDOW_SECONDS
   }
 
   private fun hasCompleteCurrentState(activity: Activity): Boolean {
@@ -276,7 +303,7 @@ object BiometricSecretStore {
     val existing = keyStore.getKey(CURRENT_KEY_ALIAS, null) as? SecretKey
     if (existing != null) {
       try {
-        check(isAuthPerUse(keyInfo(existing))) { "Android Keystore key is not auth-per-use" }
+        check(isPolicyAcceptable(keyInfo(existing))) { "Android Keystore key policy does not match this build" }
         return existing
       } catch (_: Exception) {
         clear(activity)
@@ -310,10 +337,13 @@ object BiometricSecretStore {
       .setInvalidatedByBiometricEnrollment(true)
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+      builder.setUserAuthenticationParameters(
+        AUTH_WINDOW_SECONDS,
+        KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
+      )
     } else {
       @Suppress("DEPRECATION")
-      builder.setUserAuthenticationValidityDurationSeconds(-1)
+      builder.setUserAuthenticationValidityDurationSeconds(AUTH_WINDOW_SECONDS)
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && strongBox) {
       builder.setIsStrongBoxBacked(true)

@@ -38,6 +38,8 @@ describe("shared locale catalog", () => {
       "quantum.sendTitle",
       "settings.title",
       "security.exportBackup",
+      // A safety warning nobody can read is not a warning.
+      "security.biometricScreenLockWarning",
       "common.continue",
       "home.refreshing",
       "home.pullToRefresh",

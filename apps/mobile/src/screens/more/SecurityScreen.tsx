@@ -302,6 +302,11 @@ export default function SecurityScreen({
               })
             : t("security.noBiometricSensor")}
         </p>
+        {/* The key policy accepts the device credential, so the phone screen lock
+            opens the wallet too. Say so here, not only in the public docs. */}
+        {!coldVault && platformSec?.native_biometric_available ? (
+          <p className="muted small">{t("security.biometricScreenLockWarning")}</p>
+        ) : null}
         {bioUnlockStatus?.enabled && bioUnlockStatus.configured ? (
           <p className="muted small">{t("security.biometricUnlockActive")}</p>
         ) : null}

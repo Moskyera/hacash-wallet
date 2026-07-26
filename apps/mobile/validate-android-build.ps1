@@ -320,25 +320,47 @@ if (Test-Path $biometricStoreSource) {
         ([regex]::Matches($biometricStore, '\.commit\(\)')).Count -lt 2) {
         $errors += "Biometric secret store must durably commit both save and clear operations off the UI thread"
     }
-    foreach ($authPerUseContract in @(
+    # The stricter per-use, biometric-only policy could not be enabled on device, so
+    # the released v0.1.55 policy is in use: one authentication covers a bounded
+    # window and the device credential is accepted. The gate now enforces THAT,
+    # because a contract that contradicts the shipped code protects nothing.
+    foreach ($keyPolicyContract in @(
         'hacash_wallet_biometric_unlock_v3',
         'hacash_wallet_biometric_unlock_v2',
-        'setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)',
-        'setUserAuthenticationValidityDurationSeconds(-1)'
+        'setUserAuthenticationRequired(true)',
+        'setInvalidatedByBiometricEnrollment(true)',
+        'AUTH_WINDOW_SECONDS'
     )) {
-        if ($biometricStore -notmatch [regex]::Escape($authPerUseContract)) {
-            $errors += "Biometric secret store is missing auth-per-use contract: $authPerUseContract"
+        if ($biometricStore -notmatch [regex]::Escape($keyPolicyContract)) {
+            $errors += "Biometric secret store is missing key policy contract: $keyPolicyContract"
         }
     }
-    if ($biometricStore -match 'AUTH_WINDOW_SECONDS') {
-        $errors += "Biometric unlock key must not use a time-based authentication window"
+    # The window must stay exactly the released value. Anything longer would let one
+    # authentication cover more key use than the interface implies.
+    if ($biometricStore -notmatch [regex]::Escape('AUTH_WINDOW_SECONDS = 30')) {
+        $errors += "Biometric unlock window must remain the released 30 second value"
     }
 }
 
 if (Test-Path $nativePluginSource) {
     $nativePlugin = Get-Content $nativePluginSource -Raw
-    if ($nativePlugin -notmatch [regex]::Escape('prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))')) {
-        $errors += "Biometric unlock must authenticate the exact Cipher through a CryptoObject"
+    # A bounded-window key cannot be bound to a CryptoObject, so the prompt runs
+    # first and the Cipher is created from the already unlocked key afterwards.
+    if ($nativePlugin -notmatch [regex]::Escape('prompt.authenticate(promptInfo)')) {
+        $errors += "Biometric unlock must run the prompt before creating the Cipher"
+    }
+    # Unlock accepts the device credential because the Keystore key does. Authorizing
+    # a send or Cold Vault activation must not: a phone PIN is not authorization for
+    # a high-value signing decision.
+    if ($nativePlugin -notmatch [regex]::Escape('private fun signingAuthenticators(): Int = BiometricManager.Authenticators.BIOMETRIC_STRONG')) {
+        $errors += "Prepared-operation authorization must require a Class 3 biometric only"
+    }
+    if ($nativePlugin -notmatch [regex]::Escape('.setAllowedAuthenticators(unlockAuthenticators())')) {
+        $errors += "Keystore unlock must state its allowed authenticators explicitly"
+    }
+    $signingCeremony = $nativePlugin.Substring($nativePlugin.IndexOf('fun authenticateStrong('))
+    if ($signingCeremony -match [regex]::Escape('unlockAuthenticators()')) {
+        $errors += "Prepared-operation authorization must not reuse the unlock authenticators"
     }
 }
 

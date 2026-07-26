@@ -26,7 +26,7 @@ describe("Android private-screen hardening", () => {
     expect(validator).toContain("WindowManager\\.LayoutParams\\.FLAG_SECURE");
   });
 
-  it("binds every biometric unlock decrypt to an auth-per-use CryptoObject", () => {
+  it("keeps biometric unlock on the released bounded-window key policy", () => {
     const store = read(
       "src-tauri/android-src/org/hacash/wallet/mobile/BiometricSecretStore.kt",
     );
@@ -37,20 +37,46 @@ describe("Android private-screen hardening", () => {
 
     expect(store).toContain('CURRENT_KEY_ALIAS = "hacash_wallet_biometric_unlock_v3"');
     expect(store).toContain('LEGACY_KEY_ALIAS = "hacash_wallet_biometric_unlock_v2"');
-    expect(store).toContain(
-      "setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)",
-    );
-    expect(store).toContain("setUserAuthenticationValidityDurationSeconds(-1)");
-    expect(store).not.toContain("AUTH_WINDOW_SECONDS");
+
+    // A stricter per-use, biometric-only key could not be enabled on device, so the
+    // released v0.1.55 policy is in use. What still has to hold: the key requires
+    // authentication, a new biometric enrolment invalidates it, and one
+    // authentication covers a short, literal window rather than an open-ended one.
+    expect(store).toContain("setUserAuthenticationRequired(true)");
+    expect(store).toContain("setInvalidatedByBiometricEnrollment(true)");
+    expect(store).toContain("AUTH_WINDOW_SECONDS = 30");
+    expect(store).not.toMatch(/AUTH_WINDOW_SECONDS\s*=\s*\d{3}/);
+
+    // Unlock accepts the device credential, which means the phone PIN or pattern
+    // opens the wallet. Authorizing a send or Cold Vault activation must not: that
+    // ceremony never touches the Keystore key, so nothing forces the fallback.
     expect(plugin).toContain(
-      "private fun authenticators(): Int = BiometricManager.Authenticators.BIOMETRIC_STRONG",
+      "private fun signingAuthenticators(): Int = BiometricManager.Authenticators.BIOMETRIC_STRONG",
     );
-    expect(plugin).not.toContain("BiometricManager.Authenticators.DEVICE_CREDENTIAL");
-    expect(plugin).toContain(
-      "prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))",
+    expect(plugin).toContain("BiometricManager.Authenticators.DEVICE_CREDENTIAL");
+
+    const unlockCeremony = plugin.slice(
+      plugin.indexOf("private fun authenticateWithCipher("),
+      plugin.indexOf("fun strongBiometricStatus("),
     );
-    expect(plugin).toContain("BiometricSecretStore.prepareEncryption(activity)");
-    expect(plugin).toContain("BiometricSecretStore.prepareDecryption(activity)");
+    const signingCeremony = plugin.slice(plugin.indexOf("fun authenticateStrong("));
+    expect(unlockCeremony).toContain(".setAllowedAuthenticators(unlockAuthenticators())");
+    expect(unlockCeremony).not.toContain("signingAuthenticators()");
+    expect(signingCeremony).toContain(".setAllowedAuthenticators(signingAuthenticators())");
+    expect(signingCeremony).not.toContain("unlockAuthenticators()");
+
+    // A negative button is mandatory without a credential fallback and rejected
+    // with one, so it has to be derived from the authenticators actually allowed.
+    expect(plugin).toContain(".withCancelButton(unlockAuthenticators())");
+    expect(plugin).toContain(".withCancelButton(signingAuthenticators())");
+
+    // A bounded-window key cannot be bound to a CryptoObject, so the prompt runs
+    // first and the cipher is created afterwards.
+    expect(plugin).toContain("prompt.authenticate(promptInfo)");
+    expect(plugin).not.toContain("BiometricPrompt.CryptoObject(cipher)");
+
+    // The Rust shell must never reuse a send-authorization prompt as the unlock or
+    // enrolment ceremony.
     expect(rust).not.toContain(
       'verify_native_biometric(&app, "Unlock Hacash Wallet")',
     );

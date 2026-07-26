@@ -153,6 +153,8 @@ export const primaryUiEn = {
   "security.biometricOpenWith": "Open the wallet with {kind} instead of typing the passphrase.",
   "security.noBiometricSensor": "No biometric sensor is available on this device.",
   "security.biometricUnlockActive": "Biometric unlock is active.",
+  "security.biometricScreenLockWarning":
+    "Your phone PIN, pattern or password also opens the wallet, because Android offers it whenever the fingerprint fails. One check covers 30 seconds. Enrolling a new fingerprint on the phone deletes the stored passphrase.",
   "security.passphraseToEnable": "Passphrase (to enable)",
   "security.enterWalletPassphrase": "Enter wallet passphrase",
   "security.enableBiometricUnlock": "Enable biometric unlock",
@@ -305,6 +307,8 @@ export const PRIMARY_UI_COPY = {
     "security.biometricUnlock": "Βιομετρικό ξεκλείδωμα",
     "security.noBiometricSensor": "Δεν υπάρχει διαθέσιμος βιομετρικός αισθητήρας σε αυτή τη συσκευή.",
     "security.biometricUnlockActive": "Το βιομετρικό ξεκλείδωμα είναι ενεργό.",
+    "security.biometricScreenLockWarning":
+      "Το PIN, το μοτίβο ή ο κωδικός της οθόνης του κινητού ανοίγει επίσης το wallet, επειδή το Android το προσφέρει όποτε αποτύχει το δακτυλικό. Ένας έλεγχος καλύπτει 30 δευτερόλεπτα. Η προσθήκη νέου δακτυλικού στο κινητό διαγράφει το αποθηκευμένο passphrase.",
     "security.passphraseToEnable": "Κωδικός πρόσβασης (για ενεργοποίηση)",
     "security.enableBiometricUnlock": "Ενεργοποίηση βιομετρικού ξεκλειδώματος",
     "security.disableBiometricUnlock": "Απενεργοποίηση βιομετρικού ξεκλειδώματος",
@@ -426,6 +430,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "均衡",
     "security.paranoid": "严格",
     "security.biometricUnlock": "生物识别解锁",
+    "security.biometricScreenLockWarning":
+      "手机的 PIN 码、图案或密码同样可以打开钱包，因为指纹失败时 Android 会提供这些方式。一次验证在 30 秒内有效。在手机上录入新的指纹会删除已保存的密码短语。",
     "security.noBiometricSensor": "此设备没有可用的生物识别传感器。",
     "security.enableBiometricUnlock": "启用生物识别解锁",
     "security.disableBiometricUnlock": "停用生物识别解锁",
@@ -544,6 +550,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "標準",
     "security.paranoid": "厳格",
     "security.biometricUnlock": "生体認証でロック解除",
+    "security.biometricScreenLockWarning":
+      "指紋が失敗すると Android が代替手段を提示するため、端末の PIN・パターン・パスワードでもウォレットを開けます。一度の認証は 30 秒間有効です。端末に新しい指紋を登録すると、保存されたパスフレーズは削除されます。",
     "security.noBiometricSensor": "この端末では生体認証センサーを利用できません。",
     "security.enableBiometricUnlock": "生体認証ロック解除を有効化",
     "security.disableBiometricUnlock": "生体認証ロック解除を無効化",
@@ -658,6 +666,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Dengeli",
     "security.paranoid": "Paranoid",
     "security.biometricUnlock": "Biyometrik kilit açma",
+    "security.biometricScreenLockWarning":
+      "Parmak izi başarısız olduğunda Android bunu sunduğu için telefonunuzun PIN'i, deseni veya şifresi de cüzdanı açar. Bir doğrulama 30 saniye boyunca geçerlidir. Telefona yeni bir parmak izi eklemek kayıtlı passphrase'i siler.",
     "security.noBiometricSensor": "Bu cihazda kullanılabilir biyometrik sensör yok.",
     "security.enableBiometricUnlock": "Biyometrik kilit açmayı etkinleştir",
     "security.disableBiometricUnlock": "Biyometrik kilit açmayı kapat",
@@ -771,6 +781,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Cân bằng",
     "security.paranoid": "Nghiêm ngặt",
     "security.biometricUnlock": "Mở khóa sinh trắc học",
+    "security.biometricScreenLockWarning":
+      "Mã PIN, hình mở khóa hoặc mật khẩu của điện thoại cũng mở được ví, vì Android đưa ra lựa chọn đó mỗi khi vân tay thất bại. Một lần xác thực có hiệu lực trong 30 giây. Thêm vân tay mới trên điện thoại sẽ xóa passphrase đã lưu.",
     "security.noBiometricSensor": "Thiết bị này không có cảm biến sinh trắc học khả dụng.",
     "security.enableBiometricUnlock": "Bật mở khóa sinh trắc học",
     "security.disableBiometricUnlock": "Tắt mở khóa sinh trắc học",
@@ -884,6 +896,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Сбалансированный",
     "security.paranoid": "Строгий",
     "security.biometricUnlock": "Биометрическая разблокировка",
+    "security.biometricScreenLockWarning":
+      "PIN-код, графический ключ или пароль телефона также открывают кошелёк, потому что Android предлагает их при неудачном отпечатке. Одна проверка действует 30 секунд. Добавление нового отпечатка на телефоне удаляет сохранённую парольную фразу.",
     "security.noBiometricSensor": "На этом устройстве нет доступного биометрического датчика.",
     "security.enableBiometricUnlock": "Включить биометрическую разблокировку",
     "security.disableBiometricUnlock": "Выключить биометрическую разблокировку",
@@ -997,6 +1011,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Equilibrado",
     "security.paranoid": "Paranoico",
     "security.biometricUnlock": "Desbloqueo biométrico",
+    "security.biometricScreenLockWarning":
+      "El PIN, el patrón o la contraseña del teléfono también abren la cartera, porque Android los ofrece cada vez que falla la huella. Una comprobación cubre 30 segundos. Registrar una huella nueva en el teléfono borra la frase de contraseña guardada.",
     "security.noBiometricSensor": "Este dispositivo no tiene un sensor biométrico disponible.",
     "security.enableBiometricUnlock": "Activar desbloqueo biométrico",
     "security.disableBiometricUnlock": "Desactivar desbloqueo biométrico",
@@ -1110,6 +1126,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Équilibré",
     "security.paranoid": "Paranoïaque",
     "security.biometricUnlock": "Déverrouillage biométrique",
+    "security.biometricScreenLockWarning":
+      "Le code PIN, le schéma ou le mot de passe du téléphone ouvrent aussi le portefeuille, car Android les propose dès que l'empreinte échoue. Une vérification couvre 30 secondes. Enregistrer une nouvelle empreinte sur le téléphone supprime la phrase secrète stockée.",
     "security.noBiometricSensor": "Aucun capteur biométrique n'est disponible sur cet appareil.",
     "security.enableBiometricUnlock": "Activer le déverrouillage biométrique",
     "security.disableBiometricUnlock": "Désactiver le déverrouillage biométrique",
@@ -1223,6 +1241,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Equilibrado",
     "security.paranoid": "Paranoico",
     "security.biometricUnlock": "Desbloqueio biométrico",
+    "security.biometricScreenLockWarning":
+      "O PIN, o padrão ou a senha do telefone também abrem a carteira, porque o Android os oferece sempre que a impressão digital falha. Uma verificação cobre 30 segundos. Registar uma nova impressão digital no telefone apaga a frase de acesso guardada.",
     "security.noBiometricSensor": "Não existe um sensor biométrico disponível neste dispositivo.",
     "security.enableBiometricUnlock": "Ativar desbloqueio biométrico",
     "security.disableBiometricUnlock": "Desativar desbloqueio biométrico",
@@ -1336,6 +1356,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "متوازن",
     "security.paranoid": "صارم",
     "security.biometricUnlock": "فتح القفل بالمقاييس الحيوية",
+    "security.biometricScreenLockWarning":
+      "رقم PIN أو النمط أو كلمة مرور الهاتف تفتح المحفظة أيضًا، لأن أندرويد يقدّمها عند فشل بصمة الإصبع. يغطي التحقق الواحد 30 ثانية. تسجيل بصمة جديدة على الهاتف يحذف عبارة المرور المحفوظة.",
     "security.noBiometricSensor": "لا يتوفر مستشعر حيوي على هذا الجهاز.",
     "security.enableBiometricUnlock": "تفعيل الفتح بالمقاييس الحيوية",
     "security.disableBiometricUnlock": "تعطيل الفتح بالمقاييس الحيوية",
@@ -1449,6 +1471,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Balanserad",
     "security.paranoid": "Paranoid",
     "security.biometricUnlock": "Biometrisk upplåsning",
+    "security.biometricScreenLockWarning":
+      "Telefonens PIN, mönster eller lösenord öppnar också plånboken, eftersom Android erbjuder det när fingeravtrycket misslyckas. En kontroll gäller i 30 sekunder. Att registrera ett nytt fingeravtryck på telefonen tar bort den lagrade lösenfrasen.",
     "security.noBiometricSensor": "Ingen biometrisk sensor är tillgänglig på enheten.",
     "security.enableBiometricUnlock": "Aktivera biometrisk upplåsning",
     "security.disableBiometricUnlock": "Inaktivera biometrisk upplåsning",
@@ -1562,6 +1586,8 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Ausgewogen",
     "security.paranoid": "Paranoid",
     "security.biometricUnlock": "Biometrisch entsperren",
+    "security.biometricScreenLockWarning":
+      "Die PIN, das Muster oder das Passwort des Telefons öffnen die Wallet ebenfalls, weil Android sie anbietet, sobald der Fingerabdruck fehlschlägt. Eine Prüfung gilt 30 Sekunden. Das Hinzufügen eines neuen Fingerabdrucks auf dem Telefon löscht die gespeicherte Passphrase.",
     "security.noBiometricSensor": "Auf diesem Gerät ist kein biometrischer Sensor verfügbar.",
     "security.enableBiometricUnlock": "Biometrisches Entsperren aktivieren",
     "security.disableBiometricUnlock": "Biometrisches Entsperren deaktivieren",

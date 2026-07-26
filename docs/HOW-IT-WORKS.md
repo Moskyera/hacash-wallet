@@ -86,9 +86,31 @@ session. Two independent timers end it:
 Locking wipes the key from memory, along with every pending approval.
 
 On Android you can optionally use a fingerprint or face to unlock instead of
-typing. That stores your passphrase in the phone's hardware-backed keystore. It
-is a convenience feature: it protects the passphrase well, but it does not change
-the fact that the key ends up in RAM.
+typing. Your passphrase is then stored in the phone's hardware-backed keystore,
+encrypted with a key the phone will only use after you authenticate. Please read
+the next four points before you turn this on, because they describe exactly how
+much protection you are getting.
+
+- **Your phone screen lock also opens the wallet.** The unlock prompt accepts
+  your fingerprint, your face, *and* your phone PIN, pattern or password.
+  Android offers the PIN as a fallback whenever the fingerprint fails, and the
+  wallet cannot remove that fallback without breaking fingerprint unlock on many
+  phones. So anyone who knows your phone PIN can open the wallet. If that is not
+  acceptable to you, leave this feature off and keep typing your passphrase.
+- **One authentication covers 30 seconds.** After a successful check, the phone
+  will release the stored passphrase for up to 30 seconds without asking again.
+  It is not one authentication per single use.
+- **Adding a new fingerprint destroys the stored passphrase.** If someone
+  enrols their own finger on your phone, Android permanently invalidates the
+  key. The wallet cannot unlock with it any more and you have to type your
+  passphrase. That is deliberate: it means a new fingerprint cannot be used to
+  reach your funds.
+- **Turning on Cold Vault deletes the stored passphrase** and disables this
+  feature, because a Cold Vault must never be openable by the phone screen lock.
+
+This is a convenience feature. Your passphrase is still the real protection, it
+is the only thing that cannot be reset by whoever holds the phone, and unlocking
+by any route still puts the key in RAM for the session.
 
 ## 6. How sending works, and why it matters
 

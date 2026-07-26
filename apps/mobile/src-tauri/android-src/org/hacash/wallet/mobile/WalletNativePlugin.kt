@@ -109,10 +109,46 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
   private var activePrompt: BiometricPrompt? = null
   private var activeAuthentication: PendingInvoke? = null
 
-  // Transaction authorization and Keystore unlock must use a Class 3
-  // biometric. A device PIN/pattern is intentionally not a fallback for a
-  // high-value signing decision.
-  private fun authenticators(): Int = BiometricManager.Authenticators.BIOMETRIC_STRONG
+  /**
+   * Authenticators for releasing the passphrase held in the Android Keystore.
+   *
+   * Restored from the released v0.1.55 policy: the device credential is accepted
+   * alongside a Class 3 biometric, which is exactly what the Keystore key allows.
+   * Android offers the credential whenever the fingerprint fails, so the phone PIN
+   * or pattern can unlock the wallet. That cost is stated on the Security screen
+   * and in docs/HOW-IT-WORKS.md rather than hidden.
+   */
+  private fun unlockAuthenticators(): Int =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      BiometricManager.Authenticators.BIOMETRIC_STRONG or
+        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    } else {
+      BiometricManager.Authenticators.BIOMETRIC_STRONG
+    }
+
+  /**
+   * Authenticators for authorizing a prepared operation: a send at or above the
+   * threshold, or Cold Vault activation.
+   *
+   * This ceremony never touches the Keystore key, so nothing here forces a
+   * credential fallback. A device PIN or pattern is intentionally not accepted as
+   * authorization for a high-value signing decision, which is the distinction the
+   * unlock path cannot make.
+   */
+  private fun signingAuthenticators(): Int = BiometricManager.Authenticators.BIOMETRIC_STRONG
+
+  /**
+   * BiometricPrompt requires a negative button unless a device credential is
+   * allowed, and rejects one when it is. Deriving it from the same value passed to
+   * `setAllowedAuthenticators` keeps `build()` from throwing on either path.
+   */
+  private fun BiometricPrompt.PromptInfo.Builder.withCancelButton(
+    allowed: Int,
+  ): BiometricPrompt.PromptInfo.Builder = apply {
+    if ((allowed and BiometricManager.Authenticators.DEVICE_CREDENTIAL) == 0) {
+      setNegativeButtonText("Cancel")
+    }
+  }
 
   private fun execute(invoke: Invoke, operation: () -> JSObject?) {
     val call = PendingInvoke(invoke)
@@ -203,7 +239,6 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
           if (destroyed.get()) {
             throw IllegalStateException("Android Activity is no longer available")
           }
-          val cipher = prepareCipher()
           activity.runOnUiThread {
             try {
               if (destroyed.get() || call.isComplete()) {
@@ -216,13 +251,10 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
                 override fun onAuthenticationSucceeded(
                   result: BiometricPrompt.AuthenticationResult,
                 ) {
-                  val authenticatedCipher = result.cryptoObject?.cipher
-                  if (authenticatedCipher == null) {
-                    finishAuthentication(call) {
-                      call.reject("Biometric authentication returned no cryptographic operation")
-                    }
-                    return
-                  }
+                  // The Keystore key carries a bounded authentication window rather
+                  // than a per-use requirement, which BiometricPrompt cannot bind to a
+                  // CryptoObject. The prompt gates the interface and the window gates
+                  // the key, so the cipher is created after a successful prompt.
                   synchronized(this@WalletNativePlugin) {
                     if (activeAuthentication === call) activePrompt = null
                   }
@@ -232,7 +264,7 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
                         if (destroyed.get() || call.isComplete()) {
                           throw IllegalStateException("Android Activity is no longer available")
                         }
-                        val response = useCipher(authenticatedCipher)
+                        val response = useCipher(prepareCipher())
                         finishAuthentication(call) { call.resolve(response) }
                       } catch (error: Exception) {
                         finishAuthentication(call) {
@@ -267,13 +299,13 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
                 .setTitle("Hacash Wallet")
                 .setDescription(reason)
                 .setConfirmationRequired(true)
-                .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-                .setNegativeButtonText("Cancel")
+                .setAllowedAuthenticators(unlockAuthenticators())
+                .withCancelButton(unlockAuthenticators())
                 .build()
               synchronized(this@WalletNativePlugin) {
                 if (activeAuthentication === call) activePrompt = prompt
               }
-              prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
+              prompt.authenticate(promptInfo)
             } catch (error: Exception) {
               finishAuthentication(call) {
                 call.reject(error.message ?: "Biometric authentication could not start")
@@ -361,8 +393,11 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun strongBiometricStatus(invoke: Invoke) {
     execute(invoke) {
+      // Report on the strong biometric alone. A device with only a screen lock must
+      // not be told it has a biometric sensor, and a device that passes this check
+      // also passes the more permissive unlock check.
       val available = BiometricManager.from(activity)
-        .canAuthenticate(authenticators()) == BiometricManager.BIOMETRIC_SUCCESS
+        .canAuthenticate(signingAuthenticators()) == BiometricManager.BIOMETRIC_SUCCESS
       JSObject().apply {
         put("available", available)
         put(
@@ -423,12 +458,8 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
           .setTitle("Hacash Wallet")
           .setDescription(args.reason)
           .setConfirmationRequired(true)
-          .setAllowedAuthenticators(authenticators())
-          .apply {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-              setNegativeButtonText("Cancel")
-            }
-          }
+          .setAllowedAuthenticators(signingAuthenticators())
+          .withCancelButton(signingAuthenticators())
           .build()
         synchronized(this) {
           if (activeAuthentication === call) activePrompt = prompt
