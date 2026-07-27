@@ -24,3 +24,7 @@ apps/mobile/aarch64-signed-build.log
 cargo-*.txt
 mobile-*.txt
 test-*.txt
+
+# Scratch build directories used when the main target dir is unusable.
+/target-ci/
+/target-android/
