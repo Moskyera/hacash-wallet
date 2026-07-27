@@ -91,6 +91,22 @@ outer installer. If an independently signed installed executable is required,
 use Tauri's custom sign command with a non-exportable remote/HSM key. Do not put
 an exportable PFX back into a checkout, dependency, or compilation job.
 
+
+### Explicit one-tag unsigned Windows fallback
+
+When a public Authenticode signer is not yet available, maintainers may publish a
+complete desktop release only by setting the public repository variable
+`UNSIGNED_WINDOWS_RELEASE_TAG` to the exact intended tag, for example
+`v1.0.1-desktop`. The exception is valid for that tag only. The workflow requires
+`WINDOWS_EXPECTED_CERT_SHA256` to be empty, verifies that all three Windows
+artifacts remain unsigned, labels the release prominently, and declares the
+custody class as `unsigned-distribution`.
+
+An unsigned Windows build compiles without a publisher pin. Its in-app updater
+therefore offers only the official release page and never downloads or launches
+the installer automatically. Linux artifacts, SHA-256 checksums, and GitHub
+provenance are still produced normally. Future tags fail closed unless they have
+a valid signer pin or their own explicitly reviewed exact-tag exception.
 ### Windows high-value release gate
 
 The isolated PFX workflow is a standard outer-signed distribution profile. It

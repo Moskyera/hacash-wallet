@@ -127,10 +127,17 @@ impl UpdateTarget {
     }
 
     pub(crate) fn supports_automatic_install(&self) -> bool {
-        matches!(
-            (self.os.as_str(), self.arch.as_str()),
-            ("windows", "x86_64") | ("android", "aarch64")
+        self.supports_automatic_install_with_windows_signer(
+            download::windows_update_signer_configured(),
         )
+    }
+
+    fn supports_automatic_install_with_windows_signer(&self, windows_signer: bool) -> bool {
+        match (self.os.as_str(), self.arch.as_str()) {
+            ("windows", "x86_64") => windows_signer,
+            ("android", "aarch64") => true,
+            _ => false,
+        }
     }
 }
 
