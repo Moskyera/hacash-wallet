@@ -68,6 +68,7 @@ export const ru = {
   "hacd.prevHash": "Хеш предыдущего алмаза",
   "hacd.inscriptions": "Надписи",
   "hacd.noInscriptions": "Нет",
+  "hacd.noVisual": "Этот узел не вернул пригодный визуальный ген, поэтому алмаз нельзя отрисовать.",
   "hacd.mainnetMetadata": "Метаданные mainnet",
   "common.notAvailable": "Недоступно",
   "dapp.appsTitle": "Приложения HACD",

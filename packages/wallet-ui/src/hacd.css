@@ -383,3 +383,19 @@
     margin-bottom: 0.3rem;
   }
 }
+
+/* A card with no diamond on it is the failure a holder notices first. Say why, rather
+   than leaving a black rectangle that looks like a rendering bug. */
+.hacd-meta-noart {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 60px;
+  color: #f5e1da;
+  font-size: 28px;
+  line-height: 1.35;
+  text-align: center;
+}

@@ -68,6 +68,7 @@ export const fr = {
   "hacd.prevHash": "Hash du diamant précédent",
   "hacd.inscriptions": "Inscriptions",
   "hacd.noInscriptions": "Aucune",
+  "hacd.noVisual": "Ce noeud n'a pas renvoyé de gene visuel exploitable, le diamant ne peut donc pas etre dessine.",
   "hacd.mainnetMetadata": "Métadonnées mainnet",
   "common.notAvailable": "Indisponible",
   "dapp.appsTitle": "Applications HACD",

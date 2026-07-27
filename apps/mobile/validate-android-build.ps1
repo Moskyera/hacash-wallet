@@ -494,6 +494,29 @@ if ((Test-Path $handlerInventory) -and (Test-Path $mobileLib) -and (Test-Path $w
     $errors += "Missing handler inventory, mobile lib.rs, or wallet permission manifest"
 }
 
+# The frontend that actually runs is the copy Tauri compiled INTO the Rust library,
+# not the one in the APK assets folder. Nothing reads that folder, so an APK can look
+# perfect while serving the previous release. That shipped for a whole day before it
+# was found, so it is now a build error rather than something to notice later.
+$jniLib = Join-Path $android "app/src/main/jniLibs/arm64-v8a/libhacash_wallet_mobile_lib.so"
+$distAssets = Join-Path $mobile "dist/assets"
+if ((Test-Path $jniLib) -and (Test-Path $distAssets)) {
+    $bytes = [System.IO.File]::ReadAllBytes($jniLib)
+    # The asset keys are stored as plain text in the library even though the bodies
+    # are compressed, so a byte scan finds exactly what the app will serve.
+    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+    $embedded = [regex]::Matches($text, '/assets/index-[A-Za-z0-9_-]{8}\.(?:js|css)') |
+        ForEach-Object { $_.Value } | Sort-Object -Unique
+    $onDisk = Get-ChildItem $distAssets -File |
+        Where-Object { $_.Name -match '^index-.*\.(js|css)$' } |
+        ForEach-Object { "/assets/" + $_.Name } | Sort-Object -Unique
+    if ($embedded.Count -eq 0) {
+        $errors += "The Android library embeds no frontend assets; rebuild it after 'yarn build'"
+    } elseif (Compare-Object $embedded $onDisk) {
+        $errors += "The Android library embeds a different frontend than dist/. Run 'yarn build' FIRST, then rebuild the Rust library. Embedded: $($embedded -join ', '). On disk: $($onDisk -join ', ')"
+    }
+}
+
 if ($errors.Count -gt 0) {
     Write-Host "Android build validation FAILED:" -ForegroundColor Red
     $errors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }

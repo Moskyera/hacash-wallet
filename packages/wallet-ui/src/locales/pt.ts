@@ -68,6 +68,7 @@ export const pt = {
   "hacd.prevHash": "Hash do diamante anterior",
   "hacd.inscriptions": "Inscrições",
   "hacd.noInscriptions": "Nenhuma",
+  "hacd.noVisual": "Este no nao devolveu um gene visual utilizavel, por isso o diamante nao pode ser desenhado.",
   "hacd.mainnetMetadata": "Metadata da mainnet",
   "common.notAvailable": "Indisponível",
   "dapp.appsTitle": "Aplicações HACD",

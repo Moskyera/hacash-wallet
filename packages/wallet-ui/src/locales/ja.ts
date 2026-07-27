@@ -72,6 +72,7 @@ export const ja = {
   "hacd.prevHash": "前のダイヤのハッシュ",
   "hacd.inscriptions": "インスクリプション",
   "hacd.noInscriptions": "なし",
+  "hacd.noVisual": "このノードは使用可能なビジュアル遺伝子を返さなかったため、ダイヤを描画できません。",
   "hacd.mainnetMetadata": "メインネットメタデータ",
   "common.notAvailable": "利用不可",
   "dapp.appsTitle": "HACD アプリケーション",

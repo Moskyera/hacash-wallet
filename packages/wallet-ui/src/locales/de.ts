@@ -68,6 +68,7 @@ export const de = {
   "hacd.prevHash": "Hash des vorherigen Diamanten",
   "hacd.inscriptions": "Inschriften",
   "hacd.noInscriptions": "Keine",
+  "hacd.noVisual": "Dieser Knoten hat kein verwendbares visuelles Gen geliefert, daher kann der Diamant nicht gezeichnet werden.",
   "hacd.mainnetMetadata": "Mainnet-Metadaten",
   "common.notAvailable": "Nicht verfügbar",
   "dapp.appsTitle": "HACD-Anwendungen",

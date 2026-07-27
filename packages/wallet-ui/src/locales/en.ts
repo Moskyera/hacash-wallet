@@ -99,6 +99,7 @@ export const en = {
   "hacd.prevHash": "Previous diamond hash",
   "hacd.inscriptions": "Inscriptions",
   "hacd.noInscriptions": "None",
+  "hacd.noVisual": "This node returned no usable visual gene, so the diamond cannot be drawn.",
   "hacd.mainnetMetadata": "Mainnet metadata",
   "common.notAvailable": "Not available",
   "dapp.appsTitle": "HACD applications",

@@ -55,6 +55,7 @@ export type HacdMetadataCopy = {
   prevHash: string;
   inscriptions: string;
   noInscriptions: string;
+  noVisual: string;
 };
 
 export const DEFAULT_HACD_METADATA_COPY: HacdMetadataCopy = {
@@ -77,6 +78,7 @@ export const DEFAULT_HACD_METADATA_COPY: HacdMetadataCopy = {
   prevHash: "Previous diamond hash",
   inscriptions: "Inscriptions",
   noInscriptions: "None",
+  noVisual: "This node returned no usable visual gene, so the diamond cannot be drawn.",
 };
 
 export function translatedHacdMetadataCopy(t: (key: string) => string): HacdMetadataCopy {
@@ -100,6 +102,7 @@ export function translatedHacdMetadataCopy(t: (key: string) => string): HacdMeta
     prevHash: t("hacd.prevHash"),
     inscriptions: t("hacd.inscriptions"),
     noInscriptions: t("hacd.noInscriptions"),
+    noVisual: t("hacd.noVisual"),
   };
 
 }
@@ -313,6 +316,9 @@ function ExplorerMetadataCard({
           className="hacd-meta-cdcon"
           style={{ transform: `scale(${scale})`, backgroundImage: gradient }}
         >
+          {!art && (
+            <div className="hacd-meta-noart">{copy.noVisual}</div>
+          )}
           {art && (
             <>
               <div className="hacd-meta-ibg" aria-hidden>

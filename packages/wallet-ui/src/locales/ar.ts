@@ -68,6 +68,7 @@ export const ar = {
   "hacd.prevHash": "بصمة الماسة السابقة",
   "hacd.inscriptions": "النقوش",
   "hacd.noInscriptions": "لا شيء",
+  "hacd.noVisual": "لم تُرجع هذه العقدة جينًا بصريًا صالحًا، لذا لا يمكن رسم الماسة.",
   "hacd.mainnetMetadata": "metadata للشبكة الرئيسية",
   "common.notAvailable": "غير متاح",
   "dapp.appsTitle": "تطبيقات HACD",

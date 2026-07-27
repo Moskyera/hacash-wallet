@@ -68,6 +68,7 @@ export const tr = {
   "hacd.prevHash": "Önceki elmas özeti",
   "hacd.inscriptions": "Kazımalar",
   "hacd.noInscriptions": "Yok",
+  "hacd.noVisual": "Bu düğüm kullanılabilir bir görsel gen döndürmedi, bu yüzden elmas çizilemiyor.",
   "hacd.mainnetMetadata": "Mainnet metadata",
   "common.notAvailable": "Kullanılamıyor",
   "dapp.appsTitle": "HACD uygulamaları",

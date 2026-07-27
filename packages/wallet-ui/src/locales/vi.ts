@@ -68,6 +68,7 @@ export const vi = {
   "hacd.prevHash": "Hash kim cương trước",
   "hacd.inscriptions": "Dòng chữ khắc",
   "hacd.noInscriptions": "Không có",
+  "hacd.noVisual": "Nút này không trả về gene hình ảnh dùng được, nên không thể vẽ kim cương.",
   "hacd.mainnetMetadata": "Metadata mainnet",
   "common.notAvailable": "Không khả dụng",
   "dapp.appsTitle": "Ứng dụng HACD",

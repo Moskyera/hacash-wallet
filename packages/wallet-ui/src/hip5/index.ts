@@ -36,6 +36,13 @@ export function renderHip5Svg(visualGene: string, size = 220): string {
   if (typeof svg !== "string" || svg.length > 250_000 || !/^<svg\b/i.test(svg.trimStart())) {
     throw new Error("Invalid HIP-5 renderer output");
   }
+  // The renderer does not fail on a gene it cannot draw: given 18 hex characters it
+  // returns a well formed but EMPTY <svg> of about thirty bytes, which passes every
+  // check above and paints nothing. A card with no diamond on it is the one failure a
+  // holder actually notices, so refuse it here and let the caller say why.
+  if (svg.length < 512) {
+    throw new Error("HIP-5 renderer produced an empty image");
+  }
   const styled = svg.replace(/(<svg\b[^>]*>)/i, `$1${EMBEDDED_SVG_STYLE}`);
   if (DANGEROUS_SVG_RE.test(styled)) {
     throw new Error("Unsafe HIP-5 renderer output");

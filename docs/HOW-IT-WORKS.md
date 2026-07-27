@@ -4,7 +4,7 @@ Written for everyone, not just developers. It explains what protects your money,
 what does not, and exactly where the limits are. Where something is a weakness,
 it says so.
 
-If you only read one section, read [What this is not](#what-this-is-not).
+If you only read one section, read [What this is not](#2-what-this-is-not).
 
 ---
 
@@ -129,7 +129,7 @@ This wallet does not work that way. Sending happens in two separate steps:
    the network and the transaction type, and shows you a summary tied to that
    fingerprint.
 2. **Execute.** You approve, and then the interface can only say *"run operation
-   number 7f3a…"*. **It never gets to supply transaction data.** The bytes stay in
+   number 7f3a..."*. **It never gets to supply transaction data.** The bytes stay in
    the secure core the whole time.
 
 On top of that:

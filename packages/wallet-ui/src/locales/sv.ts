@@ -68,6 +68,7 @@ export const sv = {
   "hacd.prevHash": "Hash för föregående diamant",
   "hacd.inscriptions": "Inskriptioner",
   "hacd.noInscriptions": "Inga",
+  "hacd.noVisual": "Den har noden returnerade ingen anvandbar visuell gen, sa diamanten kan inte ritas.",
   "hacd.mainnetMetadata": "Mainnet-metadata",
   "common.notAvailable": "Inte tillgängligt",
   "dapp.appsTitle": "HACD-appar",

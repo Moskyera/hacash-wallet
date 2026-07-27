@@ -75,6 +75,7 @@ export const zhCN = {
   "hacd.prevHash": "上一枚钻石哈希",
   "hacd.inscriptions": "铭文",
   "hacd.noInscriptions": "无",
+  "hacd.noVisual": "该节点未返回可用的视觉基因，因此无法绘制钻石。",
   "hacd.mainnetMetadata": "主网元数据",
   "common.notAvailable": "不可用",
   "dapp.appsTitle": "HACD 应用",

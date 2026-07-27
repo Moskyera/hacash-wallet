@@ -100,6 +100,7 @@ export const el = {
   "hacd.prevHash": "Hash προηγούμενου διαμαντιού",
   "hacd.inscriptions": "Επιγραφές",
   "hacd.noInscriptions": "Καμία",
+  "hacd.noVisual": "Ο κόμβος δεν επέστρεψε χρησιμοποιήσιμο visual gene, οπότε το διαμάντι δεν μπορεί να σχεδιαστεί.",
   "hacd.mainnetMetadata": "Metadata mainnet",
   "common.notAvailable": "Μη διαθέσιμο",
   "dapp.appsTitle": "Εφαρμογές HACD",
