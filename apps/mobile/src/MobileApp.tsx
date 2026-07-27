@@ -24,6 +24,9 @@ import {
   clearSystemDialogExpectation,
   systemDialogInFlight,
 } from "./utils/systemDialogGuard";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { HOW_IT_WORKS_URL } from "@hacash/wallet-ui";
+import { dismissHowItWorks, howItWorksDismissed } from "./utils/howItWorksPrompt";
 import { useLocale } from "./locale";
 import { encodePaymentUri } from "./paymentQr";
 import { clearSensitiveClipboard, copyWithPrivacyClear, maskAddress } from "./privacy";
@@ -52,6 +55,9 @@ export default function MobileApp() {
   const pullOffset = useRef(0);
   const deepLinkHandled = useRef(false);
   const bioUnlockPrompted = useRef(false);
+  // Seeded once from storage: the owner should not be asked again after saying so,
+  // and should not be re-asked every time this component re-renders either.
+  const [showHowItWorks, setShowHowItWorks] = useState(() => !howItWorksDismissed());
   const backgroundLockRequested = useRef(false);
   const [deepLinkTick, setDeepLinkTick] = useState(0);
   const [biometricUnlock, setBiometricUnlock] = useState<BiometricUnlockStatus | null>(null);
@@ -593,6 +599,37 @@ export default function MobileApp() {
       </header>
 
       <main className="app-main">
+        {tab === "home" && showHowItWorks && (
+          <div className="card how-it-works-prompt">
+            <h2>{t("docs.readPromptTitle")}</h2>
+            <p className="muted small">{t("docs.readPromptBody")}</p>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => {
+                void openUrl(HOW_IT_WORKS_URL).catch((error) =>
+                  showToast(formatInvokeError(error), "error"),
+                );
+              }}
+            >
+              {t("docs.howItWorks")}
+            </button>
+            <div className="row-btns">
+              <button type="button" onClick={() => setShowHowItWorks(false)}>
+                {t("docs.readPromptLater")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  dismissHowItWorks();
+                  setShowHowItWorks(false);
+                }}
+              >
+                {t("docs.readPromptNever")}
+              </button>
+            </div>
+          </div>
+        )}
         {tab === "home" && (
           <HomeTab
             assets={session.assets}

@@ -81,4 +81,19 @@ describe("system dialog guard", () => {
     // Starting it must arm the guard, or granting the permission locks the wallet.
     expect(base).toContain("expectSystemDialog()");
   });
+  // The first-run prompt must be dismissible for good, and the choice must survive a
+  // restart. A wallet that keeps asking after being told no is not respecting the answer.
+  it("remembers do-not-ask-again across restarts", () => {
+    const app = read("MobileApp.tsx");
+
+    // Seeded from storage once, not recomputed on every render.
+    expect(app).toContain("useState(() => !howItWorksDismissed())");
+    // Both exits exist: hide for now, and never ask again.
+    expect(app).toContain('t("docs.readPromptLater")');
+    expect(app).toContain('t("docs.readPromptNever")');
+    expect(app).toContain("dismissHowItWorks();");
+    // The link is the shared constant, not a second copy of the URL.
+    expect(app).toContain("openUrl(HOW_IT_WORKS_URL)");
+    expect(app).not.toContain("https://github.com/");
+  });
 });

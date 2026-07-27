@@ -22,6 +22,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "This wallet's key was derived from a recovery phrase with one unsalted SHA-256. Anyone who guesses the phrase can spend from it without this device or your passphrase, so no device setting can protect it. Move the funds to a newly generated wallet.",
     "docs.howItWorks": "How this wallet works",
     "docs.howItWorksHint": "Opens the full public explanation on GitHub: what protects your money, what does not, and every known limit. Written in plain language.",
+    "docs.readPromptTitle":
+      "New here? Read how this wallet works",
+    "docs.readPromptBody":
+      "It explains in plain language what protects your money, what does not, and every known limit. A few minutes now can save an expensive mistake later.",
+    "docs.readPromptLater":
+      "Later",
+    "docs.readPromptNever":
+      "Do not ask me again",
     "security.coldVaultActivatedToast": "Cold Vault activated. Only exact, freshly authorized Type 2 air-gap signing is allowed.",
     "security.coldVaultBiometricBlocked": "Biometric unlock is disabled in Cold Vault. Use the passphrase on the offline signer.",
     "airgap.coldVaultSignerHint": "Cold Vault is active. Keep this device offline, inspect every field and sign only the scanned Type 2 QR.",
@@ -46,6 +54,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Το κλειδί αυτού του wallet προήλθε από φράση ανάκτησης με ένα μόνο SHA-256 χωρίς salt. Όποιος μαντέψει τη φράση ξοδεύει χωρίς αυτή τη συσκευή ή τη φράση πρόσβασής σας, άρα καμία ρύθμιση δεν το προστατεύει. Μεταφέρετε τα κεφάλαια σε νέο wallet.",
     "docs.howItWorks": "Πώς λειτουργεί αυτό το wallet",
     "docs.howItWorksHint": "Ανοίγει την πλήρη δημόσια εξήγηση στο GitHub: τι προστατεύει τα χρήματά σας, τι δεν προστατεύει, και κάθε γνωστό όριο. Σε απλή γλώσσα.",
+    "docs.readPromptTitle":
+      "Καινούριος εδώ; Διάβασε πώς λειτουργεί αυτό το wallet",
+    "docs.readPromptBody":
+      "Εξηγεί με απλά λόγια τι προστατεύει τα χρήματά σου, τι δεν προστατεύει, και κάθε γνωστό όριο. Λίγα λεπτά τώρα γλιτώνουν ένα ακριβό λάθος μετά.",
+    "docs.readPromptLater":
+      "Αργότερα",
+    "docs.readPromptNever":
+      "Μη με ρωτήσεις ξανά",
     "security.coldVaultActivatedToast": "Το Cold Vault ενεργοποιήθηκε. Επιτρέπεται μόνο ακριβής, νέα εγκεκριμένη υπογραφή Type 2 μέσω air-gap.",
     "security.coldVaultBiometricBlocked": "Το βιομετρικό ξεκλείδωμα είναι απενεργοποιημένο στο Cold Vault. Χρησιμοποιήστε τη φράση πρόσβασης στην offline συσκευή υπογραφής.",
     "airgap.coldVaultSignerHint": "Το Cold Vault είναι ενεργό. Κρατήστε τη συσκευή offline, ελέγξτε κάθε πεδίο και υπογράψτε μόνο το σαρωμένο QR Type 2.",
@@ -70,6 +86,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "此钱包的私钥由助记短语经一次无盐 SHA-256 派生。任何猜中该短语的人都能在没有本设备或密码短语的情况下动用资金，任何设备设置都无法保护它。请把资金转到新生成的钱包。",
     "docs.howItWorks": "本钱包如何运作",
     "docs.howItWorksHint": "在 GitHub 上打开完整的公开说明：什么在保护你的资金、什么不能，以及每一个已知的限制。以通俗语言写成。",
+    "docs.readPromptTitle":
+      "初次使用？先看看这个钱包如何运作",
+    "docs.readPromptBody":
+      "它用通俗的语言说明什么在保护您的资金、什么不保护，以及每一个已知的限制。现在花几分钟，可以避免以后一个昂贵的错误。",
+    "docs.readPromptLater":
+      "以后再说",
+    "docs.readPromptNever":
+      "不要再询问",
     "security.coldVaultActivatedToast": "冷库已启用。现在只允许经过全新授权的精确 Type 2 隔空签名。",
     "security.coldVaultBiometricBlocked": "冷库禁用生物识别解锁。请在离线签名设备上输入密码。",
     "airgap.coldVaultSignerHint": "冷库已启用。保持设备离线，检查每个字段，只签署扫描得到的 Type 2 二维码。",
@@ -94,6 +118,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "このウォレットの鍵は、ソルトなしの SHA-256 を一度だけ適用して復元フレーズから導出されています。フレーズを推測できる人は本端末やパスフレーズなしで送金できるため、端末側の設定では守れません。資金は新規作成したウォレットへ移してください。",
     "docs.howItWorks": "このウォレットの仕組み",
     "docs.howItWorksHint": "GitHub 上の完全な公開説明を開きます。資産を守るものと守らないもの、そして既知のすべての限界を、平易な言葉で説明しています。",
+    "docs.readPromptTitle":
+      "はじめての方へ。このウォレットの仕組みをご覧ください",
+    "docs.readPromptBody":
+      "何があなたの資産を守り、何が守らないのか、そして既知の制限のすべてを平易な言葉で説明しています。今の数分が、後の高価な失敗を防ぎます。",
+    "docs.readPromptLater":
+      "あとで",
+    "docs.readPromptNever":
+      "今後は表示しない",
     "security.coldVaultActivatedToast": "Cold Vault を有効にしました。新しく承認された正確な Type 2 エアギャップ署名のみ許可されます。",
     "security.coldVaultBiometricBlocked": "Cold Vault では生体認証による解除は無効です。オフライン署名端末でパスフレーズを使用してください。",
     "airgap.coldVaultSignerHint": "Cold Vault が有効です。端末をオフラインに保ち、全項目を確認して、読み取った Type 2 QR だけに署名してください。",
@@ -118,6 +150,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Bu cüzdanın anahtarı, kurtarma ifadesinden tuzsuz tek bir SHA-256 ile türetildi. İfadeyi tahmin eden herkes bu cihaz veya parolanız olmadan harcama yapabilir; hiçbir cihaz ayarı bunu koruyamaz. Fonları yeni oluşturulmuş bir cüzdana taşıyın.",
     "docs.howItWorks": "Bu cüzdan nasıl çalışır",
     "docs.howItWorksHint": "GitHub'daki tam kamuya açık açıklamayı açar: paranızı neyin koruduğu, neyin korumadığı ve bilinen her sınır. Sade bir dille yazılmıştır.",
+    "docs.readPromptTitle":
+      "Yeni misiniz? Bu cüzdanın nasıl çalıştığını okuyun",
+    "docs.readPromptBody":
+      "Paranızı neyin koruduğunu, neyin korumadığını ve bilinen her sınırı sade bir dille anlatır. Şimdi ayıracağınız birkaç dakika, sonra pahalı bir hatayı önler.",
+    "docs.readPromptLater":
+      "Sonra",
+    "docs.readPromptNever":
+      "Bir daha sorma",
     "security.coldVaultActivatedToast": "Cold Vault etkin. Yalnızca yeni onaylanmış kesin Type 2 air-gap imzalama kullanılabilir.",
     "security.coldVaultBiometricBlocked": "Cold Vault'ta biyometrik kilit açma kapalıdır. Çevrim dışı imzalayıcıda parolayı kullanın.",
     "airgap.coldVaultSignerHint": "Cold Vault etkin. Cihazı çevrim dışı tutun, tüm alanları inceleyin ve yalnızca taranan Type 2 QR'ı imzalayın.",
@@ -142,6 +182,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Khoá của ví này được dẫn xuất từ cụm từ khôi phục bằng một lần SHA-256 không muối. Bất kỳ ai đoán được cụm từ đều chi tiêu được mà không cần thiết bị này hay mật khẩu của bạn, nên không cài đặt nào bảo vệ được. Hãy chuyển tiền sang ví mới tạo.",
     "docs.howItWorks": "Ví này hoạt động thế nào",
     "docs.howItWorksHint": "Mở phần giải thích công khai đầy đủ trên GitHub: điều gì bảo vệ tiền của bạn, điều gì không, và mọi giới hạn đã biết. Viết bằng ngôn ngữ dễ hiểu.",
+    "docs.readPromptTitle":
+      "Bạn mới dùng? Hãy đọc cách ví này hoạt động",
+    "docs.readPromptBody":
+      "Tài liệu giải thích bằng ngôn ngữ dễ hiểu điều gì bảo vệ tiền của bạn, điều gì không, và mọi giới hạn đã biết. Vài phút bây giờ giúp tránh một sai lầm đắt giá sau này.",
+    "docs.readPromptLater":
+      "Để sau",
+    "docs.readPromptNever":
+      "Đừng hỏi lại",
     "security.coldVaultActivatedToast": "Cold Vault đã bật. Chỉ cho phép ký air-gap Type 2 chính xác với xác thực mới.",
     "security.coldVaultBiometricBlocked": "Cold Vault tắt mở khóa sinh trắc học. Hãy dùng mật khẩu trên thiết bị ký ngoại tuyến.",
     "airgap.coldVaultSignerHint": "Cold Vault đang hoạt động. Giữ thiết bị ngoại tuyến, kiểm tra mọi trường và chỉ ký QR Type 2 đã quét.",
@@ -166,6 +214,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Ключ этого кошелька получен из фразы восстановления одним SHA-256 без соли. Любой, кто угадает фразу, потратит средства без этого устройства и без вашего пароля, поэтому никакие настройки не помогут. Переведите средства в новый кошелёк.",
     "docs.howItWorks": "Как работает этот кошелёк",
     "docs.howItWorksHint": "Открывает полное публичное объяснение на GitHub: что защищает ваши средства, что не защищает и каждое известное ограничение. Простым языком.",
+    "docs.readPromptTitle":
+      "Впервые здесь? Прочитайте, как работает этот кошелёк",
+    "docs.readPromptBody":
+      "Простым языком объясняется, что защищает ваши деньги, что не защищает и каковы все известные ограничения. Несколько минут сейчас избавят от дорогой ошибки потом.",
+    "docs.readPromptLater":
+      "Позже",
+    "docs.readPromptNever":
+      "Больше не спрашивать",
     "security.coldVaultActivatedToast": "Cold Vault включён. Разрешена только точная Type 2 air-gap подпись с новой авторизацией.",
     "security.coldVaultBiometricBlocked": "В Cold Vault биометрическая разблокировка отключена. Используйте пароль на офлайн-устройстве подписи.",
     "airgap.coldVaultSignerHint": "Cold Vault включён. Держите устройство офлайн, проверяйте каждое поле и подписывайте только отсканированный QR Type 2.",
@@ -190,6 +246,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "La clave de esta cartera se derivó de una frase de recuperación con un solo SHA-256 sin sal. Quien adivine la frase puede gastar sin este dispositivo ni su contraseña, así que ningún ajuste puede protegerla. Mueva los fondos a una cartera recién generada.",
     "docs.howItWorks": "Cómo funciona esta cartera",
     "docs.howItWorksHint": "Abre la explicación pública completa en GitHub: qué protege su dinero, qué no lo protege y todos los límites conocidos. En lenguaje sencillo.",
+    "docs.readPromptTitle":
+      "¿Primera vez? Lee cómo funciona esta cartera",
+    "docs.readPromptBody":
+      "Explica en lenguaje sencillo qué protege tu dinero, qué no, y todos los límites conocidos. Unos minutos ahora pueden evitar un error caro después.",
+    "docs.readPromptLater":
+      "Más tarde",
+    "docs.readPromptNever":
+      "No volver a preguntar",
     "security.coldVaultActivatedToast": "Cold Vault activado. Solo se permite la firma air-gap Type 2 exacta y recién autorizada.",
     "security.coldVaultBiometricBlocked": "El desbloqueo biométrico está desactivado en Cold Vault. Use la contraseña en el firmante sin conexión.",
     "airgap.coldVaultSignerHint": "Cold Vault está activo. Mantenga el dispositivo sin conexión, revise cada campo y firme solo el QR Type 2 escaneado.",
@@ -214,6 +278,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "La clé de ce portefeuille a été dérivée d'une phrase de récupération par un seul SHA-256 sans sel. Quiconque devine la phrase peut dépenser sans cet appareil ni votre phrase secrète, donc aucun réglage ne la protège. Transférez les fonds vers un portefeuille nouvellement généré.",
     "docs.howItWorks": "Comment fonctionne ce portefeuille",
     "docs.howItWorksHint": "Ouvre l'explication publique complète sur GitHub : ce qui protège votre argent, ce qui ne le protège pas, et chaque limite connue. En langage clair.",
+    "docs.readPromptTitle":
+      "Nouveau ici ? Lisez comment ce portefeuille fonctionne",
+    "docs.readPromptBody":
+      "Le document explique en langage clair ce qui protège votre argent, ce qui ne le protège pas, et toutes les limites connues. Quelques minutes maintenant évitent une erreur coûteuse ensuite.",
+    "docs.readPromptLater":
+      "Plus tard",
+    "docs.readPromptNever":
+      "Ne plus me demander",
     "security.coldVaultActivatedToast": "Cold Vault activé. Seule une signature air-gap Type 2 exacte et nouvellement autorisée est permise.",
     "security.coldVaultBiometricBlocked": "Le déverrouillage biométrique est désactivé dans Cold Vault. Utilisez la phrase secrète sur le signataire hors ligne.",
     "airgap.coldVaultSignerHint": "Cold Vault est actif. Gardez l'appareil hors ligne, vérifiez chaque champ et signez uniquement le QR Type 2 scanné.",
@@ -238,6 +310,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "A chave desta carteira foi derivada de uma frase de recuperação com um único SHA-256 sem sal. Quem adivinhar a frase consegue gastar sem este dispositivo nem a sua palavra-passe, por isso nenhuma configuração a protege. Mova os fundos para uma carteira recém-gerada.",
     "docs.howItWorks": "Como funciona esta carteira",
     "docs.howItWorksHint": "Abre a explicação pública completa no GitHub: o que protege o seu dinheiro, o que não protege e todos os limites conhecidos. Em linguagem simples.",
+    "docs.readPromptTitle":
+      "É novo por aqui? Leia como esta carteira funciona",
+    "docs.readPromptBody":
+      "Explica em linguagem simples o que protege o seu dinheiro, o que não protege, e todos os limites conhecidos. Alguns minutos agora evitam um erro caro depois.",
+    "docs.readPromptLater":
+      "Mais tarde",
+    "docs.readPromptNever":
+      "Não perguntar novamente",
     "security.coldVaultActivatedToast": "Cold Vault ativado. Só é permitida a assinatura air-gap Type 2 exata e recém-autorizada.",
     "security.coldVaultBiometricBlocked": "O desbloqueio biométrico está desativado no Cold Vault. Use a palavra-passe no assinante offline.",
     "airgap.coldVaultSignerHint": "O Cold Vault está ativo. Mantenha o dispositivo offline, confirme todos os campos e assine apenas o QR Type 2 digitalizado.",
@@ -262,6 +342,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "اشتُق مفتاح هذه المحفظة من عبارة استرجاع بتطبيق SHA-256 مرة واحدة وبدون ملح. من يخمّن العبارة يستطيع الإنفاق دون هذا الجهاز ودون عبارة المرور، ولذلك لا يحميها أي إعداد. انقل الأموال إلى محفظة جديدة.",
     "docs.howItWorks": "كيف تعمل هذه المحفظة",
     "docs.howItWorksHint": "يفتح الشرح العام الكامل على GitHub: ما يحمي أموالك وما لا يحميها، وكل حد معروف. مكتوب بلغة واضحة.",
+    "docs.readPromptTitle":
+      "هل أنت جديد؟ اقرأ كيف تعمل هذه المحفظة",
+    "docs.readPromptBody":
+      "يشرح بلغة بسيطة ما يحمي أموالك وما لا يحميها، وكل حد معروف. دقائق قليلة الآن تمنع خطأً مكلفًا لاحقًا.",
+    "docs.readPromptLater":
+      "لاحقًا",
+    "docs.readPromptNever":
+      "لا تسألني مرة أخرى",
     "security.coldVaultActivatedToast": "تم تفعيل Cold Vault. يُسمح فقط بتوقيع air-gap دقيق من Type 2 بتفويض جديد.",
     "security.coldVaultBiometricBlocked": "فتح القفل بالبصمة معطل في Cold Vault. استخدم عبارة المرور على جهاز التوقيع غير المتصل.",
     "airgap.coldVaultSignerHint": "Cold Vault مفعّل. أبق الجهاز دون اتصال، وراجع كل حقل، ووقّع فقط QR من Type 2 الذي تم مسحه.",
@@ -286,6 +374,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Nyckeln i denna plånbok härleddes från en återställningsfras med en enda osaltad SHA-256. Den som gissar frasen kan spendera utan den här enheten eller din lösenfras, så ingen inställning skyddar den. Flytta medlen till en nyskapad plånbok.",
     "docs.howItWorks": "Så fungerar denna plånbok",
     "docs.howItWorksHint": "Öppnar den fullständiga offentliga förklaringen på GitHub: vad som skyddar dina pengar, vad som inte gör det, och varje känd begränsning. Skrivet på enkelt språk.",
+    "docs.readPromptTitle":
+      "Ny här? Läs hur den här plånboken fungerar",
+    "docs.readPromptBody":
+      "Den förklarar på vanligt språk vad som skyddar dina pengar, vad som inte gör det, och varje känd begränsning. Några minuter nu kan spara ett dyrt misstag senare.",
+    "docs.readPromptLater":
+      "Senare",
+    "docs.readPromptNever":
+      "Fråga mig inte igen",
     "security.coldVaultActivatedToast": "Cold Vault aktiverad. Endast exakt och nyauktoriserad Type 2-air-gap-signering tillåts.",
     "security.coldVaultBiometricBlocked": "Biometrisk upplåsning är avstängd i Cold Vault. Använd lösenfrasen på offline-signeraren.",
     "airgap.coldVaultSignerHint": "Cold Vault är aktiv. Håll enheten offline, granska varje fält och signera endast den skannade Type 2-QR-koden.",
@@ -310,6 +406,14 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Der Schlüssel dieser Wallet wurde mit einem einzigen ungesalzenen SHA-256 aus einer Wiederherstellungsphrase abgeleitet. Wer die Phrase errät, kann ohne dieses Gerät und ohne Ihre Passphrase ausgeben; keine Einstellung schützt davor. Übertragen Sie das Guthaben in eine neu erzeugte Wallet.",
     "docs.howItWorks": "Wie diese Wallet funktioniert",
     "docs.howItWorksHint": "Öffnet die vollständige öffentliche Erklärung auf GitHub: was Ihr Geld schützt, was nicht, und jede bekannte Grenze. In einfacher Sprache geschrieben.",
+    "docs.readPromptTitle":
+      "Neu hier? Lesen Sie, wie diese Wallet funktioniert",
+    "docs.readPromptBody":
+      "Der Text erklärt in einfacher Sprache, was Ihr Geld schützt, was nicht, und jede bekannte Grenze. Ein paar Minuten jetzt ersparen später einen teuren Fehler.",
+    "docs.readPromptLater":
+      "Später",
+    "docs.readPromptNever":
+      "Nicht mehr fragen",
     "security.coldVaultActivatedToast": "Cold Vault aktiviert. Nur eine exakte, neu autorisierte Type-2-Air-Gap-Signatur ist erlaubt.",
     "security.coldVaultBiometricBlocked": "Biometrisches Entsperren ist im Cold Vault deaktiviert. Verwenden Sie die Passphrase auf dem Offline-Signierer.",
     "airgap.coldVaultSignerHint": "Cold Vault ist aktiv. Gerät offline halten, jedes Feld prüfen und nur den gescannten Type-2-QR signieren.",

@@ -1642,3 +1642,14 @@ button:disabled {
 .prepared-confirm-fields .mono {
   overflow-wrap: anywhere;
 }
+
+/* The first-run prompt to read the public explanation. Visually distinct from the
+   balance cards below it, so it reads as a suggestion rather than wallet data, and
+   dismissible in two ways: for now, or for good. */
+.how-it-works-prompt {
+  border-left: 3px solid var(--accent, #7bb);
+}
+
+.how-it-works-prompt .row-btns {
+  margin-top: 0.5rem;
+}
