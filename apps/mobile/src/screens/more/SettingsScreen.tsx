@@ -1,8 +1,10 @@
 import {
+  HOW_IT_WORKS_URL,
   IstanbulSafetyPanel,
   OFFICIAL_NODE_URL,
   isOfficialNodeUrl,
 } from "@hacash/wallet-ui";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
 import {
   api,
@@ -111,6 +113,28 @@ export default function SettingsScreen({
         containerClassName="card"
         formatError={formatInvokeError}
       />
+      {/* Every build ships the same file name and the same version name, so without
+          this a field report cannot distinguish an unchanged app from an old file
+          having been installed. It cost a round of confusion to learn that. */}
+      <div className="card">
+        <h2>{t("settings.buildId")}</h2>
+        <p className="muted small">{t("settings.buildIdHint")}</p>
+        <code className="mono wrap">{__BUILD_ID__}</code>
+      </div>
+      <div className="card">
+        <h2>{t("docs.howItWorks")}</h2>
+        <p className="muted small">{t("docs.howItWorksHint")}</p>
+        <button
+          type="button"
+          onClick={() => {
+            void openUrl(HOW_IT_WORKS_URL).catch((error) =>
+              onToast(formatInvokeError(error), "error"),
+            );
+          }}
+        >
+          {t("docs.howItWorks")}
+        </button>
+      </div>
       <div className="card">
         <h2>{t("settings.network")}</h2>
         <p className="muted small">

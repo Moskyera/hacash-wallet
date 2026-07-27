@@ -21,28 +21,24 @@ env:
 
 jobs:
   build-android:
-    name: Signed Android arm64 APK
+    name: Build unsigned Android arm64 APK
     runs-on: ubuntu-22.04
     timeout-minutes: 75
-    env:
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
+    outputs:
+      release-version: ${{ steps.release-version.outputs.version }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Verify release version and tag
-        run: node scripts/release-version.mjs check
-
-      - name: Require all Android signing secrets
+        id: release-version
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$ANDROID_KEYSTORE_BASE64"
-          test -n "$ANDROID_KEYSTORE_PASSWORD"
-          test -n "$ANDROID_KEY_ALIAS"
-          test -n "$ANDROID_EXPECTED_CERT_SHA256"
+          node scripts/release-version.mjs check
+          version="$(node -p "require('./apps/mobile/package.json').version")"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
       - name: Checkout pinned fullnodedev
         shell: pwsh
@@ -85,53 +81,283 @@ jobs:
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked
 
-      - name: Restore release keystore without logging secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-          KEYSTORE="${RUNNER_TEMP}/hacash-wallet-release.jks"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
-          test -s "$KEYSTORE"
-          case "$ANDROID_KEYSTORE_PASSWORD$ANDROID_KEY_ALIAS" in
-            *$'\n'*|*$'\r'*) echo "Signing values must not contain newlines" >&2; exit 1 ;;
-          esac
-          {
-            printf 'password=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
-            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
-            printf 'storeFile=%s\n' "$KEYSTORE"
-          } > apps/mobile/src-tauri/gen/android/keystore.properties
-
       - name: Build the exact mobile frontend being packaged
         working-directory: apps/mobile
         run: yarn build
 
       - name: Apply and validate Android integration
         shell: pwsh
-        run: ./apps/mobile/apply-android-patches.ps1
+        run: |
+          ./apps/mobile/apply-android-patches.ps1
+          ./apps/mobile/validate-android-build.ps1
 
-      - name: Build signed Android arm64 release APK
+      - name: Remove release signing from the generated Gradle project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gradlePath = "apps/mobile/src-tauri/gen/android/app/build.gradle.kts"
+          if (Test-Path "apps/mobile/src-tauri/gen/android/keystore.properties") {
+            throw "Unprivileged Android build must not receive keystore.properties"
+          }
+          foreach ($name in @("ANDROID_KEYSTORE_BASE64", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS")) {
+            if (-not [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name))) {
+              throw "Unprivileged Android build unexpectedly received $name"
+            }
+          }
+
+          $lines = @(Get-Content -LiteralPath $gradlePath)
+          if (@($lines | Where-Object { $_ -match '^\s*signingConfigs\s*\{\s*$' }).Count -ne 1 -or
+              @($lines | Where-Object { $_ -match '^\s*signingConfig\s*=\s*signingConfigs\.getByName\("release"\)\s*$' }).Count -ne 1) {
+            throw "Generated Gradle signing contract changed; refusing an ambiguous unsigned build"
+          }
+
+          $output = [Collections.Generic.List[string]]::new()
+          $insideSigningBlock = $false
+          $braceDepth = 0
+          foreach ($line in $lines) {
+            if (-not $insideSigningBlock -and $line -match '^\s*import\s+java\.io\.FileInputStream\s*$') {
+              continue
+            }
+            if (-not $insideSigningBlock -and $line -match '^\s*signingConfigs\s*\{\s*$') {
+              $insideSigningBlock = $true
+              $braceDepth = ([regex]::Matches($line, '\{')).Count - ([regex]::Matches($line, '\}')).Count
+              continue
+            }
+            if ($insideSigningBlock) {
+              $braceDepth += ([regex]::Matches($line, '\{')).Count - ([regex]::Matches($line, '\}')).Count
+              if ($braceDepth -eq 0) {
+                $insideSigningBlock = $false
+              }
+              continue
+            }
+            if ($line -match '^\s*signingConfig\s*=\s*signingConfigs\.getByName\("release"\)\s*$') {
+              continue
+            }
+            $output.Add($line)
+          }
+          if ($insideSigningBlock -or $braceDepth -ne 0) {
+            throw "Unable to remove the generated Gradle signing block safely"
+          }
+
+          [IO.File]::WriteAllLines(
+            (Resolve-Path $gradlePath),
+            $output,
+            [Text.UTF8Encoding]::new($false)
+          )
+          $unsignedGradle = Get-Content -LiteralPath $gradlePath -Raw
+          if ($unsignedGradle -match 'signingConfig|keystoreProperties|FileInputStream') {
+            throw "Private signing configuration remains in the unprivileged Gradle project"
+          }
+
+      - name: Build unsigned Android arm64 release APK
         working-directory: apps/mobile
         run: yarn run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh
-        run: ./apps/mobile/validate-android-build.ps1
+        run: |
+          ./apps/mobile/apply-android-patches.ps1
+          ./apps/mobile/validate-android-build.ps1
 
-      - name: Select the single release APK
+      - name: Validate and stage the single unsigned APK
         shell: bash
         run: |
           set -euo pipefail
           mapfile -d '' APKS < <(find apps/mobile/src-tauri/gen/android/app/build/outputs/apk -type f -iname '*release*.apk' -print0)
-          test "${#APKS[@]}" -eq 1
-          printf 'RELEASE_APK=%s\n' "${APKS[0]}" >> "$GITHUB_ENV"
+          [[ "${#APKS[@]}" -eq 1 ]]
+          apk="${APKS[0]}"
+          apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+          aapt="${ANDROID_HOME}/build-tools/36.0.0/aapt"
 
-      - name: Verify signer, package, version, SDK and ABI
-        shell: pwsh
-        run: ./apps/mobile/verify-release-apk.ps1 -ApkPath $env:RELEASE_APK
+          magic="$(od -An -tx1 -N4 "$apk" | tr -d '[:space:]')"
+          [[ "$magic" == "504b0304" || "$magic" == "504b0506" || "$magic" == "504b0708" ]]
+          unzip -tqq "$apk"
+          if "$apksigner" verify "$apk" >/dev/null 2>&1; then
+            echo "Unprivileged build unexpectedly produced a signed APK" >&2
+            exit 1
+          fi
 
-      - name: Stage signed APK and checksum
-        run: node scripts/release-artifacts.mjs stage-mobile "${RELEASE_APK}" dist-release
+          IFS=. read -r major minor patch <<< "$RELEASE_VERSION"
+          version_code=$((10#$major * 10000 + 10#$minor * 100 + 10#$patch))
+          mapfile -t badging < <("$aapt" dump badging "$apk")
+          package_line="$(printf '%s\n' "${badging[@]}" | grep '^package:')"
+          [[ "$package_line" == *"name='org.hacash.wallet.mobile'"* ]]
+          [[ "$package_line" == *"versionName='$RELEASE_VERSION'"* ]]
+          [[ "$package_line" == *"versionCode='$version_code'"* ]]
+          printf '%s\n' "${badging[@]}" | grep -qx "sdkVersion:'28'"
+          printf '%s\n' "${badging[@]}" | grep -qx "targetSdkVersion:'36'"
+          native_line="$(printf '%s\n' "${badging[@]}" | grep '^native-code:')"
+          [[ "$native_line" == "native-code: 'arm64-v8a'" ]]
+
+          mkdir -p dist-unsigned
+          apk_name="hacash-wallet-mobile-v${RELEASE_VERSION}-arm64-unsigned.apk"
+          sums_name="UNSIGNED-SHA256-v${RELEASE_VERSION}-mobile.txt"
+          cp -- "$apk" "dist-unsigned/$apk_name"
+          (
+            cd dist-unsigned
+            sha256sum "$apk_name" > "$sums_name"
+          )
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mobile-android-arm64-unsigned
+          path: dist-unsigned/*
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-android:
+    name: Sign and verify Android arm64 APK
+    needs: build-android
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    environment: release-signing
+    env:
+      RELEASE_VERSION: ${{ needs.build-android.outputs.release-version }}
+      ANDROID_EXPECTED_CERT_SHA256: ${{ vars.ANDROID_EXPECTED_CERT_SHA256 }}
+      RELEASE_REF_NAME: ${{ github.ref_name }}
+      RELEASE_REF_TYPE: ${{ github.ref_type }}
+    steps:
+      # Deliberately no checkout. Tool setup and artifact validation run before
+      # the one inline step that receives the protected signing secrets.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: mobile-android-arm64-unsigned
+          path: unsigned-input
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install pinned Android signing tools
+        run: sdkmanager "build-tools;36.0.0"
+
+      - name: Validate exact unsigned Android input set
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "$RELEASE_REF_TYPE" == "tag" && "$RELEASE_REF_NAME" != "v${RELEASE_VERSION}-mobile" ]]; then
+            echo "Release tag does not match unsigned APK version" >&2
+            exit 1
+          fi
+          expected_pin="$(printf '%s' "$ANDROID_EXPECTED_CERT_SHA256" | tr -cd '0-9A-Fa-f' | tr 'A-F' 'a-f')"
+          [[ "$expected_pin" =~ ^[0-9a-f]{64}$ ]]
+
+          apk_name="hacash-wallet-mobile-v${RELEASE_VERSION}-arm64-unsigned.apk"
+          sums_name="UNSIGNED-SHA256-v${RELEASE_VERSION}-mobile.txt"
+          mapfile -t names < <(find unsigned-input -maxdepth 1 -type f -printf '%f\n' | sort)
+          expected_names=("$sums_name" "$apk_name")
+          mapfile -t expected_names < <(printf '%s\n' "${expected_names[@]}" | sort)
+          [[ "$(printf '%s\n' "${names[@]}")" == "$(printf '%s\n' "${expected_names[@]}")" ]]
+
+          expected_sum="$(cd unsigned-input && sha256sum "$apk_name")"
+          actual_sum="$(tr -d '\r' < "unsigned-input/$sums_name")"
+          [[ "$actual_sum" == "$expected_sum" ]]
+          apk="unsigned-input/$apk_name"
+          magic="$(od -An -tx1 -N4 "$apk" | tr -d '[:space:]')"
+          [[ "$magic" == "504b0304" || "$magic" == "504b0506" || "$magic" == "504b0708" ]]
+          unzip -tqq "$apk"
+
+          apksigner="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+          aapt="${ANDROID_HOME}/build-tools/36.0.0/aapt"
+          if "$apksigner" verify "$apk" >/dev/null 2>&1; then
+            echo "Protected signing job received an already signed APK" >&2
+            exit 1
+          fi
+
+          IFS=. read -r major minor patch <<< "$RELEASE_VERSION"
+          version_code=$((10#$major * 10000 + 10#$minor * 100 + 10#$patch))
+          mapfile -t badging < <("$aapt" dump badging "$apk")
+          package_line="$(printf '%s\n' "${badging[@]}" | grep '^package:')"
+          [[ "$package_line" == *"name='org.hacash.wallet.mobile'"* ]]
+          [[ "$package_line" == *"versionName='$RELEASE_VERSION'"* ]]
+          [[ "$package_line" == *"versionCode='$version_code'"* ]]
+          printf '%s\n' "${badging[@]}" | grep -qx "sdkVersion:'28'"
+          printf '%s\n' "${badging[@]}" | grep -qx "targetSdkVersion:'36'"
+          native_line="$(printf '%s\n' "${badging[@]}" | grep '^native-code:')"
+          [[ "$native_line" == "native-code: 'arm64-v8a'" ]]
+
+      - name: Sign and verify with the protected Android key
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keystore="${RUNNER_TEMP}/hacash-wallet-release.jks"
+          aligned="${RUNNER_TEMP}/hacash-wallet-aligned.apk"
+          cleanup() {
+            rm -f -- "$keystore" "$aligned"
+          }
+          trap cleanup EXIT
+
+          [[ -n "$ANDROID_KEYSTORE_BASE64" ]]
+          [[ -n "$ANDROID_KEYSTORE_PASSWORD" ]]
+          [[ -n "$ANDROID_KEY_ALIAS" ]]
+          case "$ANDROID_KEYSTORE_PASSWORD$ANDROID_KEY_ALIAS" in
+            *$'\n'*|*$'\r'*) echo "Signing values must not contain newlines" >&2; exit 1 ;;
+          esac
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          [[ -s "$keystore" ]]
+          [[ "$(stat -c '%s' "$keystore")" -ge 512 ]]
+
+          input="unsigned-input/hacash-wallet-mobile-v${RELEASE_VERSION}-arm64-unsigned.apk"
+          output_dir="dist-release"
+          output_name="hacash-wallet-mobile-v${RELEASE_VERSION}-arm64.apk"
+          output="${output_dir}/${output_name}"
+          mkdir -p "$output_dir"
+
+          build_tools="${ANDROID_HOME}/build-tools/36.0.0"
+          "${build_tools}/zipalign" -f -P 16 4 "$input" "$aligned"
+          "${build_tools}/zipalign" -c -P 16 4 "$aligned"
+          "${build_tools}/apksigner" sign \
+            --ks "$keystore" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --v4-signing-enabled false \
+            --out "$output" \
+            "$aligned"
+
+          mapfile -t signature_output < <("${build_tools}/apksigner" verify --verbose --print-certs "$output")
+          signature_text="$(printf '%s\n' "${signature_output[@]}")"
+          signer_count="$(printf '%s\n' "${signature_output[@]}" | grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest:')"
+          [[ "$signer_count" -eq 1 ]]
+          actual_signer="$(printf '%s\n' "${signature_output[@]}" |
+            sed -n 's/^Signer #1 certificate SHA-256 digest:[[:space:]]*//p' |
+            tr -cd '0-9A-Fa-f' | tr 'A-F' 'a-f')"
+          expected_signer="$(printf '%s' "$ANDROID_EXPECTED_CERT_SHA256" |
+            tr -cd '0-9A-Fa-f' | tr 'A-F' 'a-f')"
+          [[ "$actual_signer" == "$expected_signer" ]]
+          printf '%s\n' "$signature_text" | grep -Eq 'Verified using v2 scheme.*:[[:space:]]*true|Verified using v3 scheme.*:[[:space:]]*true'
+
+          magic="$(od -An -tx1 -N4 "$output" | tr -d '[:space:]')"
+          [[ "$magic" == "504b0304" || "$magic" == "504b0506" || "$magic" == "504b0708" ]]
+          unzip -tqq "$output"
+          IFS=. read -r major minor patch <<< "$RELEASE_VERSION"
+          version_code=$((10#$major * 10000 + 10#$minor * 100 + 10#$patch))
+          mapfile -t badging < <("${build_tools}/aapt" dump badging "$output")
+          package_line="$(printf '%s\n' "${badging[@]}" | grep '^package:')"
+          [[ "$package_line" == *"name='org.hacash.wallet.mobile'"* ]]
+          [[ "$package_line" == *"versionName='$RELEASE_VERSION'"* ]]
+          [[ "$package_line" == *"versionCode='$version_code'"* ]]
+          printf '%s\n' "${badging[@]}" | grep -qx "sdkVersion:'28'"
+          printf '%s\n' "${badging[@]}" | grep -qx "targetSdkVersion:'36'"
+          native_line="$(printf '%s\n' "${badging[@]}" | grep '^native-code:')"
+          [[ "$native_line" == "native-code: 'arm64-v8a'" ]]
+
+          (
+            cd "$output_dir"
+            sha256sum "$output_name" > "SHA256SUMS-v${RELEASE_VERSION}-mobile.txt"
+          )
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -143,12 +369,15 @@ jobs:
   publish:
     name: Publish verified mobile release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build-android
+    needs: sign-android
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
-      ANDROID_EXPECTED_CERT_SHA256: ${{ secrets.ANDROID_EXPECTED_CERT_SHA256 }}
+      ANDROID_EXPECTED_CERT_SHA256: ${{ vars.ANDROID_EXPECTED_CERT_SHA256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -181,6 +410,11 @@ jobs:
 
       - name: Verify downloaded APK checksum
         run: node scripts/release-artifacts.mjs verify-mobile dist-release
+
+      - name: Attest verified mobile release provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: dist-release/*
 
       - name: Publish only the verified signed APK set
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

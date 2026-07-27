@@ -24,7 +24,7 @@ import {
   MIN_KEYSTORE_PASS,
   summaryFromAccountInfo,
 } from "../quantumMeta";
-import { maybeSecondFactorGate } from "../utils/secondFactorGate";
+import { needsSecondFactor } from "../utils/secondFactorGate";
 import AddressBadge from "./AddressBadge";
 import KeystoreV3Modal from "./KeystoreV3Modal";
 
@@ -37,6 +37,11 @@ type Props = {
   clipboardClearSecs: number;
   platformSec: PlatformSecurityStatus | null;
   securityProfile?: string | null;
+  hardwareMode?: string | null;
+  /// The amount the core reports and enforces, already combining the authenticated
+  /// profile with the user's chosen value. Without it this gate would ignore a user who
+  /// tightened the policy and let the core refuse the send instead.
+  secondFactorThresholdMei?: number | null;
   biometricSendEnabled?: boolean;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
   onGoLegacySend?: () => void;
@@ -47,9 +52,9 @@ export default function QuantumScreen({
   nodeUrl,
   networkMode,
   clipboardClearSecs,
-  platformSec,
   securityProfile,
-  biometricSendEnabled = true,
+  hardwareMode,
+  secondFactorThresholdMei,
   onToast,
   onGoLegacySend,
 }: Props) {
@@ -226,12 +231,13 @@ export default function QuantumScreen({
   }, [signedAirgapQr]);
 
   async function maybeSecondFactor(amount: number) {
-    await maybeSecondFactorGate({
-      amountMei: amount,
-      securityProfile,
-      biometricSendEnabled,
-      nativeBiometricAvailable: platformSec?.native_biometric_available,
-    });
+    if (
+      !needsSecondFactor(amount, securityProfile, hardwareMode, secondFactorThresholdMei)
+    )
+      return;
+    throw new Error(
+      "Protected Quantum Lab signing is blocked until authorization can bind to the exact Type 4 body.",
+    );
   }
 
   function allowType4Action(): boolean {

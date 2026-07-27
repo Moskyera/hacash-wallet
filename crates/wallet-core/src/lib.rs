@@ -2,6 +2,7 @@ pub mod account;
 pub mod address;
 pub mod airgap;
 mod assets;
+pub mod authorization;
 pub mod bills;
 mod biometric_unlock;
 pub mod btc_send;

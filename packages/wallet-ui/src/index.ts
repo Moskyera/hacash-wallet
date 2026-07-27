@@ -12,5 +12,6 @@ export * from "./paymentQr";
 export * from "./istanbul";
 export * from "./IstanbulSafetyPanel";
 export * from "./prices";
+export * from "./securityPolicy";
 export * from "./QuantumFundingCard";
 export * from "./type4Probe";

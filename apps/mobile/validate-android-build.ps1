@@ -18,7 +18,12 @@ $commonRust = Join-Path $mobile "..\..\crates\wallet-tauri-common\src"
 $mobileRust = Join-Path $mobile "src-tauri\src"
 $nativePluginSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\WalletNativePlugin.kt"
 $nativePluginGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\WalletNativePlugin.kt"
+$mainActivitySource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\MainActivity.kt"
+$mainActivityGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\MainActivity.kt"
 $biometricStoreSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\BiometricSecretStore.kt"
+$biometricStoreGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\BiometricSecretStore.kt"
+$apkInstallerSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\ApkInstaller.kt"
+$apkInstallerGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\ApkInstaller.kt"
 $backupExportSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\BackupExportHelper.kt"
 $androidPermissions = Join-Path $mobile "src-tauri\android-permissions.xml"
 $mobileCapability = Join-Path $mobile "src-tauri\capabilities\mobile.json"
@@ -250,6 +255,50 @@ foreach ($pluginFile in @($nativePluginSource, $nativePluginGenerated)) {
     }
 }
 
+foreach ($activityFile in @($mainActivitySource, $mainActivityGenerated)) {
+    if (-not (Test-Path $activityFile)) {
+        $errors += "Missing secure Android MainActivity: $activityFile"
+        continue
+    }
+
+    $activitySource = Get-Content $activityFile -Raw
+    if ($activitySource -notmatch 'WindowManager\.LayoutParams\.FLAG_SECURE') {
+        $errors += "Android MainActivity must enforce FLAG_SECURE: $activityFile"
+    }
+}
+
+if ((Test-Path $mainActivitySource) -and (Test-Path $mainActivityGenerated)) {
+    $sourceActivity = (Get-Content $mainActivitySource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedActivity = (Get-Content $mainActivityGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourceActivity -ne $generatedActivity) {
+        $errors += "Generated MainActivity differs from the tracked secure source; rerun apply-android-patches.ps1"
+    }
+}
+
+if ((Test-Path $nativePluginSource) -and (Test-Path $nativePluginGenerated)) {
+    $sourcePlugin = (Get-Content $nativePluginSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedPlugin = (Get-Content $nativePluginGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourcePlugin -ne $generatedPlugin) {
+        $errors += "Generated WalletNativePlugin differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
+if ((Test-Path $biometricStoreSource) -and (Test-Path $biometricStoreGenerated)) {
+    $sourceStore = (Get-Content $biometricStoreSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedStore = (Get-Content $biometricStoreGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourceStore -ne $generatedStore) {
+        $errors += "Generated BiometricSecretStore differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
+if ((Test-Path $apkInstallerSource) -and (Test-Path $apkInstallerGenerated)) {
+    $sourceInstaller = (Get-Content $apkInstallerSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedInstaller = (Get-Content $apkInstallerGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourceInstaller -ne $generatedInstaller) {
+        $errors += "Generated ApkInstaller differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
 if (Test-Path $nativePluginSource) {
     $nativePlugin = Get-Content $nativePluginSource -Raw
     foreach ($permissionContract in @(
@@ -271,6 +320,68 @@ if (Test-Path $biometricStoreSource) {
         ([regex]::Matches($biometricStore, '\.commit\(\)')).Count -lt 2) {
         $errors += "Biometric secret store must durably commit both save and clear operations off the UI thread"
     }
+    # The stricter per-use, biometric-only policy could not be enabled on device, so
+    # the released v0.1.55 policy is in use: one authentication covers a bounded
+    # window and the device credential is accepted. The gate now enforces THAT,
+    # because a contract that contradicts the shipped code protects nothing.
+    foreach ($keyPolicyContract in @(
+        'hacash_wallet_biometric_unlock_v3',
+        'hacash_wallet_biometric_unlock_v2',
+        'setUserAuthenticationRequired(true)',
+        'setInvalidatedByBiometricEnrollment(true)',
+        'AUTH_WINDOW_SECONDS'
+    )) {
+        if ($biometricStore -notmatch [regex]::Escape($keyPolicyContract)) {
+            $errors += "Biometric secret store is missing key policy contract: $keyPolicyContract"
+        }
+    }
+    # The window must stay exactly the released value. Anything longer would let one
+    # authentication cover more key use than the interface implies.
+    if ($biometricStore -notmatch [regex]::Escape('AUTH_WINDOW_SECONDS = 30')) {
+        $errors += "Biometric unlock window must remain the released 30 second value"
+    }
+}
+
+if (Test-Path $nativePluginSource) {
+    $nativePlugin = Get-Content $nativePluginSource -Raw
+    # A bounded-window key cannot be bound to a CryptoObject, so the prompt runs
+    # first and the Cipher is created from the already unlocked key afterwards.
+    if ($nativePlugin -notmatch [regex]::Escape('prompt.authenticate(promptInfo)')) {
+        $errors += "Biometric unlock must run the prompt before creating the Cipher"
+    }
+    # Unlock accepts the device credential because the Keystore key does. Authorizing
+    # a send or Cold Vault activation must not: a phone PIN is not authorization for
+    # a high-value signing decision.
+    if ($nativePlugin -notmatch [regex]::Escape('private fun signingAuthenticators(): Int = BiometricManager.Authenticators.BIOMETRIC_STRONG')) {
+        $errors += "Prepared-operation authorization must require a Class 3 biometric only"
+    }
+    if ($nativePlugin -notmatch [regex]::Escape('.setAllowedAuthenticators(unlockAuthenticators())')) {
+        $errors += "Keystore unlock must state its allowed authenticators explicitly"
+    }
+    $signingCeremony = $nativePlugin.Substring($nativePlugin.IndexOf('fun authenticateStrong('))
+    if ($signingCeremony -match [regex]::Escape('unlockAuthenticators()')) {
+        $errors += "Prepared-operation authorization must not reuse the unlock authenticators"
+    }
+}
+
+if (Test-Path $apkInstallerSource) {
+    $apkInstaller = Get-Content $apkInstallerSource -Raw
+    foreach ($signerContract in @(
+        'verifyPackageIdentityAndSigner(activity, source)',
+        'PackageManager.GET_SIGNING_CERTIFICATES',
+        'candidate.packageName != activity.packageName',
+        'candidateVersion <= installedVersion',
+        'MessageDigest.getInstance("SHA-256")',
+        '.intersect(installedIdentity.currentCertificateSha256)'
+    )) {
+        if ($apkInstaller -notmatch [regex]::Escape($signerContract)) {
+            $errors += "APK installer is missing package/signer verification: $signerContract"
+        }
+    }
+    if ($apkInstaller.IndexOf('verifyPackageIdentityAndSigner(activity, source)') -gt
+        $apkInstaller.IndexOf('Intent(Intent.ACTION_VIEW)')) {
+        $errors += "APK package/signer verification must happen before ACTION_VIEW"
+    }
 }
 
 if (Test-Path $backupExportSource) {
@@ -284,6 +395,24 @@ if (Test-Path $backupExportSource) {
     )) {
         if ($backupExport -notmatch [regex]::Escape($filenameGuard)) {
             $errors += "Backup export filename validation missing: $filenameGuard"
+        }
+    }
+    foreach ($streamingContract in @(
+        'MAX_BACKUP_BYTES = 64L * 1024L * 1024L',
+        'source.parentFile != cacheRoot',
+        'Files.isSymbolicLink(requestedSource.toPath())',
+        'FileInputStream(source).use',
+        'copyBounded(input, stream)',
+        'buffer.fill(0)',
+        'temporary.renameTo(destination)'
+    )) {
+        if ($backupExport -notmatch [regex]::Escape($streamingContract)) {
+            $errors += "Backup export bounded-streaming contract missing: $streamingContract"
+        }
+    }
+    foreach ($forbiddenBuffering in @('readBytes()', 'writeBytes(bytes)')) {
+        if ($backupExport -match [regex]::Escape($forbiddenBuffering)) {
+            $errors += "Backup export must not buffer the full file: $forbiddenBuffering"
         }
     }
 }
@@ -363,6 +492,29 @@ if ((Test-Path $handlerInventory) -and (Test-Path $mobileLib) -and (Test-Path $w
     }
 } else {
     $errors += "Missing handler inventory, mobile lib.rs, or wallet permission manifest"
+}
+
+# The frontend that actually runs is the copy Tauri compiled INTO the Rust library,
+# not the one in the APK assets folder. Nothing reads that folder, so an APK can look
+# perfect while serving the previous release. That shipped for a whole day before it
+# was found, so it is now a build error rather than something to notice later.
+$jniLib = Join-Path $android "app/src/main/jniLibs/arm64-v8a/libhacash_wallet_mobile_lib.so"
+$distAssets = Join-Path $mobile "dist/assets"
+if ((Test-Path $jniLib) -and (Test-Path $distAssets)) {
+    $bytes = [System.IO.File]::ReadAllBytes($jniLib)
+    # The asset keys are stored as plain text in the library even though the bodies
+    # are compressed, so a byte scan finds exactly what the app will serve.
+    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+    $embedded = [regex]::Matches($text, '/assets/index-[A-Za-z0-9_-]{8}\.(?:js|css)') |
+        ForEach-Object { $_.Value } | Sort-Object -Unique
+    $onDisk = Get-ChildItem $distAssets -File |
+        Where-Object { $_.Name -match '^index-.*\.(js|css)$' } |
+        ForEach-Object { "/assets/" + $_.Name } | Sort-Object -Unique
+    if ($embedded.Count -eq 0) {
+        $errors += "The Android library embeds no frontend assets; rebuild it after 'yarn build'"
+    } elseif (Compare-Object $embedded $onDisk) {
+        $errors += "The Android library embeds a different frontend than dist/. Run 'yarn build' FIRST, then rebuild the Rust library. Embedded: $($embedded -join ', '). On disk: $($onDisk -join ', ')"
+    }
 }
 
 if ($errors.Count -gt 0) {

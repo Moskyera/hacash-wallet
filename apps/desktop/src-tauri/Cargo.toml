@@ -26,6 +26,10 @@ tracing-subscriber = "0.3"
 windows = { version = "0.58", features = [
     "Security_Credentials_UI",
     "Foundation",
+    # The consent prompt runs on a worker thread, which must join a COM
+    # apartment itself before any WinRT activation succeeds.
+    "Win32_Foundation",
+    "Win32_System_Com",
 ] }
 
 [features]

@@ -8,6 +8,12 @@ wallet-run.log.err
 **/hacash-wallet-release.jks
 **/upload-keystore.jks
 **/keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+*-private.pem
 apps/mobile/src-tauri/gen/
 apps/mobile/*.log
 apps/mobile/*-log.txt
@@ -18,3 +24,7 @@ apps/mobile/aarch64-signed-build.log
 cargo-*.txt
 mobile-*.txt
 test-*.txt
+
+# Scratch build directories used when the main target dir is unusable.
+/target-ci/
+/target-android/

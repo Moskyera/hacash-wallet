@@ -10,6 +10,35 @@ use crate::security::check_send_policy;
 use super::WalletService;
 
 impl WalletService {
+    /// Would a dApp signature be refused by policy right now?
+    ///
+    /// Both dApp signing paths raise an approval sheet and spend node round trips
+    /// before they reach their policy check, so a user could approve a transaction
+    /// that was never going to proceed. Asking this first keeps the interface from
+    /// requesting consent it cannot act on.
+    ///
+    /// The answer depends on session state, because the second factor is single use,
+    /// so it is only valid at the moment it is asked. It is a courtesy check, not the
+    /// enforcement: `dapp_transfer` and `dapp_sign_tx` still make their own.
+    pub fn check_dapp_signing_policy(&self) -> WalletResult<()> {
+        let unlock_ctx = self.second_factor_from_session()?;
+        if check_send_policy(
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
+            &unlock_ctx,
+        )
+        .is_err()
+        {
+            return Err(WalletError::Policy(
+                "dApp signing needs a second factor, and this path can only accept a WebAuthn \
+                 ceremony with a registered security key. Use the wallet's own Send screen, which \
+                 binds the authorization to the exact transaction"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn dapp_session_active(&self) -> bool {
         self.dapp_session.is_active()
     }
@@ -119,8 +148,8 @@ impl WalletService {
         )?;
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         self.clear_second_factor();
@@ -160,8 +189,8 @@ impl WalletService {
         crate::dapp::validate_raw_sign_transaction(&canonical)?;
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         self.clear_second_factor();

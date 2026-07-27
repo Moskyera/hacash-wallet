@@ -593,7 +593,9 @@ fn release_gate_airgap_signing_rejects_envelope_body_mismatches() {
                     Address::from_readable(&signing_account.address()).unwrap(),
                 );
                 let mut wallet = WalletService::new(None, None).unwrap();
-                let imported = wallet.import_wallet(&seed, "airgap-passphrase12").unwrap();
+                let imported = wallet
+                    .import_wallet(&seed, "airgap-passphrase12", &signing_account.address())
+                    .unwrap();
                 assert_eq!(imported, unsigned.from);
                 wallet
                     .sign_airgap_unsigned(&unsigned)
@@ -642,7 +644,9 @@ fn release_gate_airgap_broadcast_rejects_metadata_before_network_submission() {
                     Address::from_readable(&signing_account.address()).unwrap(),
                 );
                 let mut wallet = WalletService::new(None, None).unwrap();
-                wallet.import_wallet(&seed, "airgap-passphrase12").unwrap();
+                wallet
+                    .import_wallet(&seed, "airgap-passphrase12", &signing_account.address())
+                    .unwrap();
                 let signed = wallet.sign_airgap_unsigned(&unsigned).unwrap().envelope;
 
                 let mut wrong_type: AirgapSigned = signed.clone();

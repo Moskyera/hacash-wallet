@@ -7,6 +7,7 @@ use dust_whisper::protocol::{MessengerAckRequest, MessengerEnvelope, MessengerIn
 use serde::{Deserialize, Serialize};
 use sys::Account;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::account::WalletAccount;
 use crate::error::{WalletError, WalletResult};
@@ -50,7 +51,7 @@ struct MessengerStore {
 struct MessengerCtx<'a> {
     account: &'a Account,
     my_address: &'a str,
-    storage_key: [u8; 32],
+    storage_key: Zeroizing<[u8; 32]>,
 }
 
 impl MessengerStore {
@@ -59,12 +60,18 @@ impl MessengerStore {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = fs::read(&path).map_err(|e| WalletError::Other(e.to_string()))?;
+        // The old format could contain plaintext messages. Keep every read in
+        // a wiping owner and migrate legacy plaintext before returning it.
+        let raw = Zeroizing::new(fs::read(&path).map_err(|e| WalletError::Other(e.to_string()))?);
         if let Ok(text) = std::str::from_utf8(&raw)
             && text.trim_start().starts_with('{')
             && text.contains("\"messages\"")
         {
-            return serde_json::from_str(text).map_err(|e| WalletError::Other(e.to_string()));
+            let store: Self =
+                serde_json::from_str(text).map_err(|e| WalletError::Other(e.to_string()))?;
+            let encrypted = encrypt_store(&raw, &ctx.storage_key)?;
+            secure_write(&path, &encrypted).map_err(|e| WalletError::Other(e.to_string()))?;
+            return Ok(store);
         }
         match decrypt_store(&raw, &ctx.storage_key) {
             Ok(plain) => {
@@ -84,7 +91,9 @@ impl MessengerStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| WalletError::Other(e.to_string()))?;
         }
-        let json = serde_json::to_vec(self).map_err(|e| WalletError::Other(e.to_string()))?;
+        let json = Zeroizing::new(
+            serde_json::to_vec(self).map_err(|e| WalletError::Other(e.to_string()))?,
+        );
         let enc = encrypt_store(&json, &ctx.storage_key)?;
         secure_write(&path, &enc).map_err(|e| WalletError::Other(e.to_string()))
     }
@@ -141,11 +150,11 @@ impl MessengerStore {
 }
 
 fn messenger_ctx<'a>(account: &'a WalletAccount, my_address: &'a str) -> MessengerCtx<'a> {
-    let sk = account.inner().secret_key().serialize();
+    let sk = Zeroizing::new(account.inner().secret_key().serialize());
     MessengerCtx {
         account: account.inner(),
         my_address,
-        storage_key: storage_key_from_secret(&sk),
+        storage_key: Zeroizing::new(storage_key_from_secret(&sk)),
     }
 }
 

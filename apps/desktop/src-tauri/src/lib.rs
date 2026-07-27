@@ -29,15 +29,24 @@ fn wallet_platform_security_status() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-fn wallet_confirm_biometric_native(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let nonce = {
-        let mut svc = state.inner.blocking_lock();
-        svc.begin_native_biometric().map_err(|e| e.to_string())?
+async fn wallet_confirm_biometric_native(
+    operation_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let challenge = {
+        let mut svc = state.inner.lock().await;
+        svc.begin_prepared_native_authorization(&operation_id)
+            .map_err(|e| e.to_string())?
     };
-    let message = format!("Authorize Hacash Wallet transaction\nReference: {nonce}");
-    platform::verify_native_biometric(&message)?;
-    let mut svc = state.inner.blocking_lock();
-    svc.finish_native_biometric(&nonce)
+    // The OS consent prompt blocks until the user answers and needs a live
+    // message pump. Run it off the UI thread, and never hold the wallet mutex
+    // across it, so the window stays responsive while the dialog is up.
+    let message = challenge.message.clone();
+    tauri::async_runtime::spawn_blocking(move || platform::verify_native_biometric(&message))
+        .await
+        .map_err(|error| format!("biometric prompt task failed: {error}"))??;
+    let mut svc = state.inner.lock().await;
+    svc.finish_prepared_native_authorization(&operation_id, &challenge.nonce)
         .map_err(|e| e.to_string())
 }
 
@@ -50,6 +59,8 @@ pub fn run() {
             let node_override = std::env::var("HACASH_WALLET_NODE_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty());
+            wallet_tauri_common::backup_commands::recover_interrupted_restore()
+                .map_err(|error| format!("backup restore recovery: {error}"))?;
             let mut svc = WalletService::new(node_override, None).map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
@@ -66,13 +77,15 @@ pub fn run() {
         // Backup files and WebAuthn are desktop-only. The Android Downloads helper is not
         // registered until mobile exposes that flow.
         .invoke_handler(wallet_tauri_common::wallet_invoke_handler![
-            wallet_tauri_common::commands::wallet_export_backup,
+            wallet_tauri_common::backup_commands::wallet_export_backup,
             wallet_tauri_common::backup_commands::wallet_preview_backup,
             wallet_tauri_common::backup_commands::wallet_import_backup,
             wallet_tauri_common::security_commands::wallet_webauthn_register_begin,
             wallet_tauri_common::security_commands::wallet_webauthn_register_finish,
             wallet_tauri_common::security_commands::wallet_webauthn_auth_begin,
             wallet_tauri_common::security_commands::wallet_webauthn_auth_finish,
+            wallet_tauri_common::security_commands::wallet_webauthn_replacement_begin,
+            wallet_tauri_common::security_commands::wallet_webauthn_replacement_finish,
             wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
             wallet_list_bills,
             wallet_validate_hip23,

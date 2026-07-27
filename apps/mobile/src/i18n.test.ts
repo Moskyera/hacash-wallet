@@ -37,7 +37,11 @@ describe("shared locale catalog", () => {
     const primaryKeys = [
       "quantum.sendTitle",
       "settings.title",
-      "security.privateKey",
+      "security.exportBackup",
+      // A safety warning nobody can read is not a warning.
+      "security.biometricScreenLockWarning",
+      "security.signingRefusesScreenLock",
+      "security.coldVaultBackupFirst",
       "common.continue",
       "home.refreshing",
       "home.pullToRefresh",
@@ -75,6 +79,33 @@ describe("shared locale catalog", () => {
     }
   });
 
+  it("translates every high-value custody warning in all languages", () => {
+    // These strings are the only warning a user gets before an irreversible or
+    // unprotectable action. A missing key renders as the bare key name, so
+    // assert both that it resolves and that it was actually translated.
+    const keys = [
+      "security.coldVaultTitle",
+      "security.coldVaultActivationHint",
+      "security.coldVaultSoftwareLimit",
+      "security.coldVaultFactorRequired",
+      "security.coldVaultWebauthnRequired",
+      "security.legacyBrainwalletKeyWarning",
+      "security.softwareKeyCustodyHint",
+      "docs.howItWorks",
+      "docs.howItWorksHint",
+    ];
+    for (const key of keys) {
+      expect(translate("en", key), `en.${key}`).not.toBe(key);
+    }
+    for (const { code } of SUPPORTED_LOCALES) {
+      if (code === "en") continue;
+      for (const key of keys) {
+        expect(translate(code, key), `${code}.${key}`).not.toBe(key);
+        expect(translate(code, key), `${code}.${key}`).not.toBe(translate("en", key));
+      }
+    }
+  });
+
   it("rejects suspicious question-mark and replacement-character corruption", () => {
     expect(() => validateLocaleCatalogContent()).not.toThrow();
   });
@@ -100,7 +131,7 @@ describe("shared locale catalog", () => {
 
   it("interpolates named parameters without dropping unknown placeholders", () => {
     expect(translate("en", "update.trustedAvailable", { platform: "Windows" })).toBe(
-      "A trusted Windows update is available.",
+      "A Windows update with a published checksum is available.",
     );
     expect(translate("en", "unknown.key", { platform: "Linux" })).toBe("unknown.key");
     expect(translate("en", "update.trustedAvailable")).toContain("{platform}");

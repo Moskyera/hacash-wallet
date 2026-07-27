@@ -12,15 +12,21 @@ import {
   type AirgapUnsigned,
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 
 type AirgapMode = "coordinator" | "signer";
 
 type Props = {
   watchOnly: boolean;
+  coldVault: boolean;
+  signingAvailable: boolean;
   busy: boolean;
   setBusy: (v: boolean) => void;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
   onBroadcast: () => void;
+  onLock: () => void;
+  nativeBiometricAvailable: boolean;
+  biometricSendEnabled: boolean;
 };
 
 function isUnsigned(env: AirgapEnvelope): env is AirgapUnsigned & { kind: "unsigned" } {
@@ -39,7 +45,18 @@ async function qrDataUrls(parts: string[]): Promise<string[]> {
   );
 }
 
-export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroadcast }: Props) {
+export default function AirgapScreen({
+  watchOnly,
+  coldVault,
+  signingAvailable,
+  busy,
+  setBusy,
+  onToast,
+  onBroadcast,
+  onLock,
+  nativeBiometricAvailable,
+  biometricSendEnabled,
+}: Props) {
   const { t } = useLocale();
   const [mode, setMode] = useState<AirgapMode>("coordinator");
   const [sendTo, setSendTo] = useState("");
@@ -58,6 +75,12 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
   const scanPartsRef = useRef<string[]>([]);
   const scanGeneration = useRef(0);
   const scanMountId = "airgap-qr-reader";
+
+  useEffect(() => {
+    if (coldVault) {
+      setMode("signer");
+    }
+  }, [coldVault]);
 
   const resetScan = useCallback(() => {
     scanGeneration.current += 1;
@@ -231,7 +254,13 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         summary: parsed.envelope.summary,
         tx_type: parsed.envelope.tx_type,
       };
-      const result = await api.airgapSignUnsigned(unsigned);
+      const prepared = await api.prepareAirgapSign(unsigned);
+      await authorizePreparedOperation(
+        prepared,
+        nativeBiometricAvailable,
+        biometricSendEnabled,
+      );
+      const result = await api.executePreparedAirgapSign(prepared.id);
       setSignResult(result);
       onToast("Signed. show QR to coordinator.", "success");
     } catch (e) {
@@ -290,6 +319,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
           <button
             type="button"
             className={mode === "coordinator" ? "selected" : ""}
+            disabled={coldVault}
             onClick={() => setMode("coordinator")}
           >
             Coordinator
@@ -304,7 +334,11 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
         </div>
       </div>
 
-      {mode === "coordinator" && (
+      {coldVault ? (
+        <div className="card warn-text">{t("airgap.coldVaultSignerHint")}</div>
+      ) : null}
+
+      {mode === "coordinator" && !coldVault && (
         <div className="card">
           <h3>Prepare unsigned send</h3>
           <label className="label">To address</label>
@@ -344,11 +378,13 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
       <div className="card">
         <h3>{mode === "coordinator" ? "Scan signed QR & broadcast" : "Scan unsigned QR"}</h3>
         <p className="muted">
-          {mode === "signer" && watchOnly
-            ? "Watch-only cannot sign. use an offline signing wallet."
-            : mode === "signer"
-              ? "Keep device offline while signing."
-              : "Scan the signed QR from the offline device."}
+          {coldVault
+            ? t("airgap.coldVaultSignerHint")
+            : mode === "signer" && watchOnly
+              ? "Watch-only cannot sign. use an offline signing wallet."
+              : mode === "signer"
+                ? "Keep device offline while signing."
+                : "Scan the signed QR from the offline device."}
         </p>
         <div className="row-btns">
           <button type="button" disabled={busy} onClick={() => void toggleScanner()}>
@@ -382,7 +418,7 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
             {parsed.inspection.tx_type !== 2 && (
               <p className="warn-text">{t("airgap.inspection.type4QuantumOnly")}</p>
             )}
-            {mode === "signer" && !watchOnly && (
+            {mode === "signer" && !watchOnly && signingAvailable && (
               <button
                 type="button"
                 className="primary"
@@ -409,6 +445,11 @@ export default function AirgapScreen({ watchOnly, busy, setBusy, onToast, onBroa
                 <img key={i} src={url} alt={`Signed QR ${i + 1}`} className="qr-thumb" />
               ))}
             </div>
+            {coldVault ? (
+              <button type="button" onClick={onLock}>
+                {t("security.lockWallet")}
+              </button>
+            ) : null}
           </div>
         )}
 

@@ -28,10 +28,47 @@ fn milestone_webauthn_gate_blocks_sign_without_ceremony() {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet("milestone-pass12").unwrap();
-            svc.set_hardware_signing_mode(HardwareSigningMode::WebAuthnGate)
+            svc.change_hardware_signing_mode("milestone-pass12", HardwareSigningMode::WebAuthnGate)
                 .unwrap();
             let err = svc.audit_sign_tx_body("00").unwrap_err();
             assert!(matches!(err, WalletError::Policy(_)));
+        });
+    });
+}
+
+/// The test above covers the on-chain path, which reaches
+/// `check_signing_allowed_in_context` through `sign_tx_hex_in_context`. The Fast Pay
+/// rail does not: it hands the account straight to the hub router, which cosigns the
+/// settlement bill itself. Both UIs use this unprepared command only for that rail, so
+/// without an explicit barrier a hardware-gate wallet signs an L2 bill with no ceremony
+/// at all while docs/HOW-IT-WORKS.md section 7 promises one for every payment.
+#[test]
+fn milestone_webauthn_gate_blocks_the_unprepared_send_command() {
+    tier0_gate("hw_gate_unprepared_send", || {
+        with_isolated_wallet_dir(|| {
+            let mut svc = WalletService::new(None, None).unwrap();
+            svc.create_wallet("milestone-pass12").unwrap();
+            svc.change_hardware_signing_mode("milestone-pass12", HardwareSigningMode::WebAuthnGate)
+                .unwrap();
+            // Deliberately far below the 100 HAC profile threshold. The hardware gate
+            // must apply to every amount, which is the entire promise of the mode, and
+            // the profile threshold cannot express that.
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let err = rt
+                .block_on(svc.send_hac(
+                    "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+                    1.0,
+                    Default::default(),
+                ))
+                .unwrap_err();
+            assert!(
+                matches!(err, WalletError::Policy(_)),
+                "expected a policy refusal, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("prepared-operation authorization"),
+                "the refusal must name the missing prepared authorization, got: {err}"
+            );
         });
     });
 }

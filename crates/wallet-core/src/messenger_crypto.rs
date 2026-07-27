@@ -7,6 +7,7 @@ use rand::RngCore;
 use secp256k1::{PublicKey, SecretKey, ecdh::SharedSecret};
 use sha2::{Digest, Sha256};
 use sys::Account;
+use zeroize::Zeroizing;
 
 use crate::error::{WalletError, WalletResult};
 
@@ -87,11 +88,13 @@ fn encrypt_with_key(key: &[u8; 32], body: &str, sent_at: &str, aad: &[u8]) -> (S
     let cipher = Aes256Gcm::new_from_slice(key).expect("aes key");
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let plaintext = serde_json::to_vec(&PlainBody {
-        body: body.into(),
-        sent_at: sent_at.into(),
-    })
-    .expect("serialize");
+    let plaintext = Zeroizing::new(
+        serde_json::to_vec(&PlainBody {
+            body: body.into(),
+            sent_at: sent_at.into(),
+        })
+        .expect("serialize"),
+    );
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce_bytes),
@@ -116,15 +119,17 @@ fn decrypt_with_key(
         return Err(WalletError::Other("invalid messenger nonce".into()));
     }
     let ciphertext = hex::decode(ciphertext_hex).map_err(|e| WalletError::Other(e.to_string()))?;
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(&nonce_bytes),
-            Payload {
-                msg: &ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| WalletError::Other("messenger decrypt failed".into()))?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: &ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| WalletError::Other("messenger decrypt failed".into()))?,
+    );
     serde_json::from_slice(&plaintext).map_err(|e| WalletError::Other(e.to_string()))
 }
 
@@ -141,8 +146,9 @@ pub fn encrypt_body_v2(
             "peer pubkey does not match address".into(),
         ));
     }
-    let shared = ecdh_shared(&my.secret_key().serialize(), peer_pubkey)?;
-    let key = derive_message_key(&shared, my_addr, peer_addr);
+    let secret = Zeroizing::new(my.secret_key().serialize());
+    let shared = Zeroizing::new(ecdh_shared(&secret, peer_pubkey)?);
+    let key = Zeroizing::new(derive_message_key(&shared, my_addr, peer_addr));
     Ok(encrypt_with_key(&key, body, sent_at, MESSENGER_HKDF_INFO))
 }
 
@@ -152,7 +158,7 @@ pub fn encrypt_body_v1(
     body: &str,
     sent_at: &str,
 ) -> (String, String) {
-    let key = pair_key_v1(my_addr, peer_addr);
+    let key = Zeroizing::new(pair_key_v1(my_addr, peer_addr));
     encrypt_with_key(&key, body, sent_at, MESSENGER_V1_INFO)
 }
 
@@ -172,12 +178,13 @@ pub fn decrypt_body(
             if !verify_pubkey_address(peer_pk, peer_addr) {
                 return Err(WalletError::Other("peer pubkey mismatch".into()));
             }
-            let shared = ecdh_shared(&my.secret_key().serialize(), peer_pk)?;
-            let key = derive_message_key(&shared, my_addr, peer_addr);
+            let secret = Zeroizing::new(my.secret_key().serialize());
+            let shared = Zeroizing::new(ecdh_shared(&secret, peer_pk)?);
+            let key = Zeroizing::new(derive_message_key(&shared, my_addr, peer_addr));
             decrypt_with_key(&key, nonce_hex, ciphertext_hex, MESSENGER_HKDF_INFO)
         }
         MESSENGER_CRYPTO_V1 => {
-            let key = pair_key_v1(my_addr, peer_addr);
+            let key = Zeroizing::new(pair_key_v1(my_addr, peer_addr));
             decrypt_with_key(&key, nonce_hex, ciphertext_hex, MESSENGER_V1_INFO)
         }
         _ => Err(WalletError::Other(format!(
@@ -243,7 +250,7 @@ pub fn encrypt_store(plaintext: &[u8], key: &[u8; 32]) -> WalletResult<Vec<u8>> 
     serde_json::to_vec(&out).map_err(|e| WalletError::Other(e.to_string()))
 }
 
-pub fn decrypt_store(blob: &[u8], key: &[u8; 32]) -> WalletResult<Vec<u8>> {
+pub fn decrypt_store(blob: &[u8], key: &[u8; 32]) -> WalletResult<Zeroizing<Vec<u8>>> {
     let wrapper: serde_json::Value =
         serde_json::from_slice(blob).map_err(|e| WalletError::Other(e.to_string()))?;
     let nonce_hex = wrapper["nonce"]
@@ -263,6 +270,7 @@ pub fn decrypt_store(blob: &[u8], key: &[u8; 32]) -> WalletResult<Vec<u8>> {
                 aad: STORE_INFO,
             },
         )
+        .map(Zeroizing::new)
         .map_err(|_| WalletError::Other("messenger store decrypt failed".into()))
 }
 
@@ -299,5 +307,20 @@ mod tests {
         let nonce = "abc123";
         let sig = sign_inbox_auth(&a, &addr, nonce);
         verify_inbox_auth(&addr, nonce, &a.public_key().serialize_compressed(), &sig).unwrap();
+    }
+
+    #[test]
+    fn encrypted_store_plaintext_is_owned_by_a_wiping_buffer() {
+        let key = Zeroizing::new([7u8; 32]);
+        let plaintext = b"sensitive messenger state";
+        let blob = encrypt_store(plaintext, &key).unwrap();
+        let decrypted: Zeroizing<Vec<u8>> = decrypt_store(&blob, &key).unwrap();
+
+        assert_eq!(decrypted.as_slice(), plaintext);
+        assert!(
+            !blob
+                .windows(plaintext.len())
+                .any(|window| window == plaintext)
+        );
     }
 }

@@ -70,10 +70,39 @@ export default function MoreRouter({ page, data, actions }: Props) {
     setWalletNameDraft,
   } = actions;
 
+  const coldVault = status?.hardware_signing_mode === "airgap_only";
+  const coldBlockedPage =
+    coldVault &&
+    (["fastpay", "hacd", "quantum", "launchpad", "whisper", "messages", "settings"] as MorePage[])
+      .includes(page);
+
+  if (coldBlockedPage) {
+    return (
+      <>
+        <button type="button" className="ghost small" onClick={onBack}>
+          {t("more.back")}
+        </button>
+        <div className="card">
+          <h2>{t("security.coldVaultTitle")}</h2>
+          <p className="warn-text">{t("airgap.coldVaultCoordinatorBlocked")}</p>
+          <button type="button" className="primary" onClick={() => onNavigate("airgap")}>
+            {t("more.airgap")}
+          </button>
+        </div>
+      </>
+    );
+  }
+
   if (page === "menu") {
     return (
       <div className="more-menu">
         <p className="section-title">{t("more.wallet")}</p>
+        {coldVault ? (
+          <div className="card">
+            <strong>{t("security.coldVaultTitle")}</strong>
+            <p className="muted small">{t("airgap.coldVaultSignerHint")}</p>
+          </div>
+        ) : null}
         <button type="button" onClick={() => onNavigate("history")}>
           <span>{t("more.transactions")}</span>
           <span>{history.length}</span>
@@ -238,7 +267,6 @@ export default function MoreRouter({ page, data, actions }: Props) {
           platformSec={platformSec}
           watchOnly={watchOnly}
           busy={busy}
-          clipboardSecs={clipboardSecs}
           walletNameDraft={walletNameDraft}
           setWalletNameDraft={setWalletNameDraft}
           onSaveWalletName={onSaveWalletName}
@@ -294,6 +322,8 @@ export default function MoreRouter({ page, data, actions }: Props) {
           clipboardClearSecs={clipboardSecs}
           platformSec={platformSec}
           securityProfile={settings?.security_profile}
+          hardwareMode={status?.hardware_signing_mode}
+          secondFactorThresholdMei={status?.require_second_factor_above_mei ?? null}
           biometricSendEnabled={settings?.biometric_send_enabled ?? true}
           onToast={onToast}
           onGoLegacySend={onGoLegacySend}
@@ -302,10 +332,15 @@ export default function MoreRouter({ page, data, actions }: Props) {
       {page === "airgap" && (
         <AirgapScreen
           watchOnly={watchOnly}
+          coldVault={status?.hardware_signing_mode === "airgap_only"}
+          signingAvailable={status?.signing_available ?? false}
           busy={busy}
           setBusy={setBusy}
           onToast={onToast}
           onBroadcast={() => void onRefresh()}
+          onLock={onLock}
+          nativeBiometricAvailable={platformSec?.native_biometric_available ?? false}
+          biometricSendEnabled={settings?.biometric_send_enabled ?? true}
         />
       )}
       {page === "launchpad" && (

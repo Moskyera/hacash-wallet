@@ -24,8 +24,8 @@ fn stress_webauthn_500_unique_challenges() {
 }
 
 #[test]
-fn stress_webauthn_register_finish_100_roundtrips() {
-    stress_gate("webauthn_100_roundtrips", || {
+fn stress_webauthn_rejects_100_legacy_registrations() {
+    stress_gate("webauthn_100_legacy_rejections", || {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use serde_json::json;
 
@@ -41,11 +41,14 @@ fn stress_webauthn_register_finish_100_roundtrips() {
                 "origin": ORIGIN
             });
             let client_data_b64 = URL_SAFE_NO_PAD.encode(client_data.to_string().as_bytes());
+            let credential_id = URL_SAFE_NO_PAD.encode(format!("id{i}").as_bytes());
             let cred = json!({
-                "rawId": URL_SAFE_NO_PAD.encode(format!("id{i}").as_bytes()),
+                "id": credential_id,
+                "rawId": credential_id,
+                "type": "public-key",
                 "response": { "clientDataJSON": client_data_b64, "publicKey": null }
             });
-            assert!(gate.finish_register(&cred.to_string()).is_ok());
+            assert!(gate.finish_register(&cred.to_string()).is_err());
         }
     });
 }

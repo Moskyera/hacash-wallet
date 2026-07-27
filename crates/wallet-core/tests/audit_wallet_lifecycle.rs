@@ -13,9 +13,9 @@ fn audit_double_create_rejected() {
     audit_gate("lifecycle_double_create", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
+            svc.create_wallet("passphrase12345").unwrap();
             assert!(matches!(
-                svc.create_wallet("otherpass1234").unwrap_err(),
+                svc.create_wallet("otherpass12345").unwrap_err(),
                 WalletError::Vault(_)
             ));
         });
@@ -47,9 +47,9 @@ fn audit_double_unlock_rejected() {
     audit_gate("lifecycle_double_unlock", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
+            svc.create_wallet("passphrase12345").unwrap();
             assert!(matches!(
-                svc.unlock("passphrase1234").unwrap_err(),
+                svc.unlock("passphrase12345").unwrap_err(),
                 WalletError::AlreadyUnlocked
             ));
         });
@@ -61,7 +61,7 @@ fn audit_lock_clears_session() {
     audit_gate("lifecycle_lock", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
+            svc.create_wallet("passphrase12345").unwrap();
             svc.lock();
             assert!(svc.status().locked);
         });
@@ -73,10 +73,10 @@ fn audit_import_duplicate_vault_rejected() {
     audit_gate("lifecycle_import_dup", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
+            svc.create_wallet("passphrase12345").unwrap();
             svc.lock();
             let seed = WalletAccount::create("seed2").unwrap().secret_hex();
-            assert!(svc.import_wallet(&seed, "newpass1234").is_err());
+            assert!(svc.import_wallet(&seed, "newpass1234", "1Any").is_err());
         });
     });
 }
@@ -86,8 +86,8 @@ fn audit_change_passphrase_wrong_old_rejected() {
     audit_gate("lifecycle_passphrase_wrong", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
-            assert!(svc.change_passphrase("wrong", "newpass12345").is_err());
+            svc.create_wallet("passphrase12345").unwrap();
+            assert!(svc.change_passphrase("wrong", "newpass123456789").is_err());
         });
     });
 }
@@ -97,9 +97,9 @@ fn audit_export_requires_valid_passphrase() {
     audit_gate("lifecycle_export_auth", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
+            svc.create_wallet("passphrase12345").unwrap();
             assert!(svc.export_backup("wrong").is_err());
-            let backup = svc.export_backup("passphrase1234").unwrap();
+            let backup = svc.export_backup("passphrase12345").unwrap();
             assert!(!backup.contains("secret"));
         });
     });
@@ -110,7 +110,7 @@ fn audit_locked_wallet_cannot_sign() {
     audit_gate("lifecycle_locked_sign", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
+            svc.create_wallet("passphrase12345").unwrap();
             svc.lock();
             let rt = tokio::runtime::Runtime::new().unwrap();
             let err = rt
@@ -130,12 +130,12 @@ fn audit_paranoid_profile_persisted_across_reload() {
     audit_gate("lifecycle_profile_persist", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            svc.create_wallet("passphrase1234").unwrap();
-            svc.set_security_profile(SecurityProfile::paranoid())
+            svc.create_wallet("passphrase12345").unwrap();
+            svc.change_security_profile("passphrase12345", SecurityProfile::paranoid())
                 .unwrap();
             svc.lock();
             let mut svc2 = WalletService::new(None, None).unwrap();
-            svc2.unlock("passphrase1234").unwrap();
+            svc2.unlock("passphrase12345").unwrap();
             assert_eq!(svc2.get_settings().security_profile, "paranoid");
         });
     });

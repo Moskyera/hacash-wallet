@@ -1,7 +1,19 @@
 use tauri::{AppHandle, Manager, State};
 use zeroize::Zeroizing;
 
+mod bundle;
+
 use crate::state::AppState;
+
+#[tauri::command]
+pub async fn wallet_export_backup(
+    passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let passphrase = Zeroizing::new(passphrase);
+    let mut svc = state.inner.lock().await;
+    bundle::export_bundle(&mut svc, &passphrase).map_err(|error| error.to_string())
+}
 
 #[tauri::command]
 pub async fn wallet_export_backup_to_downloads(
@@ -11,18 +23,29 @@ pub async fn wallet_export_backup_to_downloads(
 ) -> Result<String, String> {
     let passphrase = Zeroizing::new(passphrase);
     let json = Zeroizing::new({
-        let svc = state.inner.lock().await;
-        svc.export_backup(&passphrase).map_err(|e| e.to_string())?
+        let mut svc = state.inner.lock().await;
+        bundle::export_bundle(&mut svc, &passphrase).map_err(|error| error.to_string())?
     });
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let filename = format!("hacash-backup-{stamp}.json");
-    let cache_dir = app.path().cache_dir().map_err(|e| e.to_string())?;
+    let filename = format!("hacash-full-backup-v1-{stamp}.json");
+    // Must be app_cache_dir, not cache_dir. On Android the two are different
+    // directories: cache_dir resolves to getExternalCacheDir, which lives on shared
+    // storage, while app_cache_dir resolves to getCacheDir, the app's private cache.
+    // The native helper only accepts a source staged directly in activity.cacheDir,
+    // so staging in the external cache made every Android export fail with a
+    // misleading "Backup source missing" error. Private storage is also the right
+    // place for a file that holds the encrypted key, however briefly.
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
     let cache_path = cache_dir.join(&filename);
-    std::fs::write(&cache_path, json.as_bytes()).map_err(|e| e.to_string())?;
+    if json.len() > bundle::MAX_BACKUP_ENVELOPE_BYTES {
+        return Err("backup file exceeds the safe size limit".into());
+    }
+    hacash_wallet_core::paths::secure_write(&cache_path, json.as_bytes())
+        .map_err(|error| format!("write encrypted backup cache: {error}"))?;
     let path = cache_path.to_string_lossy().into_owned();
 
     #[cfg(target_os = "android")]
@@ -40,9 +63,13 @@ pub async fn wallet_export_backup_to_downloads(
 }
 
 #[tauri::command]
-pub fn wallet_preview_backup(json: String) -> Result<String, String> {
-    hacash_wallet_core::vault::EncryptedVault::backup_address_from_json(json.trim())
-        .map_err(|e| e.to_string())
+pub fn wallet_preview_backup(json: String) -> Result<serde_json::Value, String> {
+    let preview = bundle::preview(json.trim()).map_err(|error| error.to_string())?;
+    serde_json::to_value(preview).map_err(|error| error.to_string())
+}
+
+pub fn recover_interrupted_restore() -> Result<(), String> {
+    bundle::recover_interrupted_restore().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -50,40 +77,23 @@ pub async fn wallet_import_backup(
     json: String,
     passphrase: String,
     delete_source: Option<String>,
-    app: AppHandle,
+    allow_legacy: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let json = Zeroizing::new(json);
     let passphrase = Zeroizing::new(passphrase);
-    let delete_source = delete_source.map(Zeroizing::new);
+    // External backup deletion is deliberately user-controlled. An IPC caller must never gain
+    // arbitrary .json/content-URI deletion authority merely by completing a restore.
+    let _ = delete_source;
     let address = {
         let mut svc = state.inner.lock().await;
-        svc.import_backup(json.trim(), &passphrase)
-            .map_err(|e| e.to_string())?
+        bundle::restore(
+            &mut svc,
+            json.trim(),
+            &passphrase,
+            allow_legacy.unwrap_or(false),
+        )
+        .map_err(|error| error.to_string())?
     };
-
-    if let Some(source) = delete_source.as_ref() {
-        let trimmed = source.trim();
-        if !trimmed.is_empty() {
-            let delete_result = if trimmed.starts_with("content://") {
-                #[cfg(target_os = "android")]
-                {
-                    crate::backup_android::delete_backup_source(&app, trimmed).await
-                }
-                #[cfg(not(target_os = "android"))]
-                {
-                    let _ = &app;
-                    Err("content URI delete requires Android".into())
-                }
-            } else {
-                let _ = &app;
-                hacash_wallet_core::paths::secure_delete_backup_file(std::path::Path::new(trimmed))
-            };
-            if let Err(msg) = delete_result {
-                tracing::warn!("backup source not deleted after import: {msg}");
-            }
-        }
-    }
-
     Ok(address)
 }

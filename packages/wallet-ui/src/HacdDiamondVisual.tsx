@@ -47,6 +47,15 @@ export type HacdMetadataCopy = {
   bid: string;
   mainnetMetadata: string;
   notAvailable: string;
+  details: string;
+  owner: string;
+  minerFull: string;
+  averageBidBurn: string;
+  bornHash: string;
+  prevHash: string;
+  inscriptions: string;
+  noInscriptions: string;
+  noVisual: string;
 };
 
 export const DEFAULT_HACD_METADATA_COPY: HacdMetadataCopy = {
@@ -61,6 +70,15 @@ export const DEFAULT_HACD_METADATA_COPY: HacdMetadataCopy = {
   bid: "BID",
   mainnetMetadata: "Mainnet metadata (read-only)",
   notAvailable: "N/A",
+  details: "On-chain details",
+  owner: "Owner",
+  minerFull: "Miner",
+  averageBidBurn: "Average bid burn",
+  bornHash: "Born block hash",
+  prevHash: "Previous diamond hash",
+  inscriptions: "Inscriptions",
+  noInscriptions: "None",
+  noVisual: "This node returned no usable visual gene, so the diamond cannot be drawn.",
 };
 
 export function translatedHacdMetadataCopy(t: (key: string) => string): HacdMetadataCopy {
@@ -76,6 +94,15 @@ export function translatedHacdMetadataCopy(t: (key: string) => string): HacdMeta
     bid: t("hacd.bid"),
     mainnetMetadata: t("hacd.mainnetMetadata"),
     notAvailable: t("common.notAvailable"),
+    details: t("hacd.details"),
+    owner: t("hacd.owner"),
+    minerFull: t("hacd.minerFull"),
+    averageBidBurn: t("hacd.averageBidBurn"),
+    bornHash: t("hacd.bornHash"),
+    prevHash: t("hacd.prevHash"),
+    inscriptions: t("hacd.inscriptions"),
+    noInscriptions: t("hacd.noInscriptions"),
+    noVisual: t("hacd.noVisual"),
   };
 
 }
@@ -289,6 +316,9 @@ function ExplorerMetadataCard({
           className="hacd-meta-cdcon"
           style={{ transform: `scale(${scale})`, backgroundImage: gradient }}
         >
+          {!art && (
+            <div className="hacd-meta-noart">{copy.noVisual}</div>
+          )}
           {art && (
             <>
               <div className="hacd-meta-ibg" aria-hidden>
@@ -362,6 +392,36 @@ function ExplorerMetadataCard({
       {info.metadata_source === "mainnet" && (
         <p className="hacd-meta-source">{copy.mainnetMetadata}</p>
       )}
+      {/* The art above is a fixed replica of the official card, so it shows only what
+          fits and truncates the miner and the born hash. Everything else the node
+          returns is listed here in full: an owner or an inscription is worth more to
+          the holder than a prettier layout. */}
+      <dl className="hacd-meta-details">
+        <dt>{copy.details}</dt>
+        <dd />
+        <dt>{copy.owner}</dt>
+        <dd className="mono wrap">{info.belong ?? copy.notAvailable}</dd>
+        <dt>{copy.minerFull}</dt>
+        <dd className="mono wrap">{info.miner ?? copy.notAvailable}</dd>
+        <dt>{copy.averageBidBurn}</dt>
+        <dd>{info.average_bid_burn ?? copy.notAvailable}</dd>
+        <dt>{copy.bornHash}</dt>
+        <dd className="mono wrap">{info.born?.hash ?? copy.notAvailable}</dd>
+        <dt>{copy.prevHash}</dt>
+        <dd className="mono wrap">{info.prev_hash ?? copy.notAvailable}</dd>
+        <dt>{copy.inscriptions}</dt>
+        <dd>
+          {info.inscriptions.length > 0 ? (
+            <ul className="hacd-meta-inscriptions">
+              {info.inscriptions.map((text, index) => (
+                <li key={`${text}-${index}`}>{text}</li>
+              ))}
+            </ul>
+          ) : (
+            copy.noInscriptions
+          )}
+        </dd>
+      </dl>
     </article>
   );
 }

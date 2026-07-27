@@ -1,0 +1,461 @@
+import type { AppLocale } from "./config";
+
+type Copy = Record<string, string>;
+
+export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
+  en: {
+    "security.signingPolicy": "Signing policy",
+    "security.paranoidDesktopOnly": "Paranoid requires WebAuthn for every send. Mobile cannot complete that ceremony, so enable it only on desktop. Use Cold Vault for an offline mobile signer.",
+    "security.softwareKeyCustodyHint": "The encrypted private key remains software-held and is decrypted in wallet memory while unlocked. A platform factor authorizes use of the key but does not move it into secure hardware.",
+    "security.webauthnSoftwareGateHint": "WebAuthn is a second-factor gate for the software key. It is not hardware key custody.",
+    "security.coldVaultTitle": "Cold Vault, air-gap-only signing",
+    "security.coldVaultActiveHint": "Active. Online sends, Fast Pay, dApps, messenger signing and Quantum signing are blocked by the core. Only a reviewed Type 2 QR can be signed after a fresh platform factor. The wallet locks after every signing attempt.",
+    "security.coldVaultRecoveryOnly": "This policy cannot be downgraded in the app. To return to an online software wallet, recover the funds into a new wallet from independently stored recovery material.",
+    "security.coldVaultActivationHint": "Use this only on a dedicated device that will remain offline. Activation forces the Paranoid profile, removes biometric unlock and permanently disables every direct signing path for this vault.",
+    "security.coldVaultSoftwareLimit": "This is a one-way policy change. It improves software-wallet isolation but does not make a general-purpose device equivalent to a hardware-wallet secure element.",
+    "security.coldVaultBackupFirst":
+      "Export a full backup before you activate, and store it offline. Activation deletes the biometric unlock secret, so if this device is lost the encrypted backup plus your passphrase is the only way back to the key. Be aware of the trade-off: a backup taken now still restores an online wallet for this same address, so treat it like the key itself.",
+    "security.coldVaultConfirmLabel": "Type ENABLE COLD VAULT to confirm",
+    "security.coldVaultActivate": "Activate Cold Vault",
+    "security.coldVaultFactorRequired": "Enable a strong device biometric or register WebAuthn first.",
+    "security.coldVaultWebauthnRequired": "This vault has a registered WebAuthn authenticator, so Cold Vault activation must be approved on the desktop wallet with that key.",
+    "security.legacyBrainwalletKeyWarning": "This wallet's key was derived from a recovery phrase with one unsalted SHA-256. Anyone who guesses the phrase can spend from it without this device or your passphrase, so no device setting can protect it. Move the funds to a newly generated wallet.",
+    "docs.howItWorks": "How this wallet works",
+    "docs.howItWorksHint": "Opens the full public explanation on GitHub: what protects your money, what does not, and every known limit. Written in plain language.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Which build is running on this device. Quote it when reporting anything.",
+    "docs.readPromptTitle":
+      "New here? Read how this wallet works",
+    "docs.readPromptBody":
+      "It explains in plain language what protects your money, what does not, and every known limit. A few minutes now can save an expensive mistake later.",
+    "docs.readPromptLater":
+      "Later",
+    "docs.readPromptNever":
+      "Do not ask me again",
+    "security.coldVaultActivatedToast": "Cold Vault activated. Only exact, freshly authorized Type 2 air-gap signing is allowed.",
+    "security.coldVaultBiometricBlocked": "Biometric unlock is disabled in Cold Vault. Use the passphrase on the offline signer.",
+    "airgap.coldVaultSignerHint": "Cold Vault is active. Keep this device offline, inspect every field and sign only the scanned Type 2 QR.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault cannot build or broadcast online transactions. Use a separate watch-only coordinator.",
+  },
+  el: {
+    "security.signingPolicy": "Πολιτική υπογραφής",
+    "security.paranoidDesktopOnly": "Το Paranoid απαιτεί WebAuthn σε κάθε αποστολή. Το mobile δεν ολοκληρώνει αυτή τη διαδικασία, γι' αυτό ενεργοποιείται μόνο στο desktop. Για offline mobile signer χρησιμοποιήστε Cold Vault.",
+    "security.softwareKeyCustodyHint": "Το κρυπτογραφημένο ιδιωτικό κλειδί παραμένει σε λογισμικό και αποκρυπτογραφείται στη μνήμη του wallet όσο είναι ξεκλείδωτο. Ο έλεγχος της συσκευής εγκρίνει τη χρήση του, αλλά δεν το μεταφέρει σε ασφαλές hardware.",
+    "security.webauthnSoftwareGateHint": "Το WebAuthn είναι δεύτερος παράγοντας για το κλειδί λογισμικού. Δεν αποτελεί φύλαξη κλειδιού σε hardware.",
+    "security.coldVaultTitle": "Cold Vault, υπογραφή μόνο μέσω air-gap",
+    "security.coldVaultActiveHint": "Ενεργό. Οι online αποστολές, το Fast Pay, τα dApps, η υπογραφή μηνυμάτων και το Quantum μπλοκάρονται από τον πυρήνα. Υπογράφεται μόνο ελεγμένο QR Type 2 μετά από νέο έλεγχο συσκευής. Το wallet κλειδώνει μετά από κάθε προσπάθεια υπογραφής.",
+    "security.coldVaultRecoveryOnly": "Αυτή η πολιτική δεν υποβαθμίζεται μέσα από την εφαρμογή. Για επιστροφή σε online wallet, μεταφέρετε τα κεφάλαια σε νέο wallet με ανεξάρτητα αποθηκευμένο υλικό ανάκτησης.",
+    "security.coldVaultActivationHint": "Χρησιμοποιήστε το μόνο σε αποκλειστική συσκευή που θα παραμένει offline. Η ενεργοποίηση επιβάλλει Paranoid, αφαιρεί το βιομετρικό ξεκλείδωμα και απενεργοποιεί μόνιμα κάθε άμεση διαδρομή υπογραφής αυτού του vault.",
+    "security.coldVaultSoftwareLimit": "Η αλλαγή είναι μονόδρομη. Βελτιώνει την απομόνωση του software wallet, αλλά δεν κάνει μια συσκευή γενικής χρήσης ισοδύναμη με secure element hardware wallet.",
+    "security.coldVaultBackupFirst":
+      "Πάρε πλήρες backup πριν την ενεργοποίηση και κράτα το offline. Η ενεργοποίηση διαγράφει το βιομετρικό ξεκλείδωμα, οπότε αν χαθεί η συσκευή το κρυπτογραφημένο backup μαζί με το passphrase είναι ο μόνος δρόμος πίσω στο κλειδί. Πρόσεξε το αντιστάθμισμα: ένα backup που παίρνεις τώρα επαναφέρει ακόμα online wallet για την ίδια διεύθυνση, άρα φύλαξέ το σαν το ίδιο το κλειδί.",
+    "security.coldVaultConfirmLabel": "Πληκτρολογήστε ENABLE COLD VAULT για επιβεβαίωση",
+    "security.coldVaultActivate": "Ενεργοποίηση Cold Vault",
+    "security.coldVaultFactorRequired": "Ενεργοποιήστε ισχυρό βιομετρικό έλεγχο συσκευής ή καταχωρίστε πρώτα WebAuthn.",
+    "security.coldVaultWebauthnRequired": "Αυτό το vault έχει καταχωρημένο authenticator WebAuthn, γι' αυτό η ενεργοποίηση Cold Vault πρέπει να εγκριθεί στο desktop wallet με το ίδιο κλειδί.",
+    "security.legacyBrainwalletKeyWarning": "Το κλειδί αυτού του wallet προήλθε από φράση ανάκτησης με ένα μόνο SHA-256 χωρίς salt. Όποιος μαντέψει τη φράση ξοδεύει χωρίς αυτή τη συσκευή ή τη φράση πρόσβασής σας, άρα καμία ρύθμιση δεν το προστατεύει. Μεταφέρετε τα κεφάλαια σε νέο wallet.",
+    "docs.howItWorks": "Πώς λειτουργεί αυτό το wallet",
+    "docs.howItWorksHint": "Ανοίγει την πλήρη δημόσια εξήγηση στο GitHub: τι προστατεύει τα χρήματά σας, τι δεν προστατεύει, και κάθε γνωστό όριο. Σε απλή γλώσσα.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Ποιο build τρέχει σε αυτή τη συσκευή. Ανάφερέ το όταν δηλώνεις κάποιο πρόβλημα.",
+    "docs.readPromptTitle":
+      "Καινούριος εδώ; Διάβασε πώς λειτουργεί αυτό το wallet",
+    "docs.readPromptBody":
+      "Εξηγεί με απλά λόγια τι προστατεύει τα χρήματά σου, τι δεν προστατεύει, και κάθε γνωστό όριο. Λίγα λεπτά τώρα γλιτώνουν ένα ακριβό λάθος μετά.",
+    "docs.readPromptLater":
+      "Αργότερα",
+    "docs.readPromptNever":
+      "Μη με ρωτήσεις ξανά",
+    "security.coldVaultActivatedToast": "Το Cold Vault ενεργοποιήθηκε. Επιτρέπεται μόνο ακριβής, νέα εγκεκριμένη υπογραφή Type 2 μέσω air-gap.",
+    "security.coldVaultBiometricBlocked": "Το βιομετρικό ξεκλείδωμα είναι απενεργοποιημένο στο Cold Vault. Χρησιμοποιήστε τη φράση πρόσβασης στην offline συσκευή υπογραφής.",
+    "airgap.coldVaultSignerHint": "Το Cold Vault είναι ενεργό. Κρατήστε τη συσκευή offline, ελέγξτε κάθε πεδίο και υπογράψτε μόνο το σαρωμένο QR Type 2.",
+    "airgap.coldVaultCoordinatorBlocked": "Το Cold Vault δεν δημιουργεί ούτε μεταδίδει online συναλλαγές. Χρησιμοποιήστε ξεχωριστό watch-only συντονιστή.",
+  },
+  "zh-CN": {
+    "security.signingPolicy": "签名策略",
+    "security.paranoidDesktopOnly": "Paranoid 要求每次发送都使用 WebAuthn。移动端无法完成该流程，因此只能在桌面端启用。离线移动签名请使用 Cold Vault。",
+    "security.softwareKeyCustodyHint": "加密私钥仍由软件保管，钱包解锁时会在内存中解密。平台验证仅授权使用私钥，并不会把私钥移入安全硬件。",
+    "security.webauthnSoftwareGateHint": "WebAuthn 是软件私钥的第二验证因素，不等于硬件托管私钥。",
+    "security.coldVaultTitle": "冷库，仅限隔空签名",
+    "security.coldVaultActiveHint": "已启用。核心会阻止在线发送、Fast Pay、dApp、消息签名和 Quantum 签名。只有经过检查的 Type 2 二维码在完成新的平台验证后才能签名。每次签名尝试后钱包都会锁定。",
+    "security.coldVaultRecoveryOnly": "此策略无法在应用内降级。若要恢复在线软件钱包，请使用独立保存的恢复资料把资金恢复到新钱包。",
+    "security.coldVaultActivationHint": "仅在长期离线的专用设备上使用。启用后会强制使用 Paranoid 配置、移除生物识别解锁，并永久禁用此保险库的所有直接签名路径。",
+    "security.coldVaultSoftwareLimit": "这是单向策略变更。它能增强软件钱包隔离，但不能让通用设备等同于硬件钱包的安全元件。",
+    "security.coldVaultBackupFirst":
+      "启用前请导出完整备份并离线保存。启用会删除生物识别解锁密钥，因此若设备丢失，加密备份加上您的密码短语是找回私钥的唯一途径。请注意代价：现在导出的备份仍可为同一地址恢复出联网钱包，请将其视同私钥本身来保管。",
+    "security.coldVaultConfirmLabel": "输入 ENABLE COLD VAULT 以确认",
+    "security.coldVaultActivate": "启用冷库",
+    "security.coldVaultFactorRequired": "请先启用强生物识别或注册 WebAuthn。",
+    "security.coldVaultWebauthnRequired": "此钱包已注册 WebAuthn 认证器，因此启用 Cold Vault 必须在桌面端钱包使用该密钥批准。",
+    "security.legacyBrainwalletKeyWarning": "此钱包的私钥由助记短语经一次无盐 SHA-256 派生。任何猜中该短语的人都能在没有本设备或密码短语的情况下动用资金，任何设备设置都无法保护它。请把资金转到新生成的钱包。",
+    "docs.howItWorks": "本钱包如何运作",
+    "docs.howItWorksHint": "在 GitHub 上打开完整的公开说明：什么在保护你的资金、什么不能，以及每一个已知的限制。以通俗语言写成。",
+    "settings.buildId": "构建版本",
+    "settings.buildIdHint":
+      "本设备上正在运行的构建。报告问题时请一并提供。",
+    "docs.readPromptTitle":
+      "初次使用？先看看这个钱包如何运作",
+    "docs.readPromptBody":
+      "它用通俗的语言说明什么在保护您的资金、什么不保护，以及每一个已知的限制。现在花几分钟，可以避免以后一个昂贵的错误。",
+    "docs.readPromptLater":
+      "以后再说",
+    "docs.readPromptNever":
+      "不要再询问",
+    "security.coldVaultActivatedToast": "冷库已启用。现在只允许经过全新授权的精确 Type 2 隔空签名。",
+    "security.coldVaultBiometricBlocked": "冷库禁用生物识别解锁。请在离线签名设备上输入密码。",
+    "airgap.coldVaultSignerHint": "冷库已启用。保持设备离线，检查每个字段，只签署扫描得到的 Type 2 二维码。",
+    "airgap.coldVaultCoordinatorBlocked": "冷库不能在线构建或广播交易。请使用独立的 watch-only 协调器。",
+  },
+  ja: {
+    "security.signingPolicy": "署名ポリシー",
+    "security.paranoidDesktopOnly": "Paranoid は送信ごとに WebAuthn を要求します。モバイルではこの手続きを完了できないため、デスクトップでのみ有効にしてください。オフラインのモバイル署名には Cold Vault を使用してください。",
+    "security.softwareKeyCustodyHint": "暗号化された秘密鍵はソフトウェア内に保持され、ウォレットの解除中はメモリで復号されます。端末認証は鍵の使用を承認しますが、安全なハードウェアへ移動するものではありません。",
+    "security.webauthnSoftwareGateHint": "WebAuthn はソフトウェア鍵の第二要素です。ハードウェアによる鍵保管ではありません。",
+    "security.coldVaultTitle": "Cold Vault、エアギャップ署名専用",
+    "security.coldVaultActiveHint": "有効です。オンライン送金、Fast Pay、dApp、メッセージ署名、Quantum 署名はコアで拒否されます。確認済みの Type 2 QR のみ、新しい端末認証後に署名できます。署名を試すたびにウォレットはロックされます。",
+    "security.coldVaultRecoveryOnly": "このポリシーはアプリ内で元に戻せません。オンラインウォレットへ戻すには、別に保管した復旧情報から新しいウォレットへ資金を復旧してください。",
+    "security.coldVaultActivationHint": "常時オフラインにする専用端末だけで使用してください。有効化すると Paranoid が強制され、生体認証による解除が削除され、この保管庫の直接署名経路が永久に無効になります。",
+    "security.coldVaultSoftwareLimit": "これは一方向の変更です。ソフトウェアウォレットの分離は強化されますが、汎用端末がハードウェアウォレットのセキュアエレメントと同等になるわけではありません。",
+    "security.coldVaultBackupFirst":
+      "有効化する前に完全バックアップを書き出し、オフラインで保管してください。有効化すると生体認証の解除情報が削除されるため、端末を失った場合は暗号化バックアップとパスフレーズだけが鍵に戻る手段です。トレードオフに注意してください。今取るバックアップは同じアドレスのオンラインウォレットを復元できるため、鍵そのものと同じように扱ってください。",
+    "security.coldVaultConfirmLabel": "確認のため ENABLE COLD VAULT と入力",
+    "security.coldVaultActivate": "Cold Vault を有効化",
+    "security.coldVaultFactorRequired": "強力な端末生体認証を有効にするか、先に WebAuthn を登録してください。",
+    "security.coldVaultWebauthnRequired": "この保管庫には WebAuthn 認証器が登録されているため、Cold Vault の有効化はデスクトップ版ウォレットで同じ鍵を使って承認してください。",
+    "security.legacyBrainwalletKeyWarning": "このウォレットの鍵は、ソルトなしの SHA-256 を一度だけ適用して復元フレーズから導出されています。フレーズを推測できる人は本端末やパスフレーズなしで送金できるため、端末側の設定では守れません。資金は新規作成したウォレットへ移してください。",
+    "docs.howItWorks": "このウォレットの仕組み",
+    "docs.howItWorksHint": "GitHub 上の完全な公開説明を開きます。資産を守るものと守らないもの、そして既知のすべての限界を、平易な言葉で説明しています。",
+    "settings.buildId": "ビルド",
+    "settings.buildIdHint":
+      "この端末で動作しているビルドです。問題を報告する際に添えてください。",
+    "docs.readPromptTitle":
+      "はじめての方へ。このウォレットの仕組みをご覧ください",
+    "docs.readPromptBody":
+      "何があなたの資産を守り、何が守らないのか、そして既知の制限のすべてを平易な言葉で説明しています。今の数分が、後の高価な失敗を防ぎます。",
+    "docs.readPromptLater":
+      "あとで",
+    "docs.readPromptNever":
+      "今後は表示しない",
+    "security.coldVaultActivatedToast": "Cold Vault を有効にしました。新しく承認された正確な Type 2 エアギャップ署名のみ許可されます。",
+    "security.coldVaultBiometricBlocked": "Cold Vault では生体認証による解除は無効です。オフライン署名端末でパスフレーズを使用してください。",
+    "airgap.coldVaultSignerHint": "Cold Vault が有効です。端末をオフラインに保ち、全項目を確認して、読み取った Type 2 QR だけに署名してください。",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault はオンラインで取引を作成または送信できません。別の watch-only コーディネーターを使用してください。",
+  },
+  tr: {
+    "security.signingPolicy": "İmzalama politikası",
+    "security.paranoidDesktopOnly": "Paranoid her gönderimde WebAuthn ister. Mobil bu işlemi tamamlayamadığı için yalnızca masaüstünde etkinleştirin. Çevrim dışı mobil imzalayıcı için Cold Vault kullanın.",
+    "security.softwareKeyCustodyHint": "Şifreli özel anahtar yazılımda tutulur ve cüzdan açıkken bellekte çözülür. Platform doğrulaması anahtarın kullanımını onaylar, anahtarı güvenli donanıma taşımaz.",
+    "security.webauthnSoftwareGateHint": "WebAuthn, yazılım anahtarı için ikinci faktördür. Donanımda anahtar saklama değildir.",
+    "security.coldVaultTitle": "Cold Vault, yalnızca air-gap imzalama",
+    "security.coldVaultActiveHint": "Etkin. Çevrim içi gönderimler, Fast Pay, dApp, mesaj ve Quantum imzalama çekirdek tarafından engellenir. Yalnızca incelenmiş Type 2 QR, yeni bir platform doğrulamasından sonra imzalanabilir. Her imzalama denemesinden sonra cüzdan kilitlenir.",
+    "security.coldVaultRecoveryOnly": "Bu politika uygulama içinde düşürülemez. Çevrim içi cüzdana dönmek için bağımsız saklanan kurtarma verileriyle fonları yeni bir cüzdana kurtarın.",
+    "security.coldVaultActivationHint": "Yalnızca çevrim dışı kalacak özel bir cihazda kullanın. Etkinleştirme Paranoid profilini zorunlu kılar, biyometrik kilit açmayı kaldırır ve bu kasa için tüm doğrudan imzalama yollarını kalıcı olarak kapatır.",
+    "security.coldVaultSoftwareLimit": "Bu tek yönlü bir değişikliktir. Yazılım cüzdanı yalıtımını artırır ancak genel amaçlı cihazı donanım cüzdanının güvenli öğesine eşdeğer yapmaz.",
+    "security.coldVaultBackupFirst":
+      "Etkinleştirmeden önce tam bir yedek alın ve çevrimdışı saklayın. Etkinleştirme biyometrik kilit açma sırrını siler; cihaz kaybolursa şifreli yedek ve passphrase anahtara dönmenin tek yoludur. Ödünü bilin: şimdi alınan bir yedek aynı adres için hâlâ çevrimiçi bir cüzdan geri yükler, bu yüzden onu anahtarın kendisi gibi koruyun.",
+    "security.coldVaultConfirmLabel": "Onaylamak için ENABLE COLD VAULT yazın",
+    "security.coldVaultActivate": "Cold Vault'u etkinleştir",
+    "security.coldVaultFactorRequired": "Önce güçlü cihaz biyometrisini etkinleştirin veya WebAuthn kaydedin.",
+    "security.coldVaultWebauthnRequired": "Bu kasada kayıtlı bir WebAuthn kimlik doğrulayıcısı var; bu nedenle Cold Vault etkinleştirmesi masaüstü cüzdanda o anahtarla onaylanmalıdır.",
+    "security.legacyBrainwalletKeyWarning": "Bu cüzdanın anahtarı, kurtarma ifadesinden tuzsuz tek bir SHA-256 ile türetildi. İfadeyi tahmin eden herkes bu cihaz veya parolanız olmadan harcama yapabilir; hiçbir cihaz ayarı bunu koruyamaz. Fonları yeni oluşturulmuş bir cüzdana taşıyın.",
+    "docs.howItWorks": "Bu cüzdan nasıl çalışır",
+    "docs.howItWorksHint": "GitHub'daki tam kamuya açık açıklamayı açar: paranızı neyin koruduğu, neyin korumadığı ve bilinen her sınır. Sade bir dille yazılmıştır.",
+    "settings.buildId": "Yapı",
+    "settings.buildIdHint":
+      "Bu cihazda çalışan yapı. Bir sorun bildirirken bunu da belirtin.",
+    "docs.readPromptTitle":
+      "Yeni misiniz? Bu cüzdanın nasıl çalıştığını okuyun",
+    "docs.readPromptBody":
+      "Paranızı neyin koruduğunu, neyin korumadığını ve bilinen her sınırı sade bir dille anlatır. Şimdi ayıracağınız birkaç dakika, sonra pahalı bir hatayı önler.",
+    "docs.readPromptLater":
+      "Sonra",
+    "docs.readPromptNever":
+      "Bir daha sorma",
+    "security.coldVaultActivatedToast": "Cold Vault etkin. Yalnızca yeni onaylanmış kesin Type 2 air-gap imzalama kullanılabilir.",
+    "security.coldVaultBiometricBlocked": "Cold Vault'ta biyometrik kilit açma kapalıdır. Çevrim dışı imzalayıcıda parolayı kullanın.",
+    "airgap.coldVaultSignerHint": "Cold Vault etkin. Cihazı çevrim dışı tutun, tüm alanları inceleyin ve yalnızca taranan Type 2 QR'ı imzalayın.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault çevrim içi işlem oluşturamaz veya yayınlayamaz. Ayrı bir watch-only koordinatör kullanın.",
+  },
+  vi: {
+    "security.signingPolicy": "Chính sách ký",
+    "security.paranoidDesktopOnly": "Paranoid yêu cầu WebAuthn cho mọi lần gửi. Thiết bị di động không hoàn tất được quy trình này, vì vậy chỉ bật trên máy tính. Hãy dùng Cold Vault cho thiết bị ký di động ngoại tuyến.",
+    "security.softwareKeyCustodyHint": "Khóa riêng được mã hóa vẫn do phần mềm giữ và được giải mã trong bộ nhớ khi ví mở khóa. Yếu tố nền tảng chỉ cho phép sử dụng khóa, không chuyển khóa vào phần cứng bảo mật.",
+    "security.webauthnSoftwareGateHint": "WebAuthn là yếu tố thứ hai cho khóa phần mềm, không phải cơ chế lưu khóa trong phần cứng.",
+    "security.coldVaultTitle": "Cold Vault, chỉ ký qua air-gap",
+    "security.coldVaultActiveHint": "Đang hoạt động. Lõi chặn gửi trực tuyến, Fast Pay, dApp, ký tin nhắn và ký Quantum. Chỉ QR Type 2 đã kiểm tra mới được ký sau một lần xác thực nền tảng mới. Ví khóa sau mỗi lần thử ký.",
+    "security.coldVaultRecoveryOnly": "Không thể hạ chính sách này trong ứng dụng. Muốn trở lại ví trực tuyến, hãy khôi phục tiền vào ví mới bằng dữ liệu khôi phục được lưu độc lập.",
+    "security.coldVaultActivationHint": "Chỉ dùng trên thiết bị chuyên dụng luôn ngoại tuyến. Kích hoạt sẽ bắt buộc hồ sơ Paranoid, xóa mở khóa sinh trắc học và vô hiệu hóa vĩnh viễn mọi đường ký trực tiếp của kho này.",
+    "security.coldVaultSoftwareLimit": "Đây là thay đổi một chiều. Nó tăng cách ly cho ví phần mềm nhưng không biến thiết bị đa dụng thành phần tử bảo mật của ví phần cứng.",
+    "security.coldVaultBackupFirst":
+      "Hãy xuất bản sao lưu đầy đủ trước khi bật và lưu ngoại tuyến. Việc bật sẽ xóa khóa mở bằng sinh trắc học, nên nếu mất thiết bị thì bản sao lưu đã mã hóa cùng passphrase là cách duy nhất để lấy lại khóa. Lưu ý điểm đánh đổi: bản sao lưu lấy lúc này vẫn phục hồi được ví trực tuyến cho cùng địa chỉ, hãy bảo vệ nó như chính khóa.",
+    "security.coldVaultConfirmLabel": "Nhập ENABLE COLD VAULT để xác nhận",
+    "security.coldVaultActivate": "Kích hoạt Cold Vault",
+    "security.coldVaultFactorRequired": "Hãy bật sinh trắc học mạnh của thiết bị hoặc đăng ký WebAuthn trước.",
+    "security.coldVaultWebauthnRequired": "Ví này đã đăng ký thiết bị xác thực WebAuthn, nên việc bật Cold Vault phải được phê duyệt trên ví máy tính bằng khoá đó.",
+    "security.legacyBrainwalletKeyWarning": "Khoá của ví này được dẫn xuất từ cụm từ khôi phục bằng một lần SHA-256 không muối. Bất kỳ ai đoán được cụm từ đều chi tiêu được mà không cần thiết bị này hay mật khẩu của bạn, nên không cài đặt nào bảo vệ được. Hãy chuyển tiền sang ví mới tạo.",
+    "docs.howItWorks": "Ví này hoạt động thế nào",
+    "docs.howItWorksHint": "Mở phần giải thích công khai đầy đủ trên GitHub: điều gì bảo vệ tiền của bạn, điều gì không, và mọi giới hạn đã biết. Viết bằng ngôn ngữ dễ hiểu.",
+    "settings.buildId": "Bản dựng",
+    "settings.buildIdHint":
+      "Bản dựng đang chạy trên thiết bị này. Hãy nêu kèm khi báo lỗi.",
+    "docs.readPromptTitle":
+      "Bạn mới dùng? Hãy đọc cách ví này hoạt động",
+    "docs.readPromptBody":
+      "Tài liệu giải thích bằng ngôn ngữ dễ hiểu điều gì bảo vệ tiền của bạn, điều gì không, và mọi giới hạn đã biết. Vài phút bây giờ giúp tránh một sai lầm đắt giá sau này.",
+    "docs.readPromptLater":
+      "Để sau",
+    "docs.readPromptNever":
+      "Đừng hỏi lại",
+    "security.coldVaultActivatedToast": "Cold Vault đã bật. Chỉ cho phép ký air-gap Type 2 chính xác với xác thực mới.",
+    "security.coldVaultBiometricBlocked": "Cold Vault tắt mở khóa sinh trắc học. Hãy dùng mật khẩu trên thiết bị ký ngoại tuyến.",
+    "airgap.coldVaultSignerHint": "Cold Vault đang hoạt động. Giữ thiết bị ngoại tuyến, kiểm tra mọi trường và chỉ ký QR Type 2 đã quét.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault không thể tạo hoặc phát giao dịch trực tuyến. Hãy dùng một bộ điều phối watch-only riêng.",
+  },
+  ru: {
+    "security.signingPolicy": "Политика подписи",
+    "security.paranoidDesktopOnly": "Paranoid требует WebAuthn при каждой отправке. Мобильное приложение не выполняет эту процедуру, поэтому включайте режим только на компьютере. Для офлайн-подписи на мобильном устройстве используйте Cold Vault.",
+    "security.softwareKeyCustodyHint": "Зашифрованный закрытый ключ хранится программно и расшифровывается в памяти, пока кошелёк открыт. Системная проверка разрешает использование ключа, но не переносит его в защищённое оборудование.",
+    "security.webauthnSoftwareGateHint": "WebAuthn является вторым фактором для программного ключа, а не аппаратным хранением ключа.",
+    "security.coldVaultTitle": "Cold Vault, только air-gap подпись",
+    "security.coldVaultActiveHint": "Включено. Ядро блокирует онлайн-переводы, Fast Pay, dApp, подпись сообщений и Quantum. Подписать можно только проверенный QR Type 2 после новой системной проверки. После каждой попытки подписи кошелёк блокируется.",
+    "security.coldVaultRecoveryOnly": "Эту политику нельзя ослабить в приложении. Для возврата к онлайн-кошельку восстановите средства в новый кошелёк из отдельно сохранленных данных восстановления.",
+    "security.coldVaultActivationHint": "Используйте только на отдельном устройстве, которое останется офлайн. Активация принудительно включает Paranoid, удаляет биометрическую разблокировку и навсегда отключает все прямые пути подписи этого хранилища.",
+    "security.coldVaultSoftwareLimit": "Это одностороннее изменение. Оно усиливает изоляцию программного кошелька, но не делает обычное устройство эквивалентом защищённого элемента аппаратного кошелька.",
+    "security.coldVaultBackupFirst":
+      "Экспортируйте полную резервную копию перед активацией и храните её офлайн. Активация удаляет секрет биометрической разблокировки, поэтому при утере устройства зашифрованная копия вместе с парольной фразой остаётся единственным путём к ключу. Учтите компромисс: копия, сделанная сейчас, по-прежнему восстанавливает онлайн-кошелёк для того же адреса, поэтому обращайтесь с ней как с самим ключом.",
+    "security.coldVaultConfirmLabel": "Введите ENABLE COLD VAULT для подтверждения",
+    "security.coldVaultActivate": "Включить Cold Vault",
+    "security.coldVaultFactorRequired": "Сначала включите сильную биометрию устройства или зарегистрируйте WebAuthn.",
+    "security.coldVaultWebauthnRequired": "В этом хранилище зарегистрирован аутентификатор WebAuthn, поэтому включение Cold Vault нужно подтвердить в настольном кошельке этим же ключом.",
+    "security.legacyBrainwalletKeyWarning": "Ключ этого кошелька получен из фразы восстановления одним SHA-256 без соли. Любой, кто угадает фразу, потратит средства без этого устройства и без вашего пароля, поэтому никакие настройки не помогут. Переведите средства в новый кошелёк.",
+    "docs.howItWorks": "Как работает этот кошелёк",
+    "docs.howItWorksHint": "Открывает полное публичное объяснение на GitHub: что защищает ваши средства, что не защищает и каждое известное ограничение. Простым языком.",
+    "settings.buildId": "Сборка",
+    "settings.buildIdHint":
+      "Какая сборка запущена на этом устройстве. Указывайте её при сообщении о проблеме.",
+    "docs.readPromptTitle":
+      "Впервые здесь? Прочитайте, как работает этот кошелёк",
+    "docs.readPromptBody":
+      "Простым языком объясняется, что защищает ваши деньги, что не защищает и каковы все известные ограничения. Несколько минут сейчас избавят от дорогой ошибки потом.",
+    "docs.readPromptLater":
+      "Позже",
+    "docs.readPromptNever":
+      "Больше не спрашивать",
+    "security.coldVaultActivatedToast": "Cold Vault включён. Разрешена только точная Type 2 air-gap подпись с новой авторизацией.",
+    "security.coldVaultBiometricBlocked": "В Cold Vault биометрическая разблокировка отключена. Используйте пароль на офлайн-устройстве подписи.",
+    "airgap.coldVaultSignerHint": "Cold Vault включён. Держите устройство офлайн, проверяйте каждое поле и подписывайте только отсканированный QR Type 2.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault не создаёт и не отправляет онлайн-транзакции. Используйте отдельный watch-only координатор.",
+  },
+  es: {
+    "security.signingPolicy": "Política de firma",
+    "security.paranoidDesktopOnly": "Paranoico exige WebAuthn en cada envío. El móvil no puede completar ese proceso, así que actívelo solo en escritorio. Use Cold Vault como firmante móvil sin conexión.",
+    "security.softwareKeyCustodyHint": "La clave privada cifrada permanece en software y se descifra en la memoria mientras el monedero está desbloqueado. El factor de la plataforma autoriza su uso, pero no mueve la clave a hardware seguro.",
+    "security.webauthnSoftwareGateHint": "WebAuthn es un segundo factor para la clave de software. No es custodia de la clave en hardware.",
+    "security.coldVaultTitle": "Cold Vault, firma solo por air-gap",
+    "security.coldVaultActiveHint": "Activo. El núcleo bloquea envíos en línea, Fast Pay, dApps, firma de mensajes y firma Quantum. Solo se puede firmar un QR Type 2 revisado tras un nuevo factor de plataforma. El monedero se bloquea después de cada intento de firma.",
+    "security.coldVaultRecoveryOnly": "Esta política no puede rebajarse en la aplicación. Para volver a un monedero en línea, recupere los fondos en uno nuevo usando material de recuperación guardado por separado.",
+    "security.coldVaultActivationHint": "Úselo solo en un dispositivo dedicado que permanecerá sin conexión. La activación fuerza Paranoid, elimina el desbloqueo biométrico y desactiva permanentemente todas las rutas de firma directa de esta bóveda.",
+    "security.coldVaultSoftwareLimit": "Es un cambio unidireccional. Mejora el aislamiento del monedero de software, pero no convierte un dispositivo general en el elemento seguro de un monedero físico.",
+    "security.coldVaultBackupFirst":
+      "Exporta una copia de seguridad completa antes de activar y guárdala sin conexión. La activación borra el secreto de desbloqueo biométrico, así que si pierdes el dispositivo la copia cifrada junto con tu frase de contraseña es la única vía de vuelta a la clave. Ten en cuenta la contrapartida: una copia hecha ahora todavía restaura una cartera en línea para esta misma dirección, así que trátala como la clave misma.",
+    "security.coldVaultConfirmLabel": "Escriba ENABLE COLD VAULT para confirmar",
+    "security.coldVaultActivate": "Activar Cold Vault",
+    "security.coldVaultFactorRequired": "Active primero una biometría fuerte del dispositivo o registre WebAuthn.",
+    "security.coldVaultWebauthnRequired": "Esta bóveda tiene un autenticador WebAuthn registrado, por lo que la activación de Cold Vault debe aprobarse en la cartera de escritorio con esa llave.",
+    "security.legacyBrainwalletKeyWarning": "La clave de esta cartera se derivó de una frase de recuperación con un solo SHA-256 sin sal. Quien adivine la frase puede gastar sin este dispositivo ni su contraseña, así que ningún ajuste puede protegerla. Mueva los fondos a una cartera recién generada.",
+    "docs.howItWorks": "Cómo funciona esta cartera",
+    "docs.howItWorksHint": "Abre la explicación pública completa en GitHub: qué protege su dinero, qué no lo protege y todos los límites conocidos. En lenguaje sencillo.",
+    "settings.buildId": "Compilación",
+    "settings.buildIdHint":
+      "Qué compilación se ejecuta en este dispositivo. Indícala al informar de algo.",
+    "docs.readPromptTitle":
+      "¿Primera vez? Lee cómo funciona esta cartera",
+    "docs.readPromptBody":
+      "Explica en lenguaje sencillo qué protege tu dinero, qué no, y todos los límites conocidos. Unos minutos ahora pueden evitar un error caro después.",
+    "docs.readPromptLater":
+      "Más tarde",
+    "docs.readPromptNever":
+      "No volver a preguntar",
+    "security.coldVaultActivatedToast": "Cold Vault activado. Solo se permite la firma air-gap Type 2 exacta y recién autorizada.",
+    "security.coldVaultBiometricBlocked": "El desbloqueo biométrico está desactivado en Cold Vault. Use la contraseña en el firmante sin conexión.",
+    "airgap.coldVaultSignerHint": "Cold Vault está activo. Mantenga el dispositivo sin conexión, revise cada campo y firme solo el QR Type 2 escaneado.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault no puede crear ni emitir transacciones en línea. Use un coordinador watch-only separado.",
+  },
+  fr: {
+    "security.signingPolicy": "Politique de signature",
+    "security.paranoidDesktopOnly": "Paranoïaque exige WebAuthn pour chaque envoi. Le mobile ne peut pas terminer cette procédure, activez-le donc uniquement sur ordinateur. Utilisez Cold Vault pour signer hors ligne sur mobile.",
+    "security.softwareKeyCustodyHint": "La clé privée chiffrée reste détenue par le logiciel et est déchiffrée en mémoire lorsque le portefeuille est ouvert. Le facteur de la plateforme autorise son utilisation sans déplacer la clé vers du matériel sécurisé.",
+    "security.webauthnSoftwareGateHint": "WebAuthn est un second facteur pour la clé logicielle. Ce n'est pas une conservation matérielle de la clé.",
+    "security.coldVaultTitle": "Cold Vault, signature uniquement air-gap",
+    "security.coldVaultActiveHint": "Actif. Le cœur bloque les envois en ligne, Fast Pay, les dApps, la signature de messages et Quantum. Seul un QR Type 2 vérifié peut être signé après un nouveau facteur de plateforme. Le portefeuille se verrouille après chaque tentative de signature.",
+    "security.coldVaultRecoveryOnly": "Cette politique ne peut pas être abaissée dans l'application. Pour revenir à un portefeuille en ligne, récupérez les fonds dans un nouveau portefeuille avec des éléments de récupération stockés séparément.",
+    "security.coldVaultActivationHint": "Utilisez cette option uniquement sur un appareil dédié qui restera hors ligne. L'activation impose Paranoid, supprime le déverrouillage biométrique et désactive définitivement toutes les voies de signature directe de ce coffre.",
+    "security.coldVaultSoftwareLimit": "Ce changement est à sens unique. Il améliore l'isolation du portefeuille logiciel sans rendre un appareil général équivalent à l'élément sécurisé d'un portefeuille matériel.",
+    "security.coldVaultBackupFirst":
+      "Exportez une sauvegarde complète avant d'activer et conservez-la hors ligne. L'activation supprime le secret de déverrouillage biométrique, donc si l'appareil est perdu, la sauvegarde chiffrée et votre phrase secrète sont le seul retour vers la clé. Notez le compromis : une sauvegarde faite maintenant restaure encore un portefeuille en ligne pour cette même adresse, traitez-la donc comme la clé elle-même.",
+    "security.coldVaultConfirmLabel": "Saisissez ENABLE COLD VAULT pour confirmer",
+    "security.coldVaultActivate": "Activer Cold Vault",
+    "security.coldVaultFactorRequired": "Activez d'abord une biométrie forte de l'appareil ou enregistrez WebAuthn.",
+    "security.coldVaultWebauthnRequired": "Ce coffre possède un authentificateur WebAuthn enregistré : l'activation du Cold Vault doit être approuvée sur le portefeuille de bureau avec cette clé.",
+    "security.legacyBrainwalletKeyWarning": "La clé de ce portefeuille a été dérivée d'une phrase de récupération par un seul SHA-256 sans sel. Quiconque devine la phrase peut dépenser sans cet appareil ni votre phrase secrète, donc aucun réglage ne la protège. Transférez les fonds vers un portefeuille nouvellement généré.",
+    "docs.howItWorks": "Comment fonctionne ce portefeuille",
+    "docs.howItWorksHint": "Ouvre l'explication publique complète sur GitHub : ce qui protège votre argent, ce qui ne le protège pas, et chaque limite connue. En langage clair.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Quel build tourne sur cet appareil. Indiquez-le lorsque vous signalez un problème.",
+    "docs.readPromptTitle":
+      "Nouveau ici ? Lisez comment ce portefeuille fonctionne",
+    "docs.readPromptBody":
+      "Le document explique en langage clair ce qui protège votre argent, ce qui ne le protège pas, et toutes les limites connues. Quelques minutes maintenant évitent une erreur coûteuse ensuite.",
+    "docs.readPromptLater":
+      "Plus tard",
+    "docs.readPromptNever":
+      "Ne plus me demander",
+    "security.coldVaultActivatedToast": "Cold Vault activé. Seule une signature air-gap Type 2 exacte et nouvellement autorisée est permise.",
+    "security.coldVaultBiometricBlocked": "Le déverrouillage biométrique est désactivé dans Cold Vault. Utilisez la phrase secrète sur le signataire hors ligne.",
+    "airgap.coldVaultSignerHint": "Cold Vault est actif. Gardez l'appareil hors ligne, vérifiez chaque champ et signez uniquement le QR Type 2 scanné.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault ne peut ni créer ni diffuser de transaction en ligne. Utilisez un coordinateur watch-only séparé.",
+  },
+  pt: {
+    "security.signingPolicy": "Política de assinatura",
+    "security.paranoidDesktopOnly": "Paranoico exige WebAuthn em cada envio. O mobile não conclui esse processo, por isso ative-o apenas no desktop. Use Cold Vault como assinador mobile offline.",
+    "security.softwareKeyCustodyHint": "A chave privada cifrada permanece no software e é decifrada na memória enquanto a carteira está desbloqueada. O fator da plataforma autoriza o uso, mas não move a chave para hardware seguro.",
+    "security.webauthnSoftwareGateHint": "WebAuthn é um segundo fator para a chave de software. Não é custódia da chave em hardware.",
+    "security.coldVaultTitle": "Cold Vault, assinatura apenas por air-gap",
+    "security.coldVaultActiveHint": "Ativo. O núcleo bloqueia envios online, Fast Pay, dApps, assinatura de mensagens e Quantum. Apenas um QR Type 2 revisto pode ser assinado após um novo fator da plataforma. A carteira bloqueia após cada tentativa de assinatura.",
+    "security.coldVaultRecoveryOnly": "Esta política não pode ser reduzida na aplicação. Para voltar a uma carteira online, recupere os fundos numa nova carteira com material de recuperação guardado separadamente.",
+    "security.coldVaultActivationHint": "Use apenas num dispositivo dedicado que permanecerá offline. A ativação força Paranoid, remove o desbloqueio biométrico e desativa permanentemente todas as vias de assinatura direta deste cofre.",
+    "security.coldVaultSoftwareLimit": "Esta é uma alteração de sentido único. Melhora o isolamento da carteira de software, mas não torna um dispositivo geral equivalente ao elemento seguro de uma carteira de hardware.",
+    "security.coldVaultBackupFirst":
+      "Exporte uma cópia de segurança completa antes de ativar e guarde-a offline. A ativação apaga o segredo de desbloqueio biométrico, por isso se perder o dispositivo a cópia cifrada com a sua frase de acesso é o único caminho de volta à chave. Atenção ao compromisso: uma cópia feita agora ainda restaura uma carteira online para este mesmo endereço, trate-a como a própria chave.",
+    "security.coldVaultConfirmLabel": "Escreva ENABLE COLD VAULT para confirmar",
+    "security.coldVaultActivate": "Ativar Cold Vault",
+    "security.coldVaultFactorRequired": "Ative primeiro uma biometria forte do dispositivo ou registe WebAuthn.",
+    "security.coldVaultWebauthnRequired": "Este cofre tem um autenticador WebAuthn registado, por isso a ativação do Cold Vault tem de ser aprovada na carteira de desktop com essa chave.",
+    "security.legacyBrainwalletKeyWarning": "A chave desta carteira foi derivada de uma frase de recuperação com um único SHA-256 sem sal. Quem adivinhar a frase consegue gastar sem este dispositivo nem a sua palavra-passe, por isso nenhuma configuração a protege. Mova os fundos para uma carteira recém-gerada.",
+    "docs.howItWorks": "Como funciona esta carteira",
+    "docs.howItWorksHint": "Abre a explicação pública completa no GitHub: o que protege o seu dinheiro, o que não protege e todos os limites conhecidos. Em linguagem simples.",
+    "settings.buildId": "Compilação",
+    "settings.buildIdHint":
+      "Qual compilação está a correr neste dispositivo. Indique-a ao relatar algo.",
+    "docs.readPromptTitle":
+      "É novo por aqui? Leia como esta carteira funciona",
+    "docs.readPromptBody":
+      "Explica em linguagem simples o que protege o seu dinheiro, o que não protege, e todos os limites conhecidos. Alguns minutos agora evitam um erro caro depois.",
+    "docs.readPromptLater":
+      "Mais tarde",
+    "docs.readPromptNever":
+      "Não perguntar novamente",
+    "security.coldVaultActivatedToast": "Cold Vault ativado. Só é permitida a assinatura air-gap Type 2 exata e recém-autorizada.",
+    "security.coldVaultBiometricBlocked": "O desbloqueio biométrico está desativado no Cold Vault. Use a palavra-passe no assinante offline.",
+    "airgap.coldVaultSignerHint": "O Cold Vault está ativo. Mantenha o dispositivo offline, confirme todos os campos e assine apenas o QR Type 2 digitalizado.",
+    "airgap.coldVaultCoordinatorBlocked": "O Cold Vault não cria nem transmite transações online. Use um coordenador watch-only separado.",
+  },
+  ar: {
+    "security.signingPolicy": "سياسة التوقيع",
+    "security.paranoidDesktopOnly": "يتطلب وضع Paranoid استخدام WebAuthn في كل إرسال. لا يستطيع تطبيق الهاتف إكمال هذه العملية، لذلك فعّله على سطح المكتب فقط. استخدم Cold Vault للتوقيع دون اتصال على الهاتف.",
+    "security.softwareKeyCustodyHint": "يبقى المفتاح الخاص المشفر محفوظاً في البرنامج ويُفك تشفيره في الذاكرة أثناء فتح المحفظة. عامل المنصة يجيز استخدام المفتاح لكنه لا ينقله إلى عتاد آمن.",
+    "security.webauthnSoftwareGateHint": "WebAuthn عامل ثانٍ للمفتاح البرمجي، وليس حفظاً للمفتاح داخل العتاد.",
+    "security.coldVaultTitle": "Cold Vault، توقيع عبر العزل فقط",
+    "security.coldVaultActiveHint": "مفعّل. تمنع النواة الإرسال عبر الإنترنت وFast Pay وتطبيقات dApp وتوقيع الرسائل وتوقيع Quantum. لا يمكن توقيع إلا QR من Type 2 تمت مراجعته بعد تحقق جديد من المنصة. تُقفل المحفظة بعد كل محاولة توقيع.",
+    "security.coldVaultRecoveryOnly": "لا يمكن خفض هذه السياسة داخل التطبيق. للعودة إلى محفظة متصلة، استعد الأموال في محفظة جديدة باستخدام مواد استرداد محفوظة بشكل مستقل.",
+    "security.coldVaultActivationHint": "استخدمه فقط على جهاز مخصص سيبقى دون اتصال. يفرض التفعيل ملف Paranoid ويحذف فتح القفل بالبصمة ويعطل نهائياً كل مسارات التوقيع المباشر لهذا الخزنة.",
+    "security.coldVaultSoftwareLimit": "هذا تغيير أحادي الاتجاه. يحسن عزل المحفظة البرمجية لكنه لا يجعل الجهاز العام مكافئاً للعنصر الآمن في محفظة عتادية.",
+    "security.coldVaultBackupFirst":
+      "قم بتصدير نسخة احتياطية كاملة قبل التفعيل واحفظها دون اتصال. التفعيل يحذف سر فتح القفل بالمقاييس الحيوية، فإذا فُقد الجهاز تكون النسخة المشفّرة مع عبارة المرور هي الطريق الوحيد للعودة إلى المفتاح. انتبه للمقايضة: النسخة التي تأخذها الآن ما زالت تستعيد محفظة متصلة لنفس العنوان، فتعامل معها كأنها المفتاح نفسه.",
+    "security.coldVaultConfirmLabel": "اكتب ENABLE COLD VAULT للتأكيد",
+    "security.coldVaultActivate": "تفعيل Cold Vault",
+    "security.coldVaultFactorRequired": "فعّل أولاً بصمة قوية للجهاز أو سجّل WebAuthn.",
+    "security.coldVaultWebauthnRequired": "تحتوي هذه الخزنة على مُصادق WebAuthn مُسجَّل، لذلك يجب اعتماد تنشيط Cold Vault في محفظة سطح المكتب باستخدام المفتاح نفسه.",
+    "security.legacyBrainwalletKeyWarning": "اشتُق مفتاح هذه المحفظة من عبارة استرجاع بتطبيق SHA-256 مرة واحدة وبدون ملح. من يخمّن العبارة يستطيع الإنفاق دون هذا الجهاز ودون عبارة المرور، ولذلك لا يحميها أي إعداد. انقل الأموال إلى محفظة جديدة.",
+    "docs.howItWorks": "كيف تعمل هذه المحفظة",
+    "docs.howItWorksHint": "يفتح الشرح العام الكامل على GitHub: ما يحمي أموالك وما لا يحميها، وكل حد معروف. مكتوب بلغة واضحة.",
+    "settings.buildId": "الإصدار البنائي",
+    "settings.buildIdHint":
+      "الإصدار الذي يعمل على هذا الجهاز. اذكره عند الإبلاغ عن أي مشكلة.",
+    "docs.readPromptTitle":
+      "هل أنت جديد؟ اقرأ كيف تعمل هذه المحفظة",
+    "docs.readPromptBody":
+      "يشرح بلغة بسيطة ما يحمي أموالك وما لا يحميها، وكل حد معروف. دقائق قليلة الآن تمنع خطأً مكلفًا لاحقًا.",
+    "docs.readPromptLater":
+      "لاحقًا",
+    "docs.readPromptNever":
+      "لا تسألني مرة أخرى",
+    "security.coldVaultActivatedToast": "تم تفعيل Cold Vault. يُسمح فقط بتوقيع air-gap دقيق من Type 2 بتفويض جديد.",
+    "security.coldVaultBiometricBlocked": "فتح القفل بالبصمة معطل في Cold Vault. استخدم عبارة المرور على جهاز التوقيع غير المتصل.",
+    "airgap.coldVaultSignerHint": "Cold Vault مفعّل. أبق الجهاز دون اتصال، وراجع كل حقل، ووقّع فقط QR من Type 2 الذي تم مسحه.",
+    "airgap.coldVaultCoordinatorBlocked": "لا يستطيع Cold Vault إنشاء أو بث معاملات عبر الإنترنت. استخدم منسق watch-only منفصلاً.",
+  },
+  sv: {
+    "security.signingPolicy": "Signeringspolicy",
+    "security.paranoidDesktopOnly": "Paranoid kräver WebAuthn vid varje sändning. Mobilen kan inte slutföra den processen, så aktivera den endast på datorn. Använd Cold Vault för en offline mobil signerare.",
+    "security.softwareKeyCustodyHint": "Den krypterade privata nyckeln hålls i programvaran och dekrypteras i minnet när plånboken är upplåst. Plattformskontrollen godkänner användning men flyttar inte nyckeln till säker hårdvara.",
+    "security.webauthnSoftwareGateHint": "WebAuthn är en andra faktor för programvarunyckeln, inte hårdvaruförvaring av nyckeln.",
+    "security.coldVaultTitle": "Cold Vault, endast air-gap-signering",
+    "security.coldVaultActiveHint": "Aktiv. Kärnan blockerar onlineöverföringar, Fast Pay, dApps, meddelandesignering och Quantum-signering. Endast en granskad Type 2-QR kan signeras efter en ny plattformsfaktor. Plånboken låses efter varje signeringsförsök.",
+    "security.coldVaultRecoveryOnly": "Policyn kan inte sänkas i appen. För att återgå till en onlineplånbok måste medlen återställas i en ny plånbok med separat lagrat återställningsmaterial.",
+    "security.coldVaultActivationHint": "Använd endast på en dedikerad enhet som förblir offline. Aktivering tvingar Paranoid, tar bort biometrisk upplåsning och stänger permanent alla direkta signeringsvägar för detta valv.",
+    "security.coldVaultSoftwareLimit": "Detta är en enkelriktad ändring. Den förbättrar isoleringen av programvaruplånboken men gör inte en allmän enhet likvärdig med ett säkert element i en hårdvaruplånbok.",
+    "security.coldVaultBackupFirst":
+      "Exportera en fullständig säkerhetskopia innan du aktiverar och förvara den offline. Aktiveringen tar bort den biometriska upplåsningsnyckeln, så om enheten försvinner är den krypterade kopian tillsammans med din lösenfras enda vägen tillbaka till nyckeln. Tänk på avvägningen: en kopia tagen nu återställer fortfarande en onlineplånbok för samma adress, så behandla den som nyckeln själv.",
+    "security.coldVaultConfirmLabel": "Skriv ENABLE COLD VAULT för att bekräfta",
+    "security.coldVaultActivate": "Aktivera Cold Vault",
+    "security.coldVaultFactorRequired": "Aktivera först stark enhetsbiometri eller registrera WebAuthn.",
+    "security.coldVaultWebauthnRequired": "Detta valv har en registrerad WebAuthn-autentiserare, så aktivering av Cold Vault måste godkännas i skrivbordsplånboken med den nyckeln.",
+    "security.legacyBrainwalletKeyWarning": "Nyckeln i denna plånbok härleddes från en återställningsfras med en enda osaltad SHA-256. Den som gissar frasen kan spendera utan den här enheten eller din lösenfras, så ingen inställning skyddar den. Flytta medlen till en nyskapad plånbok.",
+    "docs.howItWorks": "Så fungerar denna plånbok",
+    "docs.howItWorksHint": "Öppnar den fullständiga offentliga förklaringen på GitHub: vad som skyddar dina pengar, vad som inte gör det, och varje känd begränsning. Skrivet på enkelt språk.",
+    "settings.buildId": "Bygge",
+    "settings.buildIdHint":
+      "Vilket bygge som körs på den här enheten. Ange det när du rapporterar något.",
+    "docs.readPromptTitle":
+      "Ny här? Läs hur den här plånboken fungerar",
+    "docs.readPromptBody":
+      "Den förklarar på vanligt språk vad som skyddar dina pengar, vad som inte gör det, och varje känd begränsning. Några minuter nu kan spara ett dyrt misstag senare.",
+    "docs.readPromptLater":
+      "Senare",
+    "docs.readPromptNever":
+      "Fråga mig inte igen",
+    "security.coldVaultActivatedToast": "Cold Vault aktiverad. Endast exakt och nyauktoriserad Type 2-air-gap-signering tillåts.",
+    "security.coldVaultBiometricBlocked": "Biometrisk upplåsning är avstängd i Cold Vault. Använd lösenfrasen på offline-signeraren.",
+    "airgap.coldVaultSignerHint": "Cold Vault är aktiv. Håll enheten offline, granska varje fält och signera endast den skannade Type 2-QR-koden.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault kan inte skapa eller sända onlinetransaktioner. Använd en separat watch-only-koordinator.",
+  },
+  de: {
+    "security.signingPolicy": "Signaturrichtlinie",
+    "security.paranoidDesktopOnly": "Paranoid verlangt WebAuthn bei jeder Sendung. Mobil kann dieser Vorgang nicht abgeschlossen werden, daher nur auf dem Desktop aktivieren. Für einen mobilen Offline-Signer Cold Vault verwenden.",
+    "security.softwareKeyCustodyHint": "Der verschlüsselte private Schlüssel bleibt in Software und wird bei entsperrtem Wallet im Speicher entschlüsselt. Der Plattformfaktor erlaubt seine Nutzung, verschiebt den Schlüssel aber nicht in sichere Hardware.",
+    "security.webauthnSoftwareGateHint": "WebAuthn ist ein zweiter Faktor für den Softwareschlüssel. Es ist keine Verwahrung des Schlüssels in Hardware.",
+    "security.coldVaultTitle": "Cold Vault, nur Air-Gap-Signatur",
+    "security.coldVaultActiveHint": "Aktiv. Der Kern blockiert Online-Sendungen, Fast Pay, dApps, Nachrichtensignaturen und Quantum-Signaturen. Nur ein geprüfter Type-2-QR kann nach einem neuen Plattformfaktor signiert werden. Das Wallet sperrt sich nach jedem Signaturversuch.",
+    "security.coldVaultRecoveryOnly": "Diese Richtlinie kann in der App nicht herabgesetzt werden. Für ein Online-Wallet müssen die Mittel mit separat verwahrtem Wiederherstellungsmaterial in ein neues Wallet wiederhergestellt werden.",
+    "security.coldVaultActivationHint": "Nur auf einem dedizierten, dauerhaft offline bleibenden Gerät verwenden. Die Aktivierung erzwingt Paranoid, entfernt biometrisches Entsperren und deaktiviert dauerhaft jeden direkten Signaturpfad dieses Vaults.",
+    "security.coldVaultSoftwareLimit": "Dies ist eine unumkehrbare Richtlinienänderung. Sie verbessert die Isolation des Software-Wallets, macht ein Universalgerät aber nicht zum Secure Element eines Hardware-Wallets.",
+    "security.coldVaultBackupFirst":
+      "Exportieren Sie vor der Aktivierung eine vollständige Sicherung und bewahren Sie sie offline auf. Die Aktivierung löscht das biometrische Entsperrgeheimnis, wenn das Gerät also verloren geht, sind die verschlüsselte Sicherung und Ihre Passphrase der einzige Weg zurück zum Schlüssel. Beachten Sie den Kompromiss: eine jetzt erstellte Sicherung stellt weiterhin eine Online-Wallet für dieselbe Adresse wieder her, behandeln Sie sie daher wie den Schlüssel selbst.",
+    "security.coldVaultConfirmLabel": "Zur Bestätigung ENABLE COLD VAULT eingeben",
+    "security.coldVaultActivate": "Cold Vault aktivieren",
+    "security.coldVaultFactorRequired": "Zuerst starke Gerätebiometrie aktivieren oder WebAuthn registrieren.",
+    "security.coldVaultWebauthnRequired": "Dieser Tresor hat einen registrierten WebAuthn-Authenticator, daher muss die Cold-Vault-Aktivierung in der Desktop-Wallet mit diesem Schlüssel bestätigt werden.",
+    "security.legacyBrainwalletKeyWarning": "Der Schlüssel dieser Wallet wurde mit einem einzigen ungesalzenen SHA-256 aus einer Wiederherstellungsphrase abgeleitet. Wer die Phrase errät, kann ohne dieses Gerät und ohne Ihre Passphrase ausgeben; keine Einstellung schützt davor. Übertragen Sie das Guthaben in eine neu erzeugte Wallet.",
+    "docs.howItWorks": "Wie diese Wallet funktioniert",
+    "docs.howItWorksHint": "Öffnet die vollständige öffentliche Erklärung auf GitHub: was Ihr Geld schützt, was nicht, und jede bekannte Grenze. In einfacher Sprache geschrieben.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Welcher Build auf diesem Gerät läuft. Nennen Sie ihn bei jeder Meldung.",
+    "docs.readPromptTitle":
+      "Neu hier? Lesen Sie, wie diese Wallet funktioniert",
+    "docs.readPromptBody":
+      "Der Text erklärt in einfacher Sprache, was Ihr Geld schützt, was nicht, und jede bekannte Grenze. Ein paar Minuten jetzt ersparen später einen teuren Fehler.",
+    "docs.readPromptLater":
+      "Später",
+    "docs.readPromptNever":
+      "Nicht mehr fragen",
+    "security.coldVaultActivatedToast": "Cold Vault aktiviert. Nur eine exakte, neu autorisierte Type-2-Air-Gap-Signatur ist erlaubt.",
+    "security.coldVaultBiometricBlocked": "Biometrisches Entsperren ist im Cold Vault deaktiviert. Verwenden Sie die Passphrase auf dem Offline-Signierer.",
+    "airgap.coldVaultSignerHint": "Cold Vault ist aktiv. Gerät offline halten, jedes Feld prüfen und nur den gescannten Type-2-QR signieren.",
+    "airgap.coldVaultCoordinatorBlocked": "Cold Vault kann keine Online-Transaktionen erstellen oder senden. Verwenden Sie einen separaten Watch-only-Koordinator.",
+  },
+};

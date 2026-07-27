@@ -338,3 +338,64 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* The card art is a fixed-size replica, so the fields it has no room for are listed
+   below it. Long hashes and addresses are shown in full and allowed to wrap: a value
+   the holder cannot read or copy is not really shown. */
+.hacd-meta-details {
+  display: grid;
+  grid-template-columns: minmax(7rem, auto) 1fr;
+  gap: 0.15rem 0.6rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.72rem;
+}
+
+.hacd-meta-details dt {
+  color: var(--muted, #999);
+}
+
+.hacd-meta-details dt:first-of-type {
+  grid-column: 1 / -1;
+  margin-top: 0.1rem;
+  color: var(--text, #eee);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.hacd-meta-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hacd-meta-inscriptions {
+  margin: 0;
+  padding-left: 1rem;
+}
+
+@media (max-width: 420px) {
+  .hacd-meta-details {
+    grid-template-columns: 1fr;
+    gap: 0 0;
+  }
+
+  .hacd-meta-details dd {
+    margin-bottom: 0.3rem;
+  }
+}
+
+/* A card with no diamond on it is the failure a holder notices first. Say why, rather
+   than leaving a black rectangle that looks like a rendering bug. */
+.hacd-meta-noart {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 60px;
+  color: #f5e1da;
+  font-size: 28px;
+  line-height: 1.35;
+  text-align: center;
+}

@@ -1,3 +1,4 @@
+import { MIN_NEW_WALLET_PASSPHRASE_LENGTH } from "@hacash/wallet-ui";
 import type { QuantumAccountInfo, QuantumAccountSummary, QuantumSettings } from "./api";
 
 export function accountSummaryFromSettings(s: QuantumSettings): QuantumAccountSummary | null {
@@ -41,4 +42,4 @@ export const REPLACE_KEYSTORE_WARNING =
   "Funds on the previous address remain there. save your private key first if needed.";
 
 export const MIN_KEYSTORE_PASS = 8;
-export const MIN_WALLET_PASS = 8;
+export const MIN_WALLET_PASS = MIN_NEW_WALLET_PASSPHRASE_LENGTH;

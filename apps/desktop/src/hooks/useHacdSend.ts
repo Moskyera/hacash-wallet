@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type HacdSendPreview } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
-import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 import { isValidHacdName, normalizeHacdName } from "@hacash/wallet-ui";
 
 export function useHacdSend(opts: {
@@ -89,24 +89,11 @@ export function useHacdSend(opts: {
 
   const handleConfirm = useCallback(async () => {
     if (!preview) return;
-    try {
-      const status = await api.status();
-      if (status.webauthn_enabled) {
-        const options = await api.webauthnAuthBegin(webAuthnClientOrigin());
-        const assertion = await runWebAuthnAuth(options);
-        await api.webauthnAuthFinish(assertion);
-      } else if (nativeBioAvailable) {
-        await api.confirmBiometricNative();
-      } else {
-        throw new Error("Enable WebAuthn or Windows Hello before sending HACD");
-      }
-    } catch (e) {
-      onNotify(formatInvokeError(e), "error");
-      return;
-    }
     setBusy(true);
     try {
-      const result = await api.sendHacd(preview.to, preview.diamond_names);
+      const prepared = await api.prepareSendHacd(preview.to, preview.diamond_names);
+      await authorizePreparedOperation(prepared, nativeBioAvailable);
+      const result = await api.executePreparedHacd(prepared.id);
       setPreview(null);
       setSelected([]);
       setRecipient("");

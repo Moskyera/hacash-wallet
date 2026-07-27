@@ -145,6 +145,107 @@ fn android_9_backup_export_has_a_scoped_runtime_permission_flow() {
             "Android backup filename validation is missing {filename_guard}"
         );
     }
+    for streaming_contract in [
+        "MAX_BACKUP_BYTES = 64L * 1024L * 1024L",
+        "source.parentFile != cacheRoot",
+        "Files.isSymbolicLink(requestedSource.toPath())",
+        "FileInputStream(source).use",
+        "copyBounded(input, stream)",
+        "buffer.fill(0)",
+        "MediaStore.Downloads.IS_PENDING",
+        "uri?.let { activity.contentResolver.delete(it, null, null) }",
+        "temporary.renameTo(destination)",
+    ] {
+        assert!(
+            backup_helper.contains(streaming_contract),
+            "Android backup bounded-streaming contract is missing {streaming_contract}"
+        );
+    }
+    assert!(!backup_helper.contains("readBytes()"));
+    assert!(!backup_helper.contains("writeBytes(bytes)"));
+}
+
+/// The Kotlin helper accepts a source file only if its parent is exactly
+/// `activity.cacheDir`, the app's private cache. Tauri's Android path resolver maps
+/// `cache_dir()` to `getExternalCacheDir` and only `app_cache_dir()` to `getCacheDir`,
+/// so staging with `cache_dir()` makes every Android backup export fail. Nothing
+/// asserted that the two sides agreed, which is how it shipped.
+#[test]
+fn backup_export_stages_the_file_where_the_native_helper_accepts_it() {
+    let root = repo_root();
+    let export = read(&root, "crates/wallet-tauri-common/src/backup_commands.rs");
+    let backup_helper = read(
+        &root,
+        "apps/mobile/src-tauri/android-src/org/hacash/wallet/mobile/BackupExportHelper.kt",
+    );
+
+    let staging = export
+        .split_once("pub async fn wallet_export_backup_to_downloads(")
+        .expect("backup export command")
+        .1
+        .split_once("copy_backup_file_to_downloads")
+        .expect("native copy call")
+        .0;
+
+    assert!(
+        staging.contains("app.path().app_cache_dir()"),
+        "the backup must be staged with app_cache_dir(), which is the private cache the \
+         native helper requires"
+    );
+    assert!(
+        !staging.contains("app.path().cache_dir()"),
+        "cache_dir() is the EXTERNAL cache on Android; the native helper rejects it and \
+         the encrypted key must not be staged on shared storage"
+    );
+    assert!(
+        backup_helper.contains("val cacheRoot = activity.cacheDir.canonicalFile"),
+        "the native helper must keep pinning the private cache as the only valid parent"
+    );
+    // The update flow shares this constraint, so it must not regress either.
+    let update = read(&root, "crates/wallet-tauri-common/src/update_commands.rs");
+    assert!(
+        !update.contains("app.path().cache_dir()"),
+        "the APK update download must stay in the private cache as well"
+    );
+}
+
+/// The mobile Security screen only disables the Paranoid button. A disabled control is
+/// a suggestion, not a policy, so the command has to refuse it as well: Paranoid demands
+/// a WebAuthn ceremony for every send that Android cannot perform, which would stop every
+/// send on the device. Compiled out on desktop, so this asserts the source contract.
+#[test]
+fn android_refuses_the_paranoid_profile_at_the_command_layer() {
+    let root = repo_root();
+    let commands = read(&root, "crates/wallet-tauri-common/src/commands.rs");
+
+    let profile_command = commands
+        .split_once("pub fn wallet_set_security_profile(")
+        .expect("security profile command")
+        .1
+        .split_once("svc.change_security_profile(")
+        .expect("profile change call")
+        .0;
+
+    assert!(
+        profile_command.contains("#[cfg(target_os = \"android\")]"),
+        "the refusal must be Android-only, since desktop can complete the WebAuthn ceremony"
+    );
+    assert!(
+        profile_command.contains("if profile == \"paranoid\""),
+        "the command must reject the paranoid profile on Android before applying it"
+    );
+    assert!(
+        profile_command.contains("return Err("),
+        "rejecting means returning an error, not silently substituting another profile"
+    );
+
+    // Cold Vault legitimately runs on the paranoid profile, and it must keep working.
+    // It reaches that profile through the vault migration, never through this command.
+    let wallet = read(&root, "crates/wallet-core/src/wallet.rs");
+    assert!(
+        wallet.contains("target_profile = SecurityProfile::paranoid();"),
+        "Cold Vault must keep setting the paranoid profile directly in the migration"
+    );
 }
 
 #[test]

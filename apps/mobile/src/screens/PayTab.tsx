@@ -17,7 +17,7 @@ import type { L1FeeSpeed } from "../api";
 import { resolveDustWhisper } from "../dustWhisper";
 import type { SavedContact } from "../contacts";
 import { formatHacMei, maskAddress } from "../privacy";
-import { BIOMETRIC_THRESHOLD_MEI } from "../utils/appConstants";
+import { needsSecondFactor } from "../utils/secondFactorGate";
 import {
   isValidHacdName,
   isValidHacashAddress,
@@ -49,11 +49,13 @@ type Props = {
   preview: SendPreview | null;
   payScanMode: boolean;
   setPayScanMode: (v: boolean) => void;
-  payCameraIntent: boolean;
-  onCameraIntentConsumed: () => void;
   hideAddresses: boolean;
   settings: WalletSettings | null;
   platformSec: PlatformSecurityStatus | null;
+  /// The amount the core actually enforces, already combining the authenticated profile
+  /// with the user's chosen value. Passed in rather than derived, so the screen cannot
+  /// drift from the policy.
+  secondFactorThresholdMei: number | null;
   busy: boolean;
   dustWhisper?: DustWhisperSettings | null;
   onPersistSendPrefs: (
@@ -87,11 +89,10 @@ export default function PayTab({
   preview,
   payScanMode,
   setPayScanMode,
-  payCameraIntent,
-  onCameraIntentConsumed,
   hideAddresses,
   settings,
   platformSec,
+  secondFactorThresholdMei,
   busy,
   dustWhisper,
   onPersistSendPrefs,
@@ -185,8 +186,6 @@ export default function PayTab({
           )}
           {payScanMode ? (
             <PaymentQrScanner
-              autoStart={payCameraIntent}
-              onAutoStarted={onCameraIntentConsumed}
               disabled={busy}
               onDetected={(p) => void onPaymentQr(p)}
               onError={(msg) => onToast(msg, "error")}
@@ -341,9 +340,36 @@ export default function PayTab({
               {preview.plan.rail === "L1OnChain" && whisperActive ? (
                 <p className="muted small">Broadcast via DUST Whisper relay.</p>
               ) : null}
-              {platformSec?.native_biometric_available && preview.amount_mei >= BIOMETRIC_THRESHOLD_MEI && (
-                <p className="muted">Biometric confirmation required.</p>
-              )}
+              {/* This is the notice read at the moment of paying, so it has to match the
+                  core exactly: the raw threshold comparison ignored the security profile,
+                  the hardware signing mode, and the core's rounding up of the policed
+                  amount. It also stayed silent when a factor was required but the device
+                  had no way to provide one, which is precisely when a warning matters. */}
+              {needsSecondFactor(
+                preview.amount_mei,
+                settings?.security_profile,
+                settings?.hardware_signing_mode,
+                secondFactorThresholdMei,
+              ) ? (
+                // Fast Pay cannot carry authorization: its settlement bill is cosigned by
+                // the hub, so the wallet cannot bind an approval to it and refuses
+                // instead. Promising a fingerprint prompt here would be a lie, and the
+                // user would only learn the truth after tapping.
+                preview.plan.rail === "L2Fast" ? (
+                  <p className="error">
+                    This amount needs confirmation, and Fast Pay cannot be confirmed
+                    because its settlement bill is cosigned by the hub. Tick Force
+                    on-chain (L1) above to pay it.
+                  </p>
+                ) : platformSec?.native_biometric_available ? (
+                  <p className="muted">Biometric confirmation required.</p>
+                ) : (
+                  <p className="error">
+                    This amount requires a device factor, and no biometric sensor was
+                    detected. The send will be refused.
+                  </p>
+                )
+              ) : null}
               <button
                 className="primary"
                 disabled={busy || !preview.hip23.ok}

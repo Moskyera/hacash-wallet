@@ -5,6 +5,7 @@ mod common;
 
 use common::audit_gate;
 use hacash_wallet_core::WalletError;
+use hacash_wallet_core::account::WalletAccount;
 use hacash_wallet_core::vault::EncryptedVault;
 
 #[test]
@@ -49,12 +50,18 @@ fn audit_vault_unique_salt_per_encryption() {
 #[test]
 fn audit_vault_reencrypt_roundtrip() {
     audit_gate("vault_reencrypt", || {
+        let account = WalletAccount::create_random().unwrap();
+        let secret = account.secret_hex();
+        let address = account.address();
         let mut vault =
-            EncryptedVault::encrypt("rotate-me", "1Audit", "old-passphrase", "balanced").unwrap();
+            EncryptedVault::encrypt(&secret, &address, "old-passphrase", "balanced").unwrap();
         vault
             .reencrypt("old-passphrase", "new-passphrase-99")
             .unwrap();
-        assert_eq!(vault.decrypt("new-passphrase-99").unwrap(), "rotate-me");
+        assert_eq!(
+            vault.decrypt_verified_secret("new-passphrase-99").unwrap(),
+            secret.as_str()
+        );
         assert!(vault.decrypt("old-passphrase").is_err());
     });
 }

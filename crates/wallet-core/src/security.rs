@@ -43,6 +43,27 @@ impl SecurityProfile {
     }
 }
 
+/// Combine the profile's threshold with the user's chosen one.
+///
+/// `ceiling` comes from the security profile, which is bound to the vault through the
+/// profile name. `chosen` comes from the settings file, which is not bound to anything.
+/// Taking the minimum is the whole safety argument: a settings file that someone edited
+/// or replaced can only make the policy stricter than the profile allows, never weaker,
+/// so it does not need to be authenticated.
+///
+/// Two callers need this, one for enforcement and one for what the interface displays,
+/// and they must never disagree. That is why the formula lives here once rather than
+/// being written out at each site.
+pub fn effective_second_factor_threshold(ceiling: u64, chosen: Option<u64>) -> u64 {
+    match chosen {
+        // A zero would read as "no threshold at all", which is the opposite of what
+        // choosing a small number means. Normalisation rejects it; this clamps anyway
+        // rather than trusting a file.
+        Some(value) => value.clamp(1, ceiling.max(1)),
+        None => ceiling,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UnlockContext {
     pub biometric_ok: bool,

@@ -9,6 +9,7 @@ use tauri::{
     AppHandle, Manager, Runtime,
     plugin::{Builder, PluginHandle, TauriPlugin},
 };
+use zeroize::Zeroizing;
 
 const PLUGIN_NAME: &str = "wallet-native";
 const PLUGIN_PACKAGE: &str = "org.hacash.wallet.mobile";
@@ -36,17 +37,23 @@ fn plugin_error(operation: &str, error: impl std::fmt::Display) -> String {
     format!("Android {operation}: {error}")
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ConfiguredResponse {
-    configured: bool,
+pub struct BiometricStoreStatus {
+    pub configured: bool,
+    pub key_security_level: String,
+    pub hardware_backed: bool,
+    pub strong_box_backed: bool,
+    pub authentication_enforced_by_secure_hardware: bool,
+    pub auth_per_use: bool,
 }
 
-pub async fn biometric_is_configured<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
+pub async fn biometric_status<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<BiometricStoreStatus, String> {
     handle(app)?
-        .run_mobile_plugin_async::<ConfiguredResponse>("biometricIsConfigured", ())
+        .run_mobile_plugin_async::<BiometricStoreStatus>("biometricIsConfigured", ())
         .await
-        .map(|response| response.configured)
         .map_err(|error| plugin_error("Keystore status", error))
 }
 
@@ -72,11 +79,11 @@ struct LoadBiometricResponse {
     passphrase: String,
 }
 
-pub async fn biometric_load<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
+pub async fn biometric_load<R: Runtime>(app: &AppHandle<R>) -> Result<Zeroizing<String>, String> {
     handle(app)?
         .run_mobile_plugin_async::<LoadBiometricResponse>("biometricLoad", ())
         .await
-        .map(|response| response.passphrase)
+        .map(|response| Zeroizing::new(response.passphrase))
         .map_err(|error| plugin_error("Keystore load", error))
 }
 
@@ -121,6 +128,36 @@ pub async fn authenticate_strong<R: Runtime>(
         .run_mobile_plugin_async::<()>("authenticateStrong", AuthenticateStrongRequest { reason })
         .await
         .map_err(|error| plugin_error("strong biometric authentication", error))
+}
+
+#[derive(Serialize)]
+struct SetColdVaultLifecycleRequest {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct ColdVaultLifecycleStatus {
+    enabled: bool,
+}
+
+pub async fn set_cold_vault_lifecycle<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: bool,
+) -> Result<(), String> {
+    handle(app)?
+        .run_mobile_plugin_async::<()>(
+            "setColdVaultLifecycle",
+            SetColdVaultLifecycleRequest { enabled },
+        )
+        .await
+        .map_err(|error| plugin_error("Cold Vault lifecycle policy", error))
+}
+
+pub fn cold_vault_lifecycle_enabled<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
+    handle(app)?
+        .run_mobile_plugin::<ColdVaultLifecycleStatus>("coldVaultLifecycleStatus", ())
+        .map(|status| status.enabled)
+        .map_err(|error| plugin_error("Cold Vault lifecycle status", error))
 }
 
 #[derive(Serialize)]

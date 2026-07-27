@@ -53,7 +53,10 @@ fn tier0_import_rejects_whitespace_only_seed() {
     tier0_gate("import_whitespace_seed", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            assert!(svc.import_wallet("   \t\n  ", "passphrase12").is_err());
+            assert!(
+                svc.import_wallet("   \t\n  ", "passphrase12", "1Any")
+                    .is_err()
+            );
         });
     });
 }
@@ -64,9 +67,9 @@ fn tier0_import_hex_secret_requires_exact_64_chars() {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
             let short = "a".repeat(63);
-            assert!(svc.import_wallet(&short, "passphrase12").is_err());
+            assert!(svc.import_wallet(&short, "passphrase12", "1Any").is_err());
             let long = "a".repeat(65);
-            assert!(svc.import_wallet(&long, "passphrase12").is_err());
+            assert!(svc.import_wallet(&long, "passphrase12", "1Any").is_err());
         });
     });
 }

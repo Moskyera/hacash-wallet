@@ -1,12 +1,38 @@
-import { isValidHacashAddress } from "@hacash/wallet-ui";
-import { useState } from "react";
+import {
+  isValidHacashAddress,
+  MIN_NEW_WALLET_PASSPHRASE_LENGTH,
+} from "@hacash/wallet-ui";
+import { useRef, useState } from "react";
+import { api, type BackupPreview } from "../api";
 import Toast from "../components/Toast";
 import WalletLogo from "../components/WalletLogo";
 import PrivateKeyQrScanner from "../components/PrivateKeyQrScanner";
 import type { ToastKind } from "../hooks/useToast";
 import { useLocale } from "../locale";
 
-type WelcomeTab = "create" | "import" | "watch";
+const MAX_BACKUP_FILE_BYTES = 64 * 1024 * 1024;
+
+/** Hex digit count with whitespace ignored, so a key pasted across lines counts. */
+function compactSeed(value: string): string {
+  return value.replace(/\s+/g, "");
+}
+
+/** A real Hacash secret key. It is the only thing this wallet can import. */
+function isSecretHexSeed(value: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(compactSeed(value));
+}
+
+/**
+ * An all-hex input that is not exactly 64 characters is a mistyped or truncated
+ * private key. Hashing it would silently create a valid-looking wallet at a
+ * different address, so it must be reported, never offered as a recovery.
+ */
+function looksLikeMistypedKey(value: string): boolean {
+  const compact = compactSeed(value);
+  return compact.length >= 32 && /^[0-9a-fA-F]+$/.test(compact) && compact.length !== 64;
+}
+
+type WelcomeTab = "create" | "import" | "backup" | "watch";
 
 type Props = {
   walletNameDraft: string;
@@ -19,7 +45,8 @@ type Props = {
   setWatchAddress: (v: string) => void;
   busy: boolean;
   onCreate: () => void;
-  onImport: () => void;
+  onImport: (expectedAddress: string) => void;
+  onRestoreBackup: (json: string, passphrase: string, allowLegacy: boolean) => void;
   onWatchOnly: () => void;
   toast: { msg: string; kind: ToastKind } | null;
 };
@@ -36,6 +63,7 @@ export default function WelcomeScreen({
   busy,
   onCreate,
   onImport,
+  onRestoreBackup,
   onWatchOnly,
   toast,
 }: Props) {
@@ -43,6 +71,32 @@ export default function WelcomeScreen({
   const [tab, setTab] = useState<WelcomeTab>("create");
   const [showQrScan, setShowQrScan] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [backupJson, setBackupJson] = useState("");
+  const [backupPreview, setBackupPreview] = useState<BackupPreview | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [legacyLossAccepted, setLegacyLossAccepted] = useState(false);
+  const [importExpectedAddress, setImportExpectedAddress] = useState("");
+  const backupInputRef = useRef<HTMLInputElement>(null);
+
+  const loadBackupFile = async (file: File) => {
+    setBackupError(null);
+    setBackupPreview(null);
+    setLegacyLossAccepted(false);
+    if (file.size < 1 || file.size > MAX_BACKUP_FILE_BYTES) {
+      setBackupJson("");
+      setBackupError("Backup file size must be between 1 byte and 64 MiB.");
+      return;
+    }
+    try {
+      const json = await file.text();
+      const preview = await api.previewBackup(json);
+      setBackupJson(json);
+      setBackupPreview(preview);
+    } catch (error) {
+      setBackupJson("");
+      setBackupError(String(error));
+    }
+  };
 
   return (
     <div className="auth-screen">
@@ -58,6 +112,13 @@ export default function WelcomeScreen({
         <button type="button" className={tab === "import" ? "selected" : ""} onClick={() => setTab("import")}>
           Import
         </button>
+        <button
+          type="button"
+          className={tab === "backup" ? "selected" : ""}
+          onClick={() => setTab("backup")}
+        >
+          Restore
+        </button>
         <button type="button" className={tab === "watch" ? "selected" : ""} onClick={() => setTab("watch")}>
           Watch
         </button>
@@ -67,7 +128,9 @@ export default function WelcomeScreen({
         <div className="card">
           <h2>Create wallet</h2>
           <p className="muted small">New wallet on this phone.</p>
-          <p className="muted small">Back up the key in Security as QR before you delete the app.</p>
+          <p className="muted small">
+            Export an encrypted backup from Security and keep it offline before deleting the app.
+          </p>
           <label className="label">Wallet name</label>
           <input
             placeholder="e.g. My Hacash"
@@ -77,11 +140,15 @@ export default function WelcomeScreen({
           <label className="label">Encryption passphrase</label>
           <input
             type="password"
-            placeholder="Min 8 characters"
+            placeholder={`Minimum ${MIN_NEW_WALLET_PASSPHRASE_LENGTH} characters`}
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
-          <button className="primary" disabled={busy || passphrase.length < 8} onClick={() => void onCreate()}>
+          <button
+            className="primary"
+            disabled={busy || passphrase.length < MIN_NEW_WALLET_PASSPHRASE_LENGTH}
+            onClick={() => void onCreate()}
+          >
             Create wallet
           </button>
         </div>
@@ -90,7 +157,9 @@ export default function WelcomeScreen({
       {tab === "import" && (
         <div className="card">
           <h2>Import wallet</h2>
-          <p className="muted small">Scan QR from old phone: More, Security, Reveal key.</p>
+          <p className="muted small">
+            Scan a private-key QR only from a trusted existing wallet or offline backup tool.
+          </p>
           <p className="muted small">Or paste hex or old passphrase below.</p>
           <label className="label">Wallet name</label>
           <input
@@ -128,21 +197,119 @@ export default function WelcomeScreen({
             </>
           )}
           {scanError ? <p className="warn-text">{scanError}</p> : null}
-          <label className="label">Secret hex or legacy passphrase</label>
+          <label className="label">Private key (64-char hex)</label>
           <textarea
-            placeholder="64 character hex or old passphrase"
+            placeholder="64 character hex secret"
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
           />
+          <label className="label">Address of the wallet you are importing</label>
+          <input
+            placeholder="Hacash address this key belongs to"
+            value={importExpectedAddress}
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            onChange={(e) => setImportExpectedAddress(e.target.value)}
+          />
+          <p className="muted small">
+            A mistyped key is usually still a valid key, just a different wallet.
+            Checking it against your address turns a silent wrong wallet into a
+            clear error.
+          </p>
           <label className="label">Passphrase</label>
           <input
             type="password"
-            placeholder="Passphrase for this phone"
+            placeholder={`Minimum ${MIN_NEW_WALLET_PASSPHRASE_LENGTH} characters`}
             value={passphrase}
             onChange={(e) => setPassphrase(e.target.value)}
           />
-          <button className="primary" disabled={busy || !seed.trim() || passphrase.length < 8} onClick={() => void onImport()}>
+          {seed.trim() && !isSecretHexSeed(seed) ? (
+            <p className="warn-text">
+              {looksLikeMistypedKey(seed)
+                ? `A private key is exactly 64 hex characters and you entered ${compactSeed(seed).length}. Check for missing or extra characters.`
+                : "A private key is exactly 64 hex characters (0-9, a-f). This wallet cannot turn a phrase or passphrase into a key."}
+            </p>
+          ) : null}
+          <button
+            className="primary"
+            disabled={
+              busy ||
+              !isSecretHexSeed(seed) ||
+              !isValidHacashAddress(importExpectedAddress.trim()) ||
+              passphrase.length < MIN_NEW_WALLET_PASSPHRASE_LENGTH
+            }
+            onClick={() => void onImport(importExpectedAddress.trim())}
+          >
             Import
+          </button>
+        </div>
+      )}
+
+      {tab === "backup" && (
+        <div className="card">
+          <h2>Restore authenticated backup</h2>
+          <p className="muted small">
+            Choose a full-wallet JSON backup and enter the same wallet passphrase. Biometric
+            unlock is device-bound and must be enrolled again after restoration.
+          </p>
+          <input
+            ref={backupInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void loadBackupFile(file);
+              event.target.value = "";
+            }}
+          />
+          <button type="button" disabled={busy} onClick={() => backupInputRef.current?.click()}>
+            Choose backup file
+          </button>
+          {backupPreview ? (
+            <>
+              <p className="muted small">
+                Wallet: {backupPreview.address} (verified after passphrase)
+              </p>
+              <p className="muted small">
+                {backupPreview.format === "full_authenticated"
+                  ? "Authenticated full backup"
+                  : "Legacy classic-key-only backup"}
+              </p>
+              {backupPreview.warning ? <p className="warn-text">{backupPreview.warning}</p> : null}
+              {backupPreview.requiresLegacyConfirmation ? (
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={legacyLossAccepted}
+                    onChange={(event) => setLegacyLossAccepted(event.target.checked)}
+                  />
+                  I accept that this legacy backup has no Quantum keys, L2 dispute bills,
+                  settings, or private app data.
+                </label>
+              ) : null}
+            </>
+          ) : null}
+          {backupError ? <p className="warn-text">{backupError}</p> : null}
+          <label className="label">Backup passphrase</label>
+          <input
+            type="password"
+            value={passphrase}
+            onChange={(event) => setPassphrase(event.target.value)}
+          />
+          <button
+            type="button"
+            className="primary"
+            disabled={
+              busy ||
+              !backupJson ||
+              passphrase.length < 8 ||
+              (backupPreview?.requiresLegacyConfirmation === true && !legacyLossAccepted)
+            }
+            onClick={() => onRestoreBackup(backupJson, passphrase, legacyLossAccepted)}
+          >
+            Restore backup
           </button>
         </div>
       )}

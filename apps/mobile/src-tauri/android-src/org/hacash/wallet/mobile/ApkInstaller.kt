@@ -2,13 +2,16 @@ package org.hacash.wallet.mobile
 
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Looper
 import android.provider.Settings
+import android.util.Base64
 import androidx.core.content.FileProvider
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -50,7 +53,135 @@ object ApkInstaller {
         if (!source.path.startsWith(rootPrefix)) {
             throw IllegalArgumentException("APK must be a verified wallet update")
         }
+        verifyPackageIdentityAndSigner(activity, source)
         return source
+    }
+
+    private data class SignerIdentity(
+        val hasMultipleSigners: Boolean,
+        val currentCertificateSha256: Set<String>,
+        val certificateHistorySha256: Set<String>,
+    )
+
+    private fun verifyPackageIdentityAndSigner(activity: Activity, source: File) {
+        val packageManager = activity.packageManager
+        val candidate = archivePackageInfo(packageManager, source)
+        if (candidate.packageName != activity.packageName) {
+            throw SecurityException("Downloaded APK package does not match Hacash Wallet")
+        }
+
+        val installed = installedPackageInfo(packageManager, activity.packageName)
+        val candidateVersion = packageVersionCode(candidate)
+        val installedVersion = packageVersionCode(installed)
+        if (candidateVersion <= installedVersion) {
+            throw SecurityException("Downloaded APK is not a newer Hacash Wallet version")
+        }
+
+        val candidateIdentity = signerIdentity(candidate)
+        val installedIdentity = signerIdentity(installed)
+        val signerMatches = if (
+            candidateIdentity.hasMultipleSigners || installedIdentity.hasMultipleSigners
+        ) {
+            candidateIdentity.hasMultipleSigners &&
+                installedIdentity.hasMultipleSigners &&
+                candidateIdentity.currentCertificateSha256 ==
+                installedIdentity.currentCertificateSha256
+        } else {
+            candidateIdentity.certificateHistorySha256
+                .intersect(installedIdentity.currentCertificateSha256)
+                .isNotEmpty()
+        }
+        if (!signerMatches) {
+            throw SecurityException("Downloaded APK signing certificate does not match this app")
+        }
+    }
+
+    private fun archivePackageInfo(
+        packageManager: PackageManager,
+        source: File,
+    ): PackageInfo {
+        val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageArchiveInfo(
+                source.path,
+                PackageManager.PackageInfoFlags.of(
+                    PackageManager.GET_SIGNING_CERTIFICATES.toLong(),
+                ),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageArchiveInfo(
+                source.path,
+                PackageManager.GET_SIGNING_CERTIFICATES,
+            )
+        }
+        return info ?: throw SecurityException("Downloaded APK could not be parsed")
+    }
+
+    private fun installedPackageInfo(
+        packageManager: PackageManager,
+        packageName: String,
+    ): PackageInfo {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            packageManager.getPackageInfo(
+                packageName,
+                PackageManager.PackageInfoFlags.of(
+                    PackageManager.GET_SIGNING_CERTIFICATES.toLong(),
+                ),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            packageManager.getPackageInfo(
+                packageName,
+                PackageManager.GET_SIGNING_CERTIFICATES,
+            )
+        }
+    }
+
+    private fun packageVersionCode(info: PackageInfo): Long {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+    }
+
+    private fun signerIdentity(info: PackageInfo): SignerIdentity {
+        val signingInfo = info.signingInfo
+            ?: throw SecurityException("Package signing information is unavailable")
+        val currentSignatures = signingInfo.apkContentsSigners
+        if (currentSignatures.isNullOrEmpty()) {
+            throw SecurityException("Package has no current signing certificate")
+        }
+        val history = if (signingInfo.hasMultipleSigners()) {
+            currentSignatures
+        } else {
+            signingInfo.signingCertificateHistory
+        }
+        if (history.isNullOrEmpty()) {
+            throw SecurityException("Package has no verified signing history")
+        }
+        return SignerIdentity(
+            signingInfo.hasMultipleSigners(),
+            certificateDigests(currentSignatures),
+            certificateDigests(history),
+        )
+    }
+
+    private fun certificateDigests(
+        signatures: Array<android.content.pm.Signature>,
+    ): Set<String> {
+        return signatures.mapTo(linkedSetOf()) { signature ->
+            val certificate = signature.toByteArray()
+            try {
+                Base64.encodeToString(
+                    MessageDigest.getInstance("SHA-256").digest(certificate),
+                    Base64.NO_WRAP,
+                )
+            } finally {
+                certificate.fill(0)
+            }
+        }
     }
 
     private fun installOnMain(activity: Activity, source: File) {

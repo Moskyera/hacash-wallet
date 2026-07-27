@@ -2,6 +2,7 @@
 
 use hacash_wallet_core::{AirgapSigned, AirgapUnsigned};
 use tauri::State;
+use zeroize::Zeroizing;
 
 use crate::state::AppState;
 
@@ -18,30 +19,55 @@ pub fn wallet_webauthn_register_begin(
 #[tauri::command]
 pub fn wallet_webauthn_register_finish(
     credential_json: String,
+    current_passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let current_passphrase = Zeroizing::new(current_passphrase);
+    let mut svc = state.inner.blocking_lock();
+    svc.webauthn_register_finish(&credential_json, &current_passphrase)
+        .map_err(|e| e.to_string())
+}
+
+/// Let the currently registered authenticator approve its own replacement.
+#[tauri::command]
+pub fn wallet_webauthn_replacement_begin(
+    client_origin: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let mut svc = state.inner.blocking_lock();
+    svc.webauthn_replacement_auth_begin(client_origin.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn wallet_webauthn_replacement_finish(
+    assertion_json: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut svc = state.inner.blocking_lock();
-    svc.webauthn_register_finish(&credential_json)
+    svc.webauthn_replacement_auth_finish(&assertion_json)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn wallet_webauthn_auth_begin(
+    operation_id: String,
     client_origin: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let svc = state.inner.blocking_lock();
-    svc.webauthn_auth_begin(client_origin.as_deref())
+    let mut svc = state.inner.blocking_lock();
+    svc.webauthn_prepared_auth_begin(&operation_id, client_origin.as_deref())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn wallet_webauthn_auth_finish(
+    operation_id: String,
     assertion_json: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let mut svc = state.inner.blocking_lock();
-    svc.webauthn_auth_finish(&assertion_json)
+    svc.webauthn_prepared_auth_finish(&operation_id, &assertion_json)
         .map_err(|e| e.to_string())
 }
 

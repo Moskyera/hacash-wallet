@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type PlatformSecurityStatus, type WalletSettings, type WalletStatus } from "../../api";
-import PrivateKeyQrDisplay from "../../components/PrivateKeyQrDisplay";
 import { formatInvokeError } from "../../formatInvokeError";
 import { useLocale } from "../../locale";
-import { copyWithPrivacyClear } from "../../privacy";
 import { MIN_WALLET_PASS } from "../../quantumMeta";
 import { BIOMETRIC_THRESHOLD_MEI } from "../../utils/appConstants";
 
@@ -13,12 +11,11 @@ type Props = {
   platformSec: PlatformSecurityStatus | null;
   watchOnly: boolean;
   busy: boolean;
-  clipboardSecs: number;
   walletNameDraft: string;
   setWalletNameDraft: (v: string) => void;
   onSaveWalletName: () => void;
   onChangePassphrase: (oldPass: string, newPass: string) => void;
-  onResetWallet: () => void;
+  onResetWallet: (currentPassphrase: string | null, confirmationAddress: string) => Promise<boolean>;
   onLock: () => void;
   onRefresh: () => Promise<void>;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
@@ -31,7 +28,6 @@ export default function SecurityScreen({
   platformSec,
   watchOnly,
   busy,
-  clipboardSecs,
   walletNameDraft,
   setWalletNameDraft,
   onSaveWalletName,
@@ -47,18 +43,32 @@ export default function SecurityScreen({
   const [newPass, setNewPass] = useState("");
   const [bioUnlockPass, setBioUnlockPass] = useState("");
   const [bioUnlockStatus, setBioUnlockStatus] = useState<{ enabled: boolean; configured: boolean } | null>(null);
-  const [privateKeyPass, setPrivateKeyPass] = useState("");
+  const [securityPassphrase, setSecurityPassphrase] = useState("");
+  const [coldVaultPassphrase, setColdVaultPassphrase] = useState("");
+  const [coldVaultConfirmation, setColdVaultConfirmation] = useState("");
   const [backupPass, setBackupPass] = useState("");
-  const [privateKey, setPrivateKey] = useState<string | null>(null);
-  const privateKeyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const hidePrivateKey = useCallback(() => {
-    setPrivateKey(null);
-    if (privateKeyTimer.current) {
-      clearTimeout(privateKeyTimer.current);
-      privateKeyTimer.current = null;
-    }
-  }, []);
+  const [resetPassphrase, setResetPassphrase] = useState("");
+  const [resetAddress, setResetAddress] = useState("");
+  const [thresholdDraft, setThresholdDraft] = useState("");
+  const [thresholdPassphrase, setThresholdPassphrase] = useState("");
+  const coldVault = status?.hardware_signing_mode === "airgap_only";
+  const legacyKey = status?.legacy_key_derivation != null;
+  const freshFactorAvailable = platformSec?.native_biometric_available === true;
+  // The amount threshold governs HAC only, and only on the balanced profile. A Cold
+  // Vault requires a factor for every signature, and Paranoid lowers the threshold to
+  // effectively every payment, so neither can be described with a number.
+  // The core reports what it enforces, already combining the authenticated profile with
+  // the chosen amount. Displaying a constant instead is how this screen came to state
+  // the rule wrongly in the first place.
+  const enforcedThreshold =
+    status?.require_second_factor_above_mei ?? BIOMETRIC_THRESHOLD_MEI;
+  // The amount threshold governs HAC only, and only on the balanced profile. A Cold Vault
+  // needs a factor for every signature, and Paranoid lowers the threshold to effectively
+  // every payment, so neither can be described with a number. A threshold of 1 is the same
+  // situation: every positive amount rounds up to at least 1, so "above 0" would be both
+  // odd to read and wrong about why.
+  const everyPaymentNeedsFactor =
+    coldVault || status?.security_profile === "paranoid" || enforcedThreshold <= 1;
 
   useEffect(() => {
     void api.biometricUnlockStatus().then(setBioUnlockStatus).catch(() => setBioUnlockStatus(null));
@@ -78,55 +88,6 @@ export default function SecurityScreen({
         <button type="button" className="primary" onClick={onSaveWalletName}>
           {t("security.saveName")}
         </button>
-      </div>
-      <div className="card">
-        <h2>{t("security.privateKey")}</h2>
-        <p className="muted small">{t("security.privateKeyMobileHint")}</p>
-        <label className="label">{t("security.passphrase")}</label>
-        <input type="password" value={privateKeyPass} onChange={(e) => setPrivateKeyPass(e.target.value)} />
-        <button
-          type="button"
-          className="primary"
-          disabled={busy || watchOnly || !privateKeyPass}
-          onClick={() => {
-            setBusy(true);
-            void api
-              .exportPrivateKey(privateKeyPass)
-              .then((hex) => {
-                setPrivateKey(hex);
-                setPrivateKeyPass("");
-                onToast(t("security.privateKeyRevealed"), "info");
-                if (privateKeyTimer.current) clearTimeout(privateKeyTimer.current);
-                privateKeyTimer.current = setTimeout(() => hidePrivateKey(), 60_000);
-              })
-              .catch((err) => onToast(formatInvokeError(err), "error"))
-              .finally(() => setBusy(false));
-          }}
-        >
-          {t("security.revealPrivateKey")}
-        </button>
-        {privateKey ? (
-          <>
-            <p className="mono small" style={{ wordBreak: "break-all", marginTop: "0.75rem" }}>
-              {privateKey}
-            </p>
-            <PrivateKeyQrDisplay privateKeyHex={privateKey} />
-            <button
-              type="button"
-              style={{ marginTop: "0.5rem" }}
-              onClick={() =>
-                void copyWithPrivacyClear(privateKey, clipboardSecs).then(() =>
-                  onToast(t("security.privateKeyCopied"), "success"),
-                )
-              }
-            >
-              {t("common.copy")}
-            </button>
-            <button type="button" style={{ marginTop: "0.5rem", marginLeft: "0.5rem" }} onClick={hidePrivateKey}>
-              {t("common.hide")}
-            </button>
-          </>
-        ) : null}
       </div>
       <div className="card">
         <h2>{t("security.exportBackup")}</h2>
@@ -158,8 +119,50 @@ export default function SecurityScreen({
       </div>
       <div className="card">
         <h2>{t("security.deleteWallet")}</h2>
-        <p className="muted">{t("security.deleteWalletHint")}</p>
-        <button type="button" disabled={busy} onClick={onResetWallet}>
+        <p className="muted">
+          {watchOnly
+            ? "This permanently removes the watch-only wallet from this device. Type the complete wallet address exactly as shown."
+            : "This permanently removes the signing wallet from this device. Confirm with the current passphrase and type the complete wallet address exactly as shown."}
+        </p>
+        <code className="mono wrap">{status?.address ?? "Wallet address unavailable"}</code>
+        {!watchOnly ? (
+          <>
+            <label className="label">{t("security.currentPassphrase")}</label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={resetPassphrase}
+              onChange={(event) => setResetPassphrase(event.target.value)}
+            />
+          </>
+        ) : null}
+        <label className="label">Type the complete wallet address to confirm</label>
+        <input
+          value={resetAddress}
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          onChange={(event) => setResetAddress(event.target.value)}
+        />
+        <button
+          type="button"
+          disabled={
+            busy ||
+            (!watchOnly && !resetPassphrase) ||
+            !status?.address ||
+            resetAddress !== status.address
+          }
+          onClick={() => {
+            const passphrase = watchOnly ? null : resetPassphrase;
+            const address = resetAddress;
+            void onResetWallet(passphrase, address).then((removed) => {
+              if (removed) {
+                setResetPassphrase("");
+                setResetAddress("");
+              }
+            });
+          }}
+        >
           {t("security.deleteFromDevice")}
         </button>
       </div>
@@ -189,31 +192,37 @@ export default function SecurityScreen({
       </div>
       <div className="card">
         <h2>{t("security.profile")}</h2>
-        <p className="muted">{t("security.profileHint")}</p>
+        <p className="muted">{t("security.paranoidDesktopOnly")}</p>
+        <label className="label">{t("security.currentPassphrase")}</label>
+        <input
+          type="password"
+          value={securityPassphrase}
+          autoComplete="current-password"
+          onChange={(event) => setSecurityPassphrase(event.target.value)}
+        />
         <div className="display-toggle">
           <button
             type="button"
             className={status?.security_profile !== "paranoid" ? "selected" : ""}
-            disabled={busy || watchOnly}
-            onClick={() =>
+            disabled={busy || coldVault || watchOnly || !securityPassphrase}
+            onClick={() => {
+              const passphrase = securityPassphrase;
+              setSecurityPassphrase("");
+              setBusy(true);
               void api
-                .setSecurityProfile("balanced")
+                .setSecurityProfile("balanced", passphrase)
                 .then(() => onRefresh())
                 .then(() => onToast(t("security.profileUpdated", { profile: t("security.balanced") }), "success"))
-            }
+                .catch((error) => onToast(formatInvokeError(error), "error"))
+                .finally(() => setBusy(false));
+            }}
           >
             {t("security.balanced")}
           </button>
           <button
             type="button"
             className={status?.security_profile === "paranoid" ? "selected" : ""}
-            disabled={busy || watchOnly}
-            onClick={() =>
-              void api
-                .setSecurityProfile("paranoid")
-                .then(() => onRefresh())
-                .then(() => onToast(t("security.profileUpdated", { profile: t("security.paranoid") }), "success"))
-            }
+            disabled
           >
             {t("security.paranoid")}
           </button>
@@ -224,19 +233,185 @@ export default function SecurityScreen({
           })}
         </p>
       </div>
+      {/* Until now the amount was fixed in the app, so a user who wanted every payment
+          confirmed had only Cold Vault. The profile's own value stays the ceiling: this
+          can tighten the policy, never loosen it. */}
+      <div className="card">
+        <h2>{t("security.secondFactorAmount")}</h2>
+        <p className="muted small">{t("security.secondFactorAmountHint")}</p>
+        <p className="muted small">
+          {everyPaymentNeedsFactor
+            ? t("security.secondFactorAmountEvery")
+            : t("security.secondFactorAmountCurrent", { amount: enforcedThreshold - 1 })}
+        </p>
+        {!coldVault && !watchOnly ? (
+          <>
+            <label className="label">{t("security.secondFactorAmountLabel")}</label>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              inputMode="numeric"
+              placeholder={String(enforcedThreshold)}
+              value={thresholdDraft}
+              onChange={(event) => setThresholdDraft(event.target.value)}
+            />
+            <label className="label">{t("security.currentPassphrase")}</label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={thresholdPassphrase}
+              onChange={(event) => setThresholdPassphrase(event.target.value)}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !thresholdPassphrase || !thresholdDraft}
+              onClick={() => {
+                const amount = Number(thresholdDraft);
+                if (!Number.isInteger(amount) || amount < 1) {
+                  onToast(t("security.secondFactorAmountInvalid"), "error");
+                  return;
+                }
+                const passphrase = thresholdPassphrase;
+                setThresholdPassphrase("");
+                setBusy(true);
+                void api
+                  .setSecondFactorThreshold(amount, passphrase)
+                  .then(() => onRefresh())
+                  .then(() => {
+                    setThresholdDraft("");
+                    onToast(t("security.secondFactorAmountSaved"), "success");
+                  })
+                  .catch((error) => onToast(formatInvokeError(error), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {t("security.secondFactorAmountApply")}
+            </button>
+            <button
+              type="button"
+              style={{ marginTop: "0.5rem", width: "100%" }}
+              disabled={busy || !thresholdPassphrase}
+              onClick={() => {
+                const passphrase = thresholdPassphrase;
+                setThresholdPassphrase("");
+                setBusy(true);
+                void api
+                  .setSecondFactorThreshold(null, passphrase)
+                  .then(() => onRefresh())
+                  .then(() => {
+                    setThresholdDraft("");
+                    onToast(t("security.secondFactorAmountSaved"), "success");
+                  })
+                  .catch((error) => onToast(formatInvokeError(error), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {t("security.secondFactorAmountReset")}
+            </button>
+          </>
+        ) : null}
+      </div>
+      <div className="card">
+        <h2>{t("security.signingPolicy")}</h2>
+        <p className="muted small">{t("security.softwareKeyCustodyHint")}</p>
+        {legacyKey ? (
+          <p className="warn-text">{t("security.legacyBrainwalletKeyWarning")}</p>
+        ) : null}
+        <h3>{t("security.coldVaultTitle")}</h3>
+        {coldVault ? (
+          <>
+            <p className="muted small">{t("security.coldVaultActiveHint")}</p>
+            <p className="warn-text">{t("security.coldVaultRecoveryOnly")}</p>
+          </>
+        ) : (
+          <>
+            <p className="muted small">{t("security.coldVaultActivationHint")}</p>
+            <p className="warn-text">{t("security.coldVaultSoftwareLimit")}</p>
+            {/* Irreversible, and it deletes the biometric unlock secret. Anyone who
+                has not exported a backup first is one lost phone away from losing
+                the key, so say it before the passphrase field, not after. */}
+            <p className="warn-text">{t("security.coldVaultBackupFirst")}</p>
+            <label className="label">{t("security.currentPassphrase")}</label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={coldVaultPassphrase}
+              onChange={(event) => setColdVaultPassphrase(event.target.value)}
+            />
+            <label className="label">{t("security.coldVaultConfirmLabel")}</label>
+            <input
+              value={coldVaultConfirmation}
+              autoComplete="off"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(event) => setColdVaultConfirmation(event.target.value)}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={
+                busy ||
+                watchOnly ||
+                !freshFactorAvailable ||
+                !coldVaultPassphrase ||
+                coldVaultConfirmation !== "ENABLE COLD VAULT"
+              }
+              onClick={() => {
+                const passphrase = coldVaultPassphrase;
+                setColdVaultPassphrase("");
+                setColdVaultConfirmation("");
+                setBusy(true);
+                // Irreversible, so the core requires a platform ceremony bound to
+                // this exact activation before it will accept the passphrase.
+                void (async () => {
+                  const prepared = await api.prepareColdVaultActivation();
+                  if (prepared.webauthn_required) {
+                    throw new Error(t("security.coldVaultWebauthnRequired"));
+                  }
+                  await api.confirmBiometric(prepared.id);
+                  await api.executePreparedColdVaultActivation(prepared.id, passphrase);
+                })()
+                  .then(() => onRefresh())
+                  .then(() => api.biometricUnlockStatus())
+                  .then((nextStatus) => {
+                    setBioUnlockStatus(nextStatus);
+                    onToast(t("security.coldVaultActivatedToast"), "success");
+                  })
+                  .catch((error) => onToast(formatInvokeError(error), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {t("security.coldVaultActivate")}
+            </button>
+            {!freshFactorAvailable ? (
+              <p className="warn-text">{t("security.coldVaultFactorRequired")}</p>
+            ) : null}
+          </>
+        )}
+      </div>
       <div className="card">
         <h2>{t("security.biometricUnlock")}</h2>
         <p className="muted small">
-          {platformSec?.native_biometric_available
+          {coldVault
+            ? t("security.coldVaultBiometricBlocked")
+            : platformSec?.native_biometric_available
             ? t("security.biometricOpenWith", {
                 kind: platformSec.biometric_kind ?? t("security.biometric"),
               })
             : t("security.noBiometricSensor")}
         </p>
+        {/* The key policy accepts the device credential, so the phone screen lock
+            opens the wallet too. Say so here, not only in the public docs. */}
+        {!coldVault && platformSec?.native_biometric_available ? (
+          <p className="muted small">{t("security.biometricScreenLockWarning")}</p>
+        ) : null}
         {bioUnlockStatus?.enabled && bioUnlockStatus.configured ? (
           <p className="muted small">{t("security.biometricUnlockActive")}</p>
         ) : null}
-        {!bioUnlockStatus?.configured && platformSec?.native_biometric_available ? (
+        {!coldVault && !bioUnlockStatus?.configured && platformSec?.native_biometric_available ? (
           <>
             <label className="label">{t("security.passphraseToEnable")}</label>
             <input
@@ -294,46 +469,39 @@ export default function SecurityScreen({
       </div>
       <div className="card">
         <h2>{t("security.biometricConfirm")}</h2>
+        {/* Two things the old copy got wrong. The core requires a factor when the
+            amount rounded up reaches the threshold, so the honest boundary is
+            "above threshold - 1". And the amount threshold only governs HAC: a
+            Cold Vault or the Paranoid profile needs a factor for every payment,
+            whatever the amount, so quoting a number there states the rule
+            backwards. */}
         <p className="muted small">
           {platformSec?.native_biometric_available
-            ? t("security.biometricConfirmSends", {
-                amount: BIOMETRIC_THRESHOLD_MEI,
-                kind: platformSec.biometric_kind ?? t("security.biometric"),
-              })
-            : t("security.noBiometricLargeSend")}
+            ? everyPaymentNeedsFactor
+              ? t("security.biometricConfirmEvery", {
+                  kind: platformSec.biometric_kind ?? t("security.biometric"),
+                })
+              : t("security.biometricConfirmSends", {
+                  amount: enforcedThreshold - 1,
+                  kind: platformSec.biometric_kind ?? t("security.biometric"),
+                })
+            : everyPaymentNeedsFactor
+            ? t("security.noBiometricAnySend")
+            : t("security.noBiometricLargeSend", {
+                amount: enforcedThreshold - 1,
+              })}
         </p>
-        <div className="toggle-row">
-          <span>{t("security.useBiometricForSends")}</span>
-          <input
-            type="checkbox"
-            checked={settings?.biometric_send_enabled ?? true}
-            disabled={busy || watchOnly || !platformSec?.native_biometric_available}
-            onChange={(e) => {
-              if (!settings) return;
-              void api
-                .updateSettings({ ...settings, biometric_send_enabled: e.target.checked })
-                .then(() => onRefresh())
-                .then(() => onToast(t(e.target.checked ? "security.biometricConfirmOn" : "security.biometricConfirmOff"), "success"))
-                .catch((err) => onToast(formatInvokeError(err), "error"));
-            }}
-          />
-        </div>
-        <button
-          type="button"
-          className="primary"
-          style={{ marginTop: "0.75rem", width: "100%" }}
-          disabled={busy || watchOnly || !platformSec?.native_biometric_available}
-          onClick={() => {
-            setBusy(true);
-            void api
-              .confirmBiometric()
-              .then(() => onToast(t("security.biometricTestOk"), "success"))
-              .catch((err) => onToast(formatInvokeError(err), "error"))
-              .finally(() => setBusy(false));
-          }}
-        >
-          {t("security.testBiometric")}
-        </button>
+        {/* Without a sensor there is nothing to confirm with, so saying it is
+            enabled contradicts the line above it. */}
+        <p className="muted small">
+          {platformSec?.native_biometric_available
+            ? t("security.biometricConfirmOn")
+            : t("security.biometricConfirmOff")}
+        </p>
+        {platformSec?.native_biometric_available ? (
+          <p className="muted small">{t("security.signingRefusesScreenLock")}</p>
+        ) : null}
+        {/* Never use the production send authorization as a biometric test. */}
       </div>
       <button type="button" onClick={() => void onLock()}>
         {t("security.lockWallet")}

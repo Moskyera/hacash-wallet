@@ -7,8 +7,6 @@ type Props = {
   onAddressDetected?: (address: string) => void;
   onError: (message: string) => void;
   disabled?: boolean;
-  autoStart?: boolean;
-  onAutoStarted?: () => void;
 };
 
 export default function PaymentQrScanner({
@@ -16,8 +14,6 @@ export default function PaymentQrScanner({
   onAddressDetected,
   onError,
   disabled = false,
-  autoStart = false,
-  onAutoStarted,
 }: Props) {
   const addressOnly = Boolean(onAddressDetected) && !onDetected;
 
@@ -54,8 +50,6 @@ export default function PaymentQrScanner({
       onDetected={handleDetected}
       onError={onError}
       disabled={disabled}
-      autoStart={autoStart}
-      onAutoStarted={onAutoStarted}
     />
   );
 }

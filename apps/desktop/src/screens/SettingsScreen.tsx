@@ -1,7 +1,9 @@
-import { OFFICIAL_NODE_URL, isOfficialNodeUrl } from "@hacash/wallet-ui";
+import { HOW_IT_WORKS_URL, OFFICIAL_NODE_URL, isOfficialNodeUrl } from "@hacash/wallet-ui";
+import { open } from "@tauri-apps/plugin-shell";
 import { useEffect, useMemo, useState } from "react";
 import { api, type NodeDiscoveryReport, type WalletSettings } from "../api";
 import AppUpdateSection from "../components/AppUpdateSection";
+import { formatInvokeError } from "../formatInvokeError";
 import { LanguageSwitcher, useLocale } from "../locale";
 
 type Props = {
@@ -77,6 +79,19 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
       </div>
 
       <AppUpdateSection onInfo={onInfo} onError={onError} />
+
+      <hr className="divider" />
+
+      <h3>{t("docs.howItWorks")}</h3>
+      <p className="muted">{t("docs.howItWorksHint")}</p>
+      <button
+        type="button"
+        onClick={() => {
+          void open(HOW_IT_WORKS_URL).catch((error) => onError(formatInvokeError(error)));
+        }}
+      >
+        {t("docs.howItWorks")}
+      </button>
 
       <hr className="divider" />
 

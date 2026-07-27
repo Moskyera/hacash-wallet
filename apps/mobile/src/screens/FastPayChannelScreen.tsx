@@ -10,6 +10,7 @@ import {
   type WalletSettings,
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 import {
   fastPayHowItWorks,
   fastPayMenuBadge,
@@ -129,7 +130,14 @@ export default function FastPayChannelScreen({
     if (!hub) return;
     setBusy(true);
     try {
-      const tx = await api.openChannel(hub, Number(userDeposit), Number(hubDeposit));
+      const prepared = await api.prepareChannelOpen(hub, Number(userDeposit), Number(hubDeposit));
+      const security = await api.platformSecurity();
+      await authorizePreparedOperation(
+        prepared,
+        security.native_biometric_available,
+        settings?.biometric_send_enabled ?? true,
+      );
+      const tx = await api.executePreparedChannelOpen(prepared.id);
       setPreview(null);
       onToast(`Channel open submitted (${tx.slice(0, 12)}…)`, "success");
       await loadChannel();
@@ -158,7 +166,14 @@ export default function FastPayChannelScreen({
   async function handleDisableFastPay() {
     setBusy(true);
     try {
-      const tx = await api.closeChannel();
+      const prepared = await api.prepareChannelClose();
+      const security = await api.platformSecurity();
+      await authorizePreparedOperation(
+        prepared,
+        security.native_biometric_available,
+        settings?.biometric_send_enabled ?? true,
+      );
+      const tx = await api.executePreparedChannelClose(prepared.id);
       onToast(`Fast Pay disabled (${tx.slice(0, 12)}…)`, "success");
       await loadChannel();
       await onRefresh();

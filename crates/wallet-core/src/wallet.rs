@@ -1,3 +1,4 @@
+mod authorization_service;
 mod dapp_service;
 mod network_binding;
 
@@ -22,7 +23,7 @@ use crate::channel::{
     ChannelInfo, build_channel_close_tx, build_channel_open_tx, derive_channel_id, query_channel,
 };
 use crate::error::{WalletError, WalletResult};
-use crate::hardware::{HardwareSigningMode, check_signing_allowed};
+use crate::hardware::{HardwareSigningMode, SigningContext, check_signing_allowed_in_context};
 use crate::hip23::{
     BalanceFloorInput, HeightScopeInput, Hip23PatternCheck, Hip23SendCheck, Type3CheckInput,
     is_valid_hacash_address, validate_all_patterns, validate_simple_l1_send,
@@ -49,6 +50,12 @@ use crate::unlock_guard::UnlockGuard;
 use crate::vault::{EncryptedVault, VaultMetaSnapshot, default_vault_path};
 use crate::webauthn::WebAuthnGate;
 
+const MAX_UNLOCK_LIFETIME: Duration = Duration::from_secs(15 * 60);
+const COLD_VAULT_UNLOCK_LIFETIME: Duration = Duration::from_secs(2 * 60);
+/// How long the outgoing authenticator's approval of its own replacement stays
+/// usable. Short enough that it cannot be harvested and used much later.
+const WEBAUTHN_REPLACEMENT_APPROVAL_TTL: Duration = Duration::from_secs(120);
+
 pub struct WalletService {
     vault_path: PathBuf,
     vault_cache: Option<EncryptedVault>,
@@ -63,6 +70,13 @@ pub struct WalletService {
     history: TxHistory,
     webauthn: WebAuthnGate,
     unlock_guard: UnlockGuard,
+    /// Separate backoff for keystore-password attempts, so the wallet can never
+    /// be used as a fast offline oracle against a Quantum keystore file.
+    quantum_keystore_guard: UnlockGuard,
+    /// Set only by a verified assertion from the *currently registered*
+    /// authenticator, and consumed by the next registration. Replacing a second
+    /// factor is otherwise a way to swap the factor out with the passphrase only.
+    webauthn_replacement_approved_at: Option<Instant>,
     assets: AssetService,
     quantum_keystore_mem: Option<String>,
     unlocked: Option<UnlockedSession>,
@@ -71,18 +85,25 @@ pub struct WalletService {
 
 enum SessionKey {
     Signing(WalletAccount),
+    /// Address-only presentation state after a cold signing attempt. No secret
+    /// or signing capability remains; explicit unlock is required to sign again.
+    Exhausted,
     WatchOnly,
 }
 
 struct UnlockedSession {
     address: String,
     key: SessionKey,
+    /// Last accepted activity for the idle timeout.
     unlocked_at: Instant,
+    /// Hard upper bound. Renderer activity can never move this deadline.
+    absolute_deadline: Instant,
     /// Set only by `webauthn_auth_finish`. never trusted from IPC/UI flags.
     webauthn_verified: bool,
     /// Set only by `finish_native_biometric` after OS verification.
     biometric_verified: bool,
     pending_biometric_nonce: Option<String>,
+    authorization: authorization_service::SessionAuthorization,
     quantum_file_key: Option<crate::quantum_vault::QuantumFileKey>,
 }
 
@@ -90,6 +111,7 @@ struct UnlockedSession {
 pub struct WalletStatus {
     pub has_wallet: bool,
     pub locked: bool,
+    pub signing_available: bool,
     pub address: Option<String>,
     pub security_profile: String,
     pub node_url: String,
@@ -102,11 +124,19 @@ pub struct WalletStatus {
     pub auto_lock_secs: u64,
     pub seconds_until_lock: Option<u64>,
     pub hardware_signing_mode: String,
+    /// The amount at or above which a signature needs a second factor, already
+    /// combined with the user's preference. The interface must display this rather
+    /// than a constant of its own, or it will state the rule wrongly whenever the
+    /// profile or the preference is not the default.
+    pub require_second_factor_above_mei: u64,
     pub watch_only: bool,
     pub privacy: PrivacySettings,
     pub dust_whisper: DustWhisperSettings,
     pub fast_pay_state: String,
     pub fast_pay_message: String,
+    /// `Some` when the key was derived from a guessable phrase. The UI must warn
+    /// permanently and must not present this wallet as protected custody.
+    pub legacy_key_derivation: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -142,6 +172,12 @@ pub struct ChannelSetupPreview {
 impl WalletService {
     pub fn new(node_url: Option<String>, l2_hub_url: Option<String>) -> WalletResult<Self> {
         crate::protocol_init::ensure_protocol_setup();
+        let vault_path = default_vault_path();
+        crate::vault::recover_wallet_migration(
+            &vault_path,
+            &crate::paths::quantum_keystore_path(),
+            &crate::paths::settings_path(),
+        )?;
         let mut settings = WalletSettings::load().unwrap_or_default();
         if let Some(url) = node_url {
             settings.node_url = url;
@@ -160,7 +196,7 @@ impl WalletService {
         let history = TxHistory::load().unwrap_or_default();
         let router = PaymentRouter::new(node.clone(), settings.clone(), bills.clone());
         Ok(Self {
-            vault_path: default_vault_path(),
+            vault_path,
             vault_cache: None,
             vault_meta: None,
             node,
@@ -173,6 +209,8 @@ impl WalletService {
             history,
             webauthn: WebAuthnGate::new()?,
             unlock_guard: UnlockGuard::default(),
+            quantum_keystore_guard: UnlockGuard::default(),
+            webauthn_replacement_approved_at: None,
             assets: AssetService::default(),
             quantum_keystore_mem: None,
             unlocked: None,
@@ -184,47 +222,73 @@ impl WalletService {
         // Status is a security boundary, not a passive snapshot. Enforce the
         // deadline before exposing any session-derived state to IPC callers.
         self.touch_auto_lock();
-        let has_wallet = self.vault_path.exists() || self.settings.watch_only_address.is_some();
-        let watch_only = self.settings.hardware_mode() == HardwareSigningMode::WatchOnly
-            || self.settings.watch_only_address.is_some();
+        let signing_vault = self.vault_path.exists();
+        let has_wallet = signing_vault || self.settings.watch_only_address.is_some();
         let meta = self
             .vault_meta
             .as_ref()
             .cloned()
             .or_else(|| self.read_vault().ok().map(|v| v.meta_snapshot()));
-        let vault_webauthn = meta
-            .as_ref()
-            .and_then(|m| m.webauthn_credential_b64.clone());
-        let seconds_until_lock = self.unlocked.as_ref().map(|s| {
-            let elapsed = s.unlocked_at.elapsed().as_secs();
-            self.profile.auto_lock_secs.saturating_sub(elapsed)
+        let (effective_profile, effective_hardware_mode, vault_webauthn) =
+            effective_policy_for_status(meta.as_ref(), signing_vault);
+        let watch_only = if signing_vault {
+            false
+        } else {
+            effective_hardware_mode == HardwareSigningMode::WatchOnly.as_str()
+                || self.settings.watch_only_address.is_some()
+        };
+        let now = Instant::now();
+        let seconds_until_lock = self.unlocked.as_ref().and_then(|session| {
+            if matches!(session.key, SessionKey::Exhausted) {
+                return None;
+            }
+            let idle_remaining = effective_profile
+                .auto_lock_secs
+                .saturating_sub(now.saturating_duration_since(session.unlocked_at).as_secs());
+            let absolute_remaining = session
+                .absolute_deadline
+                .saturating_duration_since(now)
+                .as_secs();
+            Some(idle_remaining.min(absolute_remaining))
         });
         let fast_pay = self.fast_pay_status_sync();
         WalletStatus {
             has_wallet,
             locked: self.unlocked.is_none(),
+            signing_available: self
+                .unlocked
+                .as_ref()
+                .is_some_and(|session| matches!(session.key, SessionKey::Signing(_))),
             address: self
                 .unlocked
                 .as_ref()
                 .map(|s| s.address.clone())
-                .or_else(|| meta.map(|m| m.address))
+                .or_else(|| meta.as_ref().map(|m| m.address.clone()))
                 .or_else(|| self.settings.watch_only_address.clone()),
-            security_profile: self.profile.name.clone(),
+            security_profile: effective_profile.name.clone(),
+            // The ceiling comes from the vault-authenticated profile, not from
+            // self.profile, so a tampered settings file cannot inflate the number the
+            // user is shown. Same formula as enforcement.
+            require_second_factor_above_mei: crate::security::effective_second_factor_threshold(
+                effective_profile.require_second_factor_above_mei,
+                self.settings.require_second_factor_above_mei,
+            ),
             node_url: self.node.base_url().to_string(),
             network_mode: self.network_mode.clone(),
             l2_enabled: self.router.has_l2_hub(),
             l2_hub_url: self.settings.l2_hub_url.clone(),
             channel_id: self.settings.channel_id_hex.clone(),
-            webauthn_enabled: vault_webauthn.is_some() || self.settings.webauthn_enabled,
+            webauthn_enabled: vault_webauthn,
             l2_bill_count: self.bills.count(),
-            auto_lock_secs: self.profile.auto_lock_secs,
+            auto_lock_secs: effective_profile.auto_lock_secs,
             seconds_until_lock,
-            hardware_signing_mode: self.settings.hardware_signing_mode.clone(),
+            hardware_signing_mode: effective_hardware_mode,
             watch_only,
             privacy: self.settings.privacy.clone(),
             dust_whisper: self.settings.dust_whisper.clone(),
             fast_pay_state: fast_pay.state.as_str().to_string(),
             fast_pay_message: fast_pay.message,
+            legacy_key_derivation: meta.as_ref().and_then(|m| m.legacy_key_derivation.clone()),
         }
     }
 
@@ -236,7 +300,20 @@ impl WalletService {
     }
 
     pub fn get_settings(&self) -> WalletSettings {
-        self.settings.clone()
+        let mut settings = self.settings.clone();
+        if self.vault_path.exists() {
+            let meta = self.read_vault().ok().map(|vault| vault.meta_snapshot());
+            let (profile, hardware_mode, webauthn_enabled) =
+                effective_policy_for_status(meta.as_ref(), true);
+            settings.security_profile = profile.name;
+            settings.hardware_signing_mode = hardware_mode;
+            settings.webauthn_enabled = webauthn_enabled;
+            settings.watch_only_address = None;
+            if settings.hardware_signing_mode == HardwareSigningMode::AirgapOnly.as_str() {
+                settings.biometric_unlock_enabled = false;
+            }
+        }
+        settings
     }
 
     pub async fn ping_node(&self) -> WalletResult<serde_json::Value> {
@@ -324,13 +401,45 @@ impl WalletService {
     }
 
     pub fn update_settings(&mut self, mut settings: WalletSettings) -> WalletResult<()> {
+        if self.cold_vault_configured()? {
+            self.profile = SecurityProfile::paranoid();
+            self.settings.security_profile = self.profile.name.clone();
+            self.settings.hardware_signing_mode = HardwareSigningMode::AirgapOnly.as_str().into();
+            self.settings.biometric_unlock_enabled = false;
+        }
+        if settings.quantum_keystore_json.is_some() {
+            return Err(WalletError::Policy(
+                "quantum key material cannot be submitted through generic settings".into(),
+            ));
+        }
+        let current = &self.settings;
+        let sensitive_change = settings.security_profile != current.security_profile
+            // Raising the threshold loosens the policy within the band the profile
+            // allows, so it needs the same authority as changing the profile itself.
+            || settings.require_second_factor_above_mei != current.require_second_factor_above_mei
+            || settings.hardware_signing_mode != current.hardware_signing_mode
+            || settings.webauthn_enabled != current.webauthn_enabled
+            || settings.biometric_send_enabled != current.biometric_send_enabled
+            || settings.biometric_unlock_enabled != current.biometric_unlock_enabled
+            || settings.watch_only_address != current.watch_only_address
+            || settings.channel_id_hex != current.channel_id_hex
+            || settings.quantum_mode != current.quantum_mode
+            || settings.quantum_meta != current.quantum_meta;
+        if sensitive_change {
+            return Err(WalletError::Policy(
+                "security and key settings require their dedicated authenticated command".into(),
+            ));
+        }
+
+        // The IPC representation is intentionally redacted. Preserve any legacy value until the
+        // authenticated unlock migration has moved it into quantum.keystore.enc.
+        settings.quantum_keystore_json = current.quantum_keystore_json.clone();
         settings.validate_and_normalize()?;
         let node = NodeClient::new(settings.node_url.clone())?;
         settings.save()?;
         self.invalidate_network_binding();
         self.node = node;
         self.assets.clear_cache();
-        self.profile = SecurityProfile::from_name(&settings.security_profile);
         if std::env::var("HACASH_WALLET_NETWORK").is_err() {
             self.network_mode = settings.network_mode.clone();
         }
@@ -343,6 +452,11 @@ impl WalletService {
     /// Wipe all local wallet data so a new wallet can be created on this device.
     pub fn reset_wallet(&mut self) -> WalletResult<()> {
         self.lock();
+        crate::vault::discard_wallet_migration(
+            &self.vault_path,
+            &crate::paths::quantum_keystore_path(),
+            &crate::paths::settings_path(),
+        )?;
         let paths = [
             self.vault_path.clone(),
             crate::paths::settings_path(),
@@ -383,11 +497,8 @@ impl WalletService {
         if self.vault_path.exists() {
             return Err(WalletError::Vault("wallet already exists".into()));
         }
-        if passphrase.len() < 8 {
-            return Err(WalletError::Vault(
-                "passphrase (min 8 chars) required to encrypt your wallet".into(),
-            ));
-        }
+        validate_new_passphrase(passphrase)?;
+
         let account = WalletAccount::create_random()?;
         let address = account.address();
         let mut secret = account.secret_hex();
@@ -399,29 +510,65 @@ impl WalletService {
         Ok(address)
     }
 
-    pub fn import_wallet(&mut self, seed: &str, passphrase: &str) -> WalletResult<String> {
+    /// Import a 32-byte secret key.
+    ///
+    /// `expected_address` is required because a mistyped key is usually still a
+    /// perfectly valid key, just a different one. Length checks cannot catch that:
+    /// change one digit of a 64-character key and you silently land on someone
+    /// else's empty address and conclude your funds are gone. Anyone importing a
+    /// key is recovering a specific wallet and knows which.
+    pub fn import_wallet(
+        &mut self,
+        seed: &str,
+        passphrase: &str,
+        expected_address: &str,
+    ) -> WalletResult<String> {
         if self.vault_path.exists() {
             return Err(WalletError::Vault(
                 "wallet already exists. remove vault first".into(),
             ));
         }
-        if seed.trim().is_empty() || passphrase.len() < 8 {
+        if seed.trim().is_empty() {
+            return Err(WalletError::Vault("seed is required".into()));
+        }
+        validate_new_passphrase(passphrase)?;
+        // Whitespace cannot be part of a hex key, so ignoring it is unambiguous and
+        // lets a key pasted across lines work instead of failing confusingly.
+        let compact: String = seed.chars().filter(|c| !c.is_whitespace()).collect();
+        let all_hex = compact.chars().all(|c| c.is_ascii_hexdigit());
+        // Report a near-miss key as a near-miss key. Calling it a brainwallet phrase
+        // would push the user toward hashing it, which silently produces a valid
+        // wallet at a different address than the one they are trying to recover.
+        if all_hex && compact.chars().count() != 64 {
+            return Err(WalletError::Vault(format!(
+                "a private key must be exactly 64 hex characters; this is {}. check for missing or extra characters",
+                compact.chars().count()
+            )));
+        }
+        // Anything else would previously fall through to a single unsalted SHA-256
+        // of the text, producing a brainwallet: a key anyone who guesses the phrase
+        // can reproduce. That derivation is no longer reachable from this wallet at
+        // all, so say plainly what is required instead of offering an alternative.
+        if !all_hex {
             return Err(WalletError::Vault(
-                "seed and passphrase (min 8 chars) required".into(),
+                "a private key is exactly 64 hex characters. this wallet cannot derive a key from a phrase or passphrase"
+                    .into(),
             ));
         }
-        let trimmed = seed.trim();
-        if trimmed.chars().all(|c| c.is_ascii_hexdigit()) && trimmed.len() != 64 {
+        let expected_address = expected_address.trim();
+        if expected_address.is_empty() {
             return Err(WalletError::Vault(
-                "hex secret must be exactly 64 characters".into(),
+                "the address of the wallet you are importing is required".into(),
             ));
         }
-        let account = if is_secret_hex(seed) {
-            WalletAccount::from_secret_hex(seed.trim())?
-        } else {
-            WalletAccount::create(seed.trim())?
-        };
+        crate::address::require_address_for_network(expected_address, &self.network_mode)?;
+        let account = WalletAccount::from_secret_hex(&compact)?;
         let address = account.address();
+        if address != expected_address {
+            return Err(WalletError::Vault(
+                "this private key does not belong to that address. check both for typos".into(),
+            ));
+        }
         let mut secret = account.secret_hex();
         let vault = EncryptedVault::encrypt(&secret, &address, passphrase, &self.profile.name)?;
         secret.zeroize();
@@ -431,12 +578,26 @@ impl WalletService {
         Ok(address)
     }
 
+    /// `Some(marker)` when this wallet's key came from a guessable phrase.
+    pub fn legacy_key_derivation(&self) -> Option<String> {
+        if let Some(meta) = self.vault_meta.as_ref() {
+            return meta.legacy_key_derivation.clone();
+        }
+        if !self.vault_path.exists() {
+            return None;
+        }
+        self.read_vault()
+            .ok()
+            .and_then(|vault| vault.legacy_key_derivation().map(str::to_owned))
+    }
+
     pub fn export_backup(&self, passphrase: &str) -> WalletResult<String> {
         if !self.vault_path.exists() {
             return Err(WalletError::NoWallet);
         }
         let vault = self.read_vault()?;
-        vault.decrypt(passphrase)?;
+        let mut secret = vault.decrypt_verified_secret(passphrase)?;
+        secret.zeroize();
         vault.export_json()
     }
 
@@ -454,43 +615,50 @@ impl WalletService {
         }
         let vault = EncryptedVault::from_export_json(json.trim())?;
         let mut secret = vault
-            .decrypt(passphrase)
+            .decrypt_verified_secret(passphrase)
             .map_err(|_| WalletError::InvalidPassphrase)?;
         secret.zeroize();
         let snap = vault.meta_snapshot();
         let address = snap.address.clone();
         self.profile = SecurityProfile::from_name(&snap.security_profile);
         self.settings.security_profile = snap.security_profile;
+        self.settings.hardware_signing_mode = snap.hardware_signing_mode;
+        self.settings.webauthn_enabled = snap.webauthn_credential_b64.is_some();
+        if self.settings.hardware_signing_mode == HardwareSigningMode::AirgapOnly.as_str() {
+            self.settings.biometric_unlock_enabled = false;
+        }
         self.persist_vault(vault)?;
         self.settings.save()?;
         self.unlock(passphrase)?;
         Ok(address)
     }
 
-    /// Reveal the wallet private key after passphrase verification.
-    pub fn export_private_key(&self, passphrase: &str) -> WalletResult<String> {
-        if !self.vault_path.exists() {
-            return Err(WalletError::NoWallet);
-        }
-        let vault = self.read_vault()?;
-        let mut secret = vault.decrypt(passphrase)?;
-        let hex = secret.clone();
-        secret.zeroize();
-        Ok(hex)
-    }
-
     pub fn biometric_unlock_configured(&self) -> bool {
-        crate::biometric_unlock::is_configured()
+        !self.cold_vault_configured().unwrap_or(true) && crate::biometric_unlock::is_configured()
     }
 
     pub fn verify_wallet_passphrase(&mut self, passphrase: &str) -> WalletResult<()> {
+        self.unlock_guard.check_allowed()?;
         let vault = self.vault_snapshot()?;
-        let mut secret = vault.decrypt(passphrase)?;
-        secret.zeroize();
-        Ok(())
+        match vault.decrypt_verified_secret(passphrase) {
+            Ok(mut secret) => {
+                secret.zeroize();
+                self.unlock_guard.record_success();
+                Ok(())
+            }
+            Err(error) => {
+                self.unlock_guard.record_failure();
+                Err(error)
+            }
+        }
     }
 
     pub fn set_biometric_unlock_enabled(&mut self, enabled: bool) -> WalletResult<()> {
+        if enabled && self.cold_vault_configured()? {
+            return Err(WalletError::Policy(
+                "cold vault cannot store a biometric unlock secret".into(),
+            ));
+        }
         if !enabled {
             crate::biometric_unlock::clear()?;
         }
@@ -522,40 +690,249 @@ impl WalletService {
         old_passphrase: &str,
         new_passphrase: &str,
     ) -> WalletResult<()> {
-        if new_passphrase.len() < 8 {
-            return Err(WalletError::Vault(
-                "new passphrase must be at least 8 characters".into(),
+        validate_new_passphrase(new_passphrase)?;
+
+        self.verify_wallet_passphrase(old_passphrase)?;
+        let current_vault = self.vault_snapshot()?;
+        let target_profile =
+            SecurityProfile::from_name(&current_vault.security_profile_for_migration());
+        let (hardware_mode, credential) = current_vault.policy_for_migration()?;
+        self.migrate_vault_encryption(
+            old_passphrase,
+            new_passphrase,
+            target_profile,
+            HardwareSigningMode::from_name(&hardware_mode),
+            credential.as_deref(),
+            true,
+        )
+    }
+
+    /// Choose the amount at or above which a signature needs a second factor.
+    ///
+    /// `chosen` of `None` restores the profile's own value. Anything above the profile
+    /// ceiling is stored as given but has no effect, because
+    /// [`Self::second_factor_threshold_mei`] takes the minimum; that is deliberate, so a
+    /// stricter profile cannot be silently loosened by a stale preference.
+    ///
+    /// This needs the passphrase for the same reason changing the profile does: raising
+    /// the amount widens the range of payments that need no confirmation. `update_settings`
+    /// refuses the change so it can only happen here.
+    pub fn set_second_factor_threshold(
+        &mut self,
+        current_passphrase: &str,
+        chosen: Option<u64>,
+    ) -> WalletResult<()> {
+        if !self.vault_path.exists() {
+            return Err(WalletError::NoWallet);
+        }
+        if chosen == Some(0) {
+            return Err(WalletError::Policy(
+                "the second-factor amount must be at least 1 HAC; every smaller amount already rounds up to it"
+                    .into(),
             ));
         }
-        let mut vault = self.vault_snapshot()?;
-        vault.reencrypt(old_passphrase, new_passphrase)?;
-        vault.metadata.security_profile = self.profile.name.clone();
-        if self.unlocked.is_some() {
-            let mut secret = vault.decrypt(new_passphrase)?;
-            let account = WalletAccount::from_secret_hex(&secret)?;
-            secret.zeroize();
-            if let Some(session) = &mut self.unlocked {
-                session.address = account.address();
-                session.key = SessionKey::Signing(account);
-                session.unlocked_at = Instant::now();
+        self.verify_wallet_passphrase(current_passphrase)?;
+        self.settings.require_second_factor_above_mei = chosen;
+        self.settings.save()?;
+        // A ticket prepared a moment ago carries the requirement computed under the old
+        // threshold. Tightening the policy must not leave an already-authorized, or
+        // authorization-free, operation waiting to execute under the looser rule.
+        self.clear_prepared_operation();
+        Ok(())
+    }
+
+    pub fn change_security_profile(
+        &mut self,
+        current_passphrase: &str,
+        requested_profile: SecurityProfile,
+    ) -> WalletResult<()> {
+        if !matches!(requested_profile.name.as_str(), "balanced" | "paranoid") {
+            return Err(WalletError::Policy("unknown security profile".into()));
+        }
+        if !self.vault_path.exists() {
+            return Err(WalletError::NoWallet);
+        }
+        self.verify_wallet_passphrase(current_passphrase)?;
+        let target_profile = SecurityProfile::from_name(&requested_profile.name);
+        let current_vault = self.vault_snapshot()?;
+        let (hardware_mode, credential) = current_vault.policy_for_migration()?;
+        let hardware_mode = HardwareSigningMode::from_name(&hardware_mode);
+        if hardware_mode == HardwareSigningMode::AirgapOnly
+            && target_profile.name != SecurityProfile::paranoid().name
+        {
+            return Err(WalletError::Policy(
+                "cold vault security profile cannot be downgraded".into(),
+            ));
+        }
+        self.migrate_vault_encryption(
+            current_passphrase,
+            current_passphrase,
+            target_profile,
+            hardware_mode,
+            credential.as_deref(),
+            false,
+        )
+    }
+
+    fn migrate_vault_encryption(
+        &mut self,
+        current_passphrase: &str,
+        new_passphrase: &str,
+        mut target_profile: SecurityProfile,
+        target_hardware_mode: HardwareSigningMode,
+        target_webauthn_credential: Option<&str>,
+        disable_biometric_unlock: bool,
+    ) -> WalletResult<()> {
+        let current_vault = self.vault_snapshot()?;
+        let (current_hardware_mode, _) = current_vault.policy_for_migration()?;
+        let current_is_cold = current_hardware_mode == HardwareSigningMode::AirgapOnly.as_str();
+        let target_is_cold = target_hardware_mode == HardwareSigningMode::AirgapOnly;
+        if current_is_cold && !target_is_cold {
+            return Err(WalletError::Policy(
+                "cold vault mode is irreversible for this vault".into(),
+            ));
+        }
+        if target_is_cold {
+            target_profile = SecurityProfile::paranoid();
+        }
+        let disable_biometric_unlock = disable_biometric_unlock || target_is_cold;
+        let replacement_vault = current_vault.reencrypted_with_policy(
+            current_passphrase,
+            new_passphrase,
+            &target_profile.name,
+            target_hardware_mode.as_str(),
+            target_webauthn_credential,
+        )?;
+
+        let quantum_path = crate::paths::quantum_keystore_path();
+        // Once a vault is cold, its legacy Quantum sidecar is quarantined. Wallet
+        // passphrase/profile changes must never derive its file key or decrypt it.
+        let quantum_json = if current_is_cold {
+            None
+        } else if quantum_path.exists() {
+            let current_quantum_key = crate::quantum_vault::QuantumFileKey::derive(
+                current_passphrase,
+                current_vault.salt(),
+            )?;
+            Some(
+                crate::quantum_vault::load_encrypted(&current_quantum_key)?
+                    .ok_or_else(|| WalletError::Vault("quantum keystore disappeared".into()))?,
+            )
+        } else {
+            self.settings.quantum_keystore_json.clone()
+        };
+
+        let replacement_quantum_key = if current_is_cold {
+            None
+        } else {
+            Some(crate::quantum_vault::QuantumFileKey::derive(
+                new_passphrase,
+                replacement_vault.salt(),
+            )?)
+        };
+        let replacement_quantum = match (quantum_json.as_deref(), &replacement_quantum_key) {
+            (Some(json), Some(key)) => Some(crate::quantum_vault::encode_encrypted(key, json)?),
+            _ => None,
+        };
+
+        let mut replacement_settings = self.settings.clone();
+        replacement_settings.security_profile = target_profile.name.clone();
+        replacement_settings.hardware_signing_mode = target_hardware_mode.as_str().into();
+        replacement_settings.webauthn_enabled = target_webauthn_credential.is_some();
+        replacement_settings.watch_only_address = None;
+        if target_is_cold
+            && let Some(mut legacy_secret) = replacement_settings.quantum_keystore_json.take()
+        {
+            legacy_secret.zeroize();
+        }
+        if quantum_json.is_some() {
+            replacement_settings.quantum_keystore_json = None;
+            if let Some(meta) = quantum_json
+                .as_deref()
+                .and_then(crate::quantum::quantum_meta_from_json)
+            {
+                replacement_settings.quantum_meta = Some(meta);
             }
         }
-        self.persist_vault(vault)?;
-        if self.settings.biometric_unlock_enabled {
+        if disable_biometric_unlock {
+            // Removing the retired local cache before commit is fail-safe. A failed migration may
+            // require biometric setup again, but can never leave an old passphrase recoverable.
             crate::biometric_unlock::clear()?;
-            self.settings.biometric_unlock_enabled = false;
-            self.settings.save()?;
+            replacement_settings.biometric_unlock_enabled = false;
         }
+        replacement_settings.validate_and_normalize()?;
+        let replacement_settings_bytes = serde_json::to_vec(&replacement_settings)
+            .map_err(|error| WalletError::Vault(error.to_string()))?;
+
+        let commit_result = crate::vault::commit_wallet_migration(
+            &self.vault_path,
+            &replacement_vault,
+            &quantum_path,
+            replacement_quantum.as_deref(),
+            &crate::paths::settings_path(),
+            Some(&replacement_settings_bytes),
+        );
+        if let Err(error) = commit_result {
+            // If the filesystem could not complete or roll back, discard every in-memory key.
+            // Startup recovery will finish the journal before any wallet state is loaded again.
+            self.lock();
+            self.vault_cache = None;
+            self.vault_meta = None;
+            return Err(error);
+        }
+
+        if let Some(legacy_secret) = self.settings.quantum_keystore_json.as_mut() {
+            legacy_secret.zeroize();
+        }
+        self.vault_meta = Some(replacement_vault.meta_snapshot());
+        self.vault_cache = Some(replacement_vault);
+        self.settings = replacement_settings;
+        self.profile = target_profile;
+        let exhausted = self
+            .unlocked
+            .as_ref()
+            .is_some_and(|session| matches!(session.key, SessionKey::Exhausted));
+        self.quantum_keystore_mem = if exhausted || target_is_cold {
+            None
+        } else {
+            quantum_json
+        };
+        if let Some(session) = &mut self.unlocked {
+            if exhausted || target_is_cold {
+                session.quantum_file_key = None;
+            } else {
+                session.quantum_file_key = replacement_quantum_key;
+            }
+            let now = Instant::now();
+            session.unlocked_at = now;
+            if target_is_cold {
+                let cold_deadline = now + COLD_VAULT_UNLOCK_LIFETIME;
+                session.absolute_deadline = session.absolute_deadline.min(cold_deadline);
+            }
+            session.webauthn_verified = false;
+            session.biometric_verified = false;
+            session.pending_biometric_nonce = None;
+            session.authorization.clear();
+        }
+        self.dapp_session.clear();
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
         Ok(())
     }
 
     pub fn unlock(&mut self, passphrase: &str) -> WalletResult<String> {
-        if self.unlocked.is_some() {
+        if self
+            .unlocked
+            .as_ref()
+            .is_some_and(|session| matches!(session.key, SessionKey::Exhausted))
+        {
+            self.unlocked = None;
+        } else if self.unlocked.is_some() {
             return Err(WalletError::AlreadyUnlocked);
         }
         self.unlock_guard.check_allowed()?;
-        let vault = self.vault_snapshot()?;
-        let decrypt_result = vault.decrypt(passphrase);
+        let mut vault = self.vault_snapshot()?;
+        let decrypt_result = vault.decrypt_verified_secret(passphrase);
         if decrypt_result.is_err() {
             self.unlock_guard.record_failure();
             return Err(WalletError::InvalidPassphrase);
@@ -565,29 +942,69 @@ impl WalletService {
         let account = WalletAccount::from_secret_hex(&secret)?;
         secret.zeroize();
         let address = account.address();
-        self.profile = SecurityProfile::from_name(&self.settings.security_profile);
-        self.assets.clear_cache();
-        let qkey = crate::quantum_vault::QuantumFileKey::derive(passphrase, vault.salt())?;
-        let mut qks = crate::quantum_vault::load_encrypted(&qkey)?;
-        if qks.is_none()
-            && let Some(legacy) = self.settings.quantum_keystore_json.take()
-        {
-            crate::quantum_vault::save_encrypted(&qkey, &legacy)?;
-            if let Some(meta) = crate::quantum::quantum_meta_from_json(&legacy) {
-                self.settings.quantum_meta = Some(meta);
-            }
-            self.settings.save()?;
-            qks = Some(legacy);
+        if vault.metadata.version < crate::vault::VAULT_VERSION_LATEST {
+            let target_profile =
+                SecurityProfile::from_name(&vault.security_profile_for_migration());
+            self.migrate_vault_encryption(
+                passphrase,
+                passphrase,
+                target_profile,
+                HardwareSigningMode::WebAuthnGate,
+                None,
+                false,
+            )?;
+            vault = self.vault_snapshot()?;
         }
+        vault.validate_authenticated_policy()?;
+        self.profile = SecurityProfile::from_name(&vault.metadata.security_profile);
+        self.settings.security_profile = vault.metadata.security_profile.clone();
+        self.settings.hardware_signing_mode = vault.metadata.hardware_signing_mode.clone();
+        self.settings.webauthn_enabled = vault.metadata.webauthn_credential_b64.is_some();
+        self.settings.watch_only_address = None;
+        let signing_mode = HardwareSigningMode::from_name(&vault.metadata.hardware_signing_mode);
+        if signing_mode == HardwareSigningMode::AirgapOnly {
+            if let Some(legacy_secret) = self.settings.quantum_keystore_json.as_mut() {
+                legacy_secret.zeroize();
+            }
+            self.settings.quantum_keystore_json = None;
+            crate::biometric_unlock::clear()?;
+            self.settings.biometric_unlock_enabled = false;
+        }
+        self.settings.save()?;
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
+        self.assets.clear_cache();
+        let (qkey, qks) = if signing_mode == HardwareSigningMode::AirgapOnly {
+            // Cold Vault is intentionally a classic Type 2 signer. Do not even
+            // derive the Quantum sidecar key, much less read/decrypt the file.
+            (None, None)
+        } else {
+            let qkey = crate::quantum_vault::QuantumFileKey::derive(passphrase, vault.salt())?;
+            let mut qks = crate::quantum_vault::load_encrypted(&qkey)?;
+            if qks.is_none()
+                && let Some(legacy) = self.settings.quantum_keystore_json.take()
+            {
+                crate::quantum_vault::save_encrypted(&qkey, &legacy)?;
+                if let Some(meta) = crate::quantum::quantum_meta_from_json(&legacy) {
+                    self.settings.quantum_meta = Some(meta);
+                }
+                self.settings.save()?;
+                qks = Some(legacy);
+            }
+            (Some(qkey), qks)
+        };
         self.quantum_keystore_mem = qks;
+        let now = Instant::now();
         self.unlocked = Some(UnlockedSession {
             address: address.clone(),
             key: SessionKey::Signing(account),
-            unlocked_at: Instant::now(),
+            unlocked_at: now,
+            absolute_deadline: now + maximum_unlock_lifetime(signing_mode),
             webauthn_verified: false,
             biometric_verified: false,
             pending_biometric_nonce: None,
-            quantum_file_key: Some(qkey),
+            authorization: authorization_service::SessionAuthorization::default(),
+            quantum_file_key: qkey,
         });
         Ok(address)
     }
@@ -619,27 +1036,52 @@ impl WalletService {
             .watch_only_address
             .clone()
             .ok_or(WalletError::NoWallet)?;
+        let now = Instant::now();
         self.unlocked = Some(UnlockedSession {
             address: address.clone(),
             key: SessionKey::WatchOnly,
-            unlocked_at: Instant::now(),
+            unlocked_at: now,
+            absolute_deadline: now + maximum_unlock_lifetime(HardwareSigningMode::WatchOnly),
             webauthn_verified: false,
             biometric_verified: false,
             pending_biometric_nonce: None,
+            authorization: authorization_service::SessionAuthorization::default(),
             quantum_file_key: None,
         });
         Ok(address)
     }
 
     pub fn set_hardware_signing_mode(&mut self, mode: HardwareSigningMode) -> WalletResult<()> {
+        if self.vault_path.exists() {
+            let vault = self.read_vault()?;
+            if vault.metadata.version >= crate::vault::VAULT_VERSION_LATEST
+                && vault.metadata.hardware_signing_mode == mode.as_str()
+            {
+                self.settings.hardware_signing_mode = mode.as_str().into();
+                if mode == HardwareSigningMode::AirgapOnly {
+                    crate::biometric_unlock::clear()?;
+                    self.profile = SecurityProfile::paranoid();
+                    self.settings.security_profile = self.profile.name.clone();
+                    self.settings.biometric_unlock_enabled = false;
+                    self.clear_session_authorizations();
+                }
+                self.settings.save()?;
+                return Ok(());
+            }
+            return Err(WalletError::Policy(
+                "changing a signing wallet hardware mode requires current-passphrase authentication"
+                    .into(),
+            ));
+        }
+        if mode == HardwareSigningMode::AirgapOnly {
+            return Err(WalletError::Policy(
+                "cold vault mode requires an existing signing vault and passphrase authentication"
+                    .into(),
+            ));
+        }
         if mode == HardwareSigningMode::WatchOnly && self.settings.watch_only_address.is_none() {
             return Err(WalletError::Vault(
                 "watch-only mode requires a watch-only imported address".into(),
-            ));
-        }
-        if mode == HardwareSigningMode::WatchOnly && self.vault_path.exists() {
-            return Err(WalletError::Vault(
-                "cannot enable watch-only mode while encrypted vault exists".into(),
             ));
         }
         self.settings.hardware_signing_mode = mode.as_str().into();
@@ -647,9 +1089,58 @@ impl WalletService {
         Ok(())
     }
 
+    pub fn change_hardware_signing_mode(
+        &mut self,
+        current_passphrase: &str,
+        mode: HardwareSigningMode,
+    ) -> WalletResult<()> {
+        if !self.vault_path.exists() {
+            return self.set_hardware_signing_mode(mode);
+        }
+        if mode == HardwareSigningMode::WatchOnly {
+            return Err(WalletError::Policy(
+                "a signing vault cannot be converted to watch-only mode".into(),
+            ));
+        }
+        if mode == HardwareSigningMode::AirgapOnly {
+            // Irreversible, so a correct passphrase alone is never enough: route
+            // through the prepared ticket that a fresh platform ceremony binds to
+            // this exact activation.
+            return Err(WalletError::Policy(
+                "cold vault activation requires a prepared, freshly authorized activation ticket"
+                    .into(),
+            ));
+        }
+        self.verify_wallet_passphrase(current_passphrase)?;
+        let current_vault = self.vault_snapshot()?;
+        let (current_mode, credential) = current_vault.policy_for_migration()?;
+        if current_mode == HardwareSigningMode::AirgapOnly.as_str()
+            && mode != HardwareSigningMode::AirgapOnly
+        {
+            return Err(WalletError::Policy(
+                "cold vault mode is irreversible for this vault".into(),
+            ));
+        }
+        let target_profile = if mode == HardwareSigningMode::AirgapOnly {
+            SecurityProfile::paranoid()
+        } else {
+            SecurityProfile::from_name(&current_vault.security_profile_for_migration())
+        };
+        self.migrate_vault_encryption(
+            current_passphrase,
+            current_passphrase,
+            target_profile,
+            mode,
+            credential.as_deref(),
+            false,
+        )
+    }
+
     /// Begin OS-native biometric ceremony (Windows Hello). Returns nonce for platform UI.
     pub fn begin_native_biometric(&mut self) -> WalletResult<String> {
+        self.reject_cold_vault_key_access("generic native biometric authorization")?;
         let session = self.unlocked.as_mut().ok_or(WalletError::Locked)?;
+        session.authorization.clear();
         let nonce = random_biometric_nonce();
         session.pending_biometric_nonce = Some(nonce.clone());
         Ok(nonce)
@@ -657,6 +1148,7 @@ impl WalletService {
 
     /// Complete OS-native biometric ceremony after platform verifier succeeds.
     pub fn finish_native_biometric(&mut self, nonce: &str) -> WalletResult<()> {
+        self.reject_cold_vault_key_access("generic native biometric authorization")?;
         let session = self.unlocked.as_mut().ok_or(WalletError::Locked)?;
         match &session.pending_biometric_nonce {
             Some(expected) if expected == nonce => {
@@ -670,15 +1162,37 @@ impl WalletService {
         }
     }
 
+    /// Test helper that drives the real prepared activation ceremony.
+    ///
+    /// It is not a bypass: it calls the same begin/finish pair the shell calls,
+    /// and the shell is what interposes the OS verification between them. The
+    /// nonce is already returned to the in-process caller in production, so this
+    /// grants nothing that `begin_prepared_native_authorization` does not.
+    #[doc(hidden)]
+    pub fn audit_activate_cold_vault(&mut self, current_passphrase: &str) -> WalletResult<()> {
+        let prepared = self.prepare_cold_vault_activation()?;
+        if prepared.webauthn_required {
+            return Err(WalletError::Policy(
+                "this vault requires a WebAuthn ceremony to activate the cold vault".into(),
+            ));
+        }
+        let challenge = self.begin_prepared_native_authorization(&prepared.id)?;
+        self.finish_prepared_native_authorization(&prepared.id, &challenge.nonce)?;
+        self.execute_prepared_cold_vault_activation(&prepared.id, current_passphrase)
+    }
+
     /// Test-only bypass. production apps must use `finish_native_biometric`.
     #[doc(hidden)]
     pub fn confirm_biometric_for_send(&mut self) -> WalletResult<()> {
+        self.reject_cold_vault_key_access("test biometric authorization bypass")?;
         let session = self.unlocked.as_mut().ok_or(WalletError::Locked)?;
         session.biometric_verified = true;
         Ok(())
     }
 
     pub fn lock(&mut self) {
+        let _ = self.webauthn.clear_pending();
+        self.webauthn_replacement_approved_at = None;
         self.unlocked = None;
         self.assets.clear_cache();
         self.quantum_keystore_mem = None;
@@ -686,8 +1200,12 @@ impl WalletService {
     }
 
     pub fn touch_auto_lock(&mut self) {
+        let now = Instant::now();
         if let Some(session) = &self.unlocked
-            && session.unlocked_at.elapsed() >= Duration::from_secs(self.profile.auto_lock_secs)
+            && !matches!(session.key, SessionKey::Exhausted)
+            && (now.saturating_duration_since(session.unlocked_at)
+                >= Duration::from_secs(self.profile.auto_lock_secs)
+                || now >= session.absolute_deadline)
         {
             self.lock();
         }
@@ -698,7 +1216,11 @@ impl WalletService {
         // UI activity that arrives after the deadline cannot revive an expired
         // session. Enforce the deadline before moving it forward.
         self.touch_auto_lock();
-        if let Some(session) = &mut self.unlocked {
+        let may_extend_idle = match self.authenticated_signing_mode() {
+            Ok(HardwareSigningMode::AirgapOnly) | Err(_) => false,
+            Ok(_) => true,
+        };
+        if may_extend_idle && let Some(session) = &mut self.unlocked {
             session.unlocked_at = Instant::now();
         }
     }
@@ -708,17 +1230,89 @@ impl WalletService {
         self.webauthn.begin_register(&address, client_origin)
     }
 
-    pub fn webauthn_register_finish(&mut self, credential_json: &str) -> WalletResult<()> {
-        let cred_b64 = self.webauthn.finish_register(credential_json)?;
+    /// Begin the ceremony that lets the *current* authenticator approve its own
+    /// replacement. Without this, a stolen passphrase would be enough to swap the
+    /// second factor for one the attacker controls.
+    pub fn webauthn_replacement_auth_begin(
+        &mut self,
+        client_origin: Option<&str>,
+    ) -> WalletResult<String> {
+        self.webauthn_replacement_approved_at = None;
+        let credential = self.load_webauthn_credential()?.ok_or_else(|| {
+            WalletError::Policy(
+                "no WebAuthn authenticator is registered; register one instead of replacing".into(),
+            )
+        })?;
+        let credential_id = crate::webauthn::credential_id_from_store(&credential)?;
+        self.webauthn.begin_auth(&credential_id, client_origin)
+    }
+
+    /// Record that the outgoing authenticator approved being replaced.
+    ///
+    /// Deliberately does not set `webauthn_verified`: approving a key rotation is
+    /// not consent to sign a transaction.
+    pub fn webauthn_replacement_auth_finish(&mut self, assertion_json: &str) -> WalletResult<()> {
+        let stored = self
+            .load_webauthn_credential()?
+            .ok_or_else(|| WalletError::Policy("no WebAuthn authenticator is registered".into()))?;
+        let updated = match self.webauthn.finish_auth(assertion_json, Some(&stored)) {
+            Ok(updated) => updated,
+            Err(error) => {
+                self.webauthn_replacement_approved_at = None;
+                return Err(error);
+            }
+        };
         let mut vault = self.vault_snapshot()?;
-        vault.metadata.webauthn_credential_b64 = Some(cred_b64);
+        vault.update_webauthn_counter_credential(&updated)?;
         self.persist_vault(vault)?;
-        self.settings.webauthn_enabled = true;
-        self.settings.save()?;
+        self.webauthn_replacement_approved_at = Some(Instant::now());
         Ok(())
     }
 
+    fn take_webauthn_replacement_approval(&mut self) -> WalletResult<()> {
+        let approved_at = self.webauthn_replacement_approved_at.take().ok_or_else(|| {
+            WalletError::Policy(
+                "replacing a registered WebAuthn authenticator requires approval from the current authenticator"
+                    .into(),
+            )
+        })?;
+        if approved_at.elapsed() > WEBAUTHN_REPLACEMENT_APPROVAL_TTL {
+            return Err(WalletError::Policy(
+                "the current authenticator's approval expired; approve the replacement again"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn webauthn_register_finish(
+        &mut self,
+        credential_json: &str,
+        current_passphrase: &str,
+    ) -> WalletResult<()> {
+        self.verify_wallet_passphrase(current_passphrase)?;
+        // Registering the first authenticator is a pure upgrade. Replacing an
+        // existing one is a downgrade risk, so the outgoing key must consent.
+        if self.load_webauthn_credential()?.is_some() {
+            self.take_webauthn_replacement_approval()?;
+        }
+        let credential = self.webauthn.finish_register(credential_json)?;
+        let current_vault = self.vault_snapshot()?;
+        let target_profile =
+            SecurityProfile::from_name(&current_vault.security_profile_for_migration());
+        let (hardware_mode, _) = current_vault.policy_for_migration()?;
+        self.migrate_vault_encryption(
+            current_passphrase,
+            current_passphrase,
+            target_profile,
+            HardwareSigningMode::from_name(&hardware_mode),
+            Some(&credential),
+            false,
+        )
+    }
+
     pub fn webauthn_auth_begin(&self, client_origin: Option<&str>) -> WalletResult<String> {
+        self.reject_cold_vault_key_access("generic WebAuthn authorization")?;
         let cred = self
             .load_webauthn_credential()?
             .ok_or_else(|| WalletError::Policy("WebAuthn not registered".into()))?;
@@ -727,9 +1321,14 @@ impl WalletService {
     }
 
     pub fn webauthn_auth_finish(&mut self, assertion_json: &str) -> WalletResult<()> {
+        self.reject_cold_vault_key_access("generic WebAuthn authorization")?;
         let stored = self.load_webauthn_credential()?;
-        self.webauthn
+        let updated = self
+            .webauthn
             .finish_auth(assertion_json, stored.as_deref())?;
+        let mut vault = self.vault_snapshot()?;
+        vault.update_webauthn_counter_credential(&updated)?;
+        self.persist_vault(vault)?;
         if let Some(session) = &mut self.unlocked {
             session.webauthn_verified = true;
         }
@@ -799,8 +1398,8 @@ impl WalletService {
         // BTC has no HAC-denominated amount, so require the profile's second
         // factor at the signing boundary for every bridged-BTC transfer.
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         if self.profile.yubikey_required {
@@ -878,8 +1477,8 @@ impl WalletService {
         self.touch_auto_lock();
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         if self.profile.yubikey_required {
@@ -1130,6 +1729,7 @@ impl WalletService {
 
     pub async fn accept_fast_pay(&mut self, payment_id: &str) -> WalletResult<FastPayExecution> {
         self.touch_auto_lock();
+        self.reject_cold_vault_key_access("Fast Pay recipient bill signing")?;
         let hub_url = self
             .settings
             .l2_hub_url
@@ -1167,6 +1767,14 @@ impl WalletService {
                     "Fast Pay request {payment_id} is not awaiting this wallet"
                 ))
             })?;
+        let amount_mei = item
+            .amount
+            .parse::<f64>()
+            .map_err(|_| WalletError::Policy("Fast Pay inbox returned an invalid amount".into()))?;
+        self.protected_unprepared_signing_block(
+            "Fast Pay recipient bill signing",
+            crate::hip23::policy_amount_mei_ceil(amount_mei)?,
+        )?;
         if !item
             .payee_channel_id
             .eq_ignore_ascii_case(&configured_channel_id)
@@ -1192,16 +1800,17 @@ impl WalletService {
                     "watch-only wallet cannot accept Fast Pay bills".into(),
                 ));
             }
+            SessionKey::Exhausted => {
+                return Err(WalletError::Policy(
+                    "cold vault signing session is exhausted; unlock again".into(),
+                ));
+            }
         };
         let result = client
             .accept_inbox_item(&item, &mut self.bills, account, &channel, &hub_address)
             .await?;
         self.router.replace_bills(self.bills.clone());
 
-        let amount_mei = item
-            .amount
-            .parse::<f64>()
-            .map_err(|_| WalletError::Policy("Fast Pay inbox returned an invalid amount".into()))?;
         self.append_history_if_enabled(
             PaymentRail::L2Fast,
             &result.payment_id,
@@ -1433,6 +2042,10 @@ impl WalletService {
         hub_deposit_mei: f64,
     ) -> WalletResult<String> {
         self.touch_auto_lock();
+        self.protected_unprepared_signing_block(
+            "direct channel open",
+            crate::hip23::policy_amount_mei_ceil(user_deposit_mei)?,
+        )?;
         let preview = self.preview_channel_open(hub_address, user_deposit_mei, hub_deposit_mei)?;
         let fee = crate::hip23::wire_mei_for_node("1:244");
         let encoded_channel_id = crate::channel::encoded_channel_id(&preview.channel_id)?;
@@ -1491,6 +2104,10 @@ impl WalletService {
 
     pub async fn close_channel(&mut self) -> WalletResult<String> {
         self.touch_auto_lock();
+        self.protected_unprepared_signing_block(
+            "direct channel close",
+            self.second_factor_threshold_mei(),
+        )?;
         let from = self.require_address()?;
         let channel_id = self
             .settings
@@ -1759,6 +2376,22 @@ impl WalletService {
         &mut self,
         unsigned: &AirgapUnsigned,
     ) -> WalletResult<AirgapSignResult> {
+        self.sign_airgap_unsigned_in_context(unsigned, SigningContext::Online)
+    }
+
+    fn sign_prepared_airgap_unsigned(
+        &mut self,
+        unsigned: &AirgapUnsigned,
+        _permit: authorization_service::PreparedAirgapSigningPermit,
+    ) -> WalletResult<AirgapSignResult> {
+        self.sign_airgap_unsigned_in_context(unsigned, SigningContext::PreparedAirgap)
+    }
+
+    fn sign_airgap_unsigned_in_context(
+        &mut self,
+        unsigned: &AirgapUnsigned,
+        context: SigningContext,
+    ) -> WalletResult<AirgapSignResult> {
         self.touch_auto_lock();
         let from = self.require_address()?;
         if unsigned.from != from {
@@ -1783,9 +2416,11 @@ impl WalletService {
                 "Type 4 air-gap transactions require the Quantum Lab signer".into(),
             ));
         }
-        let unlock_ctx = self.second_factor_from_session()?;
-        let policy_amount = crate::hip23::policy_amount_mei_ceil(inspection.amount_mei)?;
-        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
+        if context == SigningContext::Online {
+            let unlock_ctx = self.second_factor_from_session()?;
+            let policy_amount = crate::hip23::policy_amount_mei_ceil(inspection.amount_mei)?;
+            check_send_policy(&self.effective_profile(), policy_amount, &unlock_ctx)?;
+        }
         let expected_service_fee =
             crate::send_options::compute_service_fee_mei(inspection.amount_mei);
         if (unsigned.service_fee_mei - expected_service_fee).abs() > 0.000_000_1
@@ -1821,7 +2456,7 @@ impl WalletService {
                 canonical.tx_type
             )));
         }
-        let signed_hex = self.sign_tx_hex(&unsigned.body_hex)?;
+        let signed_hex = self.sign_tx_hex_in_context(&unsigned.body_hex, context)?;
         self.clear_second_factor();
         let signed = AirgapSigned {
             v: AIRGAP_VERSION,
@@ -1973,9 +2608,10 @@ impl WalletService {
         options: crate::send_options::SendOptions,
     ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
+        self.reject_cold_vault_key_access("online HAC and Fast Pay signing")?;
         let unlock_ctx = self.second_factor_from_session()?;
         let policy_amount = crate::hip23::policy_amount_mei_ceil(amount_mei)?;
-        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
+        check_send_policy(&self.effective_profile(), policy_amount, &unlock_ctx)?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {
@@ -1986,6 +2622,16 @@ impl WalletService {
         }
         // Single-use second factor: consumed before signing (enterprise per-tx model).
         self.clear_second_factor();
+        // Both UIs use this unprepared command only for the Fast Pay rail, and that rail
+        // hands the account to the hub router, which cosigns the settlement bill itself.
+        // It therefore never reaches sign_tx_hex_in_context and never hits
+        // check_signing_allowed_in_context, the only place that enforces the hardware
+        // signing mode for a signature. Without this barrier a webauthn_gate wallet
+        // signs an L2 bill with no ceremony while promising one for every payment, and a
+        // balanced wallet accepts a session-level biometric for a large send instead of
+        // one bound to that exact bill. Anything that needs a factor must go through the
+        // prepared ceremony, which is what the three sibling call sites already require.
+        self.protected_unprepared_signing_block("HAC send", policy_amount)?;
         let from = self.require_address()?;
         let preview = self.preview_send(to, amount_mei, &options).await?;
         let pending_key = self.begin_pending_history(preview.plan.rail, &from, to, amount_mei)?;
@@ -2007,6 +2653,9 @@ impl WalletService {
                 }
                 SessionKey::WatchOnly => Err(WalletError::Policy(
                     "watch-only wallet cannot sign L2 bills".into(),
+                )),
+                SessionKey::Exhausted => Err(WalletError::Policy(
+                    "cold vault signing session is exhausted; unlock again".into(),
                 )),
             },
             PaymentRail::L1OnChain => {
@@ -2071,13 +2720,66 @@ impl WalletService {
         }
     }
 
+    /// The amount, in HAC, at or above which a signature needs a second factor.
+    ///
+    /// The authenticated security profile sets the ceiling, and it is bound to the vault
+    /// through the profile name. A user preference may lower that ceiling but can never
+    /// raise it, because this takes the minimum of the two. That single property is what
+    /// makes the preference safe to keep in the settings file, which is not
+    /// cryptographically bound: someone who edits or replaces that file can only make
+    /// the policy stricter than the profile allows, never weaker.
+    ///
+    /// Every policy decision must read the threshold from here. Nothing outside this
+    /// method and [`Self::effective_profile`] may read
+    /// `SecurityProfile::require_second_factor_above_mei` directly, or a preference the
+    /// user set would silently not apply on that path.
+    ///
+    /// An audit test in `tests/second_factor_threshold.rs` checks two shapes of that
+    /// mistake: a direct field read, and handing the raw profile to a policy helper such
+    /// as `check_send_policy`. It is a text walker, so it cannot see every possible
+    /// aliasing of the field, and it is not a substitute for reading the code. An earlier
+    /// version of this note said the test enforces the rule, which claimed more than the
+    /// test delivers.
+    pub fn second_factor_threshold_mei(&self) -> u64 {
+        crate::security::effective_second_factor_threshold(
+            self.profile.require_second_factor_above_mei,
+            self.settings.require_second_factor_above_mei,
+        )
+    }
+
+    /// The active profile with its threshold replaced by the effective one.
+    ///
+    /// For the policy helpers that take a whole `SecurityProfile`. Same rule as
+    /// [`Self::second_factor_threshold_mei`]: the clone never reaches the vault, which
+    /// stores only the profile name, so this cannot weaken what the vault authenticates.
+    pub(crate) fn effective_profile(&self) -> SecurityProfile {
+        let mut profile = self.profile.clone();
+        profile.require_second_factor_above_mei = self.second_factor_threshold_mei();
+        profile
+    }
+
     pub fn set_security_profile(&mut self, profile: SecurityProfile) -> WalletResult<()> {
-        let name = profile.name.clone();
-        self.profile = profile;
-        self.settings.security_profile = name;
+        if !matches!(profile.name.as_str(), "balanced" | "paranoid") {
+            return Err(WalletError::Policy("unknown security profile".into()));
+        }
+        let normalized = SecurityProfile::from_name(&profile.name);
+        if self.vault_path.exists() {
+            let vault = self.read_vault()?;
+            if vault.metadata.security_profile == normalized.name
+                && self.settings.security_profile == normalized.name
+            {
+                self.profile = normalized;
+                return Ok(());
+            }
+            return Err(WalletError::Policy(
+                "changing a signing wallet security profile requires current-passphrase authentication"
+                    .into(),
+            ));
+        }
+
+        self.settings.security_profile = normalized.name.clone();
         self.settings.save()?;
-        // Policy lives in settings; vault AAD binds security_profile. never patch
-        // metadata without full reencrypt (see vault_aad + change_passphrase).
+        self.profile = normalized;
         Ok(())
     }
 
@@ -2123,18 +2825,32 @@ impl WalletService {
     }
 
     pub(crate) fn sign_tx_hex(&self, body_hex: &str) -> WalletResult<String> {
+        self.sign_tx_hex_in_context(body_hex, SigningContext::Online)
+    }
+
+    fn sign_tx_hex_in_context(
+        &self,
+        body_hex: &str,
+        context: SigningContext,
+    ) -> WalletResult<String> {
         let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
         let watch_only = matches!(session.key, SessionKey::WatchOnly);
-        check_signing_allowed(
-            self.settings.hardware_mode(),
+        check_signing_allowed_in_context(
+            self.authenticated_signing_mode()?,
             watch_only,
             session.webauthn_verified,
+            context,
         )?;
         let account = match &session.key {
             SessionKey::Signing(acc) => acc,
             SessionKey::WatchOnly => {
                 return Err(WalletError::Policy(
                     "watch-only wallet cannot sign transactions".into(),
+                ));
+            }
+            SessionKey::Exhausted => {
+                return Err(WalletError::Policy(
+                    "cold vault signing session is exhausted; unlock again".into(),
                 ));
             }
         };
@@ -2230,20 +2946,99 @@ impl WalletService {
     }
 
     fn require_signing_account(&self) -> WalletResult<&WalletAccount> {
+        self.reject_cold_vault_key_access("messenger account access")?;
         let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
         match &session.key {
             SessionKey::Signing(acc) => Ok(acc),
             SessionKey::WatchOnly => Err(WalletError::Policy(
                 "watch-only wallet cannot access messenger".into(),
             )),
+            SessionKey::Exhausted => Err(WalletError::Policy(
+                "cold vault signing session is exhausted; unlock again".into(),
+            )),
         }
     }
 
     fn load_webauthn_credential(&self) -> WalletResult<Option<String>> {
-        Ok(self
-            .vault_meta
-            .as_ref()
-            .and_then(|m| m.webauthn_credential_b64.clone()))
+        let vault = self.read_vault()?;
+        if vault.metadata.version < crate::vault::VAULT_VERSION_LATEST {
+            return Err(WalletError::Policy(
+                "legacy WebAuthn metadata is unauthenticated; unlock to migrate and re-register"
+                    .into(),
+            ));
+        }
+        vault.validate_authenticated_policy()?;
+        Ok(vault.metadata.webauthn_credential_b64.clone())
+    }
+
+    pub(crate) fn reject_cold_vault_key_access(&self, operation: &str) -> WalletResult<()> {
+        if self.cold_vault_configured()? {
+            return Err(WalletError::Policy(format!(
+                "cold vault blocks {operation}; use a freshly authorized prepared Type 2 air-gap operation"
+            )));
+        }
+        Ok(())
+    }
+
+    fn cold_vault_configured(&self) -> WalletResult<bool> {
+        if !self.vault_path.exists() {
+            return Ok(false);
+        }
+        let vault = self.read_vault()?;
+        Ok(vault.metadata.version >= crate::vault::VAULT_VERSION_LATEST
+            && vault.metadata.hardware_signing_mode == HardwareSigningMode::AirgapOnly.as_str())
+    }
+
+    fn exhaust_cold_signing_session(&mut self) {
+        let _ = self.webauthn.clear_pending();
+        self.dapp_session.clear();
+        self.quantum_keystore_mem = None;
+        let Some(session) = self.unlocked.take() else {
+            return;
+        };
+        let address = session.address.clone();
+        drop(session);
+        let now = Instant::now();
+        self.unlocked = Some(UnlockedSession {
+            address,
+            key: SessionKey::Exhausted,
+            unlocked_at: now,
+            absolute_deadline: now,
+            webauthn_verified: false,
+            biometric_verified: false,
+            pending_biometric_nonce: None,
+            authorization: authorization_service::SessionAuthorization::default(),
+            quantum_file_key: None,
+        });
+    }
+
+    fn clear_session_authorizations(&mut self) {
+        self.webauthn_replacement_approved_at = None;
+        if let Some(session) = &mut self.unlocked {
+            session.webauthn_verified = false;
+            session.biometric_verified = false;
+            session.pending_biometric_nonce = None;
+            session.authorization.clear();
+        }
+        self.dapp_session.clear();
+        let _ = self.webauthn.clear_pending();
+    }
+
+    fn authenticated_signing_mode(&self) -> WalletResult<HardwareSigningMode> {
+        let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
+        if matches!(session.key, SessionKey::WatchOnly) {
+            return Ok(HardwareSigningMode::WatchOnly);
+        }
+        let vault = self.read_vault()?;
+        vault.validate_authenticated_policy()?;
+        match vault.metadata.hardware_signing_mode.as_str() {
+            "software" => Ok(HardwareSigningMode::Software),
+            "webauthn_gate" => Ok(HardwareSigningMode::WebAuthnGate),
+            "airgap_only" => Ok(HardwareSigningMode::AirgapOnly),
+            _ => Err(WalletError::Policy(
+                "authenticated vault hardware mode is invalid".into(),
+            )),
+        }
     }
 
     fn read_vault(&self) -> WalletResult<EncryptedVault> {
@@ -2279,19 +3074,83 @@ impl WalletService {
     /// Warm vault metadata cache (faster first `status()` after app start).
     pub fn warm_vault_cache(&mut self) -> WalletResult<()> {
         if self.vault_path.exists() && self.vault_cache.is_none() {
-            let _ = self.vault_snapshot()?;
+            let vault = self.vault_snapshot()?;
+            let meta = vault.meta_snapshot();
+            let (profile, hardware_mode, webauthn_enabled) =
+                effective_policy_for_status(Some(&meta), true);
+            self.profile = profile;
+            self.settings.security_profile = self.profile.name.clone();
+            self.settings.hardware_signing_mode = hardware_mode;
+            self.settings.webauthn_enabled = webauthn_enabled;
+            self.settings.watch_only_address = None;
+            if self.settings.hardware_signing_mode == HardwareSigningMode::AirgapOnly.as_str() {
+                self.settings.biometric_unlock_enabled = false;
+            }
         }
         Ok(())
     }
 }
 
-fn format_amount_mei(amount_mei: f64) -> String {
-    crate::hip23::format_mei_for_node(amount_mei)
+fn effective_policy_for_status(
+    metadata: Option<&VaultMetaSnapshot>,
+    signing_vault_exists: bool,
+) -> (SecurityProfile, String, bool) {
+    if let Some(metadata) = metadata {
+        let profile = if metadata.version >= 2
+            && metadata.hardware_signing_mode != HardwareSigningMode::AirgapOnly.as_str()
+        {
+            SecurityProfile::from_name(&metadata.security_profile)
+        } else {
+            SecurityProfile::paranoid()
+        };
+        if metadata.version >= crate::vault::VAULT_VERSION_LATEST {
+            return (
+                profile,
+                metadata.hardware_signing_mode.clone(),
+                metadata.webauthn_credential_b64.is_some()
+                    && metadata.webauthn_credential_binding_sha256.is_some(),
+            );
+        }
+        return (
+            profile,
+            HardwareSigningMode::WebAuthnGate.as_str().into(),
+            false,
+        );
+    }
+    if signing_vault_exists {
+        return (
+            SecurityProfile::paranoid(),
+            HardwareSigningMode::WebAuthnGate.as_str().into(),
+            false,
+        );
+    }
+    (
+        SecurityProfile::from_name("balanced"),
+        HardwareSigningMode::Software.as_str().into(),
+        false,
+    )
+}
+fn maximum_unlock_lifetime(mode: HardwareSigningMode) -> Duration {
+    if mode == HardwareSigningMode::AirgapOnly {
+        COLD_VAULT_UNLOCK_LIFETIME
+    } else {
+        MAX_UNLOCK_LIFETIME
+    }
 }
 
-fn is_secret_hex(seed: &str) -> bool {
-    let s = seed.trim();
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+fn validate_new_passphrase(passphrase: &str) -> WalletResult<()> {
+    const MIN_CHARS: usize = 15;
+    const MAX_CHARS: usize = 1024;
+    let count = passphrase.chars().count();
+    if !(MIN_CHARS..=MAX_CHARS).contains(&count) {
+        return Err(WalletError::Vault(format!(
+            "new wallet passphrase must contain {MIN_CHARS} to {MAX_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+fn format_amount_mei(amount_mei: f64) -> String {
+    crate::hip23::format_mei_for_node(amount_mei)
 }
 
 fn random_biometric_nonce() -> String {
@@ -2304,6 +3163,40 @@ fn random_biometric_nonce() -> String {
 impl WalletService {
     /// Type 4 support is an experimental Quantum Lab feature. Keep this guard
     /// at the core boundary so direct IPC calls cannot enable it on mainnet.
+    /// A live signing session is required. `Exhausted` and watch-only sessions
+    /// hold no key, so they must not reach key-material code paths either.
+    pub(crate) fn require_unlocked_signing_session(&self) -> WalletResult<()> {
+        let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
+        match session.key {
+            SessionKey::Signing(_) => Ok(()),
+            SessionKey::WatchOnly => Err(WalletError::Policy(
+                "watch-only wallet cannot access key material".into(),
+            )),
+            SessionKey::Exhausted => Err(WalletError::Policy(
+                "signing session is exhausted; unlock again".into(),
+            )),
+        }
+    }
+
+    /// Exponential backoff shared by every keystore-password attempt. Callers
+    /// must report the outcome with [`Self::record_quantum_keystore_attempt`].
+    pub(crate) fn check_quantum_keystore_attempt_allowed(&self) -> WalletResult<()> {
+        self.quantum_keystore_guard.check_allowed()
+    }
+
+    pub(crate) fn record_quantum_keystore_attempt(&mut self, accepted: bool) {
+        if accepted {
+            self.quantum_keystore_guard.record_success();
+        } else {
+            self.quantum_keystore_guard.record_failure();
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn audit_quantum_keystore_failures(&self) -> u32 {
+        self.quantum_keystore_guard.audit_failures()
+    }
+
     pub(crate) fn require_quantum_testnet(&self) -> WalletResult<()> {
         if self.network_mode == "testnet" {
             return Ok(());
@@ -2321,11 +3214,12 @@ impl WalletService {
         self.settings.quantum_meta.clone()
     }
 
-    pub(crate) fn quantum_keystore_json(&self) -> Option<String> {
+    pub(crate) fn quantum_keystore_json(&self) -> WalletResult<Option<String>> {
+        self.reject_cold_vault_key_access("reading Quantum key material")?;
         if let Some(mem) = &self.quantum_keystore_mem {
-            return Some(mem.clone());
+            return Ok(Some(mem.clone()));
         }
-        self.settings.quantum_keystore_json.clone()
+        Ok(self.settings.quantum_keystore_json.clone())
     }
 
     pub(crate) fn ensure_quantum_signing_policy(&self, amount_mei: f64) -> WalletResult<()> {
@@ -2340,13 +3234,13 @@ impl WalletService {
             .map(|s| s.webauthn_verified)
             .unwrap_or(false);
         crate::hardware::check_signing_allowed(
-            self.settings.hardware_mode(),
+            self.authenticated_signing_mode()?,
             watch_only,
             webauthn_verified,
         )?;
         let unlock_ctx = self.second_factor_from_session()?;
         let policy_amount = crate::hip23::policy_amount_mei_ceil(amount_mei)?;
-        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
+        check_send_policy(&self.effective_profile(), policy_amount, &unlock_ctx)?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {
@@ -2384,6 +3278,17 @@ impl WalletService {
     }
 
     pub fn store_quantum_keystore_json(&mut self, json: String) -> WalletResult<()> {
+        self.reject_cold_vault_key_access("storing Quantum key material")?;
+        if self
+            .unlocked
+            .as_ref()
+            .is_some_and(|session| matches!(session.key, SessionKey::Exhausted))
+        {
+            return Err(WalletError::Policy(
+                "cold vault signing session is exhausted; unlock before storing key material"
+                    .into(),
+            ));
+        }
         self.bump_unlock_activity();
         if let Some(meta) = crate::quantum::quantum_meta_from_json(&json) {
             self.settings.quantum_meta = Some(meta);
@@ -2404,6 +3309,337 @@ impl WalletService {
         &self.node
     }
 }
+
+#[cfg(test)]
+mod vault_migration_tests {
+    use super::*;
+    use crate::test_support::IsolatedWalletData;
+
+    const OLD_PASS: &str = "old-wallet-passphrase";
+    const NEW_PASS: &str = "new-wallet-passphrase";
+
+    #[test]
+    fn renderer_activity_never_extends_the_absolute_unlock_deadline() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+
+        let original_deadline = wallet.unlocked.as_ref().unwrap().absolute_deadline;
+        let opened_at = wallet.unlocked.as_ref().unwrap().unlocked_at;
+        assert_eq!(
+            original_deadline.saturating_duration_since(opened_at),
+            MAX_UNLOCK_LIFETIME
+        );
+        wallet.bump_unlock_activity();
+        assert_eq!(
+            wallet.unlocked.as_ref().unwrap().absolute_deadline,
+            original_deadline
+        );
+
+        wallet.unlocked.as_mut().unwrap().absolute_deadline =
+            Instant::now() - Duration::from_secs(1);
+        wallet.bump_unlock_activity();
+        assert!(wallet.unlocked.is_none());
+    }
+
+    #[test]
+    fn cold_vault_activity_is_a_noop_and_uses_the_stricter_deadline() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+        wallet.audit_activate_cold_vault(OLD_PASS).unwrap();
+
+        let session = wallet.unlocked.as_ref().unwrap();
+        assert!(
+            session
+                .absolute_deadline
+                .saturating_duration_since(session.unlocked_at)
+                <= COLD_VAULT_UNLOCK_LIFETIME
+        );
+        let idle_before = session.unlocked_at;
+        let deadline_before = session.absolute_deadline;
+        wallet.bump_unlock_activity();
+        let session = wallet.unlocked.as_ref().unwrap();
+        assert_eq!(session.unlocked_at, idle_before);
+        assert_eq!(session.absolute_deadline, deadline_before);
+
+        wallet.unlocked.as_mut().unwrap().absolute_deadline =
+            Instant::now() - Duration::from_secs(1);
+        wallet.touch_auto_lock();
+        assert!(wallet.unlocked.is_none());
+    }
+
+    #[test]
+    fn authenticated_vault_policy_overrides_tampered_settings() {
+        let _wallet_data = IsolatedWalletData::new();
+        let wallet = WalletService::new(None, None).unwrap();
+        let account = WalletAccount::create_random().unwrap();
+        let secret = account.secret_hex();
+        let address = account.address();
+        let vault = EncryptedVault::encrypt_with_policy(
+            &secret,
+            &address,
+            OLD_PASS,
+            "paranoid",
+            "webauthn_gate",
+            None,
+            None,
+        )
+        .unwrap();
+        vault.save(&wallet.vault_path).unwrap();
+
+        let tampered = WalletSettings {
+            security_profile: "balanced".into(),
+            hardware_signing_mode: "software".into(),
+            webauthn_enabled: false,
+            ..WalletSettings::default()
+        };
+        tampered.save().unwrap();
+        drop(wallet);
+
+        let mut reopened = WalletService::new(None, None).unwrap();
+        let status = reopened.status();
+        assert_eq!(status.security_profile, "paranoid");
+        assert_eq!(status.hardware_signing_mode, "webauthn_gate");
+        assert!(!status.watch_only);
+        assert_eq!(reopened.unlock(OLD_PASS).unwrap(), address);
+        let settings = reopened.get_settings();
+        assert_eq!(settings.security_profile, "paranoid");
+        assert_eq!(settings.hardware_signing_mode, "webauthn_gate");
+
+        let mirrored = WalletSettings::load().unwrap();
+        assert_eq!(mirrored.security_profile, "paranoid");
+        assert_eq!(mirrored.hardware_signing_mode, "webauthn_gate");
+    }
+
+    #[test]
+    fn legacy_v2_unlock_migrates_to_v3_without_trusting_legacy_second_factor() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        let account = WalletAccount::create_random().unwrap();
+        let secret = account.secret_hex();
+        let address = account.address();
+        let legacy = EncryptedVault::encrypt_legacy_v2_for_test(
+            &secret,
+            &address,
+            OLD_PASS,
+            "balanced",
+            Some("attacker-replaceable-legacy-credential"),
+        )
+        .unwrap();
+        legacy.save(&wallet.vault_path).unwrap();
+
+        wallet.settings.security_profile = "balanced".into();
+        wallet.settings.hardware_signing_mode = "software".into();
+        wallet.settings.webauthn_enabled = true;
+        wallet.settings.save().unwrap();
+
+        let status = wallet.status();
+        assert_eq!(status.hardware_signing_mode, "webauthn_gate");
+        assert!(!status.webauthn_enabled);
+        assert_eq!(wallet.unlock(OLD_PASS).unwrap(), address);
+
+        let migrated = EncryptedVault::load(&wallet.vault_path).unwrap();
+        assert_eq!(
+            migrated.metadata.version,
+            crate::vault::VAULT_VERSION_LATEST
+        );
+        assert_eq!(migrated.metadata.security_profile, "balanced");
+        assert_eq!(migrated.metadata.hardware_signing_mode, "webauthn_gate");
+        assert!(migrated.metadata.webauthn_credential_b64.is_none());
+        assert!(
+            migrated
+                .metadata
+                .webauthn_credential_binding_sha256
+                .is_none()
+        );
+        assert!(migrated.decrypt_verified_secret(OLD_PASS).is_ok());
+        assert_eq!(wallet.settings.hardware_signing_mode, "webauthn_gate");
+        assert!(!wallet.settings.webauthn_enabled);
+    }
+
+    #[test]
+    fn passphrase_change_rotates_classic_and_quantum_vaults_together() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        let address = wallet.create_wallet(OLD_PASS).unwrap();
+
+        let current_vault = wallet.vault_snapshot().unwrap();
+        let old_quantum_key =
+            crate::quantum_vault::QuantumFileKey::derive(OLD_PASS, current_vault.salt()).unwrap();
+        let quantum_json = r#"{"kind":"opaque","payload":"protected-quantum-key"}"#;
+        crate::quantum_vault::save_encrypted(&old_quantum_key, quantum_json).unwrap();
+        wallet.quantum_keystore_mem = Some(quantum_json.into());
+
+        wallet.change_passphrase(OLD_PASS, NEW_PASS).unwrap();
+        wallet.lock();
+        let migrated_vault = EncryptedVault::load(&wallet.vault_path).unwrap();
+        assert!(migrated_vault.decrypt(OLD_PASS).is_err());
+        assert_eq!(wallet.unlock(NEW_PASS).unwrap(), address);
+        assert_eq!(
+            wallet.quantum_keystore_json().unwrap().as_deref(),
+            Some(quantum_json)
+        );
+
+        let migrated_vault = EncryptedVault::load(&wallet.vault_path).unwrap();
+        let new_quantum_key =
+            crate::quantum_vault::QuantumFileKey::derive(NEW_PASS, migrated_vault.salt()).unwrap();
+        assert_eq!(
+            crate::quantum_vault::load_encrypted(&new_quantum_key)
+                .unwrap()
+                .as_deref(),
+            Some(quantum_json)
+        );
+        assert!(crate::quantum_vault::load_encrypted(&old_quantum_key).is_err());
+    }
+
+    #[test]
+    fn cold_vault_never_retains_quantum_file_key_or_plaintext() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+        wallet
+            .store_quantum_keystore_json(
+                r#"{"kind":"opaque","payload":"protected-quantum-key"}"#.into(),
+            )
+            .unwrap();
+
+        wallet.audit_activate_cold_vault(OLD_PASS).unwrap();
+        assert!(wallet.quantum_keystore_mem.is_none());
+        assert!(
+            wallet
+                .unlocked
+                .as_ref()
+                .is_some_and(|session| session.quantum_file_key.is_none())
+        );
+
+        wallet.lock();
+        std::fs::write(
+            crate::paths::quantum_keystore_path(),
+            b"intentionally corrupt",
+        )
+        .unwrap();
+        wallet.unlock(OLD_PASS).unwrap();
+        assert!(wallet.quantum_keystore_mem.is_none());
+        assert!(
+            wallet
+                .unlocked
+                .as_ref()
+                .is_some_and(|session| session.quantum_file_key.is_none())
+        );
+    }
+
+    #[test]
+    fn failed_authentication_changes_no_wallet_file() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+
+        let current_vault = wallet.vault_snapshot().unwrap();
+        let quantum_key =
+            crate::quantum_vault::QuantumFileKey::derive(OLD_PASS, current_vault.salt()).unwrap();
+        crate::quantum_vault::save_encrypted(&quantum_key, r#"{"payload":"quantum"}"#).unwrap();
+
+        let vault_before = std::fs::read(&wallet.vault_path).unwrap();
+        let quantum_before = std::fs::read(crate::paths::quantum_keystore_path()).unwrap();
+        let settings_before = std::fs::read(crate::paths::settings_path()).unwrap();
+
+        assert!(
+            wallet
+                .change_passphrase("incorrect-passphrase", NEW_PASS)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&wallet.vault_path).unwrap(), vault_before);
+        assert_eq!(
+            std::fs::read(crate::paths::quantum_keystore_path()).unwrap(),
+            quantum_before
+        );
+        assert_eq!(
+            std::fs::read(crate::paths::settings_path()).unwrap(),
+            settings_before
+        );
+    }
+
+    #[test]
+    fn security_profile_change_requires_authentication_and_reencrypts_kdf() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+
+        let vault_before = std::fs::read(&wallet.vault_path).unwrap();
+        assert!(
+            wallet
+                .set_security_profile(SecurityProfile::paranoid())
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&wallet.vault_path).unwrap(), vault_before);
+        assert!(
+            wallet
+                .change_security_profile("incorrect-passphrase", SecurityProfile::paranoid(),)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&wallet.vault_path).unwrap(), vault_before);
+
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet
+            .change_security_profile(OLD_PASS, SecurityProfile::paranoid())
+            .unwrap();
+        let migrated = EncryptedVault::load(&wallet.vault_path).unwrap();
+        assert_eq!(migrated.metadata.security_profile, "paranoid");
+        assert_eq!(
+            migrated.metadata.kdf,
+            crate::kdf::KdfParams::paranoid().label()
+        );
+        assert!(migrated.decrypt_verified_secret(OLD_PASS).is_ok());
+        assert_eq!(wallet.settings.security_profile, "paranoid");
+    }
+
+    #[test]
+    fn generic_settings_reject_sensitive_changes_and_preserve_redacted_secret() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+        wallet.settings.quantum_keystore_json = Some("legacy-protected-value".into());
+
+        let mut redacted = wallet.get_settings();
+        redacted.quantum_keystore_json = None;
+        wallet.update_settings(redacted).unwrap();
+        assert_eq!(
+            wallet.settings.quantum_keystore_json.as_deref(),
+            Some("legacy-protected-value")
+        );
+
+        let mut submitted_secret = wallet.get_settings();
+        submitted_secret.quantum_keystore_json = Some("renderer-value".into());
+        assert!(wallet.update_settings(submitted_secret).is_err());
+
+        let mut downgraded = wallet.get_settings();
+        downgraded.security_profile = "paranoid".into();
+        assert!(wallet.update_settings(downgraded).is_err());
+
+        let mut hardware = wallet.get_settings();
+        hardware.hardware_signing_mode = "watch_only".into();
+        assert!(wallet.update_settings(hardware).is_err());
+    }
+
+    #[test]
+    fn sensitive_passphrase_verification_uses_shared_backoff() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+
+        assert!(
+            wallet
+                .verify_wallet_passphrase("incorrect-passphrase")
+                .is_err()
+        );
+        assert!(matches!(
+            wallet.verify_wallet_passphrase(OLD_PASS),
+            Err(WalletError::UnlockRateLimited(_))
+        ));
+    }
+}
+
 #[cfg(test)]
 mod asset_facade_tests {
     use std::sync::Arc;

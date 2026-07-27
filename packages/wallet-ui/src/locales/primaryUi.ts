@@ -1,10 +1,12 @@
 import type { AppLocale } from "./config";
 import { AIRGAP_UI_COPY } from "./airgapUi";
+import { HIGH_VALUE_UI_COPY } from "./highValueUi";
 import { ISTANBUL_UI_COPY } from "./istanbulUi";
 
 export const primaryUiEn = {
   ...ISTANBUL_UI_COPY.en,
   ...AIRGAP_UI_COPY.en,
+  ...HIGH_VALUE_UI_COPY.en,
   "account.pqc": "PQC",
   "account.hybrid": "Hybrid",
   "common.continue": "Continue",
@@ -151,6 +153,8 @@ export const primaryUiEn = {
   "security.biometricOpenWith": "Open the wallet with {kind} instead of typing the passphrase.",
   "security.noBiometricSensor": "No biometric sensor is available on this device.",
   "security.biometricUnlockActive": "Biometric unlock is active.",
+  "security.biometricScreenLockWarning":
+    "Your phone PIN, pattern or password also opens the wallet, because Android offers it whenever the fingerprint fails. One check covers 30 seconds. Enrolling a new fingerprint on the phone deletes the stored passphrase.",
   "security.passphraseToEnable": "Passphrase (to enable)",
   "security.enterWalletPassphrase": "Enter wallet passphrase",
   "security.enableBiometricUnlock": "Enable biometric unlock",
@@ -158,11 +162,29 @@ export const primaryUiEn = {
   "security.biometricUnlockEnabled": "Biometric unlock enabled.",
   "security.biometricUnlockDisabled": "Biometric unlock disabled.",
   "security.biometricConfirm": "Biometric confirmation",
-  "security.biometricConfirmSends": "Confirm sends of {amount} HAC or more with {kind}.",
-  "security.noBiometricLargeSend": "No biometric sensor was detected. Large sends may fail without biometric confirmation.",
+  "security.secondFactorAmount": "Confirmation amount",
+  "security.secondFactorAmountHint":
+    "Ask for confirmation on HAC sends above this amount. Your security profile sets the maximum, so this can only make the wallet stricter, never looser. Changing it needs your passphrase.",
+  "security.secondFactorAmountCurrent": "Enforced now: HAC sends above {amount} HAC.",
+  "security.secondFactorAmountEvery": "Enforced now: every payment, whatever the amount.",
+  "security.secondFactorAmountLabel": "Confirm sends above (HAC)",
+  "security.secondFactorAmountApply": "Save confirmation amount",
+  "security.secondFactorAmountReset": "Use the security profile default",
+  "security.secondFactorAmountSaved": "Confirmation amount updated.",
+  "security.secondFactorAmountInvalid": "Enter a whole number of HAC, at least 1.",
+  "security.biometricConfirmSends":
+    "HAC sends above {amount} HAC require {kind}. Below that, a HAC send is signed with no confirmation while the wallet is unlocked. Diamond and bridged Bitcoin sends always require it, whatever the amount.",
+  "security.biometricConfirmEvery":
+    "Every payment requires {kind}, whatever the amount.",
+  "security.noBiometricLargeSend":
+    "No biometric sensor was detected. HAC sends above {amount} HAC, and every Diamond or bridged Bitcoin send, will be refused because this device cannot confirm them.",
+  "security.noBiometricAnySend":
+    "No biometric sensor was detected. Every payment will be refused, because this policy needs a confirmation this device cannot provide.",
   "security.useBiometricForSends": "Use biometric confirmation for sends",
   "security.biometricConfirmOn": "Biometric confirmation enabled.",
   "security.biometricConfirmOff": "Biometric confirmation disabled.",
+  "security.signingRefusesScreenLock":
+    "Your phone PIN, pattern or password is not accepted for approving a send. Only a fingerprint or face is.",
   "security.testBiometric": "Test biometric authentication",
   "security.biometricTestOk": "Biometric test successful.",
   "security.lockWallet": "Lock wallet",
@@ -184,6 +206,7 @@ export const PRIMARY_UI_COPY = {
   el: translated({
     ...ISTANBUL_UI_COPY.el,
     ...AIRGAP_UI_COPY.el,
+    ...HIGH_VALUE_UI_COPY.el,
     "account.pqc": "PQC",
     "account.hybrid": "Υβριδικός",
     "common.continue": "Συνέχεια",
@@ -302,10 +325,34 @@ export const PRIMARY_UI_COPY = {
     "security.biometricUnlock": "Βιομετρικό ξεκλείδωμα",
     "security.noBiometricSensor": "Δεν υπάρχει διαθέσιμος βιομετρικός αισθητήρας σε αυτή τη συσκευή.",
     "security.biometricUnlockActive": "Το βιομετρικό ξεκλείδωμα είναι ενεργό.",
+    "security.biometricScreenLockWarning":
+      "Το PIN, το μοτίβο ή ο κωδικός της οθόνης του κινητού ανοίγει επίσης το wallet, επειδή το Android το προσφέρει όποτε αποτύχει το δακτυλικό. Ένας έλεγχος καλύπτει 30 δευτερόλεπτα. Η προσθήκη νέου δακτυλικού στο κινητό διαγράφει το αποθηκευμένο passphrase.",
     "security.passphraseToEnable": "Κωδικός πρόσβασης (για ενεργοποίηση)",
     "security.enableBiometricUnlock": "Ενεργοποίηση βιομετρικού ξεκλειδώματος",
     "security.disableBiometricUnlock": "Απενεργοποίηση βιομετρικού ξεκλειδώματος",
     "security.biometricConfirm": "Βιομετρική επιβεβαίωση",
+    "security.secondFactorAmount": "Ποσό επιβεβαίωσης",
+    "security.secondFactorAmountHint":
+      "Ζήτα επιβεβαίωση στις αποστολές HAC πάνω από αυτό το ποσό. Το προφίλ ασφαλείας ορίζει το ανώτατο, οπότε αυτό μπορεί μόνο να κάνει το wallet αυστηρότερο, ποτέ πιο χαλαρό. Η αλλαγή απαιτεί το passphrase.",
+    "security.secondFactorAmountCurrent": "Ισχύει τώρα: αποστολές HAC πάνω από {amount} HAC.",
+    "security.secondFactorAmountEvery": "Ισχύει τώρα: κάθε πληρωμή, ανεξάρτητα από το ποσό.",
+    "security.secondFactorAmountLabel": "Επιβεβαίωση για αποστολές πάνω από (HAC)",
+    "security.secondFactorAmountApply": "Αποθήκευση ποσού",
+    "security.secondFactorAmountReset": "Χρήση της προεπιλογής του προφίλ",
+    "security.secondFactorAmountSaved": "Το ποσό επιβεβαίωσης ενημερώθηκε.",
+    "security.secondFactorAmountInvalid": "Βάλε ακέραιο αριθμό HAC, τουλάχιστον 1.",
+    "security.biometricConfirmSends":
+      "Οι αποστολές HAC πάνω από {amount} HAC απαιτούν {kind}. Κάτω από αυτό, μια αποστολή HAC υπογράφεται χωρίς επιβεβαίωση όσο το wallet είναι ξεκλείδωτο. Οι αποστολές Diamond και bridged Bitcoin απαιτούν πάντα επιβεβαίωση, ανεξάρτητα από το ποσό.",
+    "security.biometricConfirmEvery":
+      "Κάθε πληρωμή απαιτεί {kind}, ανεξάρτητα από το ποσό.",
+    "security.noBiometricLargeSend":
+      "Δεν βρέθηκε βιομετρικός αισθητήρας. Οι αποστολές HAC πάνω από {amount} HAC, και κάθε αποστολή Diamond ή bridged Bitcoin, θα απορρίπτονται, γιατί η συσκευή δεν μπορεί να τις επιβεβαιώσει.",
+    "security.noBiometricAnySend":
+      "Δεν βρέθηκε βιομετρικός αισθητήρας. Κάθε πληρωμή θα απορρίπτεται, γιατί αυτή η πολιτική απαιτεί επιβεβαίωση που η συσκευή δεν μπορεί να δώσει.",
+    "security.biometricConfirmOn": "Η βιομετρική επιβεβαίωση είναι ενεργή.",
+    "security.biometricConfirmOff": "Η βιομετρική επιβεβαίωση δεν είναι διαθέσιμη.",
+    "security.signingRefusesScreenLock":
+      "Το PIN, το μοτίβο ή ο κωδικός του κινητού δεν γίνεται δεκτός για την έγκριση αποστολής. Μόνο δακτυλικό ή πρόσωπο.",
     "security.useBiometricForSends": "Χρήση βιομετρικής επιβεβαίωσης στις αποστολές",
     "security.testBiometric": "Δοκιμή βιομετρικού ελέγχου",
     "security.biometricTestOk": "Η βιομετρική δοκιμή πέτυχε.",
@@ -317,6 +364,7 @@ export const PRIMARY_UI_COPY = {
   "zh-CN": translated({
     ...ISTANBUL_UI_COPY["zh-CN"],
     ...AIRGAP_UI_COPY["zh-CN"],
+    ...HIGH_VALUE_UI_COPY["zh-CN"],
     "account.hybrid": "混合",
     "common.continue": "继续",
     "common.copy": "复制",
@@ -422,10 +470,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "均衡",
     "security.paranoid": "严格",
     "security.biometricUnlock": "生物识别解锁",
+    "security.biometricScreenLockWarning":
+      "手机的 PIN 码、图案或密码同样可以打开钱包，因为指纹失败时 Android 会提供这些方式。一次验证在 30 秒内有效。在手机上录入新的指纹会删除已保存的密码短语。",
     "security.noBiometricSensor": "此设备没有可用的生物识别传感器。",
     "security.enableBiometricUnlock": "启用生物识别解锁",
     "security.disableBiometricUnlock": "停用生物识别解锁",
     "security.biometricConfirm": "生物识别确认",
+    "security.signingRefusesScreenLock":
+      "批准发送时不接受手机的 PIN 码、图案或密码，只接受指纹或人脸。",
     "security.useBiometricForSends": "发送时使用生物识别确认",
     "security.testBiometric": "测试生物识别",
     "security.lockWallet": "锁定钱包",
@@ -435,6 +487,7 @@ export const PRIMARY_UI_COPY = {
   ja: translated({
     ...ISTANBUL_UI_COPY.ja,
     ...AIRGAP_UI_COPY.ja,
+    ...HIGH_VALUE_UI_COPY.ja,
     "account.hybrid": "ハイブリッド",
     "common.continue": "続行",
     "common.copy": "コピー",
@@ -539,10 +592,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "標準",
     "security.paranoid": "厳格",
     "security.biometricUnlock": "生体認証でロック解除",
+    "security.biometricScreenLockWarning":
+      "指紋が失敗すると Android が代替手段を提示するため、端末の PIN・パターン・パスワードでもウォレットを開けます。一度の認証は 30 秒間有効です。端末に新しい指紋を登録すると、保存されたパスフレーズは削除されます。",
     "security.noBiometricSensor": "この端末では生体認証センサーを利用できません。",
     "security.enableBiometricUnlock": "生体認証ロック解除を有効化",
     "security.disableBiometricUnlock": "生体認証ロック解除を無効化",
     "security.biometricConfirm": "生体認証による確認",
+    "security.signingRefusesScreenLock":
+      "送金の承認では端末の PIN、パターン、パスワードは使えません。指紋または顔認証のみです。",
     "security.useBiometricForSends": "送信時に生体認証を使用",
     "security.testBiometric": "生体認証をテスト",
     "security.lockWallet": "ウォレットをロック",
@@ -552,6 +609,7 @@ export const PRIMARY_UI_COPY = {
   tr: translated({
     ...ISTANBUL_UI_COPY.tr,
     ...AIRGAP_UI_COPY.tr,
+    ...HIGH_VALUE_UI_COPY.tr,
     "account.hybrid": "Hibrit",
     "common.continue": "Devam et",
     "common.copy": "Kopyala",
@@ -652,10 +710,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Dengeli",
     "security.paranoid": "Paranoid",
     "security.biometricUnlock": "Biyometrik kilit açma",
+    "security.biometricScreenLockWarning":
+      "Parmak izi başarısız olduğunda Android bunu sunduğu için telefonunuzun PIN'i, deseni veya şifresi de cüzdanı açar. Bir doğrulama 30 saniye boyunca geçerlidir. Telefona yeni bir parmak izi eklemek kayıtlı passphrase'i siler.",
     "security.noBiometricSensor": "Bu cihazda kullanılabilir biyometrik sensör yok.",
     "security.enableBiometricUnlock": "Biyometrik kilit açmayı etkinleştir",
     "security.disableBiometricUnlock": "Biyometrik kilit açmayı kapat",
     "security.biometricConfirm": "Biyometrik onay",
+    "security.signingRefusesScreenLock":
+      "Gönderimi onaylamak için telefonun PIN'i, deseni veya şifresi kabul edilmez. Yalnızca parmak izi veya yüz.",
     "security.useBiometricForSends": "Gönderimlerde biyometrik onay kullan",
     "security.testBiometric": "Biyometriyi test et",
     "security.lockWallet": "Cüzdanı kilitle",
@@ -664,6 +726,7 @@ export const PRIMARY_UI_COPY = {
   vi: translated({
     ...ISTANBUL_UI_COPY.vi,
     ...AIRGAP_UI_COPY.vi,
+    ...HIGH_VALUE_UI_COPY.vi,
     "account.hybrid": "Kết hợp",
     "common.continue": "Tiếp tục",
     "common.copy": "Sao chép",
@@ -764,10 +827,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Cân bằng",
     "security.paranoid": "Nghiêm ngặt",
     "security.biometricUnlock": "Mở khóa sinh trắc học",
+    "security.biometricScreenLockWarning":
+      "Mã PIN, hình mở khóa hoặc mật khẩu của điện thoại cũng mở được ví, vì Android đưa ra lựa chọn đó mỗi khi vân tay thất bại. Một lần xác thực có hiệu lực trong 30 giây. Thêm vân tay mới trên điện thoại sẽ xóa passphrase đã lưu.",
     "security.noBiometricSensor": "Thiết bị này không có cảm biến sinh trắc học khả dụng.",
     "security.enableBiometricUnlock": "Bật mở khóa sinh trắc học",
     "security.disableBiometricUnlock": "Tắt mở khóa sinh trắc học",
     "security.biometricConfirm": "Xác nhận sinh trắc học",
+    "security.signingRefusesScreenLock":
+      "Mã PIN, hình mở khóa hoặc mật khẩu của điện thoại không được chấp nhận để phê duyệt giao dịch gửi. Chỉ vân tay hoặc khuôn mặt.",
     "security.useBiometricForSends": "Dùng sinh trắc học khi gửi",
     "security.testBiometric": "Kiểm tra sinh trắc học",
     "security.lockWallet": "Khóa ví",
@@ -776,6 +843,7 @@ export const PRIMARY_UI_COPY = {
   ru: translated({
     ...ISTANBUL_UI_COPY.ru,
     ...AIRGAP_UI_COPY.ru,
+    ...HIGH_VALUE_UI_COPY.ru,
     "account.hybrid": "Гибридный",
     "common.continue": "Продолжить",
     "common.copy": "Копировать",
@@ -876,10 +944,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Сбалансированный",
     "security.paranoid": "Строгий",
     "security.biometricUnlock": "Биометрическая разблокировка",
+    "security.biometricScreenLockWarning":
+      "PIN-код, графический ключ или пароль телефона также открывают кошелёк, потому что Android предлагает их при неудачном отпечатке. Одна проверка действует 30 секунд. Добавление нового отпечатка на телефоне удаляет сохранённую парольную фразу.",
     "security.noBiometricSensor": "На этом устройстве нет доступного биометрического датчика.",
     "security.enableBiometricUnlock": "Включить биометрическую разблокировку",
     "security.disableBiometricUnlock": "Выключить биометрическую разблокировку",
     "security.biometricConfirm": "Биометрическое подтверждение",
+    "security.signingRefusesScreenLock":
+      "PIN-код, графический ключ или пароль телефона не принимаются для подтверждения отправки. Только отпечаток или лицо.",
     "security.useBiometricForSends": "Использовать биометрию при отправке",
     "security.testBiometric": "Проверить биометрию",
     "security.lockWallet": "Заблокировать кошелёк",
@@ -888,6 +960,7 @@ export const PRIMARY_UI_COPY = {
   es: translated({
     ...ISTANBUL_UI_COPY.es,
     ...AIRGAP_UI_COPY.es,
+    ...HIGH_VALUE_UI_COPY.es,
     "account.hybrid": "Híbrida",
     "common.continue": "Continuar",
     "common.copy": "Copiar",
@@ -988,10 +1061,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Equilibrado",
     "security.paranoid": "Paranoico",
     "security.biometricUnlock": "Desbloqueo biométrico",
+    "security.biometricScreenLockWarning":
+      "El PIN, el patrón o la contraseña del teléfono también abren la cartera, porque Android los ofrece cada vez que falla la huella. Una comprobación cubre 30 segundos. Registrar una huella nueva en el teléfono borra la frase de contraseña guardada.",
     "security.noBiometricSensor": "Este dispositivo no tiene un sensor biométrico disponible.",
     "security.enableBiometricUnlock": "Activar desbloqueo biométrico",
     "security.disableBiometricUnlock": "Desactivar desbloqueo biométrico",
     "security.biometricConfirm": "Confirmación biométrica",
+    "security.signingRefusesScreenLock":
+      "El PIN, el patrón o la contraseña del teléfono no se aceptan para aprobar un envío. Solo huella o rostro.",
     "security.useBiometricForSends": "Usar biometría para los envíos",
     "security.testBiometric": "Probar biometría",
     "security.lockWallet": "Bloquear monedero",
@@ -1000,6 +1077,7 @@ export const PRIMARY_UI_COPY = {
   fr: translated({
     ...ISTANBUL_UI_COPY.fr,
     ...AIRGAP_UI_COPY.fr,
+    ...HIGH_VALUE_UI_COPY.fr,
     "account.hybrid": "Hybride",
     "common.continue": "Continuer",
     "common.copy": "Copier",
@@ -1100,10 +1178,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Équilibré",
     "security.paranoid": "Paranoïaque",
     "security.biometricUnlock": "Déverrouillage biométrique",
+    "security.biometricScreenLockWarning":
+      "Le code PIN, le schéma ou le mot de passe du téléphone ouvrent aussi le portefeuille, car Android les propose dès que l'empreinte échoue. Une vérification couvre 30 secondes. Enregistrer une nouvelle empreinte sur le téléphone supprime la phrase secrète stockée.",
     "security.noBiometricSensor": "Aucun capteur biométrique n'est disponible sur cet appareil.",
     "security.enableBiometricUnlock": "Activer le déverrouillage biométrique",
     "security.disableBiometricUnlock": "Désactiver le déverrouillage biométrique",
     "security.biometricConfirm": "Confirmation biométrique",
+    "security.signingRefusesScreenLock":
+      "Le code PIN, le schéma ou le mot de passe du téléphone n'est pas accepté pour approuver un envoi. Uniquement l'empreinte ou le visage.",
     "security.useBiometricForSends": "Utiliser la biométrie pour les envois",
     "security.testBiometric": "Tester la biométrie",
     "security.lockWallet": "Verrouiller le portefeuille",
@@ -1112,6 +1194,7 @@ export const PRIMARY_UI_COPY = {
   pt: translated({
     ...ISTANBUL_UI_COPY.pt,
     ...AIRGAP_UI_COPY.pt,
+    ...HIGH_VALUE_UI_COPY.pt,
     "account.hybrid": "Híbrida",
     "common.continue": "Continuar",
     "common.copy": "Copiar",
@@ -1212,10 +1295,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Equilibrado",
     "security.paranoid": "Paranoico",
     "security.biometricUnlock": "Desbloqueio biométrico",
+    "security.biometricScreenLockWarning":
+      "O PIN, o padrão ou a senha do telefone também abrem a carteira, porque o Android os oferece sempre que a impressão digital falha. Uma verificação cobre 30 segundos. Registar uma nova impressão digital no telefone apaga a frase de acesso guardada.",
     "security.noBiometricSensor": "Não existe um sensor biométrico disponível neste dispositivo.",
     "security.enableBiometricUnlock": "Ativar desbloqueio biométrico",
     "security.disableBiometricUnlock": "Desativar desbloqueio biométrico",
     "security.biometricConfirm": "Confirmação biométrica",
+    "security.signingRefusesScreenLock":
+      "O PIN, o padrão ou a senha do telefone não são aceites para aprovar um envio. Apenas impressão digital ou rosto.",
     "security.useBiometricForSends": "Usar biometria nos envios",
     "security.testBiometric": "Testar biometria",
     "security.lockWallet": "Bloquear carteira",
@@ -1224,6 +1311,7 @@ export const PRIMARY_UI_COPY = {
   ar: translated({
     ...ISTANBUL_UI_COPY.ar,
     ...AIRGAP_UI_COPY.ar,
+    ...HIGH_VALUE_UI_COPY.ar,
     "account.hybrid": "هجين",
     "common.continue": "متابعة",
     "common.copy": "نسخ",
@@ -1324,10 +1412,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "متوازن",
     "security.paranoid": "صارم",
     "security.biometricUnlock": "فتح القفل بالمقاييس الحيوية",
+    "security.biometricScreenLockWarning":
+      "رقم PIN أو النمط أو كلمة مرور الهاتف تفتح المحفظة أيضًا، لأن أندرويد يقدّمها عند فشل بصمة الإصبع. يغطي التحقق الواحد 30 ثانية. تسجيل بصمة جديدة على الهاتف يحذف عبارة المرور المحفوظة.",
     "security.noBiometricSensor": "لا يتوفر مستشعر حيوي على هذا الجهاز.",
     "security.enableBiometricUnlock": "تفعيل الفتح بالمقاييس الحيوية",
     "security.disableBiometricUnlock": "تعطيل الفتح بالمقاييس الحيوية",
     "security.biometricConfirm": "التأكيد بالمقاييس الحيوية",
+    "security.signingRefusesScreenLock":
+      "لا يُقبل رقم PIN أو النمط أو كلمة مرور الهاتف للموافقة على الإرسال. البصمة أو الوجه فقط.",
     "security.useBiometricForSends": "استخدام المقاييس الحيوية عند الإرسال",
     "security.testBiometric": "اختبار المقاييس الحيوية",
     "security.lockWallet": "قفل المحفظة",
@@ -1336,6 +1428,7 @@ export const PRIMARY_UI_COPY = {
   sv: translated({
     ...ISTANBUL_UI_COPY.sv,
     ...AIRGAP_UI_COPY.sv,
+    ...HIGH_VALUE_UI_COPY.sv,
     "account.hybrid": "Hybrid",
     "common.continue": "Fortsätt",
     "common.copy": "Kopiera",
@@ -1436,10 +1529,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Balanserad",
     "security.paranoid": "Paranoid",
     "security.biometricUnlock": "Biometrisk upplåsning",
+    "security.biometricScreenLockWarning":
+      "Telefonens PIN, mönster eller lösenord öppnar också plånboken, eftersom Android erbjuder det när fingeravtrycket misslyckas. En kontroll gäller i 30 sekunder. Att registrera ett nytt fingeravtryck på telefonen tar bort den lagrade lösenfrasen.",
     "security.noBiometricSensor": "Ingen biometrisk sensor är tillgänglig på enheten.",
     "security.enableBiometricUnlock": "Aktivera biometrisk upplåsning",
     "security.disableBiometricUnlock": "Inaktivera biometrisk upplåsning",
     "security.biometricConfirm": "Biometrisk bekräftelse",
+    "security.signingRefusesScreenLock":
+      "Telefonens PIN, mönster eller lösenord godtas inte för att godkänna en betalning. Endast fingeravtryck eller ansikte.",
     "security.useBiometricForSends": "Använd biometri vid sändning",
     "security.testBiometric": "Testa biometri",
     "security.lockWallet": "Lås plånbok",
@@ -1448,6 +1545,7 @@ export const PRIMARY_UI_COPY = {
   de: translated({
     ...ISTANBUL_UI_COPY.de,
     ...AIRGAP_UI_COPY.de,
+    ...HIGH_VALUE_UI_COPY.de,
     "account.hybrid": "Hybrid",
     "common.continue": "Weiter",
     "common.copy": "Kopieren",
@@ -1548,10 +1646,14 @@ export const PRIMARY_UI_COPY = {
     "security.balanced": "Ausgewogen",
     "security.paranoid": "Paranoid",
     "security.biometricUnlock": "Biometrisch entsperren",
+    "security.biometricScreenLockWarning":
+      "Die PIN, das Muster oder das Passwort des Telefons öffnen die Wallet ebenfalls, weil Android sie anbietet, sobald der Fingerabdruck fehlschlägt. Eine Prüfung gilt 30 Sekunden. Das Hinzufügen eines neuen Fingerabdrucks auf dem Telefon löscht die gespeicherte Passphrase.",
     "security.noBiometricSensor": "Auf diesem Gerät ist kein biometrischer Sensor verfügbar.",
     "security.enableBiometricUnlock": "Biometrisches Entsperren aktivieren",
     "security.disableBiometricUnlock": "Biometrisches Entsperren deaktivieren",
     "security.biometricConfirm": "Biometrische Bestätigung",
+    "security.signingRefusesScreenLock":
+      "Die PIN, das Muster oder das Passwort des Telefons wird für die Freigabe einer Zahlung nicht akzeptiert. Nur Fingerabdruck oder Gesicht.",
     "security.useBiometricForSends": "Biometrie beim Senden verwenden",
     "security.testBiometric": "Biometrie testen",
     "security.lockWallet": "Wallet sperren",

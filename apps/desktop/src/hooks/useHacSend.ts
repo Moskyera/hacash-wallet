@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, HubFeePayer, type L1FeeSpeed, SendOptions, SendPreview, WalletSettings } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
-import { runWebAuthnAuth, webAuthnClientOrigin } from "../webauthn";
+import { authorizePreparedOperation } from "../preparedAuthorization";
 import { DEFAULT_SERVICE_FEE_RATE, sendSuccessMessage } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
 import type { Screen } from "../screens/types";
@@ -167,31 +167,28 @@ export function useHacSend(opts: {
     void refreshHistory();
     try {
       const amount = Number(sendAmount);
-      const needs2fa =
+      // Mirror of authorization_requirement() in wallet-core. A hardware gate and a
+      // Cold Vault need a factor for every amount, and the core rounds the policed
+      // amount up, so 99.5 needs one too. Being more permissive here just turns a
+      // usable "Select Force L1" hint into a raw policy error at the moment of paying.
+      const needsAuthorization =
+        status?.hardware_signing_mode === "webauthn_gate" ||
+        status?.hardware_signing_mode === "airgap_only" ||
         status?.security_profile === "paranoid" ||
-        (status?.security_profile !== "paranoid" && amount >= 100);
-      if (needs2fa && status?.webauthn_enabled) {
-        onInfo("Complete WebAuthn (YubiKey / Windows Hello) in the system prompt…");
-        const origin = webAuthnClientOrigin();
-        const options = await api.webauthnAuthBegin(origin);
-        const assertion = await runWebAuthnAuth(options);
-        await api.webauthnAuthFinish(assertion);
-      } else if (needs2fa) {
-        if (nativeBioAvailable) {
-          onInfo(
-            "Amount ≥ 100 HAC: confirm in the Windows Hello / PIN dialog (check taskbar if hidden).",
+        Math.ceil(amount) >= (status?.require_second_factor_above_mei ?? 100);
+      let result;
+      if (preview?.plan.rail === "L2Fast") {
+        if (needsAuthorization) {
+          throw new Error(
+            "Protected Fast Pay is blocked until its exact settlement bill can be prepared before authorization. Select Force L1.",
           );
-          await api.confirmBiometricNative();
-        } else if (status?.webauthn_enabled) {
-          const origin = webAuthnClientOrigin();
-          const options = await api.webauthnAuthBegin(origin);
-          const assertion = await runWebAuthnAuth(options);
-          await api.webauthnAuthFinish(assertion);
-        } else {
-          throw new Error("Enable Windows Hello or register WebAuthn for large sends");
         }
+        result = await api.sendHac(sendTo.trim(), amount, currentSendOptions());
+      } else {
+        const prepared = await api.prepareSendHac(sendTo.trim(), amount, currentSendOptions());
+        await authorizePreparedOperation(prepared, nativeBioAvailable);
+        result = await api.executePreparedHac(prepared.id);
       }
-      const result = await api.sendHac(sendTo.trim(), amount, currentSendOptions());
       setLastTxHash(result.tx_hash);
       setPreview(null);
       setSendTo("");
