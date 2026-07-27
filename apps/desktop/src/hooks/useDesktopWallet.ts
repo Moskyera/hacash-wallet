@@ -833,6 +833,27 @@ export function useDesktopWallet(
     [clearMessages, refreshStatus, onInfo, onError],
   );
 
+  const handleSetSecondFactorThreshold = useCallback(
+    async (amountMei: number | null, currentPassphrase: string) => {
+      setBusy(true);
+      clearMessages();
+      try {
+        await api.setSecondFactorThreshold(amountMei, currentPassphrase);
+        await refreshStatus();
+        onInfo(
+          amountMei == null
+            ? "Confirmation amount reset to the security profile default."
+            : `Confirmation required for sends above ${amountMei - 1} HAC.`,
+        );
+      } catch (e) {
+        onError(String(e));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [clearMessages, refreshStatus, onInfo, onError],
+  );
+
   const setLastTxHash = useCallback((hash: string) => {
     setLastTx(hash);
   }, []);
@@ -891,6 +912,7 @@ export function useDesktopWallet(
     handleClearHistory,
     handleCopyAddress,
     handleSetProfile,
+    handleSetSecondFactorThreshold,
     handleSetHardwareMode,
     handleValidateHip23,
     setLastTxHash,

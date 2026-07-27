@@ -93,6 +93,7 @@ export type DesktopActions = {
   onCloseChannel: (setChannelPreview: (p: import("../api").ChannelSetupPreview | null) => void) => void;
   onRegisterWebAuthn: (currentPassphrase: string) => void;
   onSetProfile: (profile: string, currentPassphrase: string) => void;
+  onSetSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) => void;
   onSetHardwareMode: (
     mode: "software" | "webauthn_gate" | "airgap_only" | "watch_only",
     currentPassphrase: string,
@@ -189,6 +190,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     onCloseChannel,
     onRegisterWebAuthn,
     onSetProfile,
+    onSetSecondFactorThreshold,
     onSetHardwareMode,
     onSaveSettings,
     onChangePassphrase,
@@ -408,6 +410,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
             busy={busy}
             onRegisterWebAuthn={onRegisterWebAuthn}
             onSetProfile={onSetProfile}
+            onSetSecondFactorThreshold={onSetSecondFactorThreshold}
             onSetHardwareMode={onSetHardwareMode}
           />
           <SecurityScreen

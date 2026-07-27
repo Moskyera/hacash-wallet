@@ -639,6 +639,8 @@ export const api = {
     invoke<SendResult>("wallet_send_hac", { to, amountMei, sendOptions }),
   setSecurityProfile: (profile: string, currentPassphrase: string) =>
     invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
+  setSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) =>
+    invoke<void>("wallet_set_second_factor_threshold", { amountMei, currentPassphrase }),
   updatePrivacySettings: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   updateDustWhisperSettings: (dustWhisper: DustWhisperSettings) =>

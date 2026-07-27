@@ -185,6 +185,8 @@ export default function App() {
         void wallet.handleRegisterWebAuthn(currentPassphrase),
       onSetProfile: (p: string, currentPassphrase: string) =>
         void wallet.handleSetProfile(p, currentPassphrase),
+      onSetSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) =>
+        void wallet.handleSetSecondFactorThreshold(amountMei, currentPassphrase),
       onSetHardwareMode: (
         m: "software" | "webauthn_gate" | "airgap_only" | "watch_only",
         currentPassphrase: string,

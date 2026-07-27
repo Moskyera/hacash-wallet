@@ -151,7 +151,7 @@ did not see. It can annoy you, it cannot redirect your money.
   factor is required for every payment **above 99 HAC**. At or below that, while
   the wallet is unlocked, the payment is signed with no further confirmation.
   Please read that twice, because it is the rule that decides your daily
-  experience. On Android you can lower that limit: Settings, Security,
+  experience. You can lower that limit on either platform: Settings, Security,
   **Confirmation amount** accepts any whole number of HAC down to 1, and needs
   your passphrase. It can only make the wallet stricter, never looser, because
   your security profile sets the maximum and the wallet always takes the smaller

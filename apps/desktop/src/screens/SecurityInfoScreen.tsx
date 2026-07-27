@@ -9,6 +9,7 @@ type Props = {
   busy: boolean;
   onRegisterWebAuthn: (currentPassphrase: string) => void;
   onSetProfile: (profile: string, currentPassphrase: string) => void;
+  onSetSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) => void;
   onSetHardwareMode: (
     mode: "software" | "webauthn_gate" | "airgap_only" | "watch_only",
     currentPassphrase: string,
@@ -22,14 +23,22 @@ export default function SecurityInfoScreen({
   busy,
   onRegisterWebAuthn,
   onSetProfile,
+  onSetSecondFactorThreshold,
   onSetHardwareMode,
 }: Props) {
   const { t } = useLocale();
   const [currentPassphrase, setCurrentPassphrase] = useState("");
   const [coldVaultConfirmation, setColdVaultConfirmation] = useState("");
+  const [thresholdDraft, setThresholdDraft] = useState("");
   const coldVault = status?.hardware_signing_mode === "airgap_only";
   const legacyKey = status?.legacy_key_derivation != null;
   const freshFactorAvailable = !!status?.webauthn_enabled || nativeBioAvailable;
+  // The core reports what it enforces, already combining the authenticated profile with
+  // the chosen amount. A constant here would state the rule wrongly the moment either
+  // one is not the default.
+  const enforcedThreshold = status?.require_second_factor_above_mei ?? 100;
+  const everyPaymentNeedsFactor =
+    coldVault || status?.security_profile === "paranoid" || enforcedThreshold <= 1;
   const runAuthenticated = (action: (passphrase: string) => void) => {
     const passphrase = currentPassphrase;
     setCurrentPassphrase("");
@@ -117,6 +126,52 @@ export default function SecurityInfoScreen({
           Paranoid profile
         </button>
       </div>
+
+      <h3>{t("security.secondFactorAmount")}</h3>
+      <p className="muted">{t("security.secondFactorAmountHint")}</p>
+      <p className="muted">
+        {everyPaymentNeedsFactor
+          ? t("security.secondFactorAmountEvery")
+          : t("security.secondFactorAmountCurrent", { amount: enforcedThreshold - 1 })}
+      </p>
+      {!coldVault ? (
+        <>
+          <label>{t("security.secondFactorAmountLabel")}</label>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            placeholder={String(enforcedThreshold)}
+            value={thresholdDraft}
+            onChange={(event) => setThresholdDraft(event.target.value)}
+          />
+          <div className="actions-row">
+            <button
+              className="primary"
+              disabled={busy || !currentPassphrase || !thresholdDraft}
+              onClick={() => {
+                const amount = Number(thresholdDraft);
+                if (!Number.isInteger(amount) || amount < 1) return;
+                setThresholdDraft("");
+                runAuthenticated((passphrase) =>
+                  onSetSecondFactorThreshold(amount, passphrase),
+                );
+              }}
+            >
+              {t("security.secondFactorAmountApply")}
+            </button>
+            <button
+              disabled={busy || !currentPassphrase}
+              onClick={() => {
+                setThresholdDraft("");
+                runAuthenticated((passphrase) => onSetSecondFactorThreshold(null, passphrase));
+              }}
+            >
+              {t("security.secondFactorAmountReset")}
+            </button>
+          </div>
+        </>
+      ) : null}
 
       <h3>{t("security.signingPolicy")}</h3>
       <p className="muted">{t("security.softwareKeyCustodyHint")}</p>
