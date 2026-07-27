@@ -22,6 +22,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "This wallet's key was derived from a recovery phrase with one unsalted SHA-256. Anyone who guesses the phrase can spend from it without this device or your passphrase, so no device setting can protect it. Move the funds to a newly generated wallet.",
     "docs.howItWorks": "How this wallet works",
     "docs.howItWorksHint": "Opens the full public explanation on GitHub: what protects your money, what does not, and every known limit. Written in plain language.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Which build is running on this device. Quote it when reporting anything.",
     "docs.readPromptTitle":
       "New here? Read how this wallet works",
     "docs.readPromptBody":
@@ -54,6 +57,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Το κλειδί αυτού του wallet προήλθε από φράση ανάκτησης με ένα μόνο SHA-256 χωρίς salt. Όποιος μαντέψει τη φράση ξοδεύει χωρίς αυτή τη συσκευή ή τη φράση πρόσβασής σας, άρα καμία ρύθμιση δεν το προστατεύει. Μεταφέρετε τα κεφάλαια σε νέο wallet.",
     "docs.howItWorks": "Πώς λειτουργεί αυτό το wallet",
     "docs.howItWorksHint": "Ανοίγει την πλήρη δημόσια εξήγηση στο GitHub: τι προστατεύει τα χρήματά σας, τι δεν προστατεύει, και κάθε γνωστό όριο. Σε απλή γλώσσα.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Ποιο build τρέχει σε αυτή τη συσκευή. Ανάφερέ το όταν δηλώνεις κάποιο πρόβλημα.",
     "docs.readPromptTitle":
       "Καινούριος εδώ; Διάβασε πώς λειτουργεί αυτό το wallet",
     "docs.readPromptBody":
@@ -86,6 +92,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "此钱包的私钥由助记短语经一次无盐 SHA-256 派生。任何猜中该短语的人都能在没有本设备或密码短语的情况下动用资金，任何设备设置都无法保护它。请把资金转到新生成的钱包。",
     "docs.howItWorks": "本钱包如何运作",
     "docs.howItWorksHint": "在 GitHub 上打开完整的公开说明：什么在保护你的资金、什么不能，以及每一个已知的限制。以通俗语言写成。",
+    "settings.buildId": "构建版本",
+    "settings.buildIdHint":
+      "本设备上正在运行的构建。报告问题时请一并提供。",
     "docs.readPromptTitle":
       "初次使用？先看看这个钱包如何运作",
     "docs.readPromptBody":
@@ -118,6 +127,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "このウォレットの鍵は、ソルトなしの SHA-256 を一度だけ適用して復元フレーズから導出されています。フレーズを推測できる人は本端末やパスフレーズなしで送金できるため、端末側の設定では守れません。資金は新規作成したウォレットへ移してください。",
     "docs.howItWorks": "このウォレットの仕組み",
     "docs.howItWorksHint": "GitHub 上の完全な公開説明を開きます。資産を守るものと守らないもの、そして既知のすべての限界を、平易な言葉で説明しています。",
+    "settings.buildId": "ビルド",
+    "settings.buildIdHint":
+      "この端末で動作しているビルドです。問題を報告する際に添えてください。",
     "docs.readPromptTitle":
       "はじめての方へ。このウォレットの仕組みをご覧ください",
     "docs.readPromptBody":
@@ -150,6 +162,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Bu cüzdanın anahtarı, kurtarma ifadesinden tuzsuz tek bir SHA-256 ile türetildi. İfadeyi tahmin eden herkes bu cihaz veya parolanız olmadan harcama yapabilir; hiçbir cihaz ayarı bunu koruyamaz. Fonları yeni oluşturulmuş bir cüzdana taşıyın.",
     "docs.howItWorks": "Bu cüzdan nasıl çalışır",
     "docs.howItWorksHint": "GitHub'daki tam kamuya açık açıklamayı açar: paranızı neyin koruduğu, neyin korumadığı ve bilinen her sınır. Sade bir dille yazılmıştır.",
+    "settings.buildId": "Yapı",
+    "settings.buildIdHint":
+      "Bu cihazda çalışan yapı. Bir sorun bildirirken bunu da belirtin.",
     "docs.readPromptTitle":
       "Yeni misiniz? Bu cüzdanın nasıl çalıştığını okuyun",
     "docs.readPromptBody":
@@ -182,6 +197,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Khoá của ví này được dẫn xuất từ cụm từ khôi phục bằng một lần SHA-256 không muối. Bất kỳ ai đoán được cụm từ đều chi tiêu được mà không cần thiết bị này hay mật khẩu của bạn, nên không cài đặt nào bảo vệ được. Hãy chuyển tiền sang ví mới tạo.",
     "docs.howItWorks": "Ví này hoạt động thế nào",
     "docs.howItWorksHint": "Mở phần giải thích công khai đầy đủ trên GitHub: điều gì bảo vệ tiền của bạn, điều gì không, và mọi giới hạn đã biết. Viết bằng ngôn ngữ dễ hiểu.",
+    "settings.buildId": "Bản dựng",
+    "settings.buildIdHint":
+      "Bản dựng đang chạy trên thiết bị này. Hãy nêu kèm khi báo lỗi.",
     "docs.readPromptTitle":
       "Bạn mới dùng? Hãy đọc cách ví này hoạt động",
     "docs.readPromptBody":
@@ -214,6 +232,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Ключ этого кошелька получен из фразы восстановления одним SHA-256 без соли. Любой, кто угадает фразу, потратит средства без этого устройства и без вашего пароля, поэтому никакие настройки не помогут. Переведите средства в новый кошелёк.",
     "docs.howItWorks": "Как работает этот кошелёк",
     "docs.howItWorksHint": "Открывает полное публичное объяснение на GitHub: что защищает ваши средства, что не защищает и каждое известное ограничение. Простым языком.",
+    "settings.buildId": "Сборка",
+    "settings.buildIdHint":
+      "Какая сборка запущена на этом устройстве. Указывайте её при сообщении о проблеме.",
     "docs.readPromptTitle":
       "Впервые здесь? Прочитайте, как работает этот кошелёк",
     "docs.readPromptBody":
@@ -246,6 +267,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "La clave de esta cartera se derivó de una frase de recuperación con un solo SHA-256 sin sal. Quien adivine la frase puede gastar sin este dispositivo ni su contraseña, así que ningún ajuste puede protegerla. Mueva los fondos a una cartera recién generada.",
     "docs.howItWorks": "Cómo funciona esta cartera",
     "docs.howItWorksHint": "Abre la explicación pública completa en GitHub: qué protege su dinero, qué no lo protege y todos los límites conocidos. En lenguaje sencillo.",
+    "settings.buildId": "Compilación",
+    "settings.buildIdHint":
+      "Qué compilación se ejecuta en este dispositivo. Indícala al informar de algo.",
     "docs.readPromptTitle":
       "¿Primera vez? Lee cómo funciona esta cartera",
     "docs.readPromptBody":
@@ -278,6 +302,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "La clé de ce portefeuille a été dérivée d'une phrase de récupération par un seul SHA-256 sans sel. Quiconque devine la phrase peut dépenser sans cet appareil ni votre phrase secrète, donc aucun réglage ne la protège. Transférez les fonds vers un portefeuille nouvellement généré.",
     "docs.howItWorks": "Comment fonctionne ce portefeuille",
     "docs.howItWorksHint": "Ouvre l'explication publique complète sur GitHub : ce qui protège votre argent, ce qui ne le protège pas, et chaque limite connue. En langage clair.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Quel build tourne sur cet appareil. Indiquez-le lorsque vous signalez un problème.",
     "docs.readPromptTitle":
       "Nouveau ici ? Lisez comment ce portefeuille fonctionne",
     "docs.readPromptBody":
@@ -310,6 +337,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "A chave desta carteira foi derivada de uma frase de recuperação com um único SHA-256 sem sal. Quem adivinhar a frase consegue gastar sem este dispositivo nem a sua palavra-passe, por isso nenhuma configuração a protege. Mova os fundos para uma carteira recém-gerada.",
     "docs.howItWorks": "Como funciona esta carteira",
     "docs.howItWorksHint": "Abre a explicação pública completa no GitHub: o que protege o seu dinheiro, o que não protege e todos os limites conhecidos. Em linguagem simples.",
+    "settings.buildId": "Compilação",
+    "settings.buildIdHint":
+      "Qual compilação está a correr neste dispositivo. Indique-a ao relatar algo.",
     "docs.readPromptTitle":
       "É novo por aqui? Leia como esta carteira funciona",
     "docs.readPromptBody":
@@ -342,6 +372,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "اشتُق مفتاح هذه المحفظة من عبارة استرجاع بتطبيق SHA-256 مرة واحدة وبدون ملح. من يخمّن العبارة يستطيع الإنفاق دون هذا الجهاز ودون عبارة المرور، ولذلك لا يحميها أي إعداد. انقل الأموال إلى محفظة جديدة.",
     "docs.howItWorks": "كيف تعمل هذه المحفظة",
     "docs.howItWorksHint": "يفتح الشرح العام الكامل على GitHub: ما يحمي أموالك وما لا يحميها، وكل حد معروف. مكتوب بلغة واضحة.",
+    "settings.buildId": "الإصدار البنائي",
+    "settings.buildIdHint":
+      "الإصدار الذي يعمل على هذا الجهاز. اذكره عند الإبلاغ عن أي مشكلة.",
     "docs.readPromptTitle":
       "هل أنت جديد؟ اقرأ كيف تعمل هذه المحفظة",
     "docs.readPromptBody":
@@ -374,6 +407,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Nyckeln i denna plånbok härleddes från en återställningsfras med en enda osaltad SHA-256. Den som gissar frasen kan spendera utan den här enheten eller din lösenfras, så ingen inställning skyddar den. Flytta medlen till en nyskapad plånbok.",
     "docs.howItWorks": "Så fungerar denna plånbok",
     "docs.howItWorksHint": "Öppnar den fullständiga offentliga förklaringen på GitHub: vad som skyddar dina pengar, vad som inte gör det, och varje känd begränsning. Skrivet på enkelt språk.",
+    "settings.buildId": "Bygge",
+    "settings.buildIdHint":
+      "Vilket bygge som körs på den här enheten. Ange det när du rapporterar något.",
     "docs.readPromptTitle":
       "Ny här? Läs hur den här plånboken fungerar",
     "docs.readPromptBody":
@@ -406,6 +442,9 @@ export const HIGH_VALUE_UI_COPY: Record<AppLocale, Copy> = {
     "security.legacyBrainwalletKeyWarning": "Der Schlüssel dieser Wallet wurde mit einem einzigen ungesalzenen SHA-256 aus einer Wiederherstellungsphrase abgeleitet. Wer die Phrase errät, kann ohne dieses Gerät und ohne Ihre Passphrase ausgeben; keine Einstellung schützt davor. Übertragen Sie das Guthaben in eine neu erzeugte Wallet.",
     "docs.howItWorks": "Wie diese Wallet funktioniert",
     "docs.howItWorksHint": "Öffnet die vollständige öffentliche Erklärung auf GitHub: was Ihr Geld schützt, was nicht, und jede bekannte Grenze. In einfacher Sprache geschrieben.",
+    "settings.buildId": "Build",
+    "settings.buildIdHint":
+      "Welcher Build auf diesem Gerät läuft. Nennen Sie ihn bei jeder Meldung.",
     "docs.readPromptTitle":
       "Neu hier? Lesen Sie, wie diese Wallet funktioniert",
     "docs.readPromptBody":

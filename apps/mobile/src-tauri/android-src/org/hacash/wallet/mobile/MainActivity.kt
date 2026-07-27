@@ -3,6 +3,8 @@ package org.hacash.wallet.mobile
 import android.os.Bundle
 import android.os.Process
 import android.view.WindowManager
+import android.webkit.WebSettings
+import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 
 /**
@@ -14,6 +16,22 @@ class MainActivity : TauriActivity() {
     window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+  }
+
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    // The frontend ships inside the APK and every asset filename is content hashed, so
+    // index.html is the only document the WebView can cache by name. RustWebView never
+    // sets cacheMode, which leaves the default that honours HTTP caching, and the cache
+    // lives in the app data directory, which survives a package update. The result is a
+    // wallet that keeps running the previous release after an update: the owner installs
+    // a new build and sees none of it.
+    //
+    // Only the resource cache is cleared. localStorage holds saved contacts, the wallet
+    // display name and the do-not-ask-again choice, and it must survive; that is
+    // WebStorage, which this does not touch.
+    webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+    webView.clearCache(true)
   }
 
   override fun onResume() {

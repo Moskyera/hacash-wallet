@@ -113,6 +113,14 @@ export default function SettingsScreen({
         containerClassName="card"
         formatError={formatInvokeError}
       />
+      {/* Every build ships the same file name and the same version name, so without
+          this a field report cannot distinguish an unchanged app from an old file
+          having been installed. It cost a round of confusion to learn that. */}
+      <div className="card">
+        <h2>{t("settings.buildId")}</h2>
+        <p className="muted small">{t("settings.buildIdHint")}</p>
+        <code className="mono wrap">{__BUILD_ID__}</code>
+      </div>
       <div className="card">
         <h2>{t("docs.howItWorks")}</h2>
         <p className="muted small">{t("docs.howItWorksHint")}</p>
