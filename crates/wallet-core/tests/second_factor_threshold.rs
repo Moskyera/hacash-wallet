@@ -160,6 +160,11 @@ fn zero_is_refused_by_validation_and_dropped_by_normalisation() {
 /// moved on.
 #[test]
 fn every_policy_path_reads_the_threshold_through_the_accessor() {
+    // Named so the offset arithmetic below is not a magic number, and so the one needle
+    // this walker greps for is stated once.
+    const FIELD: &str = "profile.require_second_factor_above_mei";
+    // Expressed numerically so the escape cannot be mangled by tooling.
+    let newline = char::from(10u8);
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders = Vec::new();
     // The IPC crate has no policy read today, but it is where one would most plausibly be
@@ -184,27 +189,29 @@ fn every_policy_path_reads_the_threshold_through_the_accessor() {
             // Judge each read by the function that contains it and by whether it feeds
             // the shared formula, not by how the line happens to be wrapped. A pattern
             // that matches text is easy to satisfy accidentally; this one is not.
-            for (offset, _) in source.match_indices("profile.require_second_factor_above_mei") {
+            for (offset, _) in source.match_indices(FIELD) {
                 let before = &source[..offset];
                 let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
                 if source[line_start..offset].trim_start().starts_with("//") {
                     continue;
                 }
                 // Assignment writes the effective value into the clone, it does not read
-                // policy from the raw field.
-                let rest = &source[offset..];
-                if rest
-                    .split_once('\n')
-                    .map(|(line, _)| line.contains(" ="))
-                    .unwrap_or(false)
-                {
+                // policy from the raw field. Test the field as the assignment TARGET:
+                // a contains(" =") also matches " ==", which would exempt a genuine read
+                // sitting inside a compound condition.
+                let after = source[offset + FIELD.len()..].trim_start();
+                if after.starts_with('=') && !after.starts_with("==") {
                     continue;
                 }
                 // Passing the ceiling into the shared formula is the sanctioned pattern,
                 // whether the argument sits on the same line or the next one.
+                // Require the sanctioned call to still be open, so one correct read
+                // cannot shelter a wrong one a couple of lines below it.
                 let window = &before[before.len().saturating_sub(220)..];
-                if window.contains("effective_second_factor_threshold(") {
-                    continue;
+                if let Some(call) = window.rfind("effective_second_factor_threshold(") {
+                    if !window[call..].contains(';') {
+                        continue;
+                    }
                 }
                 // Report the enclosing function so the failure says where to look.
                 // Top-level functions are unindented, methods are indented, and getting
@@ -215,6 +222,10 @@ fn every_policy_path_reads_the_threshold_through_the_accessor() {
                     "\n    pub(super) fn ",
                     "\n    fn ",
                     "\n    pub async fn ",
+                    "
+    pub(crate) async fn ",
+                    "
+    async fn ",
                     "\n    pub fn ",
                     "\npub fn ",
                     "\npub async fn ",
@@ -238,6 +249,28 @@ fn every_policy_path_reads_the_threshold_through_the_accessor() {
                 }
                 let line_number = before.matches('\n').count() + 1;
                 offenders.push(format!("{}:{line_number} in fn {enclosing}", path.display()));
+            }
+
+            // The same bypass with nothing to grep for: a helper that reads the field
+            // for you, handed the raw profile. check_send_policy(&self.profile, ..) was
+            // three of the thirteen sites, and the loop above cannot see it, because the
+            // amount comes from a local and the read itself lives in security.rs, which
+            // this walker skips. Policy helpers must be given effective_profile(); a
+            // whole-struct borrow of the raw profile has no other legitimate caller, and
+            // &self.profile.name, which the vault does use, matches neither pattern.
+            for needle in ["&self.profile,", "&self.profile)"] {
+                for (offset, _) in source.match_indices(needle) {
+                    let before = &source[..offset];
+                    let line_start = before.rfind(newline).map(|i| i + 1).unwrap_or(0);
+                    if source[line_start..offset].trim_start().starts_with("//") {
+                        continue;
+                    }
+                    let line_number = before.matches(newline).count() + 1;
+                    offenders.push(format!(
+                        "{}:{line_number} hands the raw profile to a policy helper",
+                        path.display()
+                    ));
+                }
             }
         }
     }

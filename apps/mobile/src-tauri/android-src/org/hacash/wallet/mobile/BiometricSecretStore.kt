@@ -262,10 +262,20 @@ object BiometricSecretStore {
    * Does this key match the policy this build creates?
    *
    * Callers delete the key when this is false, so it must accept the policy in
-   * `generateKey` exactly. It accepts per-use keys too, so a key written by a
-   * build that used the stricter policy keeps working instead of being wiped.
-   * A window longer than intended is still rejected: that would let one
-   * authentication cover more use than this build ever asked for.
+   * `generateKey` exactly, on every supported API level. Too strict is the
+   * destructive direction: an earlier build paired a `== -1` check with a key it
+   * generated as window 0, so it wiped the key it had just created. Comparing
+   * against the window avoids that whole -1 versus 0 ambiguity.
+   *
+   * A window longer than intended is rejected, which is the only direction that
+   * could weaken the policy: it would let one authentication cover more key use
+   * than the interface implies.
+   *
+   * It also accepts a per-use key, which is strictly stronger and so cannot
+   * weaken anything. That is forward compatibility, not recovery: this build
+   * does not bind a CryptoObject to the prompt, so a per-use key would fail at
+   * `doFinal` and be cleared anyway. An earlier version of this comment claimed
+   * such a key "keeps working", which was wrong.
    */
   private fun isPolicyAcceptable(keyInfo: KeyInfo): Boolean {
     if (!keyInfo.isUserAuthenticationRequired) return false

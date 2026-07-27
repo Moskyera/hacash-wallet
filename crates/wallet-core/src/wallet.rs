@@ -2733,7 +2733,14 @@ impl WalletService {
     /// Every policy decision must read the threshold from here. Nothing outside this
     /// method and [`Self::effective_profile`] may read
     /// `SecurityProfile::require_second_factor_above_mei` directly, or a preference the
-    /// user set would silently not apply on that path. An audit test enforces that.
+    /// user set would silently not apply on that path.
+    ///
+    /// An audit test in `tests/second_factor_threshold.rs` checks two shapes of that
+    /// mistake: a direct field read, and handing the raw profile to a policy helper such
+    /// as `check_send_policy`. It is a text walker, so it cannot see every possible
+    /// aliasing of the field, and it is not a substitute for reading the code. An earlier
+    /// version of this note said the test enforces the rule, which claimed more than the
+    /// test delivers.
     pub fn second_factor_threshold_mei(&self) -> u64 {
         crate::security::effective_second_factor_threshold(
             self.profile.require_second_factor_above_mei,
