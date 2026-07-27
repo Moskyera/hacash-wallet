@@ -286,7 +286,12 @@ fn linux_never_selects_or_offers_windows_installers() {
 fn update_target_derivation_gates_automatic_install_by_os_and_arch() {
     let windows = UpdateTarget::from_parts("windows", "x86_64");
     assert_eq!(windows.channel(), UpdateChannel::Desktop);
-    assert!(windows.supports_automatic_install());
+    assert!(windows.supports_automatic_install_with_windows_signer(true));
+    assert!(!windows.supports_automatic_install_with_windows_signer(false));
+    assert_eq!(
+        windows.supports_automatic_install(),
+        super::download::windows_update_signer_configured()
+    );
 
     let android = UpdateTarget::from_parts("android", "aarch64");
     assert_eq!(android.channel(), UpdateChannel::Mobile);

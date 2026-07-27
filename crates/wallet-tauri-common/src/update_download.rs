@@ -353,7 +353,6 @@ pub async fn download_update_file(
     result
 }
 
-#[cfg(any(target_os = "windows", test))]
 fn normalize_certificate_sha256(raw: &str) -> Option<String> {
     if !raw.chars().all(|character| {
         character.is_ascii_hexdigit()
@@ -368,6 +367,12 @@ fn normalize_certificate_sha256(raw: &str) -> Option<String> {
         .collect::<String>()
         .to_ascii_lowercase();
     (normalized.len() == 64).then_some(normalized)
+}
+
+pub(crate) fn windows_update_signer_configured() -> bool {
+    option_env!("WINDOWS_UPDATE_SIGNER_SHA256")
+        .and_then(normalize_certificate_sha256)
+        .is_some()
 }
 
 #[cfg(target_os = "windows")]

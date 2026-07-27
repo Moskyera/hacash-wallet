@@ -29,6 +29,9 @@ jobs:
       # Public trust policy compiled into the updater. This is a repository
       # Actions variable, never private signing material.
       WINDOWS_UPDATE_SIGNER_SHA256: ${{ vars.WINDOWS_EXPECTED_CERT_SHA256 }}
+      UNSIGNED_WINDOWS_RELEASE_TAG: ${{ vars.UNSIGNED_WINDOWS_RELEASE_TAG }}
+      RELEASE_REF_NAME: ${{ github.ref_name }}
+      RELEASE_REF_TYPE: ${{ github.ref_type }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -44,13 +47,19 @@ jobs:
           }
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Validate the public Windows signer pin
+      - name: Validate the Windows release trust mode
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $fingerprint = ($env:WINDOWS_UPDATE_SIGNER_SHA256 -replace "[^0-9A-Fa-f]", "").ToLowerInvariant()
-          if ($fingerprint -notmatch "^[0-9a-f]{64}$") {
-            throw "Repository variable WINDOWS_EXPECTED_CERT_SHA256 must be a SHA-256 certificate fingerprint"
+          $allowUnsigned = $env:RELEASE_REF_TYPE -eq "tag" -and
+            $env:UNSIGNED_WINDOWS_RELEASE_TAG -eq $env:RELEASE_REF_NAME
+          if ($allowUnsigned) {
+            if (-not [string]::IsNullOrWhiteSpace($fingerprint)) {
+              throw "Unsigned release exception cannot be combined with a publisher certificate pin"
+            }
+          } elseif ($fingerprint -notmatch "^[0-9a-f]{64}$") {
+            throw "A signer pin is required unless UNSIGNED_WINDOWS_RELEASE_TAG exactly matches this tag"
           }
 
       - name: Checkout pinned fullnodedev
@@ -103,14 +112,17 @@ jobs:
           retention-days: 7
 
   sign-windows:
-    name: Sign and verify Windows x64 artifacts
+    name: Apply and verify Windows x64 release policy
     needs: build-windows
+    outputs:
+      signing-mode: ${{ steps.windows-policy.outputs.signing-mode }}
     runs-on: windows-2022
     timeout-minutes: 20
     environment: release-signing
     env:
       RELEASE_VERSION: ${{ needs.build-windows.outputs.release-version }}
       WINDOWS_EXPECTED_CERT_SHA256: ${{ vars.WINDOWS_EXPECTED_CERT_SHA256 }}
+      UNSIGNED_WINDOWS_RELEASE_TAG: ${{ vars.UNSIGNED_WINDOWS_RELEASE_TAG }}
       RELEASE_REF_NAME: ${{ github.ref_name }}
       RELEASE_REF_TYPE: ${{ github.ref_type }}
     steps:
@@ -132,7 +144,13 @@ jobs:
             throw "Release tag does not match unsigned artifact version"
           }
           $expectedPin = ($env:WINDOWS_EXPECTED_CERT_SHA256 -replace "[^0-9A-Fa-f]", "").ToLowerInvariant()
-          if ($expectedPin -notmatch '^[0-9a-f]{64}$') {
+          $allowUnsigned = $env:RELEASE_REF_TYPE -eq "tag" -and
+            $env:UNSIGNED_WINDOWS_RELEASE_TAG -eq $env:RELEASE_REF_NAME
+          if ($allowUnsigned) {
+            if (-not [string]::IsNullOrWhiteSpace($expectedPin)) {
+              throw "Unsigned release exception cannot be combined with a publisher certificate pin"
+            }
+          } elseif ($expectedPin -notmatch '^[0-9a-f]{64}$') {
             throw "Repository variable WINDOWS_EXPECTED_CERT_SHA256 must be a SHA-256 certificate fingerprint"
           }
 
@@ -181,13 +199,21 @@ jobs:
             }
           }
 
-      - name: Sign and verify with the protected Authenticode key
+      - name: Apply and verify the selected Windows trust policy
+        id: windows-policy
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
+          $allowUnsigned = $env:RELEASE_REF_TYPE -eq "tag" -and
+            $env:UNSIGNED_WINDOWS_RELEASE_TAG -eq $env:RELEASE_REF_NAME
+          if ($allowUnsigned) {
+            "signing-mode=unsigned" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            return
+          }
+
           $pfxPath = Join-Path $env:RUNNER_TEMP "hacash-wallet-release.pfx"
           $collection = $null
           try {
@@ -267,6 +293,7 @@ jobs:
             }
             Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
           }
+          "signing-mode=signed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -342,20 +369,25 @@ jobs:
       artifact-metadata: write
     env:
       REQUESTED_CUSTODY_CLASS: ${{ vars.RELEASE_CUSTODY_CLASS }}
+      WINDOWS_SIGNING_MODE: ${{ needs.sign-windows.outputs.signing-mode }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Verify release version and tag
         run: node scripts/release-version.mjs check
 
-      - name: Refuse a high-value custody attestation
+      - name: Validate the declared Windows custody class
         shell: bash
         run: |
           set -euo pipefail
-          requested="${REQUESTED_CUSTODY_CLASS:-standard-outer-signed}"
-          if [[ "$requested" != "standard-outer-signed" ]]; then
-            echo "This PFX workflow signs outer artifacts only; custody class '$requested' is forbidden." >&2
-            echo "Use the documented Tauri-integrated non-exportable remote/HSM signer first." >&2
+          case "$WINDOWS_SIGNING_MODE" in
+            signed) expected="standard-outer-signed" ;;
+            unsigned) expected="unsigned-distribution" ;;
+            *) echo "Unknown Windows signing mode" >&2; exit 1 ;;
+          esac
+          requested="${REQUESTED_CUSTODY_CLASS:-$expected}"
+          if [[ "$requested" != "$expected" ]]; then
+            echo "Custody class '$requested' does not match Windows signing mode '$WINDOWS_SIGNING_MODE'." >&2
             exit 1
           fi
 
@@ -373,27 +405,53 @@ jobs:
         with:
           subject-path: dist-release/*
 
-      - name: Publish only the verified complete artifact set
+      - name: Publish the verified signed desktop artifact set
+        if: needs.sign-windows.outputs.signing-mode == 'signed'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
+          name: DECE Hacash Wallet Desktop ${{ github.ref_name }}
           fail_on_unmatched_files: true
           files: dist-release/*
           body: |
             ### Hacash Wallet Desktop ${{ github.ref_name }}
 
             Windows x64:
-            - NSIS setup executable
-            - MSI installer
-            - Portable executable
-
-            Windows Authenticode covers the three downloadable files. This outer-signing
-            release profile is not a high-value or hardware-grade custody attestation.
+            - Authenticode-signed NSIS setup executable
+            - Authenticode-signed MSI installer
+            - Authenticode-signed portable executable
 
             Linux x64:
             - Debian package
             - AppImage
-            - AppImage is the portable Linux option
             - Raw x64 binary (requires compatible GTK 3, WebKitGTK 4.1 and system libraries)
 
-            A SHA-256 checksum file is included with all desktop artifacts.
+            A SHA-256 checksum file and GitHub build provenance are included.
+
+      - name: Publish the verified unsigned desktop artifact set
+        if: needs.sign-windows.outputs.signing-mode == 'unsigned'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DECE Hacash Wallet Desktop ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: dist-release/*
+          body: |
+            ### Hacash Wallet Desktop ${{ github.ref_name }}
+
+            > **Windows signing notice:** The Windows files in this release are not
+            > Authenticode signed. Windows may show an Unknown publisher or SmartScreen
+            > warning. Download only from this official release and verify SHA-256.
+            > The wallet does not automatically install this unsigned update.
+
+            Windows x64:
+            - Unsigned NSIS setup executable
+            - Unsigned MSI installer
+            - Unsigned portable executable
+
+            Linux x64:
+            - Debian package
+            - AppImage
+            - Raw x64 binary (requires compatible GTK 3, WebKitGTK 4.1 and system libraries)
+
+            A SHA-256 checksum file and GitHub build provenance are included.
