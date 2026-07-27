@@ -126,8 +126,13 @@ describe("destructive wallet IPC", () => {
 
     // Fast Pay cannot carry authorization, so a protected amount is refused rather than
     // prompted. Promising a fingerprint there would only be discovered after tapping.
+    //
+    // Assert the distinctive sentence, not the word "Force": that word already appears in
+    // the Force on-chain checkbox label and inside sendForceL1, so it passes even if the
+    // whole refusal paragraph is deleted.
     const payTab = read("screens/PayTab.tsx");
     expect(payTab).toContain('preview.plan.rail === "L2Fast" ? (');
-    expect(payTab).toContain("Force");
+    expect(payTab).toContain("Fast Pay cannot be confirmed");
+    expect(payTab).toContain("on-chain (L1) above to pay it");
   });
 });

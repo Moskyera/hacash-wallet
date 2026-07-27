@@ -134,19 +134,48 @@ fn dapp_signing_checks_connection_and_policy_before_requesting_consent() {
     }
 
     // The wallet mutex must never be held across the approval await: require_approval
-    // waits up to 120 seconds, and the sync commands use blocking_lock, so holding it
-    // would freeze the interface thread rather than fail cleanly.
-    let transfer = command_body(&dapp, "pub async fn wallet_dapp_transfer(");
-    let guard_block = transfer
-        .split_once("let svc = state.inner.lock().await;")
-        .expect("scoped pre-check guard")
-        .1;
-    let block_end = guard_block.find('}').expect("pre-check block must close");
-    let approval_offset = guard_block
-        .find("require_approval(")
-        .expect("approval call after the pre-check");
-    assert!(
-        block_end < approval_offset,
-        "the pre-check guard must be dropped before require_approval is awaited"
-    );
+    // waits up to 120 seconds, and around thirty sync commands use blocking_lock, so
+    // holding it would freeze the interface thread rather than fail cleanly.
+    //
+    // This counts braces instead of taking the first one. The first `}` after the lock is
+    // the one closing the `json!({ ... })` literal in the not-connected early return, so a
+    // naive search is satisfied by punctuation and cannot fail on the regression it names.
+    for command in [
+        "pub async fn wallet_dapp_transfer(",
+        "pub async fn wallet_dapp_sign_tx(",
+    ] {
+        let body = command_body(&dapp, command);
+        let lock = body
+            .find("let svc = state.inner.lock().await;")
+            .unwrap_or_else(|| panic!("{command} must take the wallet lock for the pre-check"));
+        // Walk back to the `{` that opened the scope holding the guard, then forward to its
+        // matching `}`. That offset, and only that offset, is where the guard is dropped.
+        let open = body[..lock]
+            .rfind('{')
+            .unwrap_or_else(|| panic!("{command} pre-check must live in its own scope"));
+        let mut depth = 0usize;
+        let mut guard_dropped = None;
+        for (offset, ch) in body[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        guard_dropped = Some(open + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let guard_dropped = guard_dropped
+            .unwrap_or_else(|| panic!("{command} pre-check scope must close"));
+        let approval = body
+            .find("require_approval(")
+            .unwrap_or_else(|| panic!("{command} must still request approval"));
+        assert!(
+            guard_dropped < approval,
+            "{command} must drop the wallet guard before awaiting require_approval, or the              mutex is held for the whole approval window"
+        );
+    }
 }

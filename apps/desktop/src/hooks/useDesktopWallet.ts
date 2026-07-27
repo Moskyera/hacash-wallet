@@ -839,11 +839,15 @@ export function useDesktopWallet(
       clearMessages();
       try {
         await api.setSecondFactorThreshold(amountMei, currentPassphrase);
-        await refreshStatus();
+        // Report what the core enforces, not what was asked for. A value above the
+        // security profile's ceiling is stored and then ignored, so echoing the request
+        // would state a threshold that is not in force.
+        const next = await refreshStatus();
+        const enforced = next.require_second_factor_above_mei;
         onInfo(
-          amountMei == null
-            ? "Confirmation amount reset to the security profile default."
-            : `Confirmation required for sends above ${amountMei - 1} HAC.`,
+          enforced <= 1
+            ? "Confirmation now required for every payment."
+            : `Confirmation now required for sends above ${enforced - 1} HAC.`,
         );
       } catch (e) {
         onError(String(e));

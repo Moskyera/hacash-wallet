@@ -134,7 +134,7 @@ export default function SecurityInfoScreen({
           ? t("security.secondFactorAmountEvery")
           : t("security.secondFactorAmountCurrent", { amount: enforcedThreshold - 1 })}
       </p>
-      {!coldVault ? (
+      {!coldVault && !status?.watch_only ? (
         <>
           <label>{t("security.secondFactorAmountLabel")}</label>
           <input
