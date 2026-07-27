@@ -329,7 +329,7 @@ impl WalletService {
         )?;
         self.ensure_transaction_network_binding(&body_hex).await?;
         let requirement =
-            self.authorization_requirement(self.profile.require_second_factor_above_mei)?;
+            self.authorization_requirement(self.second_factor_threshold_mei())?;
         let display = exact_transaction_display(
             "Send HACD",
             &preview.summary,
@@ -429,7 +429,7 @@ impl WalletService {
         )?;
         self.ensure_transaction_network_binding(&body_hex).await?;
         let requirement =
-            self.authorization_requirement(self.profile.require_second_factor_above_mei)?;
+            self.authorization_requirement(self.second_factor_threshold_mei())?;
         let display = exact_transaction_display(
             "Send bridged BTC",
             &preview.summary,
@@ -620,7 +620,7 @@ impl WalletService {
         )?;
         self.ensure_transaction_network_binding(&body_hex).await?;
         let requirement =
-            self.authorization_requirement(self.profile.require_second_factor_above_mei)?;
+            self.authorization_requirement(self.second_factor_threshold_mei())?;
         let display = exact_transaction_display(
             "Close Fast Pay channel",
             "Close the on-chain channel",
@@ -904,7 +904,7 @@ impl WalletService {
             HardwareSigningMode::WebAuthnGate => Ok(AuthorizationRequirement::WebAuthn),
             HardwareSigningMode::AirgapOnly => Ok(AuthorizationRequirement::AnyPlatformFactor),
             HardwareSigningMode::Software => {
-                if policy_amount_mei < self.profile.require_second_factor_above_mei {
+                if policy_amount_mei < self.second_factor_threshold_mei() {
                     Ok(AuthorizationRequirement::None)
                 } else if self.profile.yubikey_required {
                     Ok(AuthorizationRequirement::WebAuthn)
@@ -1035,7 +1035,10 @@ impl WalletService {
         }
     }
 
-    fn clear_prepared_operation(&mut self) {
+    /// Visible to the parent module so a policy change can invalidate a ticket that was
+    /// prepared under the previous rule. Still not public: only the wallet decides when a
+    /// pending operation stops being valid.
+    pub(super) fn clear_prepared_operation(&mut self) {
         if let Some(session) = self.unlocked.as_mut() {
             session.authorization.clear();
         }

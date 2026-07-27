@@ -49,13 +49,26 @@ export default function SecurityScreen({
   const [backupPass, setBackupPass] = useState("");
   const [resetPassphrase, setResetPassphrase] = useState("");
   const [resetAddress, setResetAddress] = useState("");
+  const [thresholdDraft, setThresholdDraft] = useState("");
+  const [thresholdPassphrase, setThresholdPassphrase] = useState("");
   const coldVault = status?.hardware_signing_mode === "airgap_only";
   const legacyKey = status?.legacy_key_derivation != null;
   const freshFactorAvailable = platformSec?.native_biometric_available === true;
   // The amount threshold governs HAC only, and only on the balanced profile. A Cold
   // Vault requires a factor for every signature, and Paranoid lowers the threshold to
   // effectively every payment, so neither can be described with a number.
-  const everyPaymentNeedsFactor = coldVault || status?.security_profile === "paranoid";
+  // The core reports what it enforces, already combining the authenticated profile with
+  // the chosen amount. Displaying a constant instead is how this screen came to state
+  // the rule wrongly in the first place.
+  const enforcedThreshold =
+    status?.require_second_factor_above_mei ?? BIOMETRIC_THRESHOLD_MEI;
+  // The amount threshold governs HAC only, and only on the balanced profile. A Cold Vault
+  // needs a factor for every signature, and Paranoid lowers the threshold to effectively
+  // every payment, so neither can be described with a number. A threshold of 1 is the same
+  // situation: every positive amount rounds up to at least 1, so "above 0" would be both
+  // odd to read and wrong about why.
+  const everyPaymentNeedsFactor =
+    coldVault || status?.security_profile === "paranoid" || enforcedThreshold <= 1;
 
   useEffect(() => {
     void api.biometricUnlockStatus().then(setBioUnlockStatus).catch(() => setBioUnlockStatus(null));
@@ -219,6 +232,86 @@ export default function SecurityScreen({
             profile: t(status?.security_profile === "paranoid" ? "security.paranoid" : "security.balanced"),
           })}
         </p>
+      </div>
+      {/* Until now the amount was fixed in the app, so a user who wanted every payment
+          confirmed had only Cold Vault. The profile's own value stays the ceiling: this
+          can tighten the policy, never loosen it. */}
+      <div className="card">
+        <h2>{t("security.secondFactorAmount")}</h2>
+        <p className="muted small">{t("security.secondFactorAmountHint")}</p>
+        <p className="muted small">
+          {everyPaymentNeedsFactor
+            ? t("security.secondFactorAmountEvery")
+            : t("security.secondFactorAmountCurrent", { amount: enforcedThreshold - 1 })}
+        </p>
+        {!coldVault && !watchOnly ? (
+          <>
+            <label className="label">{t("security.secondFactorAmountLabel")}</label>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              inputMode="numeric"
+              placeholder={String(enforcedThreshold)}
+              value={thresholdDraft}
+              onChange={(event) => setThresholdDraft(event.target.value)}
+            />
+            <label className="label">{t("security.currentPassphrase")}</label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={thresholdPassphrase}
+              onChange={(event) => setThresholdPassphrase(event.target.value)}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !thresholdPassphrase || !thresholdDraft}
+              onClick={() => {
+                const amount = Number(thresholdDraft);
+                if (!Number.isInteger(amount) || amount < 1) {
+                  onToast(t("security.secondFactorAmountInvalid"), "error");
+                  return;
+                }
+                const passphrase = thresholdPassphrase;
+                setThresholdPassphrase("");
+                setBusy(true);
+                void api
+                  .setSecondFactorThreshold(amount, passphrase)
+                  .then(() => onRefresh())
+                  .then(() => {
+                    setThresholdDraft("");
+                    onToast(t("security.secondFactorAmountSaved"), "success");
+                  })
+                  .catch((error) => onToast(formatInvokeError(error), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {t("security.secondFactorAmountApply")}
+            </button>
+            <button
+              type="button"
+              style={{ marginTop: "0.5rem", width: "100%" }}
+              disabled={busy || !thresholdPassphrase}
+              onClick={() => {
+                const passphrase = thresholdPassphrase;
+                setThresholdPassphrase("");
+                setBusy(true);
+                void api
+                  .setSecondFactorThreshold(null, passphrase)
+                  .then(() => onRefresh())
+                  .then(() => {
+                    setThresholdDraft("");
+                    onToast(t("security.secondFactorAmountSaved"), "success");
+                  })
+                  .catch((error) => onToast(formatInvokeError(error), "error"))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {t("security.secondFactorAmountReset")}
+            </button>
+          </>
+        ) : null}
       </div>
       <div className="card">
         <h2>{t("security.signingPolicy")}</h2>
@@ -389,13 +482,13 @@ export default function SecurityScreen({
                   kind: platformSec.biometric_kind ?? t("security.biometric"),
                 })
               : t("security.biometricConfirmSends", {
-                  amount: BIOMETRIC_THRESHOLD_MEI - 1,
+                  amount: enforcedThreshold - 1,
                   kind: platformSec.biometric_kind ?? t("security.biometric"),
                 })
             : everyPaymentNeedsFactor
             ? t("security.noBiometricAnySend")
             : t("security.noBiometricLargeSend", {
-                amount: BIOMETRIC_THRESHOLD_MEI - 1,
+                amount: enforcedThreshold - 1,
               })}
         </p>
         {/* Without a sensor there is nothing to confirm with, so saying it is

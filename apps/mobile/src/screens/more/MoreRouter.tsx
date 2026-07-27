@@ -322,6 +322,8 @@ export default function MoreRouter({ page, data, actions }: Props) {
           clipboardClearSecs={clipboardSecs}
           platformSec={platformSec}
           securityProfile={settings?.security_profile}
+          hardwareMode={status?.hardware_signing_mode}
+          secondFactorThresholdMei={status?.require_second_factor_above_mei ?? null}
           biometricSendEnabled={settings?.biometric_send_enabled ?? true}
           onToast={onToast}
           onGoLegacySend={onGoLegacySend}

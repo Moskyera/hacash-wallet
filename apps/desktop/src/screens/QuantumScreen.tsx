@@ -89,6 +89,8 @@ export default function QuantumScreen({
         blockedMessage={mainnetBlocked ? t("quantum.lab.mainnetBlocked") : undefined}
         webauthnEnabled={status?.webauthn_enabled}
         securityProfile={status?.security_profile}
+        hardwareMode={status?.hardware_signing_mode}
+        secondFactorThresholdMei={status?.require_second_factor_above_mei ?? null}
         nativeBioAvailable={nativeBioAvailable}
       />
     </section>

@@ -89,6 +89,7 @@ export type WalletSettings = {
   biometric_unlock_enabled?: boolean;
   security_profile: string;
   hardware_signing_mode?: SigningPolicy;
+  require_second_factor_above_mei?: number | null;
   privacy: PrivacySettings;
   dust_whisper?: DustWhisperSettings;
   send?: SendPreferences;
@@ -123,6 +124,7 @@ export type WalletStatus = {
   seconds_until_lock: number | null;
   channel_id: string | null;
   hardware_signing_mode: SigningPolicy;
+  require_second_factor_above_mei: number;
   signing_available: boolean;
 };
 
@@ -620,6 +622,8 @@ export const api = {
   openWatchOnly: () => invoke<string>("wallet_open_watch_only"),
   setSecurityProfile: (profile: string, currentPassphrase: string) =>
     invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
+  setSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) =>
+    invoke<void>("wallet_set_second_factor_threshold", { amountMei, currentPassphrase }),
   setHardwareMode: (mode: SigningPolicy, currentPassphrase: string) =>
     invoke<void>("wallet_set_hardware_mode", { mode, currentPassphrase }),
   // Cold Vault is irreversible, so it has its own prepared ceremony instead of

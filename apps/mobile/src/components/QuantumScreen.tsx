@@ -37,6 +37,11 @@ type Props = {
   clipboardClearSecs: number;
   platformSec: PlatformSecurityStatus | null;
   securityProfile?: string | null;
+  hardwareMode?: string | null;
+  /// The amount the core reports and enforces, already combining the authenticated
+  /// profile with the user's chosen value. Without it this gate would ignore a user who
+  /// tightened the policy and let the core refuse the send instead.
+  secondFactorThresholdMei?: number | null;
   biometricSendEnabled?: boolean;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
   onGoLegacySend?: () => void;
@@ -48,6 +53,8 @@ export default function QuantumScreen({
   networkMode,
   clipboardClearSecs,
   securityProfile,
+  hardwareMode,
+  secondFactorThresholdMei,
   onToast,
   onGoLegacySend,
 }: Props) {
@@ -224,7 +231,10 @@ export default function QuantumScreen({
   }, [signedAirgapQr]);
 
   async function maybeSecondFactor(amount: number) {
-    if (!needsSecondFactor(amount, securityProfile)) return;
+    if (
+      !needsSecondFactor(amount, securityProfile, hardwareMode, secondFactorThresholdMei)
+    )
+      return;
     throw new Error(
       "Protected Quantum Lab signing is blocked until authorization can bind to the exact Type 4 body.",
     );

@@ -23,8 +23,8 @@ impl WalletService {
     pub fn check_dapp_signing_policy(&self) -> WalletResult<()> {
         let unlock_ctx = self.second_factor_from_session()?;
         if check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )
         .is_err()
@@ -148,8 +148,8 @@ impl WalletService {
         )?;
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         self.clear_second_factor();
@@ -189,8 +189,8 @@ impl WalletService {
         crate::dapp::validate_raw_sign_transaction(&canonical)?;
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         self.clear_second_factor();

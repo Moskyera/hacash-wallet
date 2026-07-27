@@ -124,6 +124,11 @@ pub struct WalletStatus {
     pub auto_lock_secs: u64,
     pub seconds_until_lock: Option<u64>,
     pub hardware_signing_mode: String,
+    /// The amount at or above which a signature needs a second factor, already
+    /// combined with the user's preference. The interface must display this rather
+    /// than a constant of its own, or it will state the rule wrongly whenever the
+    /// profile or the preference is not the default.
+    pub require_second_factor_above_mei: u64,
     pub watch_only: bool,
     pub privacy: PrivacySettings,
     pub dust_whisper: DustWhisperSettings,
@@ -261,6 +266,13 @@ impl WalletService {
                 .or_else(|| meta.as_ref().map(|m| m.address.clone()))
                 .or_else(|| self.settings.watch_only_address.clone()),
             security_profile: effective_profile.name.clone(),
+            // The ceiling comes from the vault-authenticated profile, not from
+            // self.profile, so a tampered settings file cannot inflate the number the
+            // user is shown. Same formula as enforcement.
+            require_second_factor_above_mei: crate::security::effective_second_factor_threshold(
+                effective_profile.require_second_factor_above_mei,
+                self.settings.require_second_factor_above_mei,
+            ),
             node_url: self.node.base_url().to_string(),
             network_mode: self.network_mode.clone(),
             l2_enabled: self.router.has_l2_hub(),
@@ -404,6 +416,9 @@ impl WalletService {
         }
         let current = &self.settings;
         let sensitive_change = settings.security_profile != current.security_profile
+            // Raising the threshold loosens the policy within the band the profile
+            // allows, so it needs the same authority as changing the profile itself.
+            || settings.require_second_factor_above_mei != current.require_second_factor_above_mei
             || settings.hardware_signing_mode != current.hardware_signing_mode
             || settings.webauthn_enabled != current.webauthn_enabled
             || settings.biometric_send_enabled != current.biometric_send_enabled
@@ -692,6 +707,40 @@ impl WalletService {
             credential.as_deref(),
             true,
         )
+    }
+
+    /// Choose the amount at or above which a signature needs a second factor.
+    ///
+    /// `chosen` of `None` restores the profile's own value. Anything above the profile
+    /// ceiling is stored as given but has no effect, because
+    /// [`Self::second_factor_threshold_mei`] takes the minimum; that is deliberate, so a
+    /// stricter profile cannot be silently loosened by a stale preference.
+    ///
+    /// This needs the passphrase for the same reason changing the profile does: raising
+    /// the amount widens the range of payments that need no confirmation. `update_settings`
+    /// refuses the change so it can only happen here.
+    pub fn set_second_factor_threshold(
+        &mut self,
+        current_passphrase: &str,
+        chosen: Option<u64>,
+    ) -> WalletResult<()> {
+        if !self.vault_path.exists() {
+            return Err(WalletError::NoWallet);
+        }
+        if chosen == Some(0) {
+            return Err(WalletError::Policy(
+                "the second-factor amount must be at least 1 HAC; every smaller amount already rounds up to it"
+                    .into(),
+            ));
+        }
+        self.verify_wallet_passphrase(current_passphrase)?;
+        self.settings.require_second_factor_above_mei = chosen;
+        self.settings.save()?;
+        // A ticket prepared a moment ago carries the requirement computed under the old
+        // threshold. Tightening the policy must not leave an already-authorized, or
+        // authorization-free, operation waiting to execute under the looser rule.
+        self.clear_prepared_operation();
+        Ok(())
     }
 
     pub fn change_security_profile(
@@ -1350,8 +1399,8 @@ impl WalletService {
         // BTC has no HAC-denominated amount, so require the profile's second
         // factor at the signing boundary for every bridged-BTC transfer.
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         if self.profile.yubikey_required {
@@ -1429,8 +1478,8 @@ impl WalletService {
         self.touch_auto_lock();
         let unlock_ctx = self.second_factor_from_session()?;
         check_send_policy(
-            &self.profile,
-            self.profile.require_second_factor_above_mei,
+            &self.effective_profile(),
+            self.second_factor_threshold_mei(),
             &unlock_ctx,
         )?;
         if self.profile.yubikey_required {
@@ -2058,7 +2107,7 @@ impl WalletService {
         self.touch_auto_lock();
         self.protected_unprepared_signing_block(
             "direct channel close",
-            self.profile.require_second_factor_above_mei,
+            self.second_factor_threshold_mei(),
         )?;
         let from = self.require_address()?;
         let channel_id = self
@@ -2371,7 +2420,7 @@ impl WalletService {
         if context == SigningContext::Online {
             let unlock_ctx = self.second_factor_from_session()?;
             let policy_amount = crate::hip23::policy_amount_mei_ceil(inspection.amount_mei)?;
-            check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
+            check_send_policy(&self.effective_profile(), policy_amount, &unlock_ctx)?;
         }
         let expected_service_fee =
             crate::send_options::compute_service_fee_mei(inspection.amount_mei);
@@ -2563,7 +2612,7 @@ impl WalletService {
         self.reject_cold_vault_key_access("online HAC and Fast Pay signing")?;
         let unlock_ctx = self.second_factor_from_session()?;
         let policy_amount = crate::hip23::policy_amount_mei_ceil(amount_mei)?;
-        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
+        check_send_policy(&self.effective_profile(), policy_amount, &unlock_ctx)?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {
@@ -2670,6 +2719,37 @@ impl WalletService {
                 Err(e)
             }
         }
+    }
+
+    /// The amount, in HAC, at or above which a signature needs a second factor.
+    ///
+    /// The authenticated security profile sets the ceiling, and it is bound to the vault
+    /// through the profile name. A user preference may lower that ceiling but can never
+    /// raise it, because this takes the minimum of the two. That single property is what
+    /// makes the preference safe to keep in the settings file, which is not
+    /// cryptographically bound: someone who edits or replaces that file can only make
+    /// the policy stricter than the profile allows, never weaker.
+    ///
+    /// Every policy decision must read the threshold from here. Nothing outside this
+    /// method and [`Self::effective_profile`] may read
+    /// `SecurityProfile::require_second_factor_above_mei` directly, or a preference the
+    /// user set would silently not apply on that path. An audit test enforces that.
+    pub fn second_factor_threshold_mei(&self) -> u64 {
+        crate::security::effective_second_factor_threshold(
+            self.profile.require_second_factor_above_mei,
+            self.settings.require_second_factor_above_mei,
+        )
+    }
+
+    /// The active profile with its threshold replaced by the effective one.
+    ///
+    /// For the policy helpers that take a whole `SecurityProfile`. Same rule as
+    /// [`Self::second_factor_threshold_mei`]: the clone never reaches the vault, which
+    /// stores only the profile name, so this cannot weaken what the vault authenticates.
+    pub(crate) fn effective_profile(&self) -> SecurityProfile {
+        let mut profile = self.profile.clone();
+        profile.require_second_factor_above_mei = self.second_factor_threshold_mei();
+        profile
     }
 
     pub fn set_security_profile(&mut self, profile: SecurityProfile) -> WalletResult<()> {
@@ -3154,7 +3234,7 @@ impl WalletService {
         )?;
         let unlock_ctx = self.second_factor_from_session()?;
         let policy_amount = crate::hip23::policy_amount_mei_ceil(amount_mei)?;
-        check_send_policy(&self.profile, policy_amount, &unlock_ctx)?;
+        check_send_policy(&self.effective_profile(), policy_amount, &unlock_ctx)?;
         if self.profile.yubikey_required {
             let session = self.unlocked.as_ref().ok_or(WalletError::Locked)?;
             if !session.webauthn_verified {

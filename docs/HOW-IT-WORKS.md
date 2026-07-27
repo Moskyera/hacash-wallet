@@ -151,9 +151,21 @@ did not see. It can annoy you, it cannot redirect your money.
   factor is required for every payment **above 99 HAC**. At or below that, while
   the wallet is unlocked, the payment is signed with no further confirmation.
   Please read that twice, because it is the rule that decides your daily
-  experience. The limit is fixed in the app, no setting lowers it, and it applies
-  per payment rather than per day, so several payments just under it ask for
-  nothing.
+  experience. On Android you can lower that limit: Settings, Security,
+  **Confirmation amount** accepts any whole number of HAC down to 1, and needs
+  your passphrase. It can only make the wallet stricter, never looser, because
+  your security profile sets the maximum and the wallet always takes the smaller
+  of the two. That is also why nobody can weaken it by editing the settings file.
+  The limit applies per payment rather than per day, so several payments just
+  under it still ask for nothing.
+
+  One consequence to know before you lower it: **Fast Pay cannot be confirmed.**
+  Its settlement bill is cosigned by the payment hub, so the wallet cannot bind
+  your approval to the exact bill and refuses instead. Any payment that needs
+  confirmation has to go on-chain, using Force on-chain (L1), and pay the network
+  fee. If you set the limit to 1 HAC, that applies to every payment, and Fast Pay
+  effectively stops being available. The Pay screen tells you this before you tap,
+  not after.
 - **Security-key gate (WebAuthn).** Every payment requires a security key or
   Windows Hello. Fast Pay is refused outright in this mode: its settlement bill
   is cosigned by the payment hub, so the wallet cannot bind your approval to the
@@ -166,8 +178,12 @@ did not see. It can annoy you, it cannot redirect your money.
 There is also a stricter **Paranoid** profile that asks for a factor on
 effectively every payment, but it demands a security key, which a phone cannot
 provide. Android refuses it for that reason rather than letting you lock yourself
-out of sending. So if you want every payment on a phone confirmed, Cold Vault is
-the only option today. That gap is real and we are not going to pretend otherwise.
+out of sending. If you want every payment on a phone confirmed, set the
+confirmation amount to 1 HAC instead: every amount rounds up to at least that, so
+every payment then asks for your fingerprint, at the cost of Fast Pay described
+above. Do not set that on a phone with no working fingerprint or face, because
+then nothing can confirm a payment and every send is refused until you raise the
+limit again, which needs your passphrase.
 
 Replacing a registered security key requires approval from the key you are
 replacing. Otherwise someone with just your passphrase could swap your second

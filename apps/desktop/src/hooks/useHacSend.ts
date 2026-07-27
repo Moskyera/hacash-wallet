@@ -175,7 +175,7 @@ export function useHacSend(opts: {
         status?.hardware_signing_mode === "webauthn_gate" ||
         status?.hardware_signing_mode === "airgap_only" ||
         status?.security_profile === "paranoid" ||
-        Math.ceil(amount) >= 100;
+        Math.ceil(amount) >= (status?.require_second_factor_above_mei ?? 100);
       let result;
       if (preview?.plan.rail === "L2Fast") {
         if (needsAuthorization) {

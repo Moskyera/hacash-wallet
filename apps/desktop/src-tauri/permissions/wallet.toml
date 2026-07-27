@@ -62,6 +62,7 @@ commands.allow = [
   "wallet_import_watch_only",
   "wallet_open_watch_only",
   "wallet_set_security_profile",
+  "wallet_set_second_factor_threshold",
   "wallet_set_hardware_mode",
   "wallet_platform_info",
   "wallet_airgap_prepare_send",

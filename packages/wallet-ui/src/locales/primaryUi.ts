@@ -162,6 +162,16 @@ export const primaryUiEn = {
   "security.biometricUnlockEnabled": "Biometric unlock enabled.",
   "security.biometricUnlockDisabled": "Biometric unlock disabled.",
   "security.biometricConfirm": "Biometric confirmation",
+  "security.secondFactorAmount": "Confirmation amount",
+  "security.secondFactorAmountHint":
+    "Ask for confirmation on HAC sends above this amount. Your security profile sets the maximum, so this can only make the wallet stricter, never looser. Changing it needs your passphrase.",
+  "security.secondFactorAmountCurrent": "Enforced now: HAC sends above {amount} HAC.",
+  "security.secondFactorAmountEvery": "Enforced now: every payment, whatever the amount.",
+  "security.secondFactorAmountLabel": "Confirm sends above (HAC)",
+  "security.secondFactorAmountApply": "Save confirmation amount",
+  "security.secondFactorAmountReset": "Use the security profile default",
+  "security.secondFactorAmountSaved": "Confirmation amount updated.",
+  "security.secondFactorAmountInvalid": "Enter a whole number of HAC, at least 1.",
   "security.biometricConfirmSends":
     "HAC sends above {amount} HAC require {kind}. Below that, a HAC send is signed with no confirmation while the wallet is unlocked. Diamond and bridged Bitcoin sends always require it, whatever the amount.",
   "security.biometricConfirmEvery":
@@ -321,6 +331,16 @@ export const PRIMARY_UI_COPY = {
     "security.enableBiometricUnlock": "Ενεργοποίηση βιομετρικού ξεκλειδώματος",
     "security.disableBiometricUnlock": "Απενεργοποίηση βιομετρικού ξεκλειδώματος",
     "security.biometricConfirm": "Βιομετρική επιβεβαίωση",
+    "security.secondFactorAmount": "Ποσό επιβεβαίωσης",
+    "security.secondFactorAmountHint":
+      "Ζήτα επιβεβαίωση στις αποστολές HAC πάνω από αυτό το ποσό. Το προφίλ ασφαλείας ορίζει το ανώτατο, οπότε αυτό μπορεί μόνο να κάνει το wallet αυστηρότερο, ποτέ πιο χαλαρό. Η αλλαγή απαιτεί το passphrase.",
+    "security.secondFactorAmountCurrent": "Ισχύει τώρα: αποστολές HAC πάνω από {amount} HAC.",
+    "security.secondFactorAmountEvery": "Ισχύει τώρα: κάθε πληρωμή, ανεξάρτητα από το ποσό.",
+    "security.secondFactorAmountLabel": "Επιβεβαίωση για αποστολές πάνω από (HAC)",
+    "security.secondFactorAmountApply": "Αποθήκευση ποσού",
+    "security.secondFactorAmountReset": "Χρήση της προεπιλογής του προφίλ",
+    "security.secondFactorAmountSaved": "Το ποσό επιβεβαίωσης ενημερώθηκε.",
+    "security.secondFactorAmountInvalid": "Βάλε ακέραιο αριθμό HAC, τουλάχιστον 1.",
     "security.biometricConfirmSends":
       "Οι αποστολές HAC πάνω από {amount} HAC απαιτούν {kind}. Κάτω από αυτό, μια αποστολή HAC υπογράφεται χωρίς επιβεβαίωση όσο το wallet είναι ξεκλείδωτο. Οι αποστολές Diamond και bridged Bitcoin απαιτούν πάντα επιβεβαίωση, ανεξάρτητα από το ποσό.",
     "security.biometricConfirmEvery":

@@ -74,4 +74,60 @@ describe("destructive wallet IPC", () => {
     expect(app).toContain("biometric unlock was disabled");
     expect(app).toContain("retry Android Keystore cleanup");
   });
+  // Every screen that states or acts on the confirmation amount must read what the core
+  // reports, never a constant of its own. The constant is the balanced default, so a
+  // screen using it would quietly ignore a user who tightened the policy, and the send
+  // routing would pick a rail the core then refuses.
+  it("reads the confirmation amount from the core, not from a constant", () => {
+    const security = read("screens/more/SecurityScreen.tsx");
+    const payTab = read("screens/PayTab.tsx");
+    const flow = read("hooks/usePaymentFlow.ts");
+
+    expect(security).toContain("status?.require_second_factor_above_mei ??");
+    expect(security).toContain("amount: enforcedThreshold - 1");
+    expect(security).not.toContain("amount: BIOMETRIC_THRESHOLD_MEI");
+
+    expect(payTab).toContain("secondFactorThresholdMei,");
+    expect(payTab).not.toContain("BIOMETRIC_THRESHOLD_MEI");
+
+    expect(flow).toContain("secondFactorThresholdMei,");
+  });
+
+  // Raising the amount widens the range of payments that need no confirmation, so it is
+  // a policy change and needs the passphrase. The generic settings command must not be
+  // able to carry it.
+  it("changes the confirmation amount only through the authenticated command", () => {
+    const api = read("api.ts");
+    const security = read("screens/more/SecurityScreen.tsx");
+
+    expect(api).toContain(
+      'invoke<void>("wallet_set_second_factor_threshold", { amountMei, currentPassphrase })',
+    );
+    expect(security).toContain(".setSecondFactorThreshold(amount, passphrase)");
+    expect(security).toContain(".setSecondFactorThreshold(null, passphrase)");
+    // The control must collect the passphrase, not send an empty one.
+    expect(security).toContain("disabled={busy || !thresholdPassphrase || !thresholdDraft}");
+  });
+  // Third time this bug class appears: a screen decides from its own copy of the
+  // threshold while the core has moved on. The constant may only be a fallback inside
+  // the shared gate helper and the one screen that displays it; no other file may
+  // compare an amount against a literal threshold.
+  it("has no screen deciding a second factor from a hardcoded amount", () => {
+    const gate = read("utils/secondFactorGate.ts");
+    const quantum = read("components/QuantumScreen.tsx");
+
+    // The gate is the only place allowed to fall back to the constant.
+    expect(gate).toContain("BIOMETRIC_THRESHOLD_MEI");
+    expect(gate).toContain("thresholdMei");
+
+    // Quantum sends are policed by the same rule, so its gate needs the same inputs.
+    expect(quantum).toContain("needsSecondFactor(amount, securityProfile, hardwareMode, secondFactorThresholdMei)");
+    expect(quantum).not.toContain(">= 100");
+
+    // Fast Pay cannot carry authorization, so a protected amount is refused rather than
+    // prompted. Promising a fingerprint there would only be discovered after tapping.
+    const payTab = read("screens/PayTab.tsx");
+    expect(payTab).toContain('preview.plan.rail === "L2Fast" ? (');
+    expect(payTab).toContain("Force");
+  });
 });

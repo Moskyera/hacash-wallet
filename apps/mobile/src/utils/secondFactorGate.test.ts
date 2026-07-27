@@ -34,4 +34,20 @@ describe("needsSecondFactor", () => {
     expect(needsSecondFactor(100, null)).toBe(true);
     expect(needsSecondFactor(50, undefined)).toBe(false);
   });
+  // The core reports the amount it enforces, already combining the authenticated profile
+  // with the user's choice. Deciding from the constant instead would route a payment to
+  // Fast Pay that the core then refuses.
+  it("uses the threshold the core reports, not the built-in constant", () => {
+    expect(needsSecondFactor(10, "balanced", "software", 5)).toBe(true);
+    expect(needsSecondFactor(4, "balanced", "software", 5)).toBe(false);
+    expect(needsSecondFactor(4.5, "balanced", "software", 5)).toBe(true);
+    // A reported value cannot loosen what the profile already demands.
+    expect(needsSecondFactor(1, "paranoid", "software", 50)).toBe(true);
+    expect(needsSecondFactor(1, "balanced", "airgap_only", 50)).toBe(true);
+    // Missing or nonsensical values fall back to the default rather than passing 0 into
+    // a comparison, which would demand a factor for nothing at all.
+    expect(needsSecondFactor(50, "balanced", "software", null)).toBe(false);
+    expect(needsSecondFactor(50, "balanced", "software", 0)).toBe(false);
+    expect(needsSecondFactor(100, "balanced", "software", undefined)).toBe(true);
+  });
 });

@@ -18,6 +18,10 @@ type Props = {
   blockedMessage?: string;
   webauthnEnabled?: boolean;
   securityProfile?: string;
+  hardwareMode?: string;
+  /// The amount the core reports and enforces, already combining the authenticated
+  /// profile with the user's chosen value.
+  secondFactorThresholdMei?: number | null;
   nativeBioAvailable?: boolean;
 };
 
@@ -27,9 +31,22 @@ async function maybeWebAuthnGate(
   securityProfile?: string,
   _nativeBioAvailable?: boolean,
   unavailableMessage?: string,
+  hardwareMode?: string,
+  secondFactorThresholdMei?: number | null,
 ) {
+  // Mirror of authorization_requirement() in wallet-core. A hardware gate and a Cold
+  // Vault need a factor for every amount, the core rounds the policed amount up, and the
+  // threshold is whatever the core reports, which already includes the amount the user
+  // chose. A hardcoded 100 here ignored all three.
+  const threshold =
+    typeof secondFactorThresholdMei === "number" && secondFactorThresholdMei > 0
+      ? secondFactorThresholdMei
+      : 100;
   const needs2fa =
-    securityProfile === "paranoid" || (securityProfile !== "paranoid" && amount >= 100);
+    hardwareMode === "webauthn_gate" ||
+    hardwareMode === "airgap_only" ||
+    securityProfile === "paranoid" ||
+    Math.ceil(amount) >= threshold;
   if (!needs2fa) return;
   throw new Error(
     unavailableMessage ??
@@ -46,6 +63,8 @@ export default function SendQuantumTx({
   blockedMessage,
   webauthnEnabled,
   securityProfile,
+  hardwareMode,
+  secondFactorThresholdMei,
   nativeBioAvailable,
 }: Props) {
   const [to, setTo] = useState(DEFAULT_TO);
@@ -134,6 +153,8 @@ export default function SendQuantumTx({
         securityProfile,
         nativeBioAvailable,
         t("quantum.secondFactorRequired"),
+        hardwareMode,
+        secondFactorThresholdMei,
       );
       const res = await quantumApi.sendType4(to.trim(), amount.trim(), pass);
       setHash(res.hash);
@@ -190,6 +211,8 @@ export default function SendQuantumTx({
         securityProfile,
         nativeBioAvailable,
         t("quantum.secondFactorRequired"),
+        hardwareMode,
+        secondFactorThresholdMei,
       );
       const signed = await quantumApi.airgapSignType4(
         {

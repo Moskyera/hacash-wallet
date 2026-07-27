@@ -107,6 +107,7 @@ commands.allow = [
   "wallet_send_hacd",
   "wallet_set_hardware_mode",
   "wallet_set_security_profile",
+  "wallet_set_second_factor_threshold",
   "wallet_status",
   "wallet_tx_history",
   "wallet_unlock",

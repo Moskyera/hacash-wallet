@@ -60,6 +60,7 @@ export default function MobileApp() {
     settings: session.settings,
     setSettings: session.setSettings,
     platformSec: session.platformSec,
+    secondFactorThresholdMei: session.status?.require_second_factor_above_mei ?? null,
     watchOnly: session.watchOnly,
     busy: session.busy,
     setBusy: session.setBusy,
@@ -643,6 +644,9 @@ export default function MobileApp() {
             hideAddresses={session.privacy.hide_addresses}
             settings={session.settings}
             platformSec={session.platformSec}
+            secondFactorThresholdMei={
+              session.status?.require_second_factor_above_mei ?? null
+            }
             busy={session.busy}
             dustWhisper={session.dustWhisper}
             onPersistSendPrefs={(h, f, s, svc) => void payment.persistSendPrefs(h, f, s, svc)}

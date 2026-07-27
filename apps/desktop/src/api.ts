@@ -96,6 +96,7 @@ export type WalletStatus = {
   auto_lock_secs: number;
   seconds_until_lock: number | null;
   hardware_signing_mode: SigningPolicy;
+  require_second_factor_above_mei: number;
   signing_available: boolean;
   watch_only: boolean;
   privacy: PrivacySettings;
@@ -162,6 +163,7 @@ export type WalletSettings = {
   webauthn_enabled: boolean;
   security_profile: string;
   hardware_signing_mode: SigningPolicy;
+  require_second_factor_above_mei?: number | null;
   privacy: PrivacySettings;
   send?: SendPreferences;
 };

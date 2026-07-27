@@ -697,6 +697,23 @@ pub fn wallet_set_security_profile(
         .map_err(|e| e.to_string())
 }
 
+/// Choose the amount at or above which a signature needs a second factor.
+///
+/// Its own authenticated command, because `wallet_update_settings` refuses the change:
+/// raising the amount widens the range of payments that need no confirmation, which is
+/// the same class of decision as changing the security profile.
+#[tauri::command]
+pub fn wallet_set_second_factor_threshold(
+    amount_mei: Option<u64>,
+    current_passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let current_passphrase = Zeroizing::new(current_passphrase);
+    let mut svc = state.inner.blocking_lock();
+    svc.set_second_factor_threshold(&current_passphrase, amount_mei)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn wallet_set_hardware_mode(
     mode: String,

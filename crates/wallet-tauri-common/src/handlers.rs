@@ -69,6 +69,7 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::commands::wallet_import_watch_only,
             wallet_tauri_common::commands::wallet_open_watch_only,
             wallet_tauri_common::commands::wallet_set_security_profile,
+            wallet_tauri_common::commands::wallet_set_second_factor_threshold,
             wallet_tauri_common::commands::wallet_set_hardware_mode,
             wallet_tauri_common::commands::wallet_platform_info,
             wallet_tauri_common::security_commands::wallet_airgap_prepare_send,

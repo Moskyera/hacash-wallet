@@ -13,6 +13,9 @@ export function usePaymentFlow(opts: {
   settings: WalletSettings | null;
   setSettings: (s: WalletSettings) => void;
   platformSec: PlatformSecurityStatus | null;
+  /// The threshold the core reports and enforces. Deciding the rail from a constant
+  /// instead would send a payment down Fast Pay that the core then refuses.
+  secondFactorThresholdMei: number | null;
   watchOnly: boolean;
   busy: boolean;
   setBusy: (b: boolean) => void;
@@ -20,7 +23,17 @@ export function usePaymentFlow(opts: {
   showToast: (msg: string, kind: "success" | "info" | "error") => void;
   onSent?: () => void;
 }) {
-  const { settings, setSettings, platformSec, busy, setBusy, refresh, showToast, onSent } = opts;
+  const {
+    settings,
+    setSettings,
+    platformSec,
+    secondFactorThresholdMei,
+    busy,
+    setBusy,
+    refresh,
+    showToast,
+    onSent,
+  } = opts;
 
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
@@ -141,6 +154,7 @@ export function usePaymentFlow(opts: {
         preview.amount_mei,
         settings?.security_profile,
         settings?.hardware_signing_mode,
+        secondFactorThresholdMei,
       );
       let result;
       if (preview.plan.rail === "L2Fast") {
@@ -174,7 +188,17 @@ export function usePaymentFlow(opts: {
     } finally {
       setBusy(false);
     }
-  }, [onSent, platformSec, preview, refresh, sendOptions, setBusy, settings, showToast]);
+  }, [
+    onSent,
+    platformSec,
+    preview,
+    refresh,
+    secondFactorThresholdMei,
+    sendOptions,
+    setBusy,
+    settings,
+    showToast,
+  ]);
 
   const goToPayContact = useCallback((address: string, label?: string) => {
     setSendTo(address);

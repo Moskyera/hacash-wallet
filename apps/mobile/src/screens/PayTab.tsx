@@ -54,6 +54,10 @@ type Props = {
   hideAddresses: boolean;
   settings: WalletSettings | null;
   platformSec: PlatformSecurityStatus | null;
+  /// The amount the core actually enforces, already combining the authenticated profile
+  /// with the user's chosen value. Passed in rather than derived, so the screen cannot
+  /// drift from the policy.
+  secondFactorThresholdMei: number | null;
   busy: boolean;
   dustWhisper?: DustWhisperSettings | null;
   onPersistSendPrefs: (
@@ -92,6 +96,7 @@ export default function PayTab({
   hideAddresses,
   settings,
   platformSec,
+  secondFactorThresholdMei,
   busy,
   dustWhisper,
   onPersistSendPrefs,
@@ -350,8 +355,19 @@ export default function PayTab({
                 preview.amount_mei,
                 settings?.security_profile,
                 settings?.hardware_signing_mode,
+                secondFactorThresholdMei,
               ) ? (
-                platformSec?.native_biometric_available ? (
+                // Fast Pay cannot carry authorization: its settlement bill is cosigned by
+                // the hub, so the wallet cannot bind an approval to it and refuses
+                // instead. Promising a fingerprint prompt here would be a lie, and the
+                // user would only learn the truth after tapping.
+                preview.plan.rail === "L2Fast" ? (
+                  <p className="error">
+                    This amount needs confirmation, and Fast Pay cannot be confirmed
+                    because its settlement bill is cosigned by the hub. Tick Force
+                    on-chain (L1) above to pay it.
+                  </p>
+                ) : platformSec?.native_biometric_available ? (
                   <p className="muted">Biometric confirmation required.</p>
                 ) : (
                   <p className="error">
