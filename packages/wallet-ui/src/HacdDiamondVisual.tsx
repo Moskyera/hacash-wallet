@@ -9,7 +9,8 @@ import {
 } from "react";
 
 import "./hacd.css";
-import { hip5MainColors, renderHip5Svg, resolveVisualGene } from "./hip5";
+import { renderHip8Svg, renderHip9Svg } from "./hacdArt";
+import { hip5ColorPalette, hip5MainColors, renderHip5Svg, resolveVisualGene } from "./hip5";
 import { isValidHacdName, normalizeHacdName } from "./paymentAssets";
 
 export type HacdDiamondBornInfo = {
@@ -212,7 +213,7 @@ export function HacdDiamondVisual({
     if (!host) return;
     const fit = () => {
       const width = host.clientWidth || 320;
-      setScale(Math.max(0.12, Math.min(0.55, width / 800)));
+      setScale(Math.max(0.2, Math.min(1, width / 800)));
     };
     fit();
     if (typeof ResizeObserver === "undefined") return;
@@ -273,17 +274,22 @@ function ExplorerMetadataCard({
   const art = useMemo(() => {
     if (!gene) return null;
     try {
-      const svg = renderHip5Svg(gene, 500);
+      const svg = renderHip5Svg(gene, 1000);
       const colors = hip5MainColors(gene);
       return {
+        palette: hip5ColorPalette(gene),
         colors,
         gene,
         dataUrl: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+        hip8Url: svgDataUrl(() => renderHip8Svg(gene, 250, "#ffffff66", displayName)),
+        hip9Url: info.life_gene
+          ? svgDataUrl(() => renderHip9Svg(info.life_gene as string, 200))
+          : null,
       };
     } catch {
       return null;
     }
-  }, [gene]);
+  }, [displayName, gene, info.life_gene]);
 
   const explorerUrl = hacdExplorerUrl(displayName);
   const openExplorer = async (event: MouseEvent<HTMLAnchorElement>) => {
@@ -303,6 +309,16 @@ function ExplorerMetadataCard({
   const gradient = art
     ? `linear-gradient(to right bottom, #${art.colors[0]}99, #${art.colors[1]})`
     : "#000000";
+  const nameGradient = art ? paletteGradient(90, art.palette.slice(0, 6)) : undefined;
+  const lifeGradient = art ? stripedGradient(-21, art.palette, false, 0) : undefined;
+  const leftStripeGradient = art ? stripedGradient(135, art.palette, true, 6) : undefined;
+  const rightStripeGradient = art
+    ? paletteGradient(0, [art.palette[14], art.palette[12], art.palette[13], art.palette[15]])
+    : undefined;
+  const stripeSize =
+    info.number == null
+      ? 12
+      : Math.max(2, Math.min(48, ((100_001 - info.number) / 100_000) * 48));
 
   return (
     <article className="hacd-metadata-card" data-hacd-name={displayName}>
@@ -324,10 +340,24 @@ function ExplorerMetadataCard({
               <div className="hacd-meta-ibg" aria-hidden>
                 <img src={art.dataUrl} alt="" />
               </div>
-              <div className="hacd-meta-ldz" aria-hidden />
+              <div
+                className="hacd-meta-ldz"
+                aria-hidden
+                style={{ backgroundSize: `${stripeSize}px ${stripeSize}px` }}
+              />
               <div className="hacd-meta-img" aria-hidden>
                 <img src={art.dataUrl} alt="" />
               </div>
+              {art.hip8Url && (
+                <div className="hacd-meta-oh hacd-meta-h8" aria-hidden>
+                  <img src={art.hip8Url} alt="" />
+                </div>
+              )}
+              {art.hip9Url && (
+                <div className="hacd-meta-oh hacd-meta-h9" aria-hidden>
+                  <img src={art.hip9Url} alt="" />
+                </div>
+              )}
             </>
           )}
           <div className="hacd-meta-overlay">
@@ -336,26 +366,22 @@ function ExplorerMetadataCard({
               <br />
               {copy.bornBlock}: <b>{info.born?.height ?? copy.notAvailable}</b>
             </div>
-            <div className="hacd-meta-clb" aria-hidden />
+            <div
+              className="hacd-meta-clb"
+              aria-hidden
+              style={{ backgroundImage: leftStripeGradient }}
+            />
             <div className="hacd-meta-num">{info.number ?? ""}</div>
             <div
               className="hacd-meta-dn"
-              style={
-                art
-                  ? { backgroundImage: `linear-gradient(90deg, #${art.colors[0]}, #${art.colors[1]})` }
-                  : undefined
-              }
+              style={{ backgroundImage: nameGradient }}
             >
               {displayName}
             </div>
             <p className="hacd-meta-lgn">{copy.lifeGenes}</p>
             <p
               className="hacd-meta-lg"
-              style={
-                art
-                  ? { backgroundImage: `linear-gradient(-21deg, #${art.colors[0]}, #${art.colors[1]})` }
-                  : undefined
-              }
+              style={{ backgroundImage: lifeGradient }}
             >
               {lifeRows.length > 0
                 ? lifeRows.map((row, index) => (
@@ -385,7 +411,11 @@ function ExplorerMetadataCard({
               <br />
               {minerShort}
             </p>
-            <div className="hacd-meta-cll" aria-hidden />
+            <div
+              className="hacd-meta-cll"
+              aria-hidden
+              style={{ backgroundImage: rightStripeGradient }}
+            />
           </div>
         </div>
       </a>
@@ -442,4 +472,41 @@ function PendingCard({ title, message }: { title?: string; message: string }) {
 function formatBidFee(fee: string | null | undefined, notAvailable: string): string {
   const raw = String(fee || "").trim();
   return raw ? `\u311c${raw}` : notAvailable;
+}
+
+function svgDataUrl(factory: () => string): string | null {
+  try {
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(factory())}`;
+  } catch {
+    return null;
+  }
+}
+
+function paletteGradient(
+  angle: number,
+  palette: ReadonlyArray<readonly [string, string]>,
+): string {
+  return `linear-gradient(${angle}deg, ${palette
+    .flatMap((pair) => [`#${pair[0]}`, `#${pair[1]}`])
+    .join(", ")})`;
+}
+
+function stripedGradient(
+  angle: number,
+  palette: ReadonlyArray<readonly [string, string]>,
+  secondColor: boolean,
+  offset: number,
+): string {
+  const stops: string[] = [];
+  for (let index = 0; index < palette.length - 1; index += 1) {
+    const start = index * (100 / palette.length) + offset;
+    const colorIndex = secondColor ? 1 : 0;
+    stops.push(
+      `#${palette[index][colorIndex]} ${start}%`,
+      `transparent ${start}%`,
+      `transparent ${start + 1}%`,
+      `#${palette[index + 1][colorIndex]} ${start + 1}%`,
+    );
+  }
+  return `linear-gradient(${angle}deg, ${stops.join(", ")})`;
 }

@@ -1,6 +1,11 @@
+import { HowItWorksPrompt } from "@hacash/wallet-ui";
+import { open } from "@tauri-apps/plugin-shell";
+
 import { AssetSummary, WalletStatus } from "../api";
 import BalanceOverview from "../components/BalanceOverview";
 import HacdDappConnect from "../components/HacdDappConnect";
+import { formatInvokeError } from "../formatInvokeError";
+import { useLocale } from "../locale";
 import { PrivacySettings } from "../api";
 import { maskHash } from "../privacy";
 import { formatCountdown, type Screen } from "./types";
@@ -34,8 +39,21 @@ export default function HomeScreen({
   onNotify,
   clearMessages,
 }: Props) {
+  const { t } = useLocale();
+
   return (
     <section className="panel">
+      <HowItWorksPrompt
+        copy={{
+          title: t("docs.readPromptTitle"),
+          body: t("docs.readPromptBody"),
+          open: t("docs.howItWorks"),
+          later: t("docs.readPromptLater"),
+          never: t("docs.readPromptNever"),
+        }}
+        openExternal={open}
+        onError={(error) => onNotify(formatInvokeError(error), "error")}
+      />
       <div className="balance-card">
         <BalanceOverview assets={assets} hideBalances={hideBalances} />
         <div className="chips">

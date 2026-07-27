@@ -28,6 +28,8 @@ describe("HIP-5 input validation", () => {
     expect(svg.trimStart().startsWith("<svg")).toBe(true);
     expect(svg).toContain("<style>.st16{");
     expect(svg).not.toContain("<script");
+    expect((svg.match(/<g(?:\s|>)/g) ?? []).length).toBeGreaterThan(0);
+    expect((svg.match(/<g(?:\s|>)/g) ?? []).length).toBe((svg.match(/<\/g>/g) ?? []).length);
 
     const colors = hip5MainColors(VALID_VISUAL_GENE);
     expect(colors).toHaveLength(2);
