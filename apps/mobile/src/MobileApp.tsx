@@ -20,6 +20,10 @@ import WelcomeScreen from "./screens/WelcomeScreen";
 import MoreRouter, { type MorePage } from "./screens/more/MoreRouter";
 import { loadContacts, type SavedContact } from "./contacts";
 import { formatInvokeError } from "./formatInvokeError";
+import {
+  clearSystemDialogExpectation,
+  systemDialogInFlight,
+} from "./utils/systemDialogGuard";
 import { useLocale } from "./locale";
 import { encodePaymentUri } from "./paymentQr";
 import { clearSensitiveClipboard, copyWithPrivacyClear, maskAddress } from "./privacy";
@@ -43,7 +47,6 @@ export default function MobileApp() {
   const [watchAddress, setWatchAddress] = useState("");
   const [receiveAmount, setReceiveAmount] = useState("");
   const [selectedBill, setSelectedBill] = useState<BillSummary | null>(null);
-  const [payCameraIntent, setPayCameraIntent] = useState(false);
 
   const pullStartY = useRef(0);
   const pullOffset = useRef(0);
@@ -91,6 +94,10 @@ export default function MobileApp() {
       void clearSensitiveClipboard();
 
       if (session.authScreen !== "app" || backgroundLockRequested.current) return;
+      // A system dialog the user just asked for is not the app being backgrounded.
+      // Concealing already happened above; locking here would eject them from a scan
+      // they started one tap earlier.
+      if (systemDialogInFlight()) return;
       backgroundLockRequested.current = true;
       void api
         .lock()
@@ -111,6 +118,7 @@ export default function MobileApp() {
       if (session.privacy.screen_privacy) setPrivacyHidden(true);
     };
     const onFocus = () => {
+      clearSystemDialogExpectation();
       if (document.visibilityState !== "hidden" && !backgroundLockRequested.current) {
         setPrivacyHidden(false);
       }
@@ -136,17 +144,18 @@ export default function MobileApp() {
     (opts?: { openCamera?: boolean }) => {
       if (session.status?.hardware_signing_mode === "airgap_only") {
         payment.setPayScanMode(false);
-        setPayCameraIntent(false);
         setMorePage("airgap");
         setTab("more");
         showToast(t("airgap.coldVaultSignerHint"), "info");
         return;
       }
       payment.setPayScanMode(false);
-      setPayCameraIntent(false);
       if (opts?.openCamera) {
+        // Show the scanner, but never start the camera on the user's behalf. A wallet
+        // that switches the camera on by itself is unpleasant on its own terms, and it
+        // used to raise the Android permission dialog before the user had chosen to
+        // scan anything. The scanner renders its own Open camera button.
         payment.setPayScanMode(true);
-        setPayCameraIntent(true);
       }
       setTab("pay");
     },
@@ -156,7 +165,6 @@ export default function MobileApp() {
   useEffect(() => {
     if (tab !== "pay") {
       payment.setPayScanMode(false);
-      setPayCameraIntent(false);
     }
   }, [tab, payment]);
 
@@ -639,8 +647,6 @@ export default function MobileApp() {
             preview={payment.preview}
             payScanMode={payment.payScanMode}
             setPayScanMode={payment.setPayScanMode}
-            payCameraIntent={payCameraIntent}
-            onCameraIntentConsumed={() => setPayCameraIntent(false)}
             hideAddresses={session.privacy.hide_addresses}
             settings={session.settings}
             platformSec={session.platformSec}

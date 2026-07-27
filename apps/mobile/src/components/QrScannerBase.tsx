@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Html5Qrcode } from "html5-qrcode/esm/index.js";
+import { expectSystemDialog } from "../utils/systemDialogGuard";
 
 type Props<T> = {
   mountId: string;
@@ -10,8 +11,6 @@ type Props<T> = {
   onDetected: (result: T) => void;
   onError: (message: string) => void;
   disabled?: boolean;
-  autoStart?: boolean;
-  onAutoStarted?: () => void;
   qrboxSize?: number;
   primaryCameraButton?: boolean;
 };
@@ -25,8 +24,6 @@ export default function QrScannerBase<T>({
   onDetected,
   onError,
   disabled = false,
-  autoStart = false,
-  onAutoStarted,
   qrboxSize = 220,
   primaryCameraButton = false,
 }: Props<T>) {
@@ -34,7 +31,6 @@ export default function QrScannerBase<T>({
   const [pasteInput, setPasteInput] = useState("");
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const handledRef = useRef(false);
-  const autoStartedRef = useRef(false);
 
   const stopScanner = useCallback(async () => {
     if (!scannerRef.current) return;
@@ -69,6 +65,11 @@ export default function QrScannerBase<T>({
 
   const startScanner = useCallback(async () => {
     if (disabled || scannerRef.current) return;
+    // Starting the camera can raise the Android permission dialog, which runs as a
+    // separate activity and makes the WebView look backgrounded. Tell the background
+    // lock that this one is expected, so it conceals without locking the wallet and
+    // dropping the user on the unlock screen mid-scan.
+    expectSystemDialog();
     handledRef.current = false;
     const scanner = new Html5Qrcode(mountId);
     scannerRef.current = scanner;
@@ -92,11 +93,6 @@ export default function QrScannerBase<T>({
     }
   }, [disabled, ingestDecoded, mountId, onError, qrboxSize, stopScanner]);
 
-  useEffect(() => {
-    if (!autoStart || disabled || autoStartedRef.current) return;
-    autoStartedRef.current = true;
-    void startScanner().finally(() => onAutoStarted?.());
-  }, [autoStart, disabled, onAutoStarted, startScanner]);
 
   function ingestPaste() {
     handledRef.current = false;

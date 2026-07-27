@@ -49,8 +49,6 @@ type Props = {
   preview: SendPreview | null;
   payScanMode: boolean;
   setPayScanMode: (v: boolean) => void;
-  payCameraIntent: boolean;
-  onCameraIntentConsumed: () => void;
   hideAddresses: boolean;
   settings: WalletSettings | null;
   platformSec: PlatformSecurityStatus | null;
@@ -91,8 +89,6 @@ export default function PayTab({
   preview,
   payScanMode,
   setPayScanMode,
-  payCameraIntent,
-  onCameraIntentConsumed,
   hideAddresses,
   settings,
   platformSec,
@@ -190,8 +186,6 @@ export default function PayTab({
           )}
           {payScanMode ? (
             <PaymentQrScanner
-              autoStart={payCameraIntent}
-              onAutoStarted={onCameraIntentConsumed}
               disabled={busy}
               onDetected={(p) => void onPaymentQr(p)}
               onError={(msg) => onToast(msg, "error")}
