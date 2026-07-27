@@ -8,6 +8,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "dependencies": {
+    "js-sha3": "0.9.3"
+  },
   "peerDependencies": {
     "react": "^19.0.0"
   }

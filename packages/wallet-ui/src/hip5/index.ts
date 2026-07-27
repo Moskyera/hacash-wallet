@@ -43,11 +43,23 @@ export function renderHip5Svg(visualGene: string, size = 220): string {
   if (svg.length < 512) {
     throw new Error("HIP-5 renderer produced an empty image");
   }
-  const styled = svg.replace(/(<svg\b[^>]*>)/i, `$1${EMBEDDED_SVG_STYLE}`);
+  const balanced = closeUnbalancedGroups(svg);
+  const styled = balanced.replace(/(<svg\b[^>]*>)/i, `$1${EMBEDDED_SVG_STYLE}`);
   if (DANGEROUS_SVG_RE.test(styled)) {
     throw new Error("Unsafe HIP-5 renderer output");
   }
   return styled;
+}
+
+function closeUnbalancedGroups(svg: string): string {
+  const opened = (svg.match(/<g(?:\s|>)/g) ?? []).length;
+  const closed = (svg.match(/<\/g>/g) ?? []).length;
+  const missing = opened - closed;
+  if (missing < 0 || missing > 32 || !/<\/svg>\s*$/i.test(svg)) {
+    throw new Error("Malformed HIP-5 renderer output");
+  }
+  if (missing === 0) return svg;
+  return svg.replace(/<\/svg>\s*$/i, `${"</g>".repeat(missing)}</svg>`);
 }
 
 export function hip5MainColors(visualGene: string): [string, string] {
@@ -63,6 +75,30 @@ export function hip5MainColors(visualGene: string): [string, string] {
     throw new Error("Invalid HIP-5 color output");
   }
   return [pair[0].toLowerCase(), pair[1].toLowerCase()];
+}
+
+export function hip5ColorPalette(visualGene: string, count = 16): Array<[string, string]> {
+  const normalized = requireVisualGene(visualGene);
+  if (!Number.isInteger(count) || count < 1 || count > 16) {
+    throw new Error("Invalid HIP-5 palette size");
+  }
+  const palette = GetDiamondMainColor(normalized, count) as unknown;
+  if (
+    !Array.isArray(palette) ||
+    palette.length !== count ||
+    palette.some(
+      (pair) =>
+        !Array.isArray(pair) ||
+        pair.length !== 2 ||
+        typeof pair[0] !== "string" ||
+        typeof pair[1] !== "string" ||
+        !HEX_COLOR_RE.test(pair[0]) ||
+        !HEX_COLOR_RE.test(pair[1]),
+    )
+  ) {
+    throw new Error("Invalid HIP-5 palette output");
+  }
+  return palette.map((pair) => [pair[0].toLowerCase(), pair[1].toLowerCase()]);
 }
 
 function requireVisualGene(visualGene: string): string {

@@ -9,9 +9,14 @@ import {
 } from "./systemDialogGuard";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = join(SRC, "..", "..", "..");
 
 function read(relative: string): string {
   return readFileSync(join(SRC, relative), "utf8");
+}
+
+function readWorkspace(relative: string): string {
+  return readFileSync(join(ROOT, relative), "utf8");
 }
 
 afterEach(() => {
@@ -57,7 +62,7 @@ describe("system dialog guard", () => {
     const clearPass = lock!.indexOf('setPassphrase("")');
     const clipboard = lock!.indexOf("clearSensitiveClipboard()");
     const guard = lock!.indexOf("systemDialogInFlight()");
-    const lockCall = lock!.indexOf("api\n        .lock()");
+    const lockCall = lock!.search(/void api\r?\n\s*\.lock\(\)/);
 
     expect(conceal).toBeGreaterThanOrEqual(0);
     expect(guard).toBeGreaterThan(conceal);
@@ -85,15 +90,18 @@ describe("system dialog guard", () => {
   // restart. A wallet that keeps asking after being told no is not respecting the answer.
   it("remembers do-not-ask-again across restarts", () => {
     const app = read("MobileApp.tsx");
+    const desktop = readWorkspace("apps/desktop/src/screens/HomeScreen.tsx");
+    const prompt = readWorkspace("packages/wallet-ui/src/HowItWorksPrompt.tsx");
 
-    // Seeded from storage once, not recomputed on every render.
-    expect(app).toContain("useState(() => !howItWorksDismissed())");
+    // Both shells render one shared implementation instead of drifting apart.
+    expect(app).toContain("<HowItWorksPrompt");
+    expect(desktop).toContain("<HowItWorksPrompt");
+    expect(prompt).toContain("useState(() => !howItWorksDismissed())");
     // Both exits exist: hide for now, and never ask again.
-    expect(app).toContain('t("docs.readPromptLater")');
-    expect(app).toContain('t("docs.readPromptNever")');
-    expect(app).toContain("dismissHowItWorks();");
+    expect(prompt).toContain("setVisible(false)");
+    expect(prompt).toContain("dismissHowItWorks();");
     // The link is the shared constant, not a second copy of the URL.
-    expect(app).toContain("openUrl(HOW_IT_WORKS_URL)");
-    expect(app).not.toContain("https://github.com/");
+    expect(prompt).toContain("openExternal(HOW_IT_WORKS_URL)");
+    expect(prompt).not.toContain("https://github.com/");
   });
 });

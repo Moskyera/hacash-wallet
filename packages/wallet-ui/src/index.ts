@@ -1,5 +1,7 @@
 export * from "./AirgapInspectionCard";
 export * from "./HacdDiamondVisual";
+export * from "./HowItWorksPrompt";
+export * from "./hacdArt";
 export * from "./DappAppSelector";
 export * from "./dappApps";
 export * from "./OwnedHacdGallery";
