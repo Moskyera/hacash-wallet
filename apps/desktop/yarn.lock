@@ -291,7 +291,7 @@
   integrity sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==
 
 "@hacash/wallet-ui@file:../../packages/wallet-ui":
-  version "1.0.1"
+  version "1.0.2"
   dependencies:
     js-sha3 "0.9.3"
 
