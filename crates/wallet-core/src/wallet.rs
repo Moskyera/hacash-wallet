@@ -288,9 +288,7 @@ impl WalletService {
             dust_whisper: self.settings.dust_whisper.clone(),
             fast_pay_state: fast_pay.state.as_str().to_string(),
             fast_pay_message: fast_pay.message,
-            legacy_key_derivation: meta
-                .as_ref()
-                .and_then(|m| m.legacy_key_derivation.clone()),
+            legacy_key_derivation: meta.as_ref().and_then(|m| m.legacy_key_derivation.clone()),
         }
     }
 
@@ -1254,9 +1252,9 @@ impl WalletService {
     /// Deliberately does not set `webauthn_verified`: approving a key rotation is
     /// not consent to sign a transaction.
     pub fn webauthn_replacement_auth_finish(&mut self, assertion_json: &str) -> WalletResult<()> {
-        let stored = self.load_webauthn_credential()?.ok_or_else(|| {
-            WalletError::Policy("no WebAuthn authenticator is registered".into())
-        })?;
+        let stored = self
+            .load_webauthn_credential()?
+            .ok_or_else(|| WalletError::Policy("no WebAuthn authenticator is registered".into()))?;
         let updated = match self.webauthn.finish_auth(assertion_json, Some(&stored)) {
             Ok(updated) => updated,
             Err(error) => {
@@ -1280,7 +1278,8 @@ impl WalletService {
         })?;
         if approved_at.elapsed() > WEBAUTHN_REPLACEMENT_APPROVAL_TTL {
             return Err(WalletError::Policy(
-                "the current authenticator's approval expired; approve the replacement again".into(),
+                "the current authenticator's approval expired; approve the replacement again"
+                    .into(),
             ));
         }
         Ok(())
@@ -3348,9 +3347,7 @@ mod vault_migration_tests {
         let _wallet_data = IsolatedWalletData::new();
         let mut wallet = WalletService::new(None, None).unwrap();
         wallet.create_wallet(OLD_PASS).unwrap();
-        wallet
-            .audit_activate_cold_vault(OLD_PASS)
-            .unwrap();
+        wallet.audit_activate_cold_vault(OLD_PASS).unwrap();
 
         let session = wallet.unlocked.as_ref().unwrap();
         assert!(
@@ -3507,9 +3504,7 @@ mod vault_migration_tests {
             )
             .unwrap();
 
-        wallet
-            .audit_activate_cold_vault(OLD_PASS)
-            .unwrap();
+        wallet.audit_activate_cold_vault(OLD_PASS).unwrap();
         assert!(wallet.quantum_keystore_mem.is_none());
         assert!(
             wallet

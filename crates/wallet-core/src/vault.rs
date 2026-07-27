@@ -449,7 +449,10 @@ fn validate_vault_blob(blob: &VaultBlob) -> WalletResult<()> {
             .webauthn_credential_binding_sha256
             .as_ref()
             .map_or(0, String::len)
-        + metadata.legacy_key_derivation.as_ref().map_or(0, String::len);
+        + metadata
+            .legacy_key_derivation
+            .as_ref()
+            .map_or(0, String::len);
     if metadata_bytes > MAX_METADATA_TEXT_BYTES {
         return Err(WalletError::Vault(
             "vault metadata exceeds safe limit".into(),

@@ -43,8 +43,14 @@ fn every_ceremony_shows_the_trusted_display_first() {
 
     // The dialog has to be mounted, or the confirmation can never resolve.
     for (root, component) in [
-        ("apps/desktop/src/App.tsx", "apps/desktop/src/components/PreparedOperationConfirm.tsx"),
-        ("apps/mobile/src/MobileApp.tsx", "apps/mobile/src/components/PreparedOperationConfirm.tsx"),
+        (
+            "apps/desktop/src/App.tsx",
+            "apps/desktop/src/components/PreparedOperationConfirm.tsx",
+        ),
+        (
+            "apps/mobile/src/MobileApp.tsx",
+            "apps/mobile/src/components/PreparedOperationConfirm.tsx",
+        ),
     ] {
         assert!(
             read(root).contains("<PreparedOperationConfirm />"),
@@ -61,7 +67,10 @@ fn every_ceremony_shows_the_trusted_display_first() {
         "apps/desktop/src/preparedConfirm.ts",
         "apps/mobile/src/preparedConfirm.ts",
     ] {
-        assert!(read(bridge).contains("Promise.reject"), "{bridge} must fail closed");
+        assert!(
+            read(bridge).contains("Promise.reject"),
+            "{bridge} must fail closed"
+        );
     }
 }
 

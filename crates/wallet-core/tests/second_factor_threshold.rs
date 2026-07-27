@@ -7,8 +7,8 @@
 mod common;
 
 use common::{tier0_gate, with_isolated_wallet_dir};
-use hacash_wallet_core::security::effective_second_factor_threshold;
 use hacash_wallet_core::WalletService;
+use hacash_wallet_core::security::effective_second_factor_threshold;
 
 const PASSPHRASE: &str = "threshold-passphrase12";
 
@@ -41,7 +41,8 @@ fn the_wallet_enforces_the_chosen_amount_and_reports_it() {
             assert_eq!(svc.second_factor_threshold_mei(), 100);
             assert_eq!(svc.status().require_second_factor_above_mei, 100);
 
-            svc.set_second_factor_threshold(PASSPHRASE, Some(5)).unwrap();
+            svc.set_second_factor_threshold(PASSPHRASE, Some(5))
+                .unwrap();
             assert_eq!(svc.second_factor_threshold_mei(), 5);
             assert_eq!(
                 svc.status().require_second_factor_above_mei,
@@ -86,7 +87,8 @@ fn lowering_the_threshold_makes_a_smaller_send_need_a_factor() {
                  factor was demanded, got: {before}"
             );
 
-            svc.set_second_factor_threshold(PASSPHRASE, Some(5)).unwrap();
+            svc.set_second_factor_threshold(PASSPHRASE, Some(5))
+                .unwrap();
 
             // Same amount, now at or above the chosen threshold, so it never reaches the
             // balance check. Two guards can refuse it and either is correct: the session
@@ -122,9 +124,10 @@ fn changing_the_threshold_needs_the_passphrase_and_its_own_command() {
             let mut svc = WalletService::new(None, None).unwrap();
             svc.create_wallet(PASSPHRASE).unwrap();
 
-            assert!(svc
-                .set_second_factor_threshold("wrong-passphrase12", Some(5))
-                .is_err());
+            assert!(
+                svc.set_second_factor_threshold("wrong-passphrase12", Some(5))
+                    .is_err()
+            );
             assert_eq!(svc.second_factor_threshold_mei(), 100);
 
             // The generic settings path must refuse it, so the authenticated command is
@@ -138,15 +141,20 @@ fn changing_the_threshold_needs_the_passphrase_and_its_own_command() {
             assert_eq!(svc.second_factor_threshold_mei(), 100);
 
             // Zero is meaningless and refused outright.
-            assert!(svc.set_second_factor_threshold(PASSPHRASE, Some(0)).is_err());
+            assert!(
+                svc.set_second_factor_threshold(PASSPHRASE, Some(0))
+                    .is_err()
+            );
         });
     });
 }
 
 #[test]
 fn zero_is_refused_by_validation_and_dropped_by_normalisation() {
-    let mut settings = hacash_wallet_core::settings::WalletSettings::default();
-    settings.require_second_factor_above_mei = Some(0);
+    let settings = hacash_wallet_core::settings::WalletSettings {
+        require_second_factor_above_mei: Some(0),
+        ..Default::default()
+    };
     assert!(settings.clone().validate_and_normalize().is_err());
 
     let mut normalised = settings;
@@ -178,7 +186,7 @@ fn every_policy_path_reads_the_threshold_through_the_accessor() {
                 stack.push(path);
                 continue;
             }
-            if !path.extension().is_some_and(|ext| ext == "rs") {
+            if path.extension().is_none_or(|ext| ext != "rs") {
                 continue;
             }
             // security.rs owns the field and the one comparison against it.
@@ -208,10 +216,10 @@ fn every_policy_path_reads_the_threshold_through_the_accessor() {
                 // Require the sanctioned call to still be open, so one correct read
                 // cannot shelter a wrong one a couple of lines below it.
                 let window = &before[before.len().saturating_sub(220)..];
-                if let Some(call) = window.rfind("effective_second_factor_threshold(") {
-                    if !window[call..].contains(';') {
-                        continue;
-                    }
+                if let Some(call) = window.rfind("effective_second_factor_threshold(")
+                    && !window[call..].contains(';')
+                {
+                    continue;
                 }
                 // Report the enclosing function so the failure says where to look.
                 // Top-level functions are unindented, methods are indented, and getting
@@ -235,20 +243,23 @@ fn every_policy_path_reads_the_threshold_through_the_accessor() {
                 .iter()
                 .filter_map(|marker| before.rfind(marker).map(|i| i + marker.len()))
                 .max()
-                    .map(|start| {
-                        source[start..]
-                            .split(['(', '<'])
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string()
-                    })
-                    .unwrap_or_default();
+                .map(|start| {
+                    source[start..]
+                        .split(['(', '<'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_default();
                 if enclosing == "second_factor_threshold_mei" || enclosing == "effective_profile" {
                     continue;
                 }
                 let line_number = before.matches('\n').count() + 1;
-                offenders.push(format!("{}:{line_number} in fn {enclosing}", path.display()));
+                offenders.push(format!(
+                    "{}:{line_number} in fn {enclosing}",
+                    path.display()
+                ));
             }
 
             // The same bypass with nothing to grep for: a helper that reads the field

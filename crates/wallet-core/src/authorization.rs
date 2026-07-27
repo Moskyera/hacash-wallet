@@ -130,7 +130,10 @@ impl<T> PreparedOperation<T> {
             (self.requirement, self.assurance),
             (AuthorizationRequirement::None, _)
                 | (AuthorizationRequirement::AnyPlatformFactor, Some(_))
-                | (AuthorizationRequirement::WebAuthn, Some(AssuranceMethod::WebAuthn))
+                | (
+                    AuthorizationRequirement::WebAuthn,
+                    Some(AssuranceMethod::WebAuthn)
+                )
         )
     }
 }

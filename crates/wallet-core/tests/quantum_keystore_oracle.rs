@@ -60,7 +60,11 @@ fn wrong_keystore_passwords_are_throttled_like_wallet_unlock() {
         with_isolated_wallet_dir(|| {
             let (mut wallet, keystore) = wallet_with_quantum_keystore();
 
-            assert!(wallet.quantum_preview_keystore(&keystore, "wrong-one").is_err());
+            assert!(
+                wallet
+                    .quantum_preview_keystore(&keystore, "wrong-one")
+                    .is_err()
+            );
             assert_eq!(wallet.audit_quantum_keystore_failures(), 1);
 
             // The next guess is refused before any key-derivation work, and the

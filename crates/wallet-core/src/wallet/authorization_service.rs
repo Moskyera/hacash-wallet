@@ -328,8 +328,7 @@ impl WalletService {
             &service_fee,
         )?;
         self.ensure_transaction_network_binding(&body_hex).await?;
-        let requirement =
-            self.authorization_requirement(self.second_factor_threshold_mei())?;
+        let requirement = self.authorization_requirement(self.second_factor_threshold_mei())?;
         let display = exact_transaction_display(
             "Send HACD",
             &preview.summary,
@@ -428,8 +427,7 @@ impl WalletService {
             &transfers,
         )?;
         self.ensure_transaction_network_binding(&body_hex).await?;
-        let requirement =
-            self.authorization_requirement(self.second_factor_threshold_mei())?;
+        let requirement = self.authorization_requirement(self.second_factor_threshold_mei())?;
         let display = exact_transaction_display(
             "Send bridged BTC",
             &preview.summary,
@@ -619,8 +617,7 @@ impl WalletService {
             &[serde_json::json!({ "kind": 3, "channel_id": encoded_channel_id })],
         )?;
         self.ensure_transaction_network_binding(&body_hex).await?;
-        let requirement =
-            self.authorization_requirement(self.second_factor_threshold_mei())?;
+        let requirement = self.authorization_requirement(self.second_factor_threshold_mei())?;
         let display = exact_transaction_display(
             "Close Fast Pay channel",
             "Close the on-chain channel",

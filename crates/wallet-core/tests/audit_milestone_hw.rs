@@ -61,7 +61,10 @@ fn milestone_webauthn_gate_blocks_the_unprepared_send_command() {
                     Default::default(),
                 ))
                 .unwrap_err();
-            assert!(matches!(err, WalletError::Policy(_)), "expected a policy refusal, got {err:?}");
+            assert!(
+                matches!(err, WalletError::Policy(_)),
+                "expected a policy refusal, got {err:?}"
+            );
             assert!(
                 err.to_string().contains("prepared-operation authorization"),
                 "the refusal must name the missing prepared authorization, got: {err}"

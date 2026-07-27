@@ -168,8 +168,8 @@ fn dapp_signing_checks_connection_and_policy_before_requesting_consent() {
                 _ => {}
             }
         }
-        let guard_dropped = guard_dropped
-            .unwrap_or_else(|| panic!("{command} pre-check scope must close"));
+        let guard_dropped =
+            guard_dropped.unwrap_or_else(|| panic!("{command} pre-check scope must close"));
         let approval = body
             .find("require_approval(")
             .unwrap_or_else(|| panic!("{command} must still request approval"));

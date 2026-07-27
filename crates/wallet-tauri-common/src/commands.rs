@@ -682,10 +682,12 @@ pub fn wallet_set_security_profile(
     #[cfg(target_os = "android")]
     {
         if profile == "paranoid" {
-            return Err("Paranoid requires a WebAuthn ceremony for every send, which Android \
+            return Err(
+                "Paranoid requires a WebAuthn ceremony for every send, which Android \
                  cannot complete. Enable it on the desktop wallet, or use Cold Vault for an \
                  offline mobile signer."
-                .into());
+                    .into(),
+            );
         }
     }
     let mut svc = state.inner.blocking_lock();

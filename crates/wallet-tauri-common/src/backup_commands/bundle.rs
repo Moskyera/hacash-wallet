@@ -1231,17 +1231,17 @@ where
         ));
     }
     for file in StateFile::ALL {
-        if let Some(bytes) = originals.0.get(&file).and_then(Option::as_deref) {
-            if let Err(error) = secure_write(&tx_dir.join(old_file_name(file)), bytes) {
-                let primary = BackupError::io("stage restore rollback copy", error);
-                let cleanup = cleanup_transaction(root, &journal);
-                return match cleanup {
-                    Ok(()) => Err(primary),
-                    Err(cleanup_error) => Err(BackupError::new(format!(
-                        "{primary}; staging cleanup also failed: {cleanup_error}"
-                    ))),
-                };
-            }
+        if let Some(bytes) = originals.0.get(&file).and_then(Option::as_deref)
+            && let Err(error) = secure_write(&tx_dir.join(old_file_name(file)), bytes)
+        {
+            let primary = BackupError::io("stage restore rollback copy", error);
+            let cleanup = cleanup_transaction(root, &journal);
+            return match cleanup {
+                Ok(()) => Err(primary),
+                Err(cleanup_error) => Err(BackupError::new(format!(
+                    "{primary}; staging cleanup also failed: {cleanup_error}"
+                ))),
+            };
         }
     }
     journal.phase = RestorePhase::Prepared;
@@ -1834,7 +1834,11 @@ mod tests {
             // Restoring over a live wallet is refused; rollback must go through
             // an explicit reset first.
             let error = restore(&mut service, &bundle, TEST_PASS, false).unwrap_err();
-            assert!(error.to_string().contains("only into an empty wallet profile"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("only into an empty wallet profile")
+            );
 
             service.lock();
             drop(service);

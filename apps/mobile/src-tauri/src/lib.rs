@@ -120,7 +120,9 @@ async fn wallet_unlock_biometric(
     };
     if signing_policy == "airgap_only" {
         let _ = biometric_store::clear(&app).await;
-        return Err("Cold Vault can only be unlocked with its passphrase on the offline signer".into());
+        return Err(
+            "Cold Vault can only be unlocked with its passphrase on the offline signer".into(),
+        );
     }
     if !enabled {
         return Err("biometric unlock is disabled in wallet settings".into());

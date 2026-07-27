@@ -53,7 +53,10 @@ fn tier0_import_rejects_whitespace_only_seed() {
     tier0_gate("import_whitespace_seed", || {
         with_isolated_wallet_dir(|| {
             let mut svc = WalletService::new(None, None).unwrap();
-            assert!(svc.import_wallet("   \t\n  ", "passphrase12", "1Any").is_err());
+            assert!(
+                svc.import_wallet("   \t\n  ", "passphrase12", "1Any")
+                    .is_err()
+            );
         });
     });
 }

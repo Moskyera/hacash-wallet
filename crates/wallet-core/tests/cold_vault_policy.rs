@@ -148,10 +148,7 @@ fn the_correct_passphrase_alone_can_never_activate_the_cold_vault() {
                 // The legacy passphrase-only entrypoint is closed for good.
                 assert!(
                     wallet
-                        .change_hardware_signing_mode(
-                            PASSPHRASE,
-                            HardwareSigningMode::AirgapOnly
-                        )
+                        .change_hardware_signing_mode(PASSPHRASE, HardwareSigningMode::AirgapOnly)
                         .is_err()
                 );
                 assert!(
@@ -257,7 +254,10 @@ fn an_approved_activation_ticket_still_fails_on_a_wrong_passphrase_and_is_burned
 
 /// Exact argument list of the call starting at `start`, by paren depth.
 fn call_arguments(source: &str, start: usize) -> &str {
-    let open = start + source[start..].find('(').expect("call has no argument list");
+    let open = start
+        + source[start..]
+            .find('(')
+            .expect("call has no argument list");
     let mut depth = 0usize;
     for (offset, character) in source[open..].char_indices() {
         match character {
@@ -280,7 +280,8 @@ fn only_the_authorized_path_can_migrate_a_vault_into_cold_mode() {
         let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let wallet = std::fs::read_to_string(crate_root.join("src/wallet.rs")).unwrap();
         let service =
-            std::fs::read_to_string(crate_root.join("src/wallet/authorization_service.rs")).unwrap();
+            std::fs::read_to_string(crate_root.join("src/wallet/authorization_service.rs"))
+                .unwrap();
 
         // Passphrase change, profile change, legacy unlock migration, policy
         // change and WebAuthn registration must all carry the vault's existing
