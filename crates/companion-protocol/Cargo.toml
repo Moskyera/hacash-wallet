@@ -1,0 +1,30 @@
+[package]
+name = "hpay-companion-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed, authenticated HPAY desktop/mobile companion protocol primitives"
+
+[features]
+default = []
+# In-memory exportable keys are intentionally unavailable to production builds.
+# This feature exists only for protocol tooling and explicit development tests.
+dev-software-identity = []
+# Explicit strict pilot only; general builds keep mobile authority read-only.
+agent-wallet-testnet-pilot = []
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+p256.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+aes-gcm.workspace = true
+sha2.workspace = true
+rand.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio.workspace = true

@@ -45,6 +45,17 @@ fn classify_balance_error(ret: i32, address: &str, message: String) -> BalanceEr
     }
 }
 
+fn encode_addr_or_ptr_for_node(value: &str) -> WalletResult<String> {
+    let address = Address::from_readable(value.trim())
+        .map_err(|error| WalletError::Transaction(format!("invalid address: {error}")))?;
+    // Istanbul actions use AddrOrPtr. Current public nodes require its address
+    // arm as canonical binary JSON rather than bare base58.
+    Ok(format!(
+        "0x{}",
+        hex::encode(field::Serialize::serialize(&address)),
+    ))
+}
+
 fn select_balance_entry(
     entries: &[BalanceEntry],
     requested_address: &str,
@@ -447,6 +458,27 @@ impl NodeClient {
         self.post_create_transaction(payload).await
     }
 
+    pub async fn build_send_native_asset_tx(
+        &self,
+        from: &str,
+        to: &str,
+        serial: u64,
+        amount: u64,
+        fee: &str,
+    ) -> WalletResult<BuildTxResponse> {
+        let to = encode_addr_or_ptr_for_node(to)?;
+        self.post_create_transaction(serde_json::json!({
+            "main_address": from,
+            "fee": fee,
+            "actions": [{
+                "kind": 17,
+                "to": to,
+                "asset": { "serial": serial, "amount": amount }
+            }]
+        }))
+        .await
+    }
+
     /// Build an HACD transfer with a mandatory HAC treasury action in the same
     /// transaction, so either both legs settle or neither does.
     pub async fn build_send_diamond_tx_with_service_fee(
@@ -798,6 +830,12 @@ pub struct BalanceEntry {
 }
 
 impl BalanceEntry {
+    /// Exact decimal balance returned by the node. New security-sensitive
+    /// accounting domains must parse this string without floating point.
+    pub fn hacash_decimal(&self) -> &str {
+        &self.hacash
+    }
+
     pub fn hacash_mei(&self) -> WalletResult<f64> {
         self.hacash
             .parse::<f64>()
@@ -915,6 +953,14 @@ impl SubmitTxResponse {
 mod diamond_metadata_tests {
     use super::*;
 
+    #[test]
+    fn addr_or_ptr_json_matches_the_public_node_binary_contract() {
+        assert_eq!(
+            encode_addr_or_ptr_for_node("133Edy8Vmi1eNoZnCRPEAhmYWrHwtMQmRL").unwrap(),
+            "0x00165c77a76c6c267624a2cee98252a1c0645540fe"
+        );
+        assert!(encode_addr_or_ptr_for_node("not-an-address").is_err());
+    }
     #[test]
     fn parses_and_bounds_official_diamond_metadata() {
         let raw = r#"{

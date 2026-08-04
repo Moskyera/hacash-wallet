@@ -643,6 +643,7 @@ fn format_timestamp(ts: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use l2_fast_pay_hub::amount::HacAmount;
     use l2_fast_pay_hub::channel_id::derive_channel_id;
     use l2_fast_pay_hub::node::{ChannelInfo, ChannelPartyBalance, ChannelSide};
     use l2_fast_pay_hub::wire::{
@@ -699,14 +700,14 @@ mod tests {
             &ChannelWireInput {
                 channel: sample_channel(&channel_id, alice.readable(), hub.readable(), "5", "1"),
                 channel_id_hex: channel_id,
-                left_balance_mei: 4.0,
-                right_balance_mei: 2.0,
+                left_balance_mei: HacAmount::from_millimeis(4_000),
+                right_balance_mei: HacAmount::from_millimeis(2_000),
                 left_satoshi: 0,
                 right_satoshi: 0,
                 bill_auto_number: 1,
             },
             ChannelSide::Left,
-            1.0,
+            HacAmount::from_millimeis(1_000),
             1_700_000_000,
         )
         .unwrap();
@@ -740,25 +741,25 @@ mod tests {
             &ChannelWireInput {
                 channel: payer_channel.clone(),
                 channel_id_hex: payer_channel_id.clone(),
-                left_balance_mei: 8.5,
-                right_balance_mei: 1.5,
+                left_balance_mei: HacAmount::from_millimeis(8_500),
+                right_balance_mei: HacAmount::from_millimeis(1_500),
                 left_satoshi: 0,
                 right_satoshi: 0,
                 bill_auto_number: 1,
             },
             ChannelSide::Left,
-            1.5,
+            HacAmount::from_millimeis(1_500),
             &ChannelWireInput {
                 channel: payee_channel.clone(),
                 channel_id_hex: payee_channel_id.clone(),
-                left_balance_mei: 3.5,
-                right_balance_mei: 3.5,
+                left_balance_mei: HacAmount::from_millimeis(3_500),
+                right_balance_mei: HacAmount::from_millimeis(3_500),
                 left_satoshi: 0,
                 right_satoshi: 0,
                 bill_auto_number: 1,
             },
             ChannelSide::Left,
-            1.5,
+            HacAmount::from_millimeis(1_500),
             1_700_000_000,
         )
         .unwrap();

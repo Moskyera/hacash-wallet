@@ -1,4 +1,6 @@
 # Fail the release build if generated Android project is missing required pieces.
+param([switch]$SkipEmbeddedFrontendCheck)
+
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $android = Join-Path $mobile "src-tauri\gen\android"
@@ -18,8 +20,12 @@ $commonRust = Join-Path $mobile "..\..\crates\wallet-tauri-common\src"
 $mobileRust = Join-Path $mobile "src-tauri\src"
 $nativePluginSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\WalletNativePlugin.kt"
 $nativePluginGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\WalletNativePlugin.kt"
+$companionPluginSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\AgentCompanionIdentityPlugin.kt"
+$companionPluginGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\AgentCompanionIdentityPlugin.kt"
 $mainActivitySource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\MainActivity.kt"
 $mainActivityGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\MainActivity.kt"
+$agentActivitySource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\AgentCompanionActivity.kt"
+$agentActivityGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\AgentCompanionActivity.kt"
 $biometricStoreSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\BiometricSecretStore.kt"
 $biometricStoreGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet\mobile\BiometricSecretStore.kt"
 $apkInstallerSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\ApkInstaller.kt"
@@ -27,6 +33,8 @@ $apkInstallerGenerated = Join-Path $android "app\src\main\java\org\hacash\wallet
 $backupExportSource = Join-Path $mobile "src-tauri\android-src\org\hacash\wallet\mobile\BackupExportHelper.kt"
 $androidPermissions = Join-Path $mobile "src-tauri\android-permissions.xml"
 $mobileCapability = Join-Path $mobile "src-tauri\capabilities\mobile.json"
+$defaultCapability = Join-Path $mobile "src-tauri\capabilities\default.json"
+$agentCapability = Join-Path $mobile "src-tauri\capabilities\agent-companion.json"
 $walletPermissions = Join-Path $mobile "src-tauri\permissions\wallet.toml"
 $dataExtractionRules = Join-Path $android "app\src\main\res\xml\data_extraction_rules.xml"
 $legacyBackupRules = Join-Path $android "app\src\main\res\xml\backup_rules.xml"
@@ -71,8 +79,75 @@ if ((Test-Path $mobileCapability) -and
     $errors += "Android capability must not reference the removed upstream biometric plugin"
 }
 
+function Read-CapabilityConfig([string] $path, [string] $label) {
+    if (-not (Test-Path $path)) {
+        $script:errors += "Missing $label capability: $path"
+        return $null
+    }
+    try {
+        return Get-Content $path -Raw | ConvertFrom-Json
+    } catch {
+        $script:errors += "$label capability JSON is invalid: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Test-ExactWebviewTarget($capability, [string] $expected, [string] $label) {
+    if ($null -eq $capability) {
+        return
+    }
+    $targets = @($capability.webviews)
+    if ($targets.Count -ne 1 -or $targets[0] -cne $expected) {
+        $script:errors += "$label capability must target exactly webview $expected"
+    }
+}
+
+$agentCapabilityConfig = Read-CapabilityConfig $agentCapability "Agent companion"
+Test-ExactWebviewTarget $agentCapabilityConfig "agent-companion" "Agent companion"
+if ($null -ne $agentCapabilityConfig) {
+    $agentPermissions = @($agentCapabilityConfig.permissions)
+    if ($agentCapabilityConfig.local -ne $true) {
+        $errors += "Agent companion capability must set local=true"
+    }
+    if ($agentPermissions -contains "allow-main-wallet") {
+        $errors += "Agent companion capability must never include allow-main-wallet"
+    }
+    if (@($agentPermissions | Where-Object { $_ -match '\*' }).Count -gt 0) {
+        $errors += "Agent companion capability permissions must not contain wildcards"
+    }
+    if ($null -ne $agentCapabilityConfig.remote) {
+        $errors += "Agent companion capability must not define remote URLs"
+    }
+}
+
+$defaultCapabilityConfig = Read-CapabilityConfig $defaultCapability "Main wallet"
+Test-ExactWebviewTarget $defaultCapabilityConfig "main" "Main wallet"
+if ($null -ne $defaultCapabilityConfig) {
+    $defaultPermissions = @($defaultCapabilityConfig.permissions)
+    if ($defaultPermissions -notcontains "allow-main-wallet") {
+        $errors += "Main wallet capability must include allow-main-wallet"
+    }
+    if ($defaultPermissions -contains "allow-agent-companion") {
+        $errors += "Main wallet capability must not include allow-agent-companion"
+    }
+}
+
 if (Test-Path $manifest) {
     $mc = Get-Content $manifest -Raw
+    $agentActivityCount = ([regex]::Matches($mc, 'android:name="\.AgentCompanionActivity"')).Count
+    if ($agentActivityCount -ne 1) {
+        $errors += "AndroidManifest must contain exactly one private AgentCompanionActivity (found $agentActivityCount)"
+    }
+    foreach ($agentAttribute in @(
+        'android:exported="false"',
+        'android:excludeFromRecents="true"',
+        'android:launchMode="singleTop"'
+    )) {
+        $agentBlock = [regex]::Match($mc, '(?s)<activity[^>]*android:name="\.AgentCompanionActivity"[^>]*/>')
+        if (-not $agentBlock.Success -or $agentBlock.Value -notmatch [regex]::Escape($agentAttribute)) {
+            $errors += "AgentCompanionActivity must declare $agentAttribute"
+        }
+    }
     $providerCount = ([regex]::Matches($mc, 'android:name="androidx\.core\.content\.FileProvider"')).Count
     if ($providerCount -ne 1) {
         $errors += "AndroidManifest must contain exactly one FileProvider (found $providerCount)"
@@ -242,20 +317,30 @@ if (Test-Path $networkConfig) {
 
 if (Test-Path $proguard) {
     $pg = Get-Content $proguard -Raw
-    foreach ($keep in @("WalletNativePlugin", "ApkInstaller", "BiometricSecretStore", "BackupFileHelper", "BackupExportHelper", "app.tauri.opener.OpenerPlugin", "app.tauri.deep_link")) {
+    foreach ($keep in @("WalletNativePlugin", "AgentCompanionIdentityPlugin", "ApkInstaller", "BiometricSecretStore", "BackupFileHelper", "BackupExportHelper", "app.tauri.opener.OpenerPlugin", "app.tauri.deep_link")) {
         if ($pg -notmatch [regex]::Escape($keep)) {
             $errors += "proguard-rules.pro missing keep rule for $keep"
         }
     }
 }
 
-foreach ($pluginFile in @($nativePluginSource, $nativePluginGenerated)) {
+foreach ($pluginFile in @(
+    $nativePluginSource,
+    $nativePluginGenerated,
+    $companionPluginSource,
+    $companionPluginGenerated
+)) {
     if (-not (Test-Path $pluginFile)) {
         $errors += "Missing wallet-native Tauri Android plugin: $pluginFile"
     }
 }
 
-foreach ($activityFile in @($mainActivitySource, $mainActivityGenerated)) {
+foreach ($activityFile in @(
+    $mainActivitySource,
+    $mainActivityGenerated,
+    $agentActivitySource,
+    $agentActivityGenerated
+)) {
     if (-not (Test-Path $activityFile)) {
         $errors += "Missing secure Android MainActivity: $activityFile"
         continue
@@ -275,11 +360,27 @@ if ((Test-Path $mainActivitySource) -and (Test-Path $mainActivityGenerated)) {
     }
 }
 
+if ((Test-Path $agentActivitySource) -and (Test-Path $agentActivityGenerated)) {
+    $sourceActivity = (Get-Content $agentActivitySource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedActivity = (Get-Content $agentActivityGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourceActivity -ne $generatedActivity) {
+        $errors += "Generated AgentCompanionActivity differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
 if ((Test-Path $nativePluginSource) -and (Test-Path $nativePluginGenerated)) {
     $sourcePlugin = (Get-Content $nativePluginSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
     $generatedPlugin = (Get-Content $nativePluginGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
     if ($sourcePlugin -ne $generatedPlugin) {
         $errors += "Generated WalletNativePlugin differs from tracked source; rerun apply-android-patches.ps1"
+    }
+}
+
+if ((Test-Path $companionPluginSource) -and (Test-Path $companionPluginGenerated)) {
+    $sourcePlugin = (Get-Content $companionPluginSource -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    $generatedPlugin = (Get-Content $companionPluginGenerated -Raw).Replace(([string][char]13 + [string][char]10), [string][char]10)
+    if ($sourcePlugin -ne $generatedPlugin) {
+        $errors += "Generated AgentCompanionIdentityPlugin differs from tracked source; rerun apply-android-patches.ps1"
     }
 }
 
@@ -364,6 +465,66 @@ if (Test-Path $nativePluginSource) {
     }
 }
 
+if (Test-Path $companionPluginSource) {
+    $companionPlugin = Get-Content $companionPluginSource -Raw
+    foreach ($identityContract in @(
+        'hpay_agent_companion_identity_v1',
+        'ECGenParameterSpec("secp256r1")',
+        'setUserAuthenticationRequired(true)',
+        'setInvalidatedByBiometricEnrollment(true)',
+        'KeyProperties.AUTH_BIOMETRIC_STRONG',
+        'setUserAuthenticationValidityDurationSeconds(-1)',
+        'BiometricPrompt.CryptoObject(preparedSignature)',
+        'authorizedSignature !== preparedSignature',
+        'authorizedSignature.update(pending.canonicalPayload)',
+        'info.userAuthenticationValidityDurationSeconds == 0',
+        'info.userAuthenticationValidityDurationSeconds == -1',
+        'info.userAuthenticationType == KeyProperties.AUTH_BIOMETRIC_STRONG',
+        'info.keySize == 256',
+        'info.purposes == expectedPurposes',
+        'info.digests.toSet() == setOf(KeyProperties.DIGEST_SHA256)',
+        'info.isInvalidatedByBiometricEnrollment',
+        'publicKey.params.order == P256_ORDER',
+        'KeyPermanentlyInvalidatedException',
+        'recreateIdentity(store)',
+        'destroyed.get() ||',
+        'activeSignature !== pending ||',
+        'MAX_CANONICAL_PAYLOAD_BASE64_CHARS',
+        'encodedPayload.length > MAX_CANONICAL_PAYLOAD_BASE64_CHARS',
+        'HPAY/COMPANION/PAIRING-REQUEST/V1',
+        'HPAY/COMPANION/PAIRING-MOBILE-PROOF/V1',
+        'HPAY/COMPANION/SESSION-RESPONSE/V1',
+        'HPAY/COMPANION/APPROVAL-DECISION/V2',
+        'HPAY/COMPANION/WITNESS-RECEIPT/V1',
+        'HPAY/COMPANION/WITNESS-ROTATION/V1',
+        'HPAY/COMPANION/WITNESS-ROTATION-BASELINE/V1',
+        'fun signPairingMobileProof(',
+        'fun signSessionResponse(',
+        'fun signApprovalDecision(',
+        'fun signWitnessReceipt(',
+        'hasCanonicalDomain(payload, expectedDomain)'
+    )) {
+        if ($companionPlugin -notmatch [regex]::Escape($identityContract)) {
+            $errors += "Agent companion identity missing security contract: $identityContract"
+        }
+    }
+    foreach ($forbiddenIdentitySurface in @(
+        'DEVICE_CREDENTIAL',
+        'fun sign(invoke:',
+        'fun signPairingConfirmation(',
+        'fun signSessionChallenge(',
+        'fun signSessionConfirmation(',
+        'fun signAdminCommand(',
+        'HPAY/COMPANION/ADMIN-COMMAND/V2',
+        'put("authPerUse", true)',
+        'wallet_send_hac'
+    )) {
+        if ($companionPlugin -match [regex]::Escape($forbiddenIdentitySurface)) {
+            $errors += "Agent companion identity contains forbidden surface: $forbiddenIdentitySurface"
+        }
+    }
+}
+
 if (Test-Path $apkInstallerSource) {
     $apkInstaller = Get-Content $apkInstallerSource -Raw
     foreach ($signerContract in @(
@@ -421,6 +582,10 @@ if ((Test-Path $mobileLib) -and
     -not (Select-String -Path $mobileLib -Pattern 'android_native::init\(\)' -Quiet)) {
     $errors += "Mobile builder must register the wallet-native plugin on Android"
 }
+if ((Test-Path $mobileLib) -and
+    -not (Select-String -Path $mobileLib -Pattern 'agent_companion_identity::init\(\)' -Quiet)) {
+    $errors += "Mobile builder must register the dedicated Agent companion identity plugin on Android"
+}
 
 foreach ($manifestPath in @($mobileCargo, $commonCargo)) {
     if ((Test-Path $manifestPath) -and
@@ -462,32 +627,83 @@ if ((Test-Path $handlerInventory) -and (Test-Path $mobileLib) -and (Test-Path $w
         Get-RegisteredCommandNames $mobileSource '(?s)\.invoke_handler\s*\(\s*wallet_tauri_common::wallet_invoke_handler!\s*\[(?<commands>.*?)\]\s*\)' "mobile"
     ) | Sort-Object -Unique
 
-    $permissionMatch = [regex]::Match(
-        $permissionSource,
-        '(?s)\[\[permission\]\]\s*identifier\s*=\s*"allow-main-wallet"(?<body>.*?)(?=\r?\n\[\[permission\]\]|\z)'
-    )
-    if (-not $permissionMatch.Success) {
-        $errors += "Unable to parse allow-main-wallet permission"
-    } else {
-        $allowMatch = [regex]::Match($permissionMatch.Groups["body"].Value, '(?s)commands\.allow\s*=\s*\[(?<commands>.*?)\]')
-        if (-not $allowMatch.Success) {
-            $errors += "Unable to parse allow-main-wallet command list"
-        } else {
-            $allowed = @([regex]::Matches($allowMatch.Groups["commands"].Value, '"(?<command>[A-Za-z_][A-Za-z0-9_]*)"') |
-                ForEach-Object { $_.Groups["command"].Value })
-            $duplicates = @($allowed | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name)
-            $missing = @($registered | Where-Object { $_ -notin $allowed })
-            $stale = @($allowed | Where-Object { $_ -notin $registered })
+    $permissionCommands = @{}
+    foreach ($permissionId in @("allow-main-wallet", "allow-agent-companion")) {
+        $permissionMatch = [regex]::Match(
+            $permissionSource,
+            "(?s)\[\[permission\]\]\s*identifier\s*=\s*`"$([regex]::Escape($permissionId))`"(?<body>.*?)(?=\r?\n\[\[permission\]\]|\z)"
+        )
+        if (-not $permissionMatch.Success) {
+            $errors += "Unable to parse $permissionId permission"
+            continue
+        }
 
-            if ($duplicates.Count -gt 0) {
-                $errors += "allow-main-wallet contains duplicate commands: $($duplicates -join ', ')"
-            }
-            if ($missing.Count -gt 0) {
-                $errors += "allow-main-wallet is missing registered commands: $($missing -join ', ')"
-            }
-            if ($stale.Count -gt 0) {
-                $errors += "allow-main-wallet contains unregistered commands: $($stale -join ', ')"
-            }
+        $allowMatch = [regex]::Match(
+            $permissionMatch.Groups["body"].Value,
+            '(?s)commands\.allow\s*=\s*\[(?<commands>.*?)\]'
+        )
+        if (-not $allowMatch.Success) {
+            $errors += "Unable to parse $permissionId command list"
+            continue
+        }
+
+        $allowedForPermission = @(
+            [regex]::Matches(
+                $allowMatch.Groups["commands"].Value,
+                '"(?<command>[A-Za-z_][A-Za-z0-9_]*)"'
+            ) | ForEach-Object { $_.Groups["command"].Value }
+        )
+        $duplicates = @(
+            $allowedForPermission |
+                Group-Object |
+                Where-Object Count -gt 1 |
+                ForEach-Object Name
+        )
+        if ($duplicates.Count -gt 0) {
+            $errors += "$permissionId contains duplicate commands: $($duplicates -join ', ')"
+        }
+        $permissionCommands[$permissionId] = $allowedForPermission
+    }
+
+    if (
+        $permissionCommands.ContainsKey("allow-main-wallet") -and
+        $permissionCommands.ContainsKey("allow-agent-companion")
+    ) {
+        $mainAllowed = @($permissionCommands["allow-main-wallet"])
+        $agentAllowed = @($permissionCommands["allow-agent-companion"])
+        $allowed = @($mainAllowed + $agentAllowed | Sort-Object -Unique)
+        $missing = @($registered | Where-Object { $_ -notin $allowed })
+        $stale = @($allowed | Where-Object { $_ -notin $registered })
+        $overlap = @($agentAllowed | Where-Object { $_ -in $mainAllowed })
+        $registeredAgent = @(
+            $registered | Where-Object { $_ -like "agent_wallet_*" }
+        )
+        $mainAgent = @(
+            $mainAllowed | Where-Object { $_ -like "agent_wallet_*" }
+        )
+        $agentMissing = @($registeredAgent | Where-Object { $_ -notin $agentAllowed })
+        $agentExtra = @($agentAllowed | Where-Object { $_ -notin $registeredAgent })
+
+        if ($registeredAgent.Count -eq 0) {
+            $errors += "No registered Agent Wallet command inventory was found"
+        }
+        if ($mainAgent.Count -gt 0) {
+            $errors += "Agent Wallet commands must not be exposed to main: $($mainAgent -join ', ')"
+        }
+        if ($missing.Count -gt 0) {
+            $errors += "Wallet permissions are missing registered commands: $($missing -join ', ')"
+        }
+        if ($stale.Count -gt 0) {
+            $errors += "Wallet permissions contain unregistered commands: $($stale -join ', ')"
+        }
+        if ($overlap.Count -gt 0) {
+            $errors += "Agent companion commands must not also be in allow-main-wallet: $($overlap -join ', ')"
+        }
+        if ($agentMissing.Count -gt 0) {
+            $errors += "allow-agent-companion is missing commands: $($agentMissing -join ', ')"
+        }
+        if ($agentExtra.Count -gt 0) {
+            $errors += "allow-agent-companion exceeds its least-privilege inventory: $($agentExtra -join ', ')"
         }
     }
 } else {
@@ -500,7 +716,7 @@ if ((Test-Path $handlerInventory) -and (Test-Path $mobileLib) -and (Test-Path $w
 # was found, so it is now a build error rather than something to notice later.
 $jniLib = Join-Path $android "app/src/main/jniLibs/arm64-v8a/libhacash_wallet_mobile_lib.so"
 $distAssets = Join-Path $mobile "dist/assets"
-if ((Test-Path $jniLib) -and (Test-Path $distAssets)) {
+if (-not $SkipEmbeddedFrontendCheck -and (Test-Path $jniLib) -and (Test-Path $distAssets)) {
     $bytes = [System.IO.File]::ReadAllBytes($jniLib)
     # The asset keys are stored as plain text in the library even though the bodies
     # are compressed, so a byte scan finds exactly what the app will serve.

@@ -1,5 +1,6 @@
 use basis::method::verify_signature;
 use field::Address;
+use l2_fast_pay_hub::amount::HacAmount;
 use l2_fast_pay_hub::channel_id::derive_channel_id;
 use l2_fast_pay_hub::node::{ChannelInfo, ChannelPartyBalance, ChannelSide};
 use l2_fast_pay_hub::wire::{
@@ -37,14 +38,14 @@ fn hub_and_payer_sign_same_channel_bill() {
         &ChannelWireInput {
             channel: sample_channel(&channel_id, alice.readable(), hub.readable(), "8.499"),
             channel_id_hex: channel_id,
-            left_balance_mei: 7.498,
-            right_balance_mei: 2.002,
+            left_balance_mei: HacAmount::from_millimeis(7_498),
+            right_balance_mei: HacAmount::from_millimeis(2_002),
             left_satoshi: 42_000,
             right_satoshi: 0,
             bill_auto_number: 1,
         },
         ChannelSide::Left,
-        1.001,
+        HacAmount::from_millimeis(1_001),
         1_700_000_000,
     )
     .unwrap();

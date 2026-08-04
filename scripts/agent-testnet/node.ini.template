@@ -1,0 +1,37 @@
+; HPAY CUSTOM FULLNODE 1.0.10
+; TESTNET V3 PILOT PROFILE
+; NO MAINNET FUNDS
+;
+; Render this file only through scripts/start-agent-testnet-node.ps1.
+
+data_dir = @@DATA_DIR@@
+
+[node]
+fast_sync = false
+not_find_nodes = true
+not_accept_nodes = true
+listen = @@P2P_PORT@@
+
+[mint]
+; chain_id=7 is the isolated local-chain identifier already used by the
+; custom fullnode project's hbit-local-chain-rig. chain_id=0 is mainnet.
+chain_id = 7
+difficulty_adjust_blocks = 8
+difficulty_group_blocks = 4
+each_block_target_time = 455
+
+[server]
+enable = true
+listen = @@RPC_PORT@@
+bind = 127.0.0.1
+diamond_form = true
+debug_open = false
+
+[miner]
+; The guarded profile never creates test funds automatically. Mining must be
+; enabled separately by a controlled operator procedure with a testnet-only
+; reward address before block one can exist.
+enable = false
+
+[diamondminer]
+enable = false

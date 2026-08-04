@@ -173,6 +173,7 @@ export type FastPayStatus = {
 
 export type FastPayInboxItem = {
   payment_id: string;
+  idempotency_key: string;
   payer: string;
   payee: string;
   amount: string;
@@ -195,7 +196,7 @@ export type HubHealth = {
   version: number;
   name?: string;
   hub_address?: string;
-  hub_fee_mei?: number;
+  hub_fee_mei?: string | number;
   settlement_ready?: boolean;
   cross_channel_ready?: boolean;
 };
@@ -206,7 +207,7 @@ export type HubDiscoveryEntry = {
   hub_url: string;
   online: boolean;
   hub_address: string | null;
-  hub_fee_mei: number | null;
+  hub_fee_mei: string | null;
   error: string | null;
 };
 
@@ -305,6 +306,8 @@ export type PassphraseChangeOutcome = {
 };
 
 export type AssetSummary = import("@hacash/wallet-ui").AssetSummary;
+export type NativeAssetSendPreview = import("@hacash/wallet-ui").NativeAssetSendPreview;
+export type NativeAssetMetadata = import("@hacash/wallet-ui").NativeAssetMetadata;
 
 export type ChannelPartyBalance = {
   address: string;
@@ -635,6 +638,14 @@ export const api = {
       operationId,
       currentPassphrase,
     }),
+  queryNativeAssetMetadata: (serial: string) =>
+    invoke<NativeAssetMetadata>("wallet_query_native_asset_metadata", { serial }),
+  previewSendNativeAsset: (to: string, serial: string, amount: string) =>
+    invoke<NativeAssetSendPreview>("wallet_preview_send_native_asset", { to, serial, amount }),
+  prepareSendNativeAsset: (to: string, serial: string, amount: string) =>
+    invoke<PreparedOperationView>("wallet_prepare_send_native_asset", { to, serial, amount }),
+  executePreparedNativeAsset: (operationId: string) =>
+    invoke<SendResult>("wallet_execute_prepared_native_asset", { operationId }),
   previewSendBtc: (to: string, satoshi: number) =>
     invoke<BtcSendPreview>("wallet_preview_send_btc", { to, satoshi }),
   prepareSendBtc: (to: string, satoshi: number) =>

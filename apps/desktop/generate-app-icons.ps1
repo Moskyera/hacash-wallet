@@ -1,8 +1,8 @@
-# Generate Hacash Wallet desktop launcher icons from full glossy brand artwork (dnhw → hb-icon.png).
+# Generate HPAY Wallet desktop launcher icons from the shared mark-only artwork.
 $ErrorActionPreference = "Stop"
 $desktop = Split-Path -Parent $MyInvocation.MyCommand.Path
 $icons = Join-Path $desktop "src-tauri\icons"
-$srcIcon = Join-Path $desktop "src\assets\hb-icon.png"
+$srcIcon = Join-Path $desktop "..\..\packages\wallet-ui\src\assets\hpay-mark.png"
 $appIcon = Join-Path $icons "app-icon.png"
 $fillRatio = 0.88
 

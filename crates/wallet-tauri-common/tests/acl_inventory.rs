@@ -2,7 +2,28 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const COMMAND_PREFIXES: [&str; 3] = ["wallet_", "quantum_", "messenger_"];
+const COMMAND_PREFIXES: [&str; 4] = ["wallet_", "quantum_", "messenger_", "agent_wallet_"];
+const AGENT_COMPANION_COMMANDS: [&str; 19] = [
+    "agent_wallet_companion_connect",
+    "agent_wallet_companion_create_identity",
+    "agent_wallet_companion_decide_payment",
+    "agent_wallet_companion_disconnect",
+    "agent_wallet_companion_identity_status",
+    "agent_wallet_companion_lifecycle",
+    "agent_wallet_companion_pairing_cancel",
+    "agent_wallet_companion_pairing_confirm",
+    "agent_wallet_companion_pairing_deliver_ack",
+    "agent_wallet_companion_pairing_start",
+    "agent_wallet_companion_pairing_retry_request",
+    "agent_wallet_companion_ping",
+    "agent_wallet_companion_reset",
+    "agent_wallet_companion_rotation_step",
+    "agent_wallet_companion_state",
+    "agent_wallet_companion_sync",
+    "agent_wallet_companion_witness_anchor",
+    "agent_wallet_rotation_candidate_pairing_confirm",
+    "agent_wallet_rotation_candidate_pairing_start",
+];
 const LAUNCHPAD_COMMANDS: [&str; 7] = [
     "wallet_dapp_connect",
     "wallet_dapp_disconnect",
@@ -107,6 +128,23 @@ fn assert_capability_scope(root: &Path, app: &str, launchpad_permission: &str) {
         launchpad["remote"]["urls"],
         serde_json::json!(["https://hacd.it/*"])
     );
+
+    if app == "mobile" {
+        let companion: serde_json::Value = serde_json::from_str(&read(
+            root,
+            "apps/mobile/src-tauri/capabilities/agent-companion.json",
+        ))
+        .expect("valid Agent companion capability JSON");
+        assert_eq!(companion["local"], serde_json::json!(true));
+        assert_eq!(
+            companion["webviews"],
+            serde_json::json!(["agent-companion"])
+        );
+        assert_eq!(
+            companion["permissions"],
+            serde_json::json!(["allow-agent-companion", "core:window:allow-close"])
+        );
+    }
 }
 
 fn assert_app_acl(root: &Path, app: &str, launchpad_permission: &str) {
@@ -116,10 +154,31 @@ fn assert_app_acl(root: &Path, app: &str, launchpad_permission: &str) {
     );
     let registered = registered_commands(root, app);
     let main = permission_commands(&permission_file, "allow-main-wallet");
-    assert_eq!(
-        main, registered,
-        "{app} main-wallet ACL must exactly match its registered invoke commands"
-    );
+    if app == "mobile" {
+        let companion = permission_commands(&permission_file, "allow-agent-companion");
+        let expected_companion: BTreeSet<String> = AGENT_COMPANION_COMMANDS
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            companion, expected_companion,
+            "mobile Agent companion ACL must remain exact and least-privilege"
+        );
+        assert!(
+            main.is_disjoint(&companion),
+            "mobile main and Agent companion permissions must be disjoint"
+        );
+        let scoped_registered: BTreeSet<String> = main.union(&companion).cloned().collect();
+        assert_eq!(
+            scoped_registered, registered,
+            "mobile registered commands must equal the union of its scoped local capabilities"
+        );
+    } else {
+        assert_eq!(
+            main, registered,
+            "{app} main-wallet ACL must exactly match its registered invoke commands"
+        );
+    }
 
     let launchpad = permission_commands(&permission_file, launchpad_permission);
     assert_eq!(

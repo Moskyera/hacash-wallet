@@ -112,8 +112,14 @@ export default function ReceivePanel({
         >
           BTC
         </button>
+        <button
+          type="button"
+          className={asset === "HIP20" ? "selected" : ""}
+          onClick={() => setAsset("HIP20")}
+        >
+          HIP-20
+        </button>
       </div>
-
       {asset === "HAC" && (
         <div className="send-section">
           <p className="muted">
@@ -241,6 +247,32 @@ export default function ReceivePanel({
               onClick={() => void copyBtc()}
             >
               Copy Hacash address for BTC
+            </button>
+          )}
+        </div>
+      )}
+      {asset === "HIP20" && (
+        <div className="send-section">
+          <div className="info-box">
+            <strong>Receive HIP-20 native assets</strong>
+            <p>
+              Share this Hacash address and tell the sender the exact asset serial. Asset names and
+              tickers are display metadata; the serial is the canonical identity.
+            </p>
+          </div>
+          {address && (
+            <PaymentQrDisplay
+              address={address}
+              hideAddress={hideAddresses}
+              caption="Hacash address for HIP-20 native assets"
+            />
+          )}
+          <div className="address-box">
+            <code>{maskAddress(address, hideAddresses)}</code>
+          </div>
+          {address && !hideAddresses && (
+            <button type="button" className="primary" disabled={busy} onClick={onCopyAddress}>
+              Copy Hacash address
             </button>
           )}
         </div>

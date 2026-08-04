@@ -24,7 +24,7 @@ export const zhCN = {
   "nav.advanced": "高级",
   "nav.pay": "支付",
   "nav.messages": "聊天",
-  "nav.more": "更多",
+  "nav.more": "菜单",
   "privacy.hidden": "钱包已隐藏",
   "privacy.focus": "聚焦窗口后即可查看余额和地址。",
   "more.wallet": "钱包",

@@ -29,6 +29,15 @@ pub(super) enum PreparedExecution {
         diamond_names: Vec<String>,
         summary: String,
     },
+    NativeAsset {
+        body_hex: String,
+        node_url: String,
+        from: String,
+        to: String,
+        serial: u64,
+        amount: u64,
+        summary: String,
+    },
     BridgedBtc {
         body_hex: String,
         node_url: String,
@@ -373,6 +382,115 @@ impl WalletService {
         let pending = self.begin_pending_history(PaymentRail::L1OnChain, &from, &to, 0.0)?;
         let label = if summary.is_empty() {
             format!("Send {} HACD", diamond_names.len())
+        } else {
+            summary
+        };
+        let result = self
+            .sign_submit_prepared(&body_hex, assurance)
+            .await
+            .and_then(|submitted| {
+                let hash = submitted
+                    .hash
+                    .clone()
+                    .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
+                Ok(SendResult {
+                    rail: PaymentRail::L1OnChain,
+                    tx_hash: hash,
+                    summary: self.summary_with_whisper_notice(label, &submitted),
+                    pending: false,
+                })
+            });
+        self.finish_prepared_history(pending, result)
+    }
+
+    pub async fn prepare_send_native_asset(
+        &mut self,
+        to: &str,
+        serial_raw: &str,
+        amount_raw: &str,
+    ) -> WalletResult<PreparedOperationView> {
+        self.touch_auto_lock();
+        self.clear_prepared_operation();
+        let from = self.require_address()?;
+        let preview = self
+            .preview_send_native_asset(to, serial_raw, amount_raw)
+            .await?;
+        if !preview.hip23.ok {
+            return Err(WalletError::Policy(preview.hip23.errors.join("; ")));
+        }
+        let serial =
+            crate::native_asset_send::parse_positive_u64_decimal(&preview.serial, "Asset serial")?;
+        let amount =
+            crate::native_asset_send::parse_positive_u64_decimal(&preview.amount, "Asset amount")?;
+        let built = self
+            .node
+            .build_send_native_asset_tx(&from, to, serial, amount, &preview.fee_wire)
+            .await?;
+        let body_hex = built
+            .body
+            .ok_or_else(|| WalletError::Transaction("missing tx body".into()))?;
+        let canonical = crate::tx_binding::verify_native_asset_transfer(
+            &body_hex,
+            &from,
+            &preview.fee_wire,
+            to,
+            serial,
+            amount,
+        )?;
+        self.ensure_transaction_network_binding(&body_hex).await?;
+        let requirement = self.authorization_requirement(self.second_factor_threshold_mei())?;
+        let display = exact_transaction_display(
+            "Send HIP-20 asset",
+            &preview.summary,
+            &canonical,
+            vec![
+                field("Recipient", to),
+                field("Asset serial", &preview.serial),
+                field("Amount", &preview.amount),
+                field("Network fee", &preview.fee_wire),
+            ],
+        );
+        self.store_prepared(
+            OperationKind::NativeAsset,
+            &from,
+            &body_hex,
+            display,
+            requirement,
+            PreparedExecution::NativeAsset {
+                body_hex: body_hex.clone(),
+                node_url: self.node.base_url().to_owned(),
+                from: from.clone(),
+                to: to.to_owned(),
+                serial,
+                amount,
+                summary: preview.summary,
+            },
+        )
+    }
+
+    pub async fn execute_prepared_native_asset(
+        &mut self,
+        operation_id: &str,
+    ) -> WalletResult<SendResult> {
+        let (payload, assurance) = self.take_prepared(operation_id, OperationKind::NativeAsset)?;
+        let PreparedExecution::NativeAsset {
+            body_hex,
+            node_url,
+            from,
+            to,
+            serial,
+            amount,
+            summary,
+        } = payload
+        else {
+            return Err(WalletError::Policy(
+                "prepared HIP-20 payload mismatch".into(),
+            ));
+        };
+        self.require_prepared_environment(&node_url)?;
+        let pending = self.begin_pending_history(PaymentRail::L1OnChain, &from, &to, 0.0)?;
+        let label = if summary.is_empty() {
+            format!("Send {amount} units of HIP-20 asset #{serial}")
         } else {
             summary
         };

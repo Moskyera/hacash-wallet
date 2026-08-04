@@ -160,11 +160,11 @@ impl WebAuthnGate {
         let options = json!({
             "publicKey": {
                 "challenge": challenge,
-                "rp": { "name": "Hacash Wallet", "id": rp_id },
+                "rp": { "name": "HPAY Wallet", "id": rp_id },
                 "user": {
                     "id": URL_SAFE_NO_PAD.encode(username.as_bytes()),
                     "name": username,
-                    "displayName": "Hacash Wallet User"
+                    "displayName": "HPAY Wallet User"
                 },
                 "pubKeyCredParams": [
                     { "type": "public-key", "alg": -7 }

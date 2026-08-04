@@ -1,0 +1,28 @@
+; CPU-only worker for HPAY Local Pilot Chain V1.
+; It connects only to the loopback miner API selected by the guarded launcher.
+connect = 127.0.0.1:@@RPC_PORT@@
+supervene = 2
+nonce_max = 4294967295
+notice_wait = 5
+
+[efficiency]
+mode = max
+dynamic_supervene = false
+supervene_min = 2
+supervene_max = 2
+oom_fallback = true
+max_temp_c = 0
+idle_start_hour = 255
+idle_end_hour = 255
+pause_if_unprofitable = false
+benchmark_seconds = 0
+stats_file = @@STATS_FILE@@
+
+[gpu]
+use_opencl = false
+use_cuda = false
+cpu_assist = false
+work_groups = 1
+local_size = 1
+unit_size = 1
+debug = 0

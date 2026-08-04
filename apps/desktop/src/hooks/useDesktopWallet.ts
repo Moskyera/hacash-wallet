@@ -14,6 +14,7 @@ import {
   WalletSettings,
   WalletStatus,
 } from "../api";
+import { appendAssetSnapshot, emptyAssetTrends } from "../assetTrends";
 import { formatInvokeError } from "../formatInvokeError";
 import { authorizePreparedOperation } from "../preparedAuthorization";
 import { DEFAULT_DUST_WHISPER, DEFAULT_PRIVACY, copyWithPrivacyClear } from "../privacy";
@@ -38,6 +39,7 @@ export function useDesktopWallet(
   const [settings, setSettings] = useState<WalletSettings | null>(null);
   const [balance, setBalance] = useState<number | null>(null);
   const [assets, setAssets] = useState<AssetSummary | null>(null);
+  const [assetTrends, setAssetTrends] = useState(emptyAssetTrends);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -53,6 +55,7 @@ export function useDesktopWallet(
   const [nativeBioAvailable, setNativeBioAvailable] = useState(false);
   const [relayHealth, setRelayHealth] = useState<RelayHealthStatus[]>([]);
   const statusRequestRef = useRef<Promise<WalletStatus> | null>(null);
+  const assetTrendWalletRef = useRef<string | null>(null);
 
   const privacy = status?.privacy ?? DEFAULT_PRIVACY;
   const dustWhisper = status?.dust_whisper ?? DEFAULT_DUST_WHISPER;
@@ -87,6 +90,11 @@ export function useDesktopWallet(
         s = await api.status();
       }
       setStatus(s);
+      const trendWallet = s.has_wallet && !s.locked ? (s.address ?? null) : null;
+      if (assetTrendWalletRef.current !== trendWallet) {
+        assetTrendWalletRef.current = trendWallet;
+        setAssetTrends(emptyAssetTrends());
+      }
       if (!s.has_wallet) {
         setBalance(null);
         setAssets(null);
@@ -125,6 +133,7 @@ export function useDesktopWallet(
       const summary = await api.assetSummary();
       setAssets(summary);
       setBalance(summary.hac_mei);
+      setAssetTrends((current) => appendAssetSnapshot(current, summary));
     } catch {
       setAssets(null);
       setBalance(null);
@@ -251,6 +260,21 @@ export function useDesktopWallet(
     }, 5000);
     return () => window.clearInterval(timer);
   }, [status?.locked, refreshStatus]);
+
+  useEffect(() => {
+    if (screen !== "home" || !status || status.locked) return;
+    let inFlight = false;
+    const timer = window.setInterval(() => {
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      refreshBalance()
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [screen, status?.locked, status?.address, refreshBalance]);
 
   useEffect(() => {
     if (screen !== "history" || !status || status.locked) return;
@@ -867,6 +891,7 @@ export function useDesktopWallet(
     settings,
     balance,
     assets,
+    assetTrends,
     error,
     info,
     busy,

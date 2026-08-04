@@ -1,9 +1,14 @@
+#[cfg(all(feature = "agent-wallet-testnet-pilot", not(target_os = "windows")))]
+compile_error!(
+    "The AI Agent Wallet testnet pilot is Windows-only until the Linux glib 0.18.5 blocker is resolved. Build Linux without agent-wallet-testnet-pilot."
+);
+
 mod platform;
 
 use hacash_wallet_core::WalletService;
 use hacash_wallet_core::hip23::{BalanceFloorInput, HeightScopeInput, Type3CheckInput};
 use tauri::{Manager, RunEvent};
-use wallet_tauri_common::AppState;
+use wallet_tauri_common::{AgentAppState, AppState};
 
 #[tauri::command]
 fn wallet_list_bills(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -64,6 +69,8 @@ pub fn run() {
             let mut svc = WalletService::new(node_override, None).map_err(|e| e.to_string())?;
             svc.warm_vault_cache().map_err(|e| e.to_string())?;
             app.manage(AppState::new(svc));
+            let agent_root = hacash_wallet_core::paths::wallet_data_root().join("agent-wallets");
+            app.manage(AgentAppState::open(agent_root));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) =
@@ -92,14 +99,67 @@ pub fn run() {
             wallet_platform_security_status,
             wallet_confirm_biometric_native,
             wallet_tauri_common::update_commands::wallet_install_desktop_update,
+            wallet_tauri_common::agent_commands::agent_wallet_runtime_status,
+            wallet_tauri_common::agent_commands::agent_wallet_pilot_diagnostics_preview,
+            wallet_tauri_common::agent_commands::agent_wallet_pilot_diagnostics_export,
+            wallet_tauri_common::agent_commands::agent_wallet_witness_rotation_prepare,
+            wallet_tauri_common::agent_commands::agent_wallet_witness_rotation_status,
+            wallet_tauri_common::agent_commands::agent_wallet_witness_rotation_cancel,
+            wallet_tauri_common::agent_commands::agent_wallet_runtime_start,
+            wallet_tauri_common::agent_commands::agent_wallet_runtime_stop,
+            wallet_tauri_common::agent_commands::agent_wallet_pairing_activate,
+            wallet_tauri_common::agent_commands::agent_wallet_pairing_pending,
+            wallet_tauri_common::agent_commands::agent_wallet_pairing_approve,
+            wallet_tauri_common::agent_commands::agent_wallet_pairing_reject,
+            wallet_tauri_common::agent_commands::agent_wallet_create,
+            wallet_tauri_common::agent_commands::agent_wallet_unlock,
+            wallet_tauri_common::agent_commands::agent_wallet_lock,
+            wallet_tauri_common::agent_commands::agent_wallet_overview,
+            wallet_tauri_common::agent_commands::agent_wallet_enable_payments,
+            wallet_tauri_common::agent_commands::agent_wallet_emergency_stop,
+            wallet_tauri_common::agent_commands::agent_wallet_list_agents,
+            wallet_tauri_common::agent_commands::agent_wallet_get_policy,
+            wallet_tauri_common::agent_commands::agent_wallet_update_policy,
+            wallet_tauri_common::agent_commands::agent_wallet_list_activity,
+            wallet_tauri_common::agent_commands::agent_wallet_list_pending_approvals,
+            wallet_tauri_common::agent_commands::agent_wallet_revoke_agent,
+            wallet_tauri_common::agent_commands::agent_wallet_pending_approval,
+            wallet_tauri_common::agent_commands::agent_wallet_approve_desktop,
+            wallet_tauri_common::agent_commands::agent_wallet_reject,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_status,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_devices,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_revoke_device,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_suggest_endpoint,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_start,
+            wallet_tauri_common::agent_commands::agent_wallet_rotation_candidate_pairing_start,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_accept_request,
+            wallet_tauri_common::agent_commands::agent_wallet_rotation_candidate_pairing_accept_request,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_complete,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_complete_automatic,
+            wallet_tauri_common::agent_commands::agent_wallet_rotation_candidate_pairing_complete,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_cancel,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_status,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_start,
+            wallet_tauri_common::agent_commands::agent_wallet_companion_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let RunEvent::Exit = event
-                && let Some(state) = app.try_state::<AppState>()
-            {
-                let _ = wallet_tauri_common::desktop_relay::stop_managed_relay(&state);
+            if let RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AgentAppState>()
+                    && let Err(error) =
+                        tauri::async_runtime::block_on(state.companion.shutdown_for_exit())
+                {
+                    tracing::error!(%error, "Agent companion shutdown failed during exit");
+                }
+                if let Some(state) = app.try_state::<AgentAppState>()
+                    && let Err(error) = state.runtime.shutdown_for_exit()
+                {
+                    tracing::error!(%error, "Agent Wallet runtime shutdown failed during exit");
+                }
+                if let Some(state) = app.try_state::<AppState>() {
+                    let _ = wallet_tauri_common::desktop_relay::stop_managed_relay(&state);
+                }
             }
         });
 }

@@ -1,4 +1,4 @@
-# Hacash Wallet - Mobile
+# HPAY Wallet - Mobile
 
 Tauri 2 mobile shell sharing **`hacash-wallet-core`** via **`wallet-tauri-common`**.
 

@@ -47,7 +47,7 @@ fn android_native_operations_use_one_managed_tauri_plugin() {
     let mobile_lib = read(&root, "apps/mobile/src-tauri/src/lib.rs");
 
     assert!(
-        mobile_lib.contains("builder.plugin(wallet_tauri_common::android_native::init())"),
+        mobile_lib.contains(".plugin(wallet_tauri_common::android_native::init())"),
         "the mobile builder must register the wallet-native plugin"
     );
     assert!(native_kotlin.contains("@TauriPlugin"));

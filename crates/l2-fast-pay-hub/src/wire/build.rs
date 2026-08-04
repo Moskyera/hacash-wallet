@@ -1,7 +1,7 @@
 use field::{Address, Amount, ChannelId, Uint1, Uint4, Uint8};
 use sha2::{Digest, Sha256};
 
-use crate::amount::format_amount_mei;
+use crate::amount::{HacAmount, format_amount_mei};
 use crate::error::{HubError, HubResult};
 use crate::node::{ChannelInfo, ChannelSide};
 
@@ -15,8 +15,8 @@ use super::satoshi_var::SatoshiVariation;
 pub struct ChannelWireInput {
     pub channel: ChannelInfo,
     pub channel_id_hex: String,
-    pub left_balance_mei: f64,
-    pub right_balance_mei: f64,
+    pub left_balance_mei: HacAmount,
+    pub right_balance_mei: HacAmount,
     pub left_satoshi: u64,
     pub right_satoshi: u64,
     pub bill_auto_number: u64,
@@ -25,7 +25,7 @@ pub struct ChannelWireInput {
 pub fn build_same_channel_bill(
     payer_channel: &ChannelWireInput,
     payer_side: ChannelSide,
-    pay_amount_mei: f64,
+    pay_amount_mei: HacAmount,
     timestamp: u64,
 ) -> HubResult<ChannelPayCompleteDocuments> {
     let body =
@@ -45,10 +45,10 @@ pub fn build_same_channel_bill(
 pub fn build_cross_channel_bill(
     payer_channel: &ChannelWireInput,
     payer_side: ChannelSide,
-    pay_total_mei: f64,
+    pay_total_mei: HacAmount,
     payee_channel: &ChannelWireInput,
     payee_side: ChannelSide,
-    credit_amount_mei: f64,
+    credit_amount_mei: HacAmount,
     timestamp: u64,
 ) -> HubResult<ChannelPayCompleteDocuments> {
     let pay_body =
@@ -91,7 +91,7 @@ fn credit_direction(side: ChannelSide) -> u8 {
 
 fn prove_body_after_transfer(
     input: &ChannelWireInput,
-    pay_amount_mei: f64,
+    pay_amount_mei: HacAmount,
     direction: u8,
 ) -> HubResult<TransferProveBody> {
     Ok(TransferProveBody {
@@ -110,7 +110,7 @@ fn prove_body_after_transfer(
     })
 }
 
-fn amount_from_mei(mei: f64) -> HubResult<Amount> {
+fn amount_from_mei(mei: HacAmount) -> HubResult<Amount> {
     Amount::from(&format_amount_mei(mei)).map_err(|e| HubError::Payment(e.to_string()))
 }
 

@@ -4,10 +4,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::error::{WalletError, WalletResult};
 
 pub const CAPABILITIES_API_VERSION: u32 = 1;
+pub const HPAY_LOCAL_PILOT_NETWORK_KIND: &str = "local_pilot_v1";
+pub const HPAY_LOCAL_PILOT_PROFILE_ID: &str = "hpay-local-pilot-chain-v1";
+pub const HPAY_LOCAL_PILOT_CHAIN_ID: u32 = 7;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -23,13 +27,53 @@ pub struct NodeCapabilities {
     pub api_version: u32,
     pub node: NodeIdentity,
     pub chain: NodeChain,
+    #[serde(default)]
+    pub network: NodeNetworkCapabilities,
     pub istanbul: IstanbulStatus,
     pub transactions: RegistrySet<u8>,
     pub actions: RegistrySet<u16>,
     pub features: NodeFeatures,
+    #[serde(default)]
+    pub api: NodeApiCapabilities,
     pub limits: NodeLimits,
     #[serde(default)]
     pub source: CapabilitySource,
+}
+
+/// Authenticated network identity reported by a node. Older nodes omit this
+/// object and therefore remain usable for legacy read-only Personal Wallet
+/// paths, but can never satisfy Agent Wallet payment readiness.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NodeNetworkCapabilities {
+    pub kind: String,
+    pub node_profile_id: String,
+    pub block_1_available: bool,
+    pub block_1_hash: Option<String>,
+    pub instance_id: Option<String>,
+    pub funding_confirmed: bool,
+    pub transaction_ready: bool,
+    pub current_height: u64,
+    pub transaction_format_version: u64,
+}
+
+/// Transaction API routes compiled into and registered by the reporting node.
+/// Older payloads default to an unavailable contract so sensitive callers can
+/// fail closed without breaking read-only legacy handling.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NodeApiCapabilities {
+    pub balance_query: bool,
+    pub transaction_submit: bool,
+    pub transaction_query: bool,
+    pub reconciliation_by_tx_hash: bool,
+}
+
+impl NodeApiCapabilities {
+    pub const fn supports_agent_testnet_payment(self) -> bool {
+        self.balance_query
+            && self.transaction_submit
+            && self.transaction_query
+            && self.reconciliation_by_tx_hash
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +161,7 @@ impl NodeCapabilities {
                 "node capability evaluation height is inconsistent".into(),
             ));
         }
+        self.validate_network_contract()?;
         validate_registry("transaction", &self.transactions)?;
         validate_registry("action", &self.actions)?;
         if self.chain.mainnet
@@ -214,6 +259,7 @@ impl NodeCapabilities {
                 next_height: 1,
                 mainnet: true,
             },
+            network: NodeNetworkCapabilities::default(),
             istanbul: IstanbulStatus {
                 activation_height: 0,
                 evaluation_height: 1,
@@ -228,6 +274,7 @@ impl NodeCapabilities {
                 enabled: vec![],
             },
             features: NodeFeatures::disabled(),
+            api: NodeApiCapabilities::default(),
             limits: NodeLimits {
                 max_tx_size: 256 * 1024,
                 max_tx_actions: basis::component::TX_ACTIONS_MAX,
@@ -246,6 +293,101 @@ impl NodeCapabilities {
 
     pub fn supports_action(&self, kind: u16) -> bool {
         self.actions.enabled.binary_search(&kind).is_ok()
+    }
+
+    pub fn supports_agent_local_pilot_payment(&self, expected_block_one: &str) -> bool {
+        self.matches_agent_local_pilot_identity(expected_block_one)
+            && self.network.funding_confirmed
+            && self.network.transaction_ready
+            && self.chain.height >= 2
+    }
+
+    /// Verify the immutable Local Pilot identity without claiming that the
+    /// node, wallet funding or mobile witness is ready for a payment.
+    pub fn matches_agent_local_pilot_identity(&self, expected_block_one: &str) -> bool {
+        let expected_instance = network_instance_id(
+            &self.network.kind,
+            self.chain.id,
+            self.chain.mainnet,
+            expected_block_one,
+            &self.network.node_profile_id,
+            self.network.transaction_format_version,
+        );
+        self.source == CapabilitySource::Reported
+            && self.chain.id == HPAY_LOCAL_PILOT_CHAIN_ID
+            && !self.chain.mainnet
+            && self.network.kind == HPAY_LOCAL_PILOT_NETWORK_KIND
+            && self.network.node_profile_id == HPAY_LOCAL_PILOT_PROFILE_ID
+            && self.network.block_1_available
+            && self.network.block_1_hash.as_deref() == Some(expected_block_one)
+            && self.network.instance_id.as_deref() == Some(expected_instance.as_str())
+            && self.network.current_height == self.chain.height
+            && self.chain.height >= 1
+            && self.network.transaction_format_version == 2
+            && self.supports_transaction(2)
+            && self.supports_action(1)
+            && self.api.supports_agent_testnet_payment()
+    }
+
+    fn validate_network_contract(&self) -> WalletResult<()> {
+        let network = &self.network;
+        let omitted = network == &NodeNetworkCapabilities::default();
+        if omitted {
+            return Ok(());
+        }
+        if network.kind.is_empty()
+            || network.node_profile_id.is_empty()
+            || network.current_height != self.chain.height
+            || network.transaction_format_version == 0
+        {
+            return Err(WalletError::Node(
+                "node network capability identity is incomplete".into(),
+            ));
+        }
+        if network.block_1_available
+            != (network.block_1_hash.is_some() && network.instance_id.is_some())
+        {
+            return Err(WalletError::Node(
+                "node block 1 availability fields disagree".into(),
+            ));
+        }
+        if !network.block_1_available && network.transaction_ready {
+            return Err(WalletError::Node(
+                "node reports transaction readiness without block 1".into(),
+            ));
+        }
+        if let (Some(block_one), Some(instance_id)) = (&network.block_1_hash, &network.instance_id)
+        {
+            validate_lowercase_sha256("block 1", block_one)?;
+            validate_lowercase_sha256("network instance", instance_id)?;
+            let expected = network_instance_id(
+                &network.kind,
+                self.chain.id,
+                self.chain.mainnet,
+                block_one,
+                &network.node_profile_id,
+                network.transaction_format_version,
+            );
+            if *instance_id != expected {
+                return Err(WalletError::Node(
+                    "node network instance id does not match its reported identity".into(),
+                ));
+            }
+        }
+        if network.transaction_ready
+            && (self.chain.mainnet
+                || self.chain.id != HPAY_LOCAL_PILOT_CHAIN_ID
+                || self.chain.height < 2
+                || network.kind != HPAY_LOCAL_PILOT_NETWORK_KIND
+                || network.node_profile_id != HPAY_LOCAL_PILOT_PROFILE_ID
+                || !network.funding_confirmed
+                || network.transaction_format_version != 2)
+        {
+            return Err(WalletError::Node(
+                "node transaction readiness contradicts the HPAY local pilot contract".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn validate_feature_contracts(&self) -> WalletResult<()> {
@@ -300,6 +442,44 @@ impl NodeCapabilities {
         }
         Ok(())
     }
+}
+
+fn validate_lowercase_sha256(label: &str, value: &str) -> WalletResult<()> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(WalletError::Node(format!(
+            "node {label} fingerprint is not canonical lowercase SHA-256"
+        )))
+    }
+}
+
+fn push_identity_field(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+pub fn network_instance_id(
+    network_kind: &str,
+    chain_id: u32,
+    mainnet: bool,
+    block_one_hash: &str,
+    node_profile_id: &str,
+    transaction_format_version: u64,
+) -> String {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"HPAY/NETWORK-INSTANCE/V1");
+    push_identity_field(&mut bytes, network_kind);
+    bytes.extend_from_slice(&chain_id.to_be_bytes());
+    bytes.push(u8::from(mainnet));
+    push_identity_field(&mut bytes, block_one_hash);
+    push_identity_field(&mut bytes, node_profile_id);
+    bytes.extend_from_slice(&transaction_format_version.to_be_bytes());
+    hex::encode(Sha256::digest(bytes))
 }
 
 impl NodeFeatures {
@@ -430,6 +610,7 @@ mod tests {
                 next_height: 100,
                 mainnet: true,
             },
+            network: NodeNetworkCapabilities::default(),
             istanbul: IstanbulStatus {
                 activation_height: 200,
                 evaluation_height: 100,
@@ -444,6 +625,12 @@ mod tests {
                 enabled: vec![],
             },
             features: NodeFeatures::disabled(),
+            api: NodeApiCapabilities {
+                balance_query: true,
+                transaction_submit: true,
+                transaction_query: true,
+                reconciliation_by_tx_hash: true,
+            },
             limits: NodeLimits {
                 max_tx_size: 1024,
                 max_tx_actions: 10,
@@ -454,6 +641,86 @@ mod tests {
             },
             source: CapabilitySource::Reported,
         }
+    }
+
+    fn local_pilot_capabilities() -> NodeCapabilities {
+        const BLOCK_ONE: &str = "000008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff";
+        let mut capabilities = valid_capabilities();
+        capabilities.chain = NodeChain {
+            id: HPAY_LOCAL_PILOT_CHAIN_ID,
+            height: 2,
+            next_height: 3,
+            mainnet: false,
+        };
+        capabilities.istanbul = IstanbulStatus {
+            activation_height: 1,
+            evaluation_height: 3,
+            active: true,
+        };
+        capabilities.transactions = RegistrySet {
+            registered: vec![2, 3],
+            enabled: vec![2, 3],
+        };
+        capabilities.actions = RegistrySet {
+            registered: vec![1],
+            enabled: vec![1],
+        };
+        capabilities.network = NodeNetworkCapabilities {
+            kind: HPAY_LOCAL_PILOT_NETWORK_KIND.into(),
+            node_profile_id: HPAY_LOCAL_PILOT_PROFILE_ID.into(),
+            block_1_available: true,
+            block_1_hash: Some(BLOCK_ONE.into()),
+            instance_id: Some(network_instance_id(
+                HPAY_LOCAL_PILOT_NETWORK_KIND,
+                HPAY_LOCAL_PILOT_CHAIN_ID,
+                false,
+                BLOCK_ONE,
+                HPAY_LOCAL_PILOT_PROFILE_ID,
+                2,
+            )),
+            funding_confirmed: true,
+            transaction_ready: true,
+            current_height: 2,
+            transaction_format_version: 2,
+        };
+        capabilities
+    }
+
+    #[test]
+    fn local_pilot_requires_the_complete_stable_network_identity() {
+        let capabilities = local_pilot_capabilities().validate().unwrap();
+        let block_one = capabilities.network.block_1_hash.as_deref().unwrap();
+        assert!(capabilities.matches_agent_local_pilot_identity(block_one));
+        assert!(capabilities.supports_agent_local_pilot_payment(block_one));
+
+        let mut identity_only = local_pilot_capabilities();
+        identity_only.network.funding_confirmed = false;
+        identity_only.network.transaction_ready = false;
+        let identity_only = identity_only.validate().unwrap();
+        assert!(identity_only.matches_agent_local_pilot_identity(block_one));
+        assert!(!identity_only.supports_agent_local_pilot_payment(block_one));
+
+        let mut different_instance = local_pilot_capabilities();
+        different_instance.network.instance_id = Some("11".repeat(32));
+        assert!(different_instance.validate().is_err());
+
+        let mut height_one_claim = local_pilot_capabilities();
+        height_one_claim.chain.height = 1;
+        height_one_claim.chain.next_height = 2;
+        height_one_claim.istanbul.evaluation_height = 2;
+        height_one_claim.network.current_height = 1;
+        assert!(height_one_claim.validate().is_err());
+
+        let mut unfunded_claim = local_pilot_capabilities();
+        unfunded_claim.network.funding_confirmed = false;
+        assert!(unfunded_claim.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_payload_without_network_identity_stays_readable_but_never_agent_ready() {
+        let capabilities = valid_capabilities().validate().unwrap();
+        assert_eq!(capabilities.network, NodeNetworkCapabilities::default());
+        assert!(!capabilities.supports_agent_local_pilot_payment(&"11".repeat(32)));
     }
 
     #[test]

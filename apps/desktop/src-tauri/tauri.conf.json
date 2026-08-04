@@ -1,6 +1,6 @@
 {
     "$schema":  "https://schema.tauri.app/config/2",
-    "productName":  "Hacash Wallet",
+    "productName":  "HPAY Wallet",
     "version":  "1.0.2",
     "identifier":  "org.hacash.wallet",
     "build":  {
@@ -12,7 +12,7 @@
     "app":  {
                 "windows":  [
                                 {
-                                    "title":  "Hacash Wallet",
+                                    "title":  "HPAY Wallet",
                                     "width":  1100,
                                     "height":  760,
                                     "minWidth":  900,
@@ -33,6 +33,19 @@
                                 "icons/icon.ico",
                                 "icons/icon.icns"
                             ],
+                   "linux":  {
+                                 "deb":  {
+                                             "provides":  [
+                                                              "hacash-wallet"
+                                                          ],
+                                             "conflicts":  [
+                                                               "hacash-wallet"
+                                                           ],
+                                             "replaces":  [
+                                                              "hacash-wallet"
+                                                          ]
+                                         }
+                             },
                    "windows":  {
                                    "allowDowngrades":  false,
                                    "wix":  {

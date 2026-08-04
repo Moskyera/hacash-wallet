@@ -86,6 +86,8 @@ commands.allow = [
   "wallet_preview_send",
   "wallet_preview_send_btc",
   "wallet_preview_send_hacd",
+  "wallet_preview_send_native_asset",
+  "wallet_query_native_asset_metadata",
   "wallet_query_diamond",
   "wallet_reset",
   "wallet_send_btc",
@@ -94,6 +96,8 @@ commands.allow = [
   "wallet_execute_prepared_hac",
   "wallet_prepare_send_hacd",
   "wallet_execute_prepared_hacd",
+  "wallet_prepare_send_native_asset",
+  "wallet_execute_prepared_native_asset",
   "wallet_prepare_send_btc",
   "wallet_execute_prepared_btc",
   "wallet_prepare_channel_open",
@@ -130,4 +134,29 @@ commands.allow = [
   "wallet_dapp_transfer",
   "wallet_dapp_sign_tx",
   "wallet_dapp_chain",
+]
+
+[[permission]]
+identifier = "allow-agent-companion"
+description = "Allows the isolated AI Agent Wallet companion webview to use native identity, pairing, read-only sync, and typed pilot approval/witness commands."
+commands.allow = [
+  "agent_wallet_companion_connect",
+  "agent_wallet_companion_create_identity",
+  "agent_wallet_companion_decide_payment",
+  "agent_wallet_companion_disconnect",
+  "agent_wallet_companion_identity_status",
+  "agent_wallet_companion_lifecycle",
+  "agent_wallet_companion_pairing_cancel",
+  "agent_wallet_companion_pairing_confirm",
+  "agent_wallet_companion_pairing_deliver_ack",
+  "agent_wallet_companion_pairing_start",
+  "agent_wallet_companion_pairing_retry_request",
+  "agent_wallet_rotation_candidate_pairing_confirm",
+  "agent_wallet_rotation_candidate_pairing_start",
+  "agent_wallet_companion_ping",
+  "agent_wallet_companion_reset",
+  "agent_wallet_companion_state",
+  "agent_wallet_companion_sync",
+  "agent_wallet_companion_rotation_step",
+  "agent_wallet_companion_witness_anchor",
 ]

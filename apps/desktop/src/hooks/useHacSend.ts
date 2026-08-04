@@ -6,6 +6,7 @@ import { DEFAULT_SERVICE_FEE_RATE, sendSuccessMessage } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
 import type { Screen } from "../screens/types";
 import type { WalletStatus } from "../api";
+import { bindReviewedHacSend } from "../reviewedHacSend";
 
 type Notify = (msg: string, kind: "error" | "info") => void;
 
@@ -166,7 +167,10 @@ export function useHacSend(opts: {
     clearMessages();
     void refreshHistory();
     try {
-      const amount = Number(sendAmount);
+      if (!preview) {
+        throw new Error("Payment review expired. Continue and review the payment again.");
+      }
+      const reviewed = bindReviewedHacSend(preview);
       // Mirror of authorization_requirement() in wallet-core. A hardware gate and a
       // Cold Vault need a factor for every amount, and the core rounds the policed
       // amount up, so 99.5 needs one too. Being more permissive here just turns a
@@ -175,17 +179,26 @@ export function useHacSend(opts: {
         status?.hardware_signing_mode === "webauthn_gate" ||
         status?.hardware_signing_mode === "airgap_only" ||
         status?.security_profile === "paranoid" ||
-        Math.ceil(amount) >= (status?.require_second_factor_above_mei ?? 100);
+        Math.ceil(reviewed.amountMei) >= (status?.require_second_factor_above_mei ?? 100);
       let result;
-      if (preview?.plan.rail === "L2Fast") {
+      if (reviewed.expectation.rail === "L2Fast") {
         if (needsAuthorization) {
           throw new Error(
             "Protected Fast Pay is blocked until its exact settlement bill can be prepared before authorization. Select Force L1.",
           );
         }
-        result = await api.sendHac(sendTo.trim(), amount, currentSendOptions());
+        result = await api.sendHac(
+          reviewed.to,
+          reviewed.amountMei,
+          reviewed.options as SendOptions,
+          reviewed.expectation,
+        );
       } else {
-        const prepared = await api.prepareSendHac(sendTo.trim(), amount, currentSendOptions());
+        const prepared = await api.prepareSendHac(
+          reviewed.to,
+          reviewed.amountMei,
+          reviewed.options as SendOptions,
+        );
         await authorizePreparedOperation(prepared, nativeBioAvailable);
         result = await api.executePreparedHac(prepared.id);
       }
@@ -203,11 +216,9 @@ export function useHacSend(opts: {
       setBusy(false);
     }
   }, [
-    sendTo,
-    sendAmount,
+    preview,
     status,
     nativeBioAvailable,
-    currentSendOptions,
     clearMessages,
     setBusy,
     setLastTxHash,

@@ -539,16 +539,21 @@ pub async fn wallet_send_hac(
     to: String,
     amount_mei: f64,
     send_options: Option<hacash_wallet_core::SendOptions>,
+    reviewed: Option<hacash_wallet_core::ReviewedSendExpectation>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let mut svc = state.inner.lock().await;
     let options = send_options.unwrap_or_else(|| {
         hacash_wallet_core::SendOptions::from_preferences(&svc.get_settings().send)
     });
-    let result = svc
-        .send_hac(&to, amount_mei, options)
-        .await
-        .map_err(|e| e.to_string())?;
+    let result = match reviewed {
+        Some(reviewed) => {
+            svc.send_hac_reviewed(&to, amount_mei, options, reviewed)
+                .await
+        }
+        None => svc.send_hac(&to, amount_mei, options).await,
+    }
+    .map_err(|e| e.to_string())?;
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
@@ -595,6 +600,33 @@ pub async fn wallet_preview_send_hacd(
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(preview).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wallet_preview_send_native_asset(
+    to: String,
+    serial: String,
+    amount: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut svc = state.inner.lock().await;
+    let preview = svc
+        .preview_send_native_asset(&to, &serial, &amount)
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(preview).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn wallet_query_native_asset_metadata(
+    serial: String,
+) -> Result<hacash_wallet_core::NativeAssetMetadata, String> {
+    let serial =
+        hacash_wallet_core::native_asset_send::parse_positive_u64_decimal(&serial, "Asset serial")
+            .map_err(|error| error.to_string())?;
+    hacash_wallet_core::fetch_native_asset_metadata(serial)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

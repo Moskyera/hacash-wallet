@@ -1,0 +1,16 @@
+[package]
+name = "agent-wallet-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Isolated local IPC runtime for the HPAY Agent Wallet"
+
+[features]
+default = []
+listener = ["hpay-agent-connector/listener"]
+
+[dependencies]
+agent-wallet-core = { path = "../agent-wallet-core" }
+hpay-agent-connector = { path = "../agent-connector", default-features = false }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true

@@ -58,6 +58,18 @@
   font-size: 0.74rem;
 }
 
+.native-assets-readonly li > span {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.native-assets-readonly li > span small {
+  overflow-wrap: anywhere;
+  color: var(--muted, #8d8d8d);
+  font-size: 0.64rem;
+}
+
 .native-assets-readonly code {
   overflow-wrap: anywhere;
   color: var(--muted, #8d8d8d);

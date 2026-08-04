@@ -1,60 +1,47 @@
 import type { TouchEvent } from "react";
 import { useLocale } from "@hacash/wallet-ui";
-import type { AssetSummary, FastPayStatus, TxRecord } from "../api";
+import type { AssetSummary } from "../api";
 import BalanceOverview from "../components/BalanceOverview";
-import HacdLaunchpadIcon from "../components/HacdLaunchpadIcon";
-import TxStatusMark from "../components/TxStatusMark";
-import { fastPayStatusLine, fastPayStatusTitle } from "../fastPayUi";
-import { formatHacMei } from "../privacy";
-import { openTxInExplorer } from "../txHistory";
 
 type Props = {
   assets: AssetSummary | null;
   hideBalances: boolean;
   refreshing: boolean;
-  fastPay: FastPayStatus | null;
   watchOnly: boolean;
-  busy: boolean;
-  history: TxRecord[];
   onPullStart: (e: TouchEvent) => void;
   onPullMove: (e: TouchEvent) => void;
   onPullEnd: () => void;
-  onEnableFastPay: () => void;
-  onDisableFastPay: () => void;
-  onScanPay: () => void;
-  onReceive: () => void;
-  onContacts: () => void;
-  onHistory: () => void;
-  onQuantum: () => void;
-  onLaunchpad: () => void;
-  onToast: (msg: string, kind: "success" | "info" | "error") => void;
+  onAirgap: () => void;
+  onChat: () => void;
+  onHacd: () => void;
+  onOpenFastPay: () => void;
 };
 
 export default function HomeTab({
   assets,
   hideBalances,
   refreshing,
-  fastPay,
   watchOnly,
-  busy,
-  history,
   onPullStart,
   onPullMove,
   onPullEnd,
-  onEnableFastPay,
-  onDisableFastPay,
-  onScanPay,
-  onReceive,
-  onContacts,
-  onHistory,
-  onQuantum,
-  onLaunchpad,
-  onToast,
+  onAirgap,
+  onChat,
+  onHacd,
+  onOpenFastPay,
 }: Props) {
   const { t } = useLocale();
+  const primaryActions = !watchOnly ? (
+    <section className="mobile-primary-actions" aria-label="Wallet menu">
+      <QuickAction kind="airgap" label={t("more.airgap")} onClick={onAirgap} primary />
+      <QuickAction kind="chat" label={t("nav.messages")} onClick={onChat} />
+      <QuickAction kind="hacd" label="My HACD" onClick={onHacd} />
+      <QuickAction kind="fastpay" label="Fast Pay" onClick={onOpenFastPay} />
+    </section>
+  ) : null;
 
   return (
-    <>
+    <div className="mobile-home-dashboard">
       <div
         className={`balance-hero ${refreshing ? "pulling" : ""}`}
         onTouchStart={onPullStart}
@@ -64,91 +51,36 @@ export default function HomeTab({
         <BalanceOverview
           assets={assets}
           hideBalances={hideBalances}
-          topHint={(
+          actions={primaryActions}
+          topHint={
             <p className="muted pull-hint">
               {refreshing ? t("home.refreshing") : t("home.pullToRefresh")}
             </p>
-          )}
+          }
         />
       </div>
-
-      {fastPay && (
-        <div className={`fp-banner${fastPay.state === "ready" ? " on" : ""}`}>
-          <div className="fp-banner-status">
-            {fastPay.state === "ready" ? (
-              <span className="badge badge-ok">{t("home.fastPayOn")}</span>
-            ) : (
-              <strong>{fastPayStatusTitle(fastPay.state)}</strong>
-            )}
-            <p className="muted">
-              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
-            </p>
-          </div>
-          {!watchOnly && fastPay.state !== "ready" && fastPay.can_enable && (
-            <button type="button" className="primary" disabled={busy} onClick={() => void onEnableFastPay()}>
-              {t("home.enable")}
-            </button>
-          )}
-          {!watchOnly && fastPay.state === "ready" && (
-            <button type="button" disabled={busy} onClick={() => void onDisableFastPay()}>
-              {t("home.disable")}
-            </button>
-          )}
-        </div>
-      )}
-
-      {!watchOnly && (
-        <div className="quick-actions">
-          <button type="button" className="quick-action primary-action" onClick={onScanPay}>
-            <span className="icon" aria-hidden>⌗</span>
-            {t("home.scanAndPay")}
-          </button>
-          <button type="button" className="quick-action" onClick={onReceive}>
-            <span className="icon" aria-hidden>↓</span>
-            {t("nav.receive")}
-          </button>
-          <button type="button" className="quick-action" onClick={onContacts}>
-            <span className="icon" aria-hidden>◎</span>
-            {t("more.contacts")}
-          </button>
-          <button type="button" className="quick-action" onClick={onHistory}>
-            <span className="icon" aria-hidden>≡</span>
-            {t("nav.history")}
-          </button>
-          <button type="button" className="quick-action" onClick={onQuantum}>
-            <span className="icon" aria-hidden>◇</span>
-            {t("nav.quantum")}
-          </button>
-          <button type="button" className="quick-action" onClick={onLaunchpad}>
-            <span className="icon" aria-hidden>
-              <HacdLaunchpadIcon />
-            </span>
-            {t("dapp.appsTitle")}
-          </button>
-        </div>
-      )}
-
-      {history.length > 0 && (
-        <div className="card card-flat">
-          <h2>{t("home.recent")}</h2>
-          {history.slice(0, 3).map((row) => (
-            <button
-              key={`${row.tx_hash}-${row.timestamp}`}
-              type="button"
-              className="list-item list-item-row list-item-tap"
-              onClick={() => void openTxInExplorer(row, onToast)}
-            >
-              <TxStatusMark status={row.status} />
-              <div className="list-item-body">
-                <div>
-                  {row.rail} · {formatHacMei(row.amount_mei)} HAC
-                </div>
-                <div className="muted">{row.summary}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-    </>
+    </div>
   );
+}
+
+type QuickKind = "airgap" | "chat" | "hacd" | "fastpay";
+
+function QuickAction({ kind, label, onClick, primary = false }: { kind: QuickKind; label: string; onClick: () => void; primary?: boolean }) {
+  return (
+    <button type="button" className={`quick-action${primary ? " primary-action" : ""}`} onClick={onClick}>
+      <QuickIcon kind={kind} />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function QuickIcon({ kind }: { kind: QuickKind }) {
+  const path = kind === "airgap"
+    ? "M7 3h10v18H7zM10 6h4M9 17h6M3 8l3 3-3 3M21 8l-3 3 3 3"
+    : kind === "chat"
+      ? "M5 5h14v11H9l-4 4V5zM8 9h8M8 12h5"
+      : kind === "hacd"
+        ? "m12 3 7 6-7 12L5 9l7-6zM5 9h14M9 9l3 12 3-12"
+        : "m13 2-8 12h7l-1 8 8-12h-7l1-8z";
+  return <svg className="quick-action-icon" viewBox="0 0 24 24" aria-hidden><path d={path} /></svg>;
 }

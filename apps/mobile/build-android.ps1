@@ -1,4 +1,4 @@
-# Build Hacash Wallet Android APK (Tauri 2)
+# Build HPAY Wallet Android APK (Tauri 2)
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $mobile

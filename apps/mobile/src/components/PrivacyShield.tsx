@@ -8,7 +8,7 @@ export default function PrivacyShield({ active }: Props) {
     <div className="privacy-shield" aria-hidden>
       <div className="privacy-shield-inner">
         <span className="privacy-shield-icon">🔒</span>
-        <p>Hacash Wallet</p>
+        <p>HPAY Wallet</p>
       </div>
     </div>
   );

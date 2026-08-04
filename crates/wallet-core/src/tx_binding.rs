@@ -357,6 +357,26 @@ pub fn verify_satoshi_transfers(
     verify_transaction_intent(body_hex, expected_main, expected_fee, &actions)
 }
 
+pub fn verify_native_asset_transfer(
+    body_hex: &str,
+    expected_main: &str,
+    expected_fee: &str,
+    to: &str,
+    serial: u64,
+    amount: u64,
+) -> WalletResult<CanonicalTransaction> {
+    verify_transaction_intent(
+        body_hex,
+        expected_main,
+        expected_fee,
+        &[json!({
+            "kind": 17,
+            "to": to,
+            "asset": { "serial": serial, "amount": amount }
+        })],
+    )
+}
+
 pub fn describe_action_intents(actions: &[Value]) -> WalletResult<String> {
     if actions.is_empty() {
         return Err(binding_error("dApp request has no actions"));
@@ -511,7 +531,7 @@ mod tests {
     use basis::interface::Transaction;
     use field::{Address, Uint1};
     use protocol::action::ReqSignList;
-    use protocol::transaction::TransactionType3;
+    use protocol::transaction::{TransactionType2, TransactionType3};
     use serde_json::json;
 
     const OFFICIAL_NODE_HAC_BODY: &str = "02006a59827900681990afd226b1cbc6c5f085cfdc2092d0843241f401010001000100d3234881daaf07d4562308104401b003328c3744f8010100000000";
@@ -617,6 +637,70 @@ mod tests {
         protocol::action::action_json_create(1, &value.to_string())
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn native_asset_binding_rejects_serial_amount_and_recipient_substitution() {
+        crate::protocol_init::ensure_protocol_setup();
+        let main = Address::create_privakey([71; 20]);
+        let recipient = Address::create_privakey([72; 20]);
+        let action_json = json!({
+            "kind": 17,
+            "to": recipient.to_readable(),
+            "asset": { "serial": 1025, "amount": 33 }
+        });
+        let action = protocol::action::action_json_create(17, &action_json.to_string())
+            .unwrap()
+            .unwrap();
+        let mut tx = TransactionType2::new_by(main, Amount::from("1:244").unwrap(), 1_700_000_000);
+        tx.push_action(action).unwrap();
+        let body = hex::encode(field::Serialize::serialize(&tx));
+
+        let canonical = verify_native_asset_transfer(
+            &body,
+            &main.to_readable(),
+            "1:244",
+            &recipient.to_readable(),
+            1025,
+            33,
+        )
+        .unwrap();
+        assert_eq!(canonical.actions[0].kind, 17);
+
+        assert!(
+            verify_native_asset_transfer(
+                &body,
+                &main.to_readable(),
+                "1:244",
+                &recipient.to_readable(),
+                1026,
+                33,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_native_asset_transfer(
+                &body,
+                &main.to_readable(),
+                "1:244",
+                &recipient.to_readable(),
+                1025,
+                34,
+            )
+            .is_err()
+        );
+        let attacker = Address::create_privakey([73; 20]);
+        assert!(
+            verify_native_asset_transfer(
+                &body,
+                &main.to_readable(),
+                "1:244",
+                &attacker.to_readable(),
+                1025,
+                33,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,0 +1,21 @@
+{
+  "agent_wallet_core_files": 39,
+  "agent_wallet_core_sha256": "c27a5d13d4dc489451cbb1d7e6718f120a24ffe831968ef10ef2c0fa9b6aa3c3",
+  "application_version": "1.0.2",
+  "built_at_utc": "2026-08-03T19:36:08Z",
+  "companion_lan_runtime_files": 10,
+  "companion_lan_runtime_sha256": "ab7927f46f20762c88528f08102a711f86eeb9767bc99f45afa2c12eca4de7d9",
+  "companion_protocol_files": 26,
+  "companion_protocol_sha256": "23b0fd46e01f845a1d792a7841646546e4b83c43a2686ffe0c784b582106e8ac",
+  "desktop_companion_source_files": 13,
+  "desktop_companion_source_sha256": "508e7e22d4b60d69f6f02b4aabf15b736d03bd3c16f5dd403bf9de390c11d179",
+  "git_branch": "codex/how-it-works-hacd-fidelity",
+  "git_head": "26ae4c5d0367aa7a59aab17abd8a8a8a15293e90",
+  "manifest_version": 1,
+  "mobile_companion_source_files": 12,
+  "mobile_companion_source_sha256": "ddd8d4587386410f112a20a74744b6c3f1d808c4cd76c0c4c59a64272e34ad6f",
+  "protocol_version": 3,
+  "shared_wallet_ui_files": 57,
+  "shared_wallet_ui_sha256": "31f3723947b37c76ad17a6505c068afc42f97f27383fbe68b3ad8c2127b952ef",
+  "worktree_dirty": true
+}

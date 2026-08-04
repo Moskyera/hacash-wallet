@@ -22,7 +22,7 @@ export const tr = {
   "nav.advanced": "Gelişmiş",
   "nav.pay": "Öde",
   "nav.messages": "Sohbet",
-  "nav.more": "Daha fazla",
+  "nav.more": "Menü",
   "more.wallet": "Cüzdan",
   "more.preferences": "Tercihler",
   "more.transactions": "İşlem geçmişi",

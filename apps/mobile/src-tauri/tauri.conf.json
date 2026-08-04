@@ -1,6 +1,6 @@
 {
     "$schema":  "https://schema.tauri.app/config/2",
-    "productName":  "Hacash Wallet",
+    "productName":  "HPAY Wallet",
     "version":  "1.0.2",
     "identifier":  "org.hacash.wallet.mobile",
     "build":  {
@@ -12,7 +12,7 @@
     "app":  {
                 "windows":  [
                                 {
-                                    "title":  "Hacash Wallet",
+                                    "title":  "HPAY Wallet",
                                     "width":  420,
                                     "height":  780,
                                     "resizable":  false,

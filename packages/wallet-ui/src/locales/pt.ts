@@ -22,7 +22,7 @@ export const pt = {
   "nav.advanced": "Avançado",
   "nav.pay": "Pagar",
   "nav.messages": "Chat",
-  "nav.more": "Mais",
+  "nav.more": "Menu",
   "more.wallet": "Carteira",
   "more.preferences": "Preferências",
   "more.transactions": "Histórico de transações",

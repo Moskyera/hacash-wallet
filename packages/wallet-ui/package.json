@@ -12,6 +12,8 @@
     "js-sha3": "0.9.3"
   },
   "peerDependencies": {
-    "react": "^19.0.0"
+    "react": "^19.0.0",
+    "html5-qrcode": "^2.3.8",
+    "qrcode": "^1.5.4"
   }
 }

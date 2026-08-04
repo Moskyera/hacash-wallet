@@ -35,7 +35,7 @@ import { clearDeepLink, parseDeepLinkPay, stashDeepLinkUrl } from "./utils/deepL
 import { hapticSuccess } from "./utils/haptic";
 import { PULL_THRESHOLD } from "./utils/appConstants";
 
-export default function MobileApp() {
+export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void }) {
   const { t } = useLocale();
   const { toast, showToast } = useToast();
   const session = useWalletSession(showToast);
@@ -541,6 +541,7 @@ export default function MobileApp() {
     return (
       <>
         <WelcomeScreen
+          busy={session.busy}
           walletNameDraft={session.walletNameDraft}
           setWalletNameDraft={session.setWalletNameDraft}
           passphrase={passphrase}
@@ -549,7 +550,6 @@ export default function MobileApp() {
           setSeed={setSeed}
           watchAddress={watchAddress}
           setWatchAddress={setWatchAddress}
-          busy={session.busy}
           onCreate={() => void handleCreate()}
           onImport={(expected) => void handleImport(expected)}
           onRestoreBackup={(json, value, allowLegacy) => void handleRestoreBackup(json, value, allowLegacy)}
@@ -566,11 +566,11 @@ export default function MobileApp() {
     return (
       <>
         <UnlockScreen
+          busy={session.busy}
           displayName={displayName}
           addressHint={maskAddress(session.status?.address, false)}
           passphrase={passphrase}
           setPassphrase={setPassphrase}
-          busy={session.busy}
           onUnlock={() => void handleUnlock()}
           biometricUnlockAvailable={bioReady}
           biometricKind={session.platformSec?.biometric_kind}
@@ -586,15 +586,20 @@ export default function MobileApp() {
     <div className="app-shell">
       <header className="app-header">
         <div className="app-header-row">
-          <WalletLogo size="sm" variant="mark" />
-          <div>
-            <h1>{displayName}</h1>
-            <p className="sub">{maskAddress(session.status?.address, session.privacy.hide_addresses)}</p>
+          <div className="mobile-header-brand">
+            <WalletLogo size="sm" variant="mark" />
+            <div>
+              <h1>HPAY</h1>
+              <p className="sub">{displayName}</p>
+            </div>
           </div>
+          <span className="mobile-header-security" title={maskAddress(session.status?.address, session.privacy.hide_addresses)} aria-label="Encrypted wallet">
+            <svg viewBox="0 0 24 24" aria-hidden><path d="M7 11V8a5 5 0 0 1 10 0v3M6 11h12v10H6z" /></svg>
+          </span>
         </div>
       </header>
 
-      <main className="app-main">
+      <main className={tab === "home" ? "app-main app-main-home" : "app-main"}>
         {tab === "home" && (
           <HowItWorksPrompt
             copy={{
@@ -613,39 +618,30 @@ export default function MobileApp() {
             assets={session.assets}
             hideBalances={session.privacy.hide_balances}
             refreshing={session.refreshing}
-            fastPay={session.fastPay}
             watchOnly={session.watchOnly}
-            busy={session.busy}
-            history={session.history}
             onPullStart={onBalanceTouchStart}
             onPullMove={onBalanceTouchMove}
             onPullEnd={onBalanceTouchEnd}
-            onEnableFastPay={() => void session.handleEnableFastPay()}
-            onDisableFastPay={() => void session.handleDisableFastPay()}
-            onScanPay={() => navigateToPay({ openCamera: true })}
-            onReceive={() => setTab("receive")}
-            onContacts={() => {
-              setMorePage("contacts");
+            onAirgap={() => {
+              setMorePage("airgap");
               setTab("more");
             }}
-            onHistory={() => {
-              setMorePage("history");
+            onChat={() => {
+              setMorePage("messages");
               setTab("more");
             }}
-            onQuantum={() => {
-              setMorePage("quantum");
+            onHacd={() => setTab("hacd")}
+            onOpenFastPay={() => {
+              setMorePage("fastpay");
               setTab("more");
             }}
-            onLaunchpad={() => {
-              setMorePage("launchpad");
-              setTab("more");
-            }}
-            onToast={showToast}
           />
         )}
 
         {tab === "pay" && !session.watchOnly && (
           <PayTab
+            assets={session.assets}
+            busy={session.busy}
             contacts={contacts}
             sendTo={payment.sendTo}
             setSendTo={payment.setSendTo}
@@ -663,12 +659,12 @@ export default function MobileApp() {
             payScanMode={payment.payScanMode}
             setPayScanMode={payment.setPayScanMode}
             hideAddresses={session.privacy.hide_addresses}
+            hideBalances={session.privacy.hide_balances}
             settings={session.settings}
             platformSec={session.platformSec}
             secondFactorThresholdMei={
               session.status?.require_second_factor_above_mei ?? null
             }
-            busy={session.busy}
             dustWhisper={session.dustWhisper}
             onPersistSendPrefs={(h, f, s, svc) => void payment.persistSendPrefs(h, f, s, svc)}
             onPersistDustWhisper={(patch) => void session.persistDustWhisper(patch)}
@@ -698,8 +694,8 @@ export default function MobileApp() {
 
         {tab === "hacd" && (
           <HacdTab
-            locked={!session.status || session.status.locked}
             busy={session.busy}
+            locked={!session.status || session.status.locked}
             onToast={showToast}
             onGoPay={() => navigateToPay()}
           />
@@ -761,7 +757,7 @@ export default function MobileApp() {
         )}
       </main>
 
-      <BottomNav active={tab} onChange={handleTabChange} watchOnly={session.watchOnly} />
+      <BottomNav active={tab} onChange={handleTabChange} onOpenAgent={onOpenAgent} watchOnly={session.watchOnly} />
       {session.status?.hardware_signing_mode !== "airgap_only" ? (
         <DappApprovalPanel onNotify={showToast} />
       ) : null}

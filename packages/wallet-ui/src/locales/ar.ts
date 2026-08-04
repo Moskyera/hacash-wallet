@@ -22,7 +22,7 @@ export const ar = {
   "nav.advanced": "متقدم",
   "nav.pay": "دفع",
   "nav.messages": "الدردشة",
-  "nav.more": "المزيد",
+  "nav.more": "القائمة",
   "more.wallet": "المحفظة",
   "more.preferences": "التفضيلات",
   "more.transactions": "سجل المعاملات",

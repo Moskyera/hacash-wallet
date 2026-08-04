@@ -38,9 +38,11 @@ async fn confirm_fast_pay_handler(
     Path(payment_id): Path<String>,
     Json(req): Json<ConfirmFastPayRequest>,
 ) -> Result<Json<FastPayResponse>, HubHttpError> {
-    Ok(Json(
-        state.hub.confirm_fast_pay(&payment_id, &req.bill_hex)?,
-    ))
+    Ok(Json(state.hub.confirm_fast_pay(
+        &payment_id,
+        &req.idempotency_key,
+        &req.bill_hex,
+    )?))
 }
 
 pub async fn serve(addr: SocketAddr, hub: Arc<HubState>) -> std::io::Result<()> {
@@ -58,10 +60,7 @@ async fn fast_pay_handler(
     State(state): State<AppState>,
     Json(req): Json<FastPayRequest>,
 ) -> Result<Json<FastPayResponse>, HubHttpError> {
-    let resp = state
-        .hub
-        .settle_fast_pay(&req.payer, &req.payee, &req.amount, &req.channel_id)
-        .await?;
+    let resp = state.hub.settle_fast_pay(&req).await?;
     Ok(Json(resp))
 }
 

@@ -1,0 +1,13 @@
+[package]
+name = "hpay-agent-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared identity, scope, and capability types for HPAY agent components"
+
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -24,7 +24,7 @@ export const ja = {
   "nav.advanced": "詳細",
   "nav.pay": "支払い",
   "nav.messages": "チャット",
-  "nav.more": "その他",
+  "nav.more": "メニュー",
   "privacy.hidden": "ウォレットを非表示中",
   "privacy.focus": "残高とアドレスを表示するにはウィンドウを選択してください。",
   "more.wallet": "ウォレット",
