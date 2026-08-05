@@ -24,9 +24,31 @@ decision.
 **Witness baseline on real hardware.** Never initialized. The journal has no witness
 or approval event in 46 records.
 
-**Backup and recovery.** There is none, and the code says so: "this release has no
-verified Agent Wallet backup or recovery path." If the vault is lost the money is
-lost. This alone disqualifies mainnet regardless of everything else.
+**Backup and recovery.** Built, on the owner's decision: restore everything, exactly
+as the Personal Wallet does, and warn. It is a STATE backup of four mutually
+consistent files - `registry.json`, `wallets/<id>/vault.json`, the journal and the
+wallet state - sealed with the wallet's own Argon2id and AES-256-GCM, and a restore
+refuses outright if those four disagree. See `crates/agent-wallet-core/src/service/backup.rs`.
+
+A restore is also one TRANSACTION, which it was not when it was first written. The five
+durable writes used to publish the registry entry last and call that enough; a crash
+between the vault write and the journal write left the keys on disk under a wallet the
+registry did not list, and the restore's own pre-check then refused it for ever, to the
+retry and to a retry after a reboot alike. `begin_wallet_restore` now records which
+wallet is being built before any of it reaches disk, the registry entry is the commit
+point, and `recover_interrupted_wallet_restore` runs at every `AgentWalletManager::open`
+and again at the top of every restore. Every one of the eight windows is crashed at in
+`crates/agent-wallet-core/src/service/companion/tests/restore_atomicity.rs`, and after
+the next open the store holds either the whole wallet or no trace of it.
+
+A restore IS a rollback, and the four consequences are executed in
+`crates/agent-wallet-core/src/service/companion/tests/state_backup.rs`: the spend
+window returns to the backup point, a revoked agent comes back live with its
+allowance reset, the old witness phone answers `RollbackDetected` for ever and must
+be replaced by a lost-phone rotation, and the backup file plus its passphrase is a
+second working wallet that can spend at the same time as the first. All four are
+shown and must be ticked before either flow will run. Mainnet remains blocked, and
+not because of this.
 
 **Independent security review.** Nobody outside this work has read it.
 

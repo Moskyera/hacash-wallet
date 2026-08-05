@@ -1129,8 +1129,9 @@ function NodeHealthPanel({
       {!overview.mainnet_spending_ready && (
         <div className="agent-warning">
           Legacy mainnet Agent Wallet detected. Do not fund this address.
-          Spending is blocked and this release has no verified Agent Wallet
-          backup or recovery path.
+          Spending is blocked. A backup of this wallet's state can be made under
+          Backup and restore, and restoring one rewinds the record of what has
+          been spent - read the warning there before you rely on it.
         </div>
       )}
       <details className="agent-advanced-details">

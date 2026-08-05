@@ -807,3 +807,52 @@
 .agent-qr-file-input {
   display: none;
 }
+
+/* THE BACKUP WARNING. It is part of the feature, not a footnote, so it is
+   styled to be read: a warning surface, one line per consequence, each with its
+   own checkbox, and a running count of what is still unread. */
+.agent-warning-block {
+  margin: 12px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid #7a3b0d;
+  border-radius: 10px;
+  background: #1a0d03;
+}
+
+.agent-warning-headline {
+  margin: 0 0 10px;
+  color: #ffb356;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.agent-warning-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-warning-list li + li {
+  margin-top: 10px;
+}
+
+.agent-warning-list label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  color: #f0d8b8;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.agent-warning-list input[type="checkbox"] {
+  margin: 3px 0 0;
+}
+
+.agent-warning-outstanding {
+  margin: 10px 0 0;
+  color: #ff9d00;
+  font-size: 12px;
+  font-weight: 700;
+}

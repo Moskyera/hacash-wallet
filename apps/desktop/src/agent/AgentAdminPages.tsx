@@ -10,6 +10,7 @@ import {
   type PaymentOperation,
   type StrandedWitness,
 } from "./api";
+import { AgentBackupPanel } from "./AgentBackupPanel";
 import { PilotDiagnosticsPanel } from "./PilotDiagnosticsPanel";
 import { WitnessRotationPanel } from "./WitnessRotationPanel";
 import {
@@ -548,6 +549,15 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
       {/* Rare, deliberate, one-off flows. They open by themselves when their
           own state says they are in progress. */}
       <details className="agent-advanced-details agent-section-title">
+        <summary>Backup and restore</summary>
+        <AgentBackupPanel
+          walletId={overview.wallet_id}
+          busy={busy}
+          run={run}
+          onInfo={onInfo}
+        />
+      </details>
+      <details className="agent-advanced-details">
         <summary>Diagnostics export</summary>
         <PilotDiagnosticsPanel
           walletId={overview.wallet_id}

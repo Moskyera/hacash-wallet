@@ -261,7 +261,7 @@ impl AgentWalletManager {
     }
 }
 
-fn validate_state(
+pub(super) fn validate_state(
     state: &AgentWalletState,
     expected_wallet_id: &AgentWalletId,
 ) -> AgentWalletResult<()> {

@@ -30,6 +30,7 @@ use crate::storage::{AgentStorage, AgentWalletRegistryEntry};
 use crate::types::{AgentId, AgentWalletId, OperationId, WalletScope};
 use crate::vault::{AgentEncryptedVault, derive_domain_key};
 mod admin;
+mod backup;
 mod companion;
 mod connector;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
@@ -47,6 +48,11 @@ use state::{
 #[cfg(test)]
 use state::{journal_path, scoped_idempotency_key};
 
+pub use backup::{
+    AGENT_WALLET_BACKUP_WARNING, AGENT_WALLET_RESTORE_WARNING, AgentWalletBackupAcknowledgement,
+    AgentWalletBackupFile, AgentWalletBackupMetadata, AgentWalletBackupPreview,
+    AgentWalletBackupWarning, AgentWalletRestoreOutcome,
+};
 pub use companion::{
     AgentCompanionPairingAttempt, AgentCompletedCompanionPairing, AgentDesktopSessionAttempt,
     AgentPairingAttemptBudget, MAX_PAIRING_REQUEST_ATTEMPTS,
@@ -363,6 +369,98 @@ pub struct AgentWalletManager {
     /// cannot rewind it, and behind its own lock so that issuing a sequence
     /// needs only `&self` on the unauthenticated challenge phase.
     challenge_sequences: Mutex<BTreeMap<String, DesktopChallengeSequence>>,
+    /// Crash injection for the two durable boundaries inside
+    /// `apply_mobile_witness_and_broadcast`. Test builds only: the fields, and
+    /// every read of them, are compiled out of the shipped library, so an owner
+    /// runs exactly the code that shipped before this existed.
+    ///
+    /// Setting one makes that call return without running anything below the
+    /// boundary. Everything above it has already been written to disk by
+    /// `persist_event`, so the on-disk state is byte-for-byte what a process
+    /// that died at that instant leaves behind, and the test reopens the wallet
+    /// from that disk rather than from memory.
+    #[cfg(test)]
+    pub(crate) crash_after_witness_accepted: bool,
+    /// Same, one step later: the receipt is durable AND the broadcast has
+    /// already happened, and the archive that would move the payment on never
+    /// runs.
+    #[cfg(test)]
+    pub(crate) crash_before_witness_archive: bool,
+    /// The sweep's two other multi-write boundaries, injected so the claim that
+    /// they are already recoverable is executed rather than read:
+    /// `approve_desktop_and_broadcast` journals `ApprovalGranted` and then calls
+    /// `resume_payment`, and `accept_witness_rotation_baseline` journals
+    /// `WitnessRotationBaselineAccepted` and then revokes the old phone.
+    #[cfg(test)]
+    pub(crate) crash_after_approval_granted: bool,
+    #[cfg(test)]
+    pub(crate) crash_after_rotation_baseline: bool,
+    /// The two boundaries the second sweep found still open.
+    ///
+    /// `resume_payment` persists `BroadcastSubmitted` and only then posts the
+    /// signed bytes to the node, on purpose, so that a restart reconciles
+    /// rather than rebroadcasts. This injects the crash in that gap - the one
+    /// case where the durable status says "submitted" and provably nothing was.
+    #[cfg(test)]
+    pub(crate) crash_after_broadcast_persisted: bool,
+    /// `apply_mobile_approval_and_broadcast` journals the phone's decision AND
+    /// the replay-guard snapshot that consumes it, and then calls
+    /// `resume_payment` to sign. This injects the crash in that gap.
+    #[cfg(test)]
+    pub(crate) crash_after_mobile_approval_granted: bool,
+    /// The three remaining boundaries the second sweep enumerated, injected so
+    /// that the claim they are benign is executed rather than read:
+    /// `pending_rollback_anchor` journals `RollbackWitnessInitialized` and then
+    /// mints the anchor; `create_payment_intent` journals `FundsReserved` and
+    /// then builds the transaction at the node; `resume_payment` journals
+    /// `TransactionSigned` and then reloads and broadcasts.
+    #[cfg(test)]
+    pub(crate) crash_after_witness_state_initialized: bool,
+    #[cfg(test)]
+    pub(crate) crash_after_funds_reserved: bool,
+    #[cfg(test)]
+    pub(crate) crash_after_transaction_signed: bool,
+    /// Where inside `restore_agent_wallet_backup` to stop dead.
+    ///
+    /// The restore is the one place in the crate that performs five durable
+    /// writes in a row, so one boolean per window would be five flags that can
+    /// disagree. One point, set once, stops the function exactly there and
+    /// leaves the write-ahead record behind - which is what dying there does.
+    #[cfg(test)]
+    pub(crate) crash_restore_at: Option<RestoreCrashPoint>,
+}
+
+/// The durable-write windows inside `restore_agent_wallet_backup`, named so a
+/// test can crash at each one and then say which one it crashed at.
+///
+/// The list is compiled into every build so the restore reads the same in a
+/// release build as it does in a test one; only the flag that arms it is
+/// test-only, so a release build cannot be made to stop at any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreCrashPoint {
+    AfterWriteAheadRecord,
+    AfterWalletLayout,
+    AfterVault,
+    AfterJournal,
+    AfterState,
+    AfterPendingRemoval,
+    AfterVerification,
+    AfterRegistry,
+}
+
+#[cfg(test)]
+impl RestoreCrashPoint {
+    /// Every window, so a test cannot silently cover only some of them.
+    pub(crate) const ALL: [Self; 8] = [
+        Self::AfterWriteAheadRecord,
+        Self::AfterWalletLayout,
+        Self::AfterVault,
+        Self::AfterJournal,
+        Self::AfterState,
+        Self::AfterPendingRemoval,
+        Self::AfterVerification,
+        Self::AfterRegistry,
+    ];
 }
 
 impl AgentWalletManager {
@@ -370,6 +468,13 @@ impl AgentWalletManager {
     /// caller. This never reads or writes Personal Wallet paths.
     pub fn open(base_root: impl AsRef<Path>) -> AgentWalletResult<Self> {
         let storage = AgentStorage::open(base_root)?;
+        // A restore that was interrupted finishes its story here, before
+        // anything reads the store: either it had committed and only its own
+        // write-ahead record is left, or nothing committed and everything it had
+        // written goes. Best effort on purpose - it can only ever touch a wallet
+        // the registry does not list, so a store that fails to heal is still
+        // safe to open, and the next open and the next restore both try again.
+        let _ = storage.recover_interrupted_wallet_restore();
         let registry = storage.load_registry()?;
         let mut emergency_controllers = BTreeMap::new();
         for wallet_id in registry.wallets.values().map(|entry| &entry.wallet_id) {
@@ -382,7 +487,48 @@ impl AgentWalletManager {
             unlocked: BTreeMap::new(),
             emergency_controllers,
             challenge_sequences: Mutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            crash_after_witness_accepted: false,
+            #[cfg(test)]
+            crash_before_witness_archive: false,
+            #[cfg(test)]
+            crash_after_approval_granted: false,
+            #[cfg(test)]
+            crash_after_rotation_baseline: false,
+            #[cfg(test)]
+            crash_after_broadcast_persisted: false,
+            #[cfg(test)]
+            crash_after_mobile_approval_granted: false,
+            #[cfg(test)]
+            crash_after_witness_state_initialized: false,
+            #[cfg(test)]
+            crash_after_funds_reserved: false,
+            #[cfg(test)]
+            crash_after_transaction_signed: false,
+            #[cfg(test)]
+            crash_restore_at: None,
         })
+    }
+
+    /// Stops the restore dead at one of its durable-write windows.
+    ///
+    /// It returns the error rather than unwinding through any cleanup on
+    /// purpose: nothing after the call runs, the write-ahead record stays on
+    /// disk, and that is exactly the disk a killed process leaves.
+    #[cfg(test)]
+    pub(crate) fn restore_crash(&self, point: RestoreCrashPoint) -> AgentWalletResult<()> {
+        if self.crash_restore_at == Some(point) {
+            return Err(AgentWalletError::PersistenceFailed);
+        }
+        Ok(())
+    }
+
+    /// Nothing at all in a release build. There is no flag to arm.
+    #[cfg(not(test))]
+    #[inline]
+    pub(crate) fn restore_crash(&self, point: RestoreCrashPoint) -> AgentWalletResult<()> {
+        let _ = point;
+        Ok(())
     }
 
     pub fn storage_root(&self) -> &Path {
@@ -418,9 +564,19 @@ impl AgentWalletManager {
         request: CreateAgentWallet,
         now: u64,
     ) -> AgentWalletResult<CreatedAgentWallet> {
-        // Until a separately encrypted Agent Wallet backup/restore flow is
-        // implemented and verified, new autonomous-spending pockets are
-        // testnet-only. Legacy authenticated mainnet state remains loadable.
+        // New autonomous-spending pockets are testnet-only. Legacy authenticated
+        // mainnet state remains loadable.
+        //
+        // The reason this line used to give - that there was no separately
+        // encrypted Agent Wallet backup and restore flow - is no longer the
+        // reason: that flow exists now, in `service/backup.rs`, with its
+        // consequences executed in
+        // `service/companion/tests/state_backup.rs`. The refusal stays exactly
+        // as it was, because it never rested only on the missing backup: an
+        // Agent Wallet on mainnet is a key that spends real money without a
+        // human in the loop for each payment, and nothing about being able to
+        // copy its state changes that. Lifting it is a separate, deliberate
+        // decision and not a side effect of this one.
         if request.network_mode != "testnet" {
             return Err(AgentWalletError::InvalidPaymentRequest);
         }
@@ -510,7 +666,48 @@ impl AgentWalletManager {
         })
     }
 
+    /// Unlock, and then finish any witness that a crash interrupted between its
+    /// two durable writes.
+    ///
+    /// The recovery reads only what is already on disk and needs no network, so
+    /// it belongs here rather than behind a control the owner has to find. It
+    /// is a no-op on every wallet that was not interrupted.
+    ///
+    /// A failure inside it must never cost the owner access to their wallet:
+    /// the session is already live at that point, the archive persists as its
+    /// last act so a failed one leaves the residue exactly as it was, and the
+    /// next unlock tries again.
     pub fn unlock(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        passphrase: &str,
+        now: u64,
+    ) -> AgentWalletResult<UnlockedAgentWalletStatus> {
+        let status = self.unlock_session(wallet_id, passphrase, now)?;
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        {
+            let _ = self.resume_interrupted_witness_archive(wallet_id, now);
+            let _ = self.resume_interrupted_rotation_baseline(wallet_id, now);
+        }
+        Ok(status)
+    }
+
+    /// The unlock itself, with no recovery attached.
+    ///
+    /// Split out so the crash-recovery suite can reopen a wallet exactly as it
+    /// stood before the recovery existed, and prove that the residue really has
+    /// no exit without it.
+    #[cfg(test)]
+    pub(crate) fn unlock_without_witness_recovery_for_test(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        passphrase: &str,
+        now: u64,
+    ) -> AgentWalletResult<UnlockedAgentWalletStatus> {
+        self.unlock_session(wallet_id, passphrase, now)
+    }
+
+    fn unlock_session(
         &mut self,
         wallet_id: &AgentWalletId,
         passphrase: &str,

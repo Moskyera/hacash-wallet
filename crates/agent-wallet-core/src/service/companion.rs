@@ -434,6 +434,15 @@ impl AgentWalletManager {
         if decision == ApprovalDecision::Reject {
             return Ok(persisted);
         }
+        // A durable write with a second step after it: the decision AND the
+        // replay-guard snapshot that consumes it are on disk, and the signing
+        // has still to run. Test builds only.
+        #[cfg(test)]
+        {
+            if self.crash_after_mobile_approval_granted {
+                return Err(AgentWalletError::RecoveryRequired);
+            }
+        }
         self.resume_payment(wallet_id, &operation_id, now).await
     }
 

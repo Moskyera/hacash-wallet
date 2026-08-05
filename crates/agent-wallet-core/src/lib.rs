@@ -38,6 +38,11 @@ pub use operation::{AgentPaymentRequest, ApprovalMode, OperationStatus, PaymentO
 pub use pairing_outbox::PairingCompletionOutboxEntry;
 pub use policy::{AgentPermission, AgentPolicy, AgentRecord, AgentStatus};
 pub use service::{
+    AGENT_WALLET_BACKUP_WARNING, AGENT_WALLET_RESTORE_WARNING, AgentWalletBackupAcknowledgement,
+    AgentWalletBackupFile, AgentWalletBackupMetadata, AgentWalletBackupPreview,
+    AgentWalletBackupWarning, AgentWalletRestoreOutcome,
+};
+pub use service::{
     AgentCompanionPairingAttempt, AgentCompletedCompanionPairing, AgentDesktopSessionAttempt,
     AgentPairingAttemptBudget, AgentWalletManager, AgentWalletOverview, CreateAgentWallet,
     MAX_PAIRING_REQUEST_ATTEMPTS, UnlockedAgentWalletStatus,

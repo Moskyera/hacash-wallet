@@ -40,7 +40,7 @@ pub(super) const AMOUNT_UNITS: u64 = 10_000;
 /// The recipient is on the agent's allowlist, because that is the ordinary case
 /// this path is for: an address the owner has already vetted. The unlisted-
 /// recipient proposal path has its own tests and is not what is under test here.
-fn pair_desktop_agent(
+pub(super) fn pair_desktop_agent(
     manager: &mut AgentWalletManager,
     wallet_id: &AgentWalletId,
     approval_mode: ApprovalMode,
@@ -520,7 +520,7 @@ async fn a_revoked_phone_does_not_satisfy_the_witness_prerequisite() {
 /// Drives an operation out of the witness lifecycle the ordinary way, so the
 /// wallet is clean and `rollback_witness` is pinned to `mobile` by a healthy
 /// run rather than by hand.
-async fn settle_with_witness(
+pub(super) async fn settle_with_witness(
     manager: &mut AgentWalletManager,
     wallet_id: &AgentWalletId,
     operation_id: &OperationId,

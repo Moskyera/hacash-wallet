@@ -1391,16 +1391,40 @@ async fn rotation_ticket_is_single_use_and_blocks_concurrent_candidate_scan() {
             1_327,
         )
         .unwrap();
+    // THE SAME DELIVERY ARRIVING TWICE IS NOT A REPLAY, AND IS NOT AN ERROR.
+    //
+    // The candidate handset persists this exact acceptance BEFORE it hands it
+    // over, so a crash on either side - or the desktop scanning the QR twice,
+    // which is the ordinary case - presents it again. Nothing is consumed and
+    // nothing is journalled the second time; the durable state already says this.
+    assert_eq!(
+        manager.accept_rotation_candidate(
+            &wallet_id,
+            &record.rotation_id,
+            candidate_record.clone(),
+            signed_acceptance.clone(),
+            1_328,
+        ),
+        Ok(()),
+        "the acceptance already durable here is accepted again unchanged"
+    );
+
+    // A DIFFERENT ACCEPTANCE FOR THE SAME CONSUMED TICKET IS STILL REFUSED.
+    let other = RotationCandidateAcceptance::for_ticket(&ticket.ticket, 1_329).unwrap();
+    let other_signed = SignedRotationCandidateAcceptance::sign(other, &first_candidate)
+        .await
+        .unwrap();
+    assert_ne!(other_signed, signed_acceptance);
     assert_eq!(
         manager.accept_rotation_candidate(
             &wallet_id,
             &record.rotation_id,
             candidate_record,
-            signed_acceptance,
-            1_328,
+            other_signed,
+            1_330,
         ),
         Err(AgentWalletError::InvalidOperationState),
-        "the consumed ticket cannot be replayed"
+        "the consumed ticket cannot be replayed with a second acceptance"
     );
     assert!(
         manager

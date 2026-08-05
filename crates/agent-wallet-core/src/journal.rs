@@ -337,6 +337,28 @@ impl AgentJournal {
         Ok(journal)
     }
 
+    /// A journal handle with no file behind it, for authenticating bytes that
+    /// are not on disk anywhere yet.
+    ///
+    /// [`Self::verify_bytes`] is the only thing it can do: `append` and `verify`
+    /// both go through `self.path`, which is empty here, so this handle can
+    /// never write and can never read a file. Restore uses it to authenticate a
+    /// backup's journal before deciding whether to write any of the backup at
+    /// all.
+    pub(crate) fn open_detached(
+        wallet_scope: WalletScope,
+        independent_journal_key: &[u8; 32],
+    ) -> AgentWalletResult<Self> {
+        validate_wallet_scope(wallet_scope.as_str())?;
+        let authentication_key =
+            derive_authentication_key(independent_journal_key, wallet_scope.as_str())?;
+        Ok(Self {
+            path: PathBuf::new(),
+            wallet_scope,
+            authentication_key: Zeroizing::new(authentication_key),
+        })
+    }
+
     /// Appends one authenticated logical record using atomic whole-file replace.
     ///
     /// The caller must hold the owning store's exclusive per-wallet lock until
@@ -407,6 +429,29 @@ impl AgentJournal {
         let Some(file) = read_bounded_file(&self.path)? else {
             return Ok(empty_recovery());
         };
+        self.verify_file(file)
+    }
+
+    /// Authenticates journal bytes that are not on this journal's path yet.
+    ///
+    /// This exists for restore, which must decide whether a backup's four
+    /// documents agree BEFORE it writes any of them - a restore that half-writes
+    /// is exactly the failure it has to refuse. It applies the identical
+    /// authentication `verify` applies: the same version and scope checks, the
+    /// same unbroken sequence and previous-hash chain, the same state-commitment
+    /// chain, the same per-record hash, and the same HMAC under the same
+    /// derived key. It touches no file and it cannot be used to accept anything
+    /// `verify` would reject.
+    pub(crate) fn verify_bytes(&self, bytes: &[u8]) -> AgentWalletResult<AgentJournalRecovery> {
+        if bytes.is_empty() || bytes.len() as u64 > MAX_JOURNAL_BYTES {
+            return Err(AgentWalletError::JournalAuthenticationFailed);
+        }
+        let file: JournalFile = serde_json::from_slice(bytes)
+            .map_err(|_| AgentWalletError::JournalAuthenticationFailed)?;
+        self.verify_file(file)
+    }
+
+    fn verify_file(&self, file: JournalFile) -> AgentWalletResult<AgentJournalRecovery> {
         if file.journal_version != JOURNAL_VERSION
             || file.wallet_scope != self.wallet_scope.as_str()
             || file.records.len() > MAX_RECORDS

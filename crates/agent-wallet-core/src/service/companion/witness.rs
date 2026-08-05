@@ -187,6 +187,15 @@ impl AgentWalletManager {
                 Some(mobile_device_id.as_str().as_bytes()),
                 now,
             )?;
+            // A durable write with a second step after it - the anchor itself is
+            // minted below - so the sweep injects a crash here too. Test builds
+            // only.
+            #[cfg(test)]
+            {
+                if self.crash_after_witness_state_initialized {
+                    return Err(AgentWalletError::RecoveryRequired);
+                }
+            }
             state =
                 self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
         }
@@ -724,6 +733,16 @@ impl AgentWalletManager {
                 Some(mobile_device_id.as_str().as_bytes()),
                 now,
             )?;
+            // THE FIRST DURABLE BOUNDARY. Above this line the receipt, the new
+            // chain position and - pre-broadcast - `WitnessedAwaitingBroadcast`
+            // are on disk. Below it the payment still has to be broadcast and
+            // the witness still has to be archived. Test builds only.
+            #[cfg(test)]
+            {
+                if self.crash_after_witness_accepted {
+                    return Err(AgentWalletError::RecoveryRequired);
+                }
+            }
         } else if pending.receipt.as_ref() != Some(&signed) {
             return Err(AgentWalletError::RollbackDetected);
         }
@@ -766,6 +785,251 @@ impl AgentWalletManager {
         }
     }
 
+    /// The receipt that was durably accepted and never archived, if there is
+    /// one, with the phase it was signed for and where the payment stands now.
+    ///
+    /// `apply_mobile_witness_and_broadcast` writes the receipt into the pending
+    /// slot and journals `RollbackWitnessAccepted` BEFORE it broadcasts and
+    /// BEFORE it archives. A process that dies in that window leaves exactly
+    /// this shape on disk, and nothing else does: the uninterrupted path always
+    /// takes the receipt back out of the slot in the same call that put it in.
+    ///
+    /// A receipt sitting here is not a claim - it is a receipt the desktop
+    /// already verified against a live anchor, whose acceptance already moved
+    /// `last_anchor_sequence` and `last_anchor_hash`, and which
+    /// `AuthenticatedRollbackWitnessState::validate` re-checks against that
+    /// chain position on every load. The recovery finishes it; it never makes
+    /// one.
+    fn interrupted_witness(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<
+        Option<(
+            OperationId,
+            SignedWitnessReceipt,
+            RollbackOperationPhase,
+            OperationStatus,
+        )>,
+    > {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let Some(witness) = state.rollback_witness.as_ref() else {
+            return Ok(None);
+        };
+        witness.validate(wallet_id)?;
+        let Some(pending) = witness.pending.as_ref() else {
+            return Ok(None);
+        };
+        let Some(receipt) = pending.receipt.as_ref() else {
+            return Ok(None);
+        };
+        let operation_id = OperationId::parse(pending.operation_id.clone())?;
+        let status = state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .status();
+        Ok(Some((
+            operation_id,
+            receipt.clone(),
+            pending.proposal.anchor.operation_phase,
+            status,
+        )))
+    }
+
+    /// Finishes an interrupted witness whose remaining step needs no network.
+    ///
+    /// This runs on every unlock. It is a no-op on every wallet that was not
+    /// interrupted, because the pending slot only ever holds a receipt between
+    /// the two durable writes of one call.
+    ///
+    /// WHAT IT DOES: exactly the archive the interrupted call was about to do,
+    /// with exactly the receipt that call had already written, through the same
+    /// `archive_completed_witness` the uninterrupted path uses. The payment
+    /// moves the one step the uninterrupted call would have moved it, and no
+    /// further.
+    ///
+    /// WHAT IT DOES NOT DO: it does not verify anything against the clock, and
+    /// it must not - a wallet that crashed is not going to be reopened inside
+    /// the anchor's five minutes, and the receipt's verification against a LIVE
+    /// anchor already happened before it was written. It does not contact the
+    /// phone, does not broadcast, does not advance the witness chain (the
+    /// accepted receipt already did), and does not mark anything witnessed that
+    /// was not already marked witnessed on disk.
+    ///
+    /// It declines rather than forces when the payment is not in the status the
+    /// archive is defined for - notably the pre-broadcast residue that is still
+    /// `WitnessedAwaitingBroadcast`, which needs the broadcast finished first
+    /// and is handled by `resume_interrupted_witness`.
+    pub(crate) fn resume_interrupted_witness_archive(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Option<PaymentOperationView>> {
+        let Some((operation_id, receipt, phase, status)) =
+            self.interrupted_witness(wallet_id, now)?
+        else {
+            return Ok(None);
+        };
+        // THE THIRD BOUNDARY INSIDE THIS ONE CALL, and the one the first sweep
+        // read past. `resume_payment` persists `BroadcastSubmitted` BEFORE it
+        // posts the signed bytes, deliberately, so that a restart in that gap
+        // may not assume the transaction went out - and may not assume it did
+        // not. A crash there leaves exactly `BroadcastSubmitted` with the
+        // receipt still parked, which is byte-for-byte what a crash one instant
+        // AFTER a successful post leaves. The two are indistinguishable on
+        // disk, and they must be, because that is what persisting first buys.
+        //
+        // The archive below would resolve that ambiguity by promoting the
+        // payment to `SubmittedAwaitingFinalWitness`, which asserts the money
+        // moved. On the pre-network half of the window it did not, and the
+        // wallet has no way to tell which half it is in - so the assertion is
+        // one this code cannot support, and it was being made on every unlock.
+        //
+        // The reconstruction that IS available from disk is the honest one:
+        // the outcome is unknown. `BroadcastUncertain` is this wallet's own
+        // name for that, written here through the same `mark_broadcast_uncertain`
+        // and the same `RecoveryRequired` journal event `resume_payment` uses
+        // when a live submission cannot be tied to its acknowledgement. It says
+        // the money may have moved and never that it did not, it keeps the
+        // payment out of every control that would hand the reservation back,
+        // and it is what the post-submit anchor then tells the phone -
+        // `WitnessSubmissionStatus::Uncertain`, not `Submitted`.
+        let status =
+            self.reconcile_interrupted_broadcast(wallet_id, &operation_id, phase, status, now)?;
+        // The admitted sets are `archive_completed_witness`'s own, restated as
+        // a precondition so a residue it would refuse is left untouched instead
+        // of turning every unlock into an error.
+        let archivable = match phase {
+            RollbackOperationPhase::SignedPreBroadcast
+            | RollbackOperationPhase::SignedAwaitingWitness => matches!(
+                status,
+                OperationStatus::BroadcastSubmitted
+                    | OperationStatus::SubmittedAwaitingFinalWitness
+                    | OperationStatus::BroadcastUncertain
+            ),
+            RollbackOperationPhase::Submitted => matches!(
+                status,
+                OperationStatus::SubmittedAwaitingFinalWitness
+                    | OperationStatus::BroadcastUncertain
+            ),
+            RollbackOperationPhase::ReconciledFinal => {
+                status == OperationStatus::ReconciledAwaitingFinalWitness
+            }
+            _ => false,
+        };
+        if !archivable {
+            return Ok(None);
+        }
+        self.archive_completed_witness(wallet_id, &operation_id, &receipt, now)
+            .map(Some)
+    }
+
+    /// The whole interrupted sequence, including the one residue that needs the
+    /// node: a payment the phone witnessed pre-broadcast whose broadcast never
+    /// ran.
+    ///
+    /// That residue is durable `WitnessedAwaitingBroadcast` - a status reachable
+    /// only by crashing inside `apply_mobile_witness_and_broadcast`, and one
+    /// that is NOT in `OperationStatus::awaits_mobile_witness`, so before this
+    /// existed the desktop's entire recovery surface answered `None` for it
+    /// while the wallet refused every further payment.
+    ///
+    /// It resumes the payment through `resume_payment`, which is the same call
+    /// the uninterrupted path makes at that point and which re-checks the node
+    /// binding, the approval commitment and the emergency interlock, and
+    /// persists the local transaction hash before the first network call. It
+    /// cannot submit twice: `resume_payment` admits `WitnessedAwaitingBroadcast`
+    /// and nothing past it.
+    ///
+    /// A witness is still required for anything to move here. The only reason
+    /// this operation is resumable at all is that a real receipt from the paired
+    /// phone over a live anchor was already verified and written to disk.
+    pub async fn resume_interrupted_witness(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Option<PaymentOperationView>> {
+        let Some((operation_id, _, phase, status)) = self.interrupted_witness(wallet_id, now)?
+        else {
+            return Ok(None);
+        };
+        if matches!(
+            phase,
+            RollbackOperationPhase::SignedPreBroadcast
+                | RollbackOperationPhase::SignedAwaitingWitness
+        ) && status == OperationStatus::WitnessedAwaitingBroadcast
+        {
+            // Byte for byte what `apply_mobile_witness_and_broadcast` does with
+            // this result, so an interrupted call and a completed one land in
+            // the same place.
+            match self.resume_payment(wallet_id, &operation_id, now).await {
+                Ok(result)
+                    if matches!(
+                        result.status,
+                        OperationStatus::SubmittedAwaitingFinalWitness
+                            | OperationStatus::BroadcastSubmitted
+                    ) => {}
+                Ok(result) => return Ok(Some(result)),
+                Err(AgentWalletError::BroadcastUncertain) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.resume_interrupted_witness_archive(wallet_id, now)
+    }
+
+    /// Turns an interrupted pre-network `BroadcastSubmitted` residue into the
+    /// only statement about it this wallet can support, and leaves every other
+    /// residue exactly as it found it.
+    ///
+    /// It runs on the recovery path only. The uninterrupted pilot path never
+    /// returns from `resume_payment` holding `BroadcastSubmitted` - it either
+    /// marks the payment submitted-awaiting-final-witness, marks it uncertain
+    /// itself, or fails - so an owner who was never interrupted never reaches
+    /// this at all.
+    ///
+    /// It moves nothing else: no chain position, no receipt, no reservation, no
+    /// transaction hash, and it never contacts the node.
+    fn reconcile_interrupted_broadcast(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &OperationId,
+        phase: RollbackOperationPhase,
+        status: OperationStatus,
+        now: u64,
+    ) -> AgentWalletResult<OperationStatus> {
+        if !matches!(
+            phase,
+            RollbackOperationPhase::SignedPreBroadcast
+                | RollbackOperationPhase::SignedAwaitingWitness
+        ) || status != OperationStatus::BroadcastSubmitted
+        {
+            return Ok(status);
+        }
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        state
+            .operations
+            .get_mut(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .mark_broadcast_uncertain()?;
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            AgentJournalEventKind::RecoveryRequired,
+            Some(operation_id.as_str().as_bytes()),
+            None,
+            now,
+        )?;
+        Ok(OperationStatus::BroadcastUncertain)
+    }
+
     fn archive_completed_witness(
         &mut self,
         wallet_id: &AgentWalletId,
@@ -773,6 +1037,15 @@ impl AgentWalletManager {
         signed: &SignedWitnessReceipt,
         now: u64,
     ) -> AgentWalletResult<PaymentOperationView> {
+        // THE SECOND DURABLE BOUNDARY. Everything the caller did before
+        // reaching here - including, on the pre-broadcast path, the broadcast
+        // itself - is already on disk. Test builds only.
+        #[cfg(test)]
+        {
+            if self.crash_before_witness_archive {
+                return Err(AgentWalletError::RecoveryRequired);
+            }
+        }
         self.ensure_session_active(wallet_id, now)?;
         let session = self.session(wallet_id)?;
         let mut state =

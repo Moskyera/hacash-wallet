@@ -160,6 +160,15 @@ impl AgentWalletManager {
             Some(agent.agent_id.as_str().as_bytes()),
             now,
         )?;
+        // A durable write with a second step after it - the node still has to
+        // build the transaction and the approval still has to be requested - so
+        // the sweep injects a crash here too. Test builds only.
+        #[cfg(test)]
+        {
+            if self.crash_after_funds_reserved {
+                return Err(AgentWalletError::RecoveryRequired);
+            }
+        }
 
         // Only HPAY constructs the transaction. The agent never supplies raw
         // bytes, fees, or transaction actions.
@@ -401,15 +410,7 @@ impl AgentWalletManager {
             // expires it, `prepare_witness_rotation` refuses while it exists,
             // and no further intent can be created. So ask about the exact
             // device that would have to produce the anchor.
-            let can_witness = match state.rollback_witness.as_ref() {
-                Some(witness) => state.companion_security.as_ref().is_some_and(|companion| {
-                    companion.is_active_witness_device(&witness.mobile_device_id)
-                }),
-                None => state.companion_security.as_ref().is_some_and(
-                    super::companion::CompanionSecurityState::has_active_witness_device,
-                ),
-            };
-            if !can_witness {
+            if !pinned_witness_phone_can_sign(&state) {
                 return Err(AgentWalletError::WitnessPhoneRequiredForApproval);
             }
         }
@@ -438,7 +439,113 @@ impl AgentWalletManager {
             now,
         )?;
 
+        // A durable write with a second step after it, so the sweep injects a
+        // crash here too. Test builds only.
+        #[cfg(test)]
+        {
+            if self.crash_after_approval_granted {
+                return Err(AgentWalletError::RecoveryRequired);
+            }
+        }
         self.resume_payment(wallet_id, &operation_id, now).await
+    }
+
+    /// Finishes an approval that a crash interrupted between its durable write
+    /// and the signature.
+    ///
+    /// BOTH approval paths have this boundary, and the first sweep named only
+    /// one of them. `approve_desktop_and_broadcast` journals `ApprovalGranted`
+    /// and then calls `resume_payment`; `apply_mobile_approval_and_broadcast`
+    /// journals the phone's decision AND the replay-guard snapshot that
+    /// consumes it, in one write, and then calls `resume_payment`. A process
+    /// that dies in either gap leaves a payment durably `Approved`.
+    ///
+    /// On the desktop side the owner could in principle press Approve again.
+    /// On the phone side they cannot, and that is what makes the mobile
+    /// boundary a real one: the decision's replay token was consumed by the
+    /// same durable write that recorded the decision, so the identical receipt
+    /// is refused with `CompanionReplayRejected` for ever - executed in
+    /// `the_mobile_approval_crash_is_finished_on_unlock`. The owner said yes on
+    /// their phone, the wallet wrote it down, and then silently dropped the
+    /// payment and showed them nothing.
+    ///
+    /// WHAT IT DOES: exactly the call the interrupted path was about to make,
+    /// on the approval that is already durable - `resume_payment`, which
+    /// re-reads the stored approval, re-checks the node binding, the approval
+    /// commitment, the policy epoch and the emergency interlock before the
+    /// signer is touched. Under the pilot that leaves the payment
+    /// `SignedAwaitingWitness`, which is precisely where the uninterrupted call
+    /// leaves it.
+    ///
+    /// WHAT IT DOES NOT DO: it approves nothing. `Approved` is only ever
+    /// written against a decision that was already verified - a desktop
+    /// commitment or a phone signature - so there is no approval here to
+    /// manufacture, and nothing runs without one already on disk. It signs
+    /// nothing that has expired: `resume_payment` sweeps expired pre-signing
+    /// operations first, so an approval the owner left behind is cancelled and
+    /// its reservation returned rather than signed late.
+    ///
+    /// It declines rather than forces in every case it cannot reason about
+    /// completely: more than one payment durably `Approved`, anything already
+    /// in the witness lifecycle, or - under the pilot - a wallet whose pinned
+    /// witness phone could not sign the anchor that a freshly signed payment
+    /// would need. That last one is the same question
+    /// `approve_desktop_and_broadcast` asks before it records an approval,
+    /// asked through the same predicate so the two cannot drift: without it,
+    /// resuming would sign into `SignedAwaitingWitness` on a wallet whose phone
+    /// has since been revoked, which is the stranding that check exists to
+    /// prevent.
+    pub async fn resume_interrupted_approval(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Option<PaymentOperationView>> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        if state.operations.values().any(|operation| {
+            matches!(
+                operation.status(),
+                OperationStatus::Signed
+                    | OperationStatus::SignedAwaitingWitness
+                    | OperationStatus::WitnessedAwaitingBroadcast
+                    | OperationStatus::BroadcastSubmitted
+                    | OperationStatus::BroadcastUncertain
+                    | OperationStatus::SubmittedAwaitingFinalWitness
+                    | OperationStatus::ReconciliationRequired
+                    | OperationStatus::ReconciledAwaitingFinalWitness
+                    | OperationStatus::RecoveryRequired
+            )
+        }) {
+            return Ok(None);
+        }
+        let mut approved = state
+            .operations
+            .values()
+            .filter(|operation| operation.status() == OperationStatus::Approved);
+        let Some(operation) = approved.next() else {
+            return Ok(None);
+        };
+        if approved.next().is_some() {
+            return Ok(None);
+        }
+        // An approval the owner left behind is not resumed at all. The
+        // predicate is `sweep_expired_pre_signing_operations`'s own, asked here
+        // rather than restated, so a payment this declines is exactly a payment
+        // the next ordinary call cancels and hands the reservation back for.
+        if operation.expires_at() <= now {
+            return Ok(None);
+        }
+        let operation_id = operation.operation_id().clone();
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        if !pinned_witness_phone_can_sign(&state) {
+            return Ok(None);
+        }
+        drop(state);
+        self.resume_payment(wallet_id, &operation_id, now)
+            .await
+            .map(Some)
     }
 
     /// Explicitly resumes only states whose prior durable transition proves
@@ -542,6 +649,16 @@ impl AgentWalletManager {
                     None,
                     now,
                 )?;
+                // A durable write with a second step after it - under the pilot
+                // the call returns here, but off the pilot it goes on to
+                // broadcast - so the sweep injects a crash here too. Test builds
+                // only.
+                #[cfg(test)]
+                {
+                    if self.crash_after_transaction_signed {
+                        return Err(AgentWalletError::RecoveryRequired);
+                    }
+                }
                 state = self.load_verified_state(
                     wallet_id,
                     &session.state_master,
@@ -600,6 +717,14 @@ impl AgentWalletManager {
             None,
             now,
         )?;
+        // THE BROADCAST BOUNDARY. `BroadcastSubmitted` is durable and the bytes
+        // have provably not left this process. Test builds only.
+        #[cfg(test)]
+        {
+            if self.crash_after_broadcast_persisted {
+                return Err(AgentWalletError::RecoveryRequired);
+            }
+        }
         safety_permit.checkpoint(state.payments_suspended)?;
 
         let submit_result = node.submit_tx_hex(&signed_hex).await;
@@ -864,6 +989,38 @@ impl AgentWalletManager {
             .filter(|operation| operation.agent_id() == authorization.agent_id())
             .map(AgentOperation::view)
             .collect())
+    }
+}
+
+/// Whether the exact device that would have to produce the rollback anchor for
+/// a freshly signed payment is an active witness right now.
+///
+/// "Some phone could witness" is the right question only until a rollback
+/// witness record exists. From then on `rollback_witness` pins one
+/// `mobile_device_id`, and `pending_rollback_anchor` refuses every other device
+/// with `RollbackDetected`. An ordinary revoke-and-re-pair leaves that pin on
+/// the revoked phone - only `complete_witness_rotation` moves it - so asking the
+/// registry alone would admit a payment that the newly paired phone can never
+/// witness, and `SignedAwaitingWitness` has no exit: no sweep expires it,
+/// `prepare_witness_rotation` refuses while it exists, and no further intent can
+/// be created. So ask about the exact device that would have to produce the
+/// anchor.
+///
+/// Asked in two places - by `approve_desktop_and_broadcast` before it records an
+/// approval, and by `resume_interrupted_approval` before it finishes one a crash
+/// interrupted - and stated once, because two copies of this question is exactly
+/// how a payment becomes admitted at one door and unwitnessable at the next.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub(super) fn pinned_witness_phone_can_sign(state: &AgentWalletState) -> bool {
+    match state.rollback_witness.as_ref() {
+        Some(witness) => state
+            .companion_security
+            .as_ref()
+            .is_some_and(|companion| companion.is_active_witness_device(&witness.mobile_device_id)),
+        None => state
+            .companion_security
+            .as_ref()
+            .is_some_and(super::companion::CompanionSecurityState::has_active_witness_device),
     }
 }
 

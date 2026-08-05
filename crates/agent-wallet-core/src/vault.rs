@@ -152,6 +152,34 @@ impl AgentEncryptedVault {
         Ok(vault)
     }
 
+    /// Parses a `vault.json` document that is not on disk here yet.
+    ///
+    /// Used by backup and restore, which must read a vault's authenticated
+    /// metadata - and decrypt it with the owner's passphrase - before anything
+    /// is written. It applies `validate_metadata` exactly as [`Self::load`]
+    /// does; the only difference is where the bytes came from.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> AgentWalletResult<Self> {
+        if bytes.is_empty() || bytes.len() as u64 > MAX_VAULT_BYTES {
+            return Err(AgentWalletError::Vault);
+        }
+        let vault: Self = serde_json::from_slice(bytes).map_err(|_| AgentWalletError::Vault)?;
+        vault.validate_metadata()?;
+        Ok(vault)
+    }
+
+    pub(crate) fn to_bytes(&self) -> AgentWalletResult<Vec<u8>> {
+        self.validate_metadata()?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|_| AgentWalletError::Vault)?;
+        if bytes.len() as u64 > MAX_VAULT_BYTES {
+            return Err(AgentWalletError::Vault);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn created_at(&self) -> u64 {
+        self.created_at
+    }
+
     pub(crate) fn save(&self, path: &Path) -> AgentWalletResult<()> {
         self.validate_metadata()?;
         let bytes = serde_json::to_vec_pretty(self).map_err(|_| AgentWalletError::Vault)?;
@@ -262,6 +290,50 @@ impl AgentEncryptedVault {
         }
         Ok(())
     }
+}
+
+/// Seals a state-backup payload with the same primitives this vault uses.
+///
+/// Argon2id at the paranoid profile over the owner's passphrase, AES-256-GCM,
+/// caller-supplied additional authenticated data. It is the vault's own
+/// `encrypt`, exported so that backup does not grow a second, subtly different
+/// copy of the wallet's encryption - which is exactly how one of two copies ends
+/// up weaker than the other.
+pub(crate) fn seal_backup_payload(
+    passphrase: &str,
+    salt: &[u8; SALT_LEN],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> AgentWalletResult<Vec<u8>> {
+    encrypt(
+        passphrase,
+        salt,
+        nonce,
+        &KdfParams::paranoid(),
+        aad,
+        plaintext,
+    )
+}
+
+/// Opens what [`seal_backup_payload`] sealed. A wrong passphrase and a tampered
+/// envelope are the same opaque `Vault` error, and neither reveals anything about
+/// the passphrase.
+pub(crate) fn open_backup_payload(
+    passphrase: &str,
+    salt: &[u8; SALT_LEN],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    ciphertext: &[u8],
+) -> AgentWalletResult<Vec<u8>> {
+    decrypt(
+        passphrase,
+        salt,
+        nonce,
+        &KdfParams::paranoid(),
+        aad,
+        ciphertext,
+    )
 }
 
 fn encrypt(

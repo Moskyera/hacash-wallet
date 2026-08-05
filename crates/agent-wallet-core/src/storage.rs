@@ -24,6 +24,25 @@ const REGISTRY_FILE: &str = "registry.json";
 const LOCK_FILE: &str = ".agent-wallet.lock";
 const ROOT_MARKER_FILE: &str = ".storage-version";
 const WALLETS_DIRECTORY: &str = "wallets";
+const RESTORE_JOURNAL_FILE: &str = ".agent-restore-journal";
+const RESTORE_JOURNAL_MAGIC: &str = "hpay_agent_wallet_restore_journal";
+const RESTORE_JOURNAL_VERSION: u32 = 1;
+const MAX_RESTORE_JOURNAL_BYTES: u64 = 4 * 1024;
+/// Every file name this crate ever writes directly inside one wallet directory.
+///
+/// Rolling back an interrupted restore removes exactly these and nothing else,
+/// so a recovery can never delete a file the owner or another program put there.
+/// `an_uncommitted_restore_leaves_no_trace_of_the_wallet` walks a real wallet
+/// built by the real code and fails if any entry is missing from this list, so
+/// the list cannot drift away from the writers.
+const WALLET_DIRECTORY_FILES: [&str; 5] = [
+    "vault.json",
+    "journal.json",
+    "wallet_state.enc.json",
+    "wallet_state_pending.enc.json",
+    ".emergency-stop-v1",
+];
+const WALLET_DIRECTORY_SUBDIRECTORIES: [&str; 2] = ["sessions", "l2"];
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_ENCRYPTED_STATE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PLAINTEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -268,6 +287,157 @@ impl AgentStorage {
         Ok(paths)
     }
 
+    // ---- THE INTERRUPTED-RESTORE WRITE-AHEAD RECORD ----------------------
+    //
+    // Restoring an Agent Wallet is five durable writes that only mean anything
+    // together, and the registry entry is the last of them. Before this record
+    // existed, a crash inside that sequence left the keys on disk under a wallet
+    // the registry did not list: invisible to `list_wallets`, answered with
+    // `AgentWalletNotFound` by `unlock_session`, and then refused FOR EVER by
+    // the restore's own pre-check, which could not tell its own debris from a
+    // live wallet. That is a half-restore, it was executed, and it was terminal.
+    //
+    // The rule here is the Personal Wallet's rule from `transactional_apply_at`:
+    // write down what is about to be attempted BEFORE attempting it, and let the
+    // next open finish the story. Because the registry entry is what makes a
+    // wallet exist at all, the commit point needs no separate phase and recovery
+    // needs no heuristic:
+    //
+    //   * record present, wallet registered     -> the restore committed and
+    //     only its own record outlived it. Retire the record.
+    //   * record present, wallet NOT registered -> nothing committed. Remove
+    //     everything the interrupted restore had written, then the record.
+    //
+    // Every deletion needs BOTH authorisations - a record naming this wallet and
+    // the absence of a registry entry for it - and is confined to the file names
+    // in `WALLET_DIRECTORY_FILES`. Anything else is left exactly where it is.
+
+    fn restore_journal_path(&self) -> PathBuf {
+        self.root.join(RESTORE_JOURNAL_FILE)
+    }
+
+    /// Records, durably, which wallet a restore is about to build.
+    ///
+    /// Not one byte of that wallet may be written before this returns; that
+    /// ordering is the whole guarantee.
+    pub(crate) fn begin_wallet_restore(&self, wallet_id: &AgentWalletId) -> AgentWalletResult<()> {
+        validate_wallet_id(wallet_id)?;
+
+        let record = AgentRestoreJournal {
+            magic: RESTORE_JOURNAL_MAGIC.to_owned(),
+            version: RESTORE_JOURNAL_VERSION,
+            store_id: self.store_id.clone(),
+            wallet_id: wallet_id.clone(),
+        };
+        let bytes = serde_json::to_vec(&record).map_err(|_| AgentWalletError::PersistenceFailed)?;
+        if bytes.len() as u64 > MAX_RESTORE_JOURNAL_BYTES {
+            return Err(AgentWalletError::PersistenceFailed);
+        }
+        let path = self.restore_journal_path();
+        reject_symlink(&path)?;
+        hacash_wallet_core::paths::secure_write(&path, &bytes)
+            .map_err(|_| AgentWalletError::PersistenceFailed)?;
+        reject_symlink(&path)
+    }
+
+    /// Retires the record once the registry entry - the commit point - is down.
+    ///
+    /// A failure here is not a failure of the restore. The wallet exists; the
+    /// next open sees a committed wallet and retires the record there.
+    pub(crate) fn finish_wallet_restore(&self) -> AgentWalletResult<()> {
+        self.remove_restore_journal()
+    }
+
+    /// Finishes the story of a restore that was interrupted, whichever way it
+    /// actually ended. A no-op when no restore was in flight.
+    pub(crate) fn recover_interrupted_wallet_restore(&self) -> AgentWalletResult<()> {
+        let path = self.restore_journal_path();
+        reject_symlink(&path)?;
+        if !path.exists() {
+            return Ok(());
+        }
+        let record = match read_json_bounded::<AgentRestoreJournal>(
+            &path,
+            MAX_RESTORE_JOURNAL_BYTES,
+        ) {
+            Ok(record)
+                if record.magic == RESTORE_JOURNAL_MAGIC
+                    && record.version == RESTORE_JOURNAL_VERSION
+                    && record.store_id == self.store_id
+                    && validate_wallet_id(&record.wallet_id).is_ok() =>
+            {
+                record
+            }
+            // A record that will not parse, or that belongs to another store,
+            // authorises nothing. The only act it could ever authorise is a
+            // deletion, so it is retired and no wallet file is touched.
+            _ => return self.remove_restore_journal(),
+        };
+        if self.load_registry()?.wallet(&record.wallet_id).is_some() {
+            return self.remove_restore_journal();
+        }
+        self.discard_uncommitted_wallet_directory(&record.wallet_id)?;
+        self.remove_restore_journal()
+    }
+
+    fn remove_restore_journal(&self) -> AgentWalletResult<()> {
+        let path = self.restore_journal_path();
+        reject_symlink(&path)?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(AgentWalletError::PersistenceFailed),
+        }
+    }
+
+    /// Removes a wallet directory that the registry does not list, restricted to
+    /// the file names this crate writes into one.
+    ///
+    /// Fails if any of the four documents that make a wallet a wallet is still
+    /// there afterwards, because that is the state a restore cannot retry
+    /// through - and a failure leaves the write-ahead record in place, so the
+    /// next open tries again rather than giving up.
+    fn discard_uncommitted_wallet_directory(
+        &self,
+        wallet_id: &AgentWalletId,
+    ) -> AgentWalletResult<()> {
+        // Re-asked here rather than trusted from the caller: this is the only
+        // function in the crate that deletes a vault.
+        if self.load_registry()?.wallet(wallet_id).is_some() {
+            return Err(AgentWalletError::PersistenceFailed);
+        }
+        let paths = self.paths(wallet_id)?;
+        let wallet_root = paths.wallet_root().to_path_buf();
+        reject_symlink(&wallet_root)?;
+        if !wallet_root.exists() {
+            return Ok(());
+        }
+        let wallets_directory = self.root.join(WALLETS_DIRECTORY);
+        reject_symlink(&wallets_directory)?;
+        let canonical_wallets = wallets_directory
+            .canonicalize()
+            .map_err(|_| AgentWalletError::PersistenceFailed)?;
+        ensure_path_is_within(&canonical_wallets, &wallet_root)?;
+        if prune_wallet_directory(&wallet_root, true)? {
+            let _ = fs::remove_dir(&wallet_root);
+            // And the shared parent, if this was the only thing in it. Both
+            // removals only ever succeed on an empty directory, and the store
+            // lock makes this the only process that could be in here.
+            let _ = fs::remove_dir(&canonical_wallets);
+        }
+        for path in [
+            paths.vault_path(),
+            wallet_root.join("journal.json"),
+            paths.encrypted_state_path("wallet_state")?,
+            paths.encrypted_state_path("wallet_state_pending")?,
+        ] {
+            if path.exists() {
+                return Err(AgentWalletError::PersistenceFailed);
+            }
+        }
+        Ok(())
+    }
+
     /// Encrypt and atomically replace one named state document.
     ///
     /// The master key is supplied by the service and must be derived separately
@@ -407,6 +577,80 @@ impl AgentStorage {
     }
 }
 
+/// Decrypts one state envelope whose `store_id` is the one recorded IN the
+/// envelope rather than the one of the store now holding it.
+///
+/// WHY THIS IS NOT A LOOSENING OF [`AgentStorage::read_encrypted`], which keeps
+/// binding to its own `store_id` and is untouched. A state file's authenticity
+/// rests on the AEAD key derived from the wallet's own `state_master`, on the
+/// journal's MAC chain, and on the state commitment in the journal head - not on
+/// `store_id`. What `store_id` buys is that a state file cannot be moved between
+/// two stores on this machine WITHOUT SOMEONE SAYING SO, which is exactly the
+/// invariant a restore has to break, once, deliberately, with the owner's
+/// passphrase in hand.
+///
+/// It is used only by restore, which immediately re-encrypts the plaintext for
+/// the receiving store and then re-reads it through `read_encrypted` before it
+/// will call the restore a success, so nothing this returns is ever left on disk
+/// bound to a foreign store.
+pub fn decrypt_foreign_state_envelope(
+    envelope_bytes: &[u8],
+    wallet_id: &AgentWalletId,
+    state_name: &str,
+    schema_version: u32,
+    master_key: &[u8; KEY_LEN],
+) -> AgentWalletResult<Vec<u8>> {
+    validate_schema_version(schema_version)?;
+    if envelope_bytes.len() as u64 > MAX_ENCRYPTED_STATE_BYTES {
+        return Err(AgentWalletError::PersistenceFailed);
+    }
+    let envelope: EncryptedStateEnvelope =
+        serde_json::from_slice(envelope_bytes).map_err(|_| AgentWalletError::PersistenceFailed)?;
+    // Everything except `store_id` is checked exactly as `read_encrypted`
+    // checks it, and `store_id` is still authenticated - as AAD - against the
+    // value the envelope itself carries, so a tampered `store_id` fails the
+    // AEAD rather than being ignored.
+    validate_envelope(
+        &envelope,
+        &envelope.store_id,
+        wallet_id,
+        state_name,
+        schema_version,
+    )?;
+    let salt = decode_fixed::<SALT_LEN>(&envelope.salt_hex)?;
+    let nonce = decode_fixed::<NONCE_LEN>(&envelope.nonce_hex)?;
+    let ciphertext = decode_bounded_hex(
+        &envelope.ciphertext_hex,
+        MAX_PLAINTEXT_BYTES
+            .checked_add(16)
+            .ok_or(AgentWalletError::IntegerOverflow)?,
+    )?;
+    let aad = state_aad(&envelope.store_id, wallet_id, state_name, schema_version)?;
+    let mut key = derive_state_key(
+        master_key,
+        &salt,
+        &envelope.store_id,
+        wallet_id,
+        state_name,
+        schema_version,
+    )?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| AgentWalletError::Crypto)?;
+    let decrypted = cipher.decrypt(
+        Nonce::from_slice(&nonce),
+        Payload {
+            msg: &ciphertext,
+            aad: &aad,
+        },
+    );
+    key.zeroize();
+    let mut plaintext = decrypted.map_err(|_| AgentWalletError::JournalAuthenticationFailed)?;
+    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+        plaintext.zeroize();
+        return Err(AgentWalletError::PersistenceFailed);
+    }
+    Ok(plaintext)
+}
+
 impl Drop for AgentStorage {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.lock_file);
@@ -461,6 +705,87 @@ fn validate_wallet_id(wallet_id: &AgentWalletId) -> AgentWalletResult<()> {
         return Err(AgentWalletError::InvalidIdentifier);
     }
     Ok(())
+}
+
+/// The write-ahead record of a restore in flight.
+///
+/// It carries only what a recovery needs in order to be allowed to act: which
+/// store it belongs to, and which wallet was being built. Nothing secret, and
+/// nothing a recovery has to interpret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentRestoreJournal {
+    magic: String,
+    version: u32,
+    store_id: String,
+    wallet_id: AgentWalletId,
+}
+
+/// Removes the entries this crate writes inside one wallet directory, and only
+/// those. Returns true when the directory is now empty and may itself go.
+///
+/// A symlink, a foreign file or a foreign subdirectory is never followed and
+/// never deleted: it is simply left behind, and its presence is reported by the
+/// `false` return so the wallet directory itself survives.
+fn prune_wallet_directory(directory: &Path, is_wallet_root: bool) -> AgentWalletResult<bool> {
+    reject_symlink(directory)?;
+    let entries = fs::read_dir(directory).map_err(|_| AgentWalletError::PersistenceFailed)?;
+    let mut emptied = true;
+    for entry in entries {
+        let entry = entry.map_err(|_| AgentWalletError::PersistenceFailed)?;
+        let path = entry.path();
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|_| AgentWalletError::PersistenceFailed)?;
+        let raw_name = entry.file_name();
+        let Some(name) = raw_name.to_str().filter(|_| !metadata.file_type().is_symlink()) else {
+            emptied = false;
+            continue;
+        };
+        if metadata.is_dir() {
+            if is_wallet_root
+                && WALLET_DIRECTORY_SUBDIRECTORIES.contains(&name)
+                && prune_wallet_directory(&path, false)?
+                && fs::remove_dir(&path).is_ok()
+            {
+                continue;
+            }
+            emptied = false;
+            continue;
+        }
+        if !is_wallet_directory_file(name, is_wallet_root) || fs::remove_file(&path).is_err() {
+            emptied = false;
+        }
+    }
+    Ok(emptied)
+}
+
+/// True when this crate is the only thing that could have written this name.
+fn is_wallet_directory_file(name: &str, is_wallet_root: bool) -> bool {
+    let is_target = |candidate: &str| {
+        candidate == ROOT_MARKER_FILE
+            || (is_wallet_root && WALLET_DIRECTORY_FILES.contains(&candidate))
+    };
+    is_target(name) || is_secure_write_temporary(name, is_target)
+}
+
+/// True for `secure_write`'s own half-written temporary of one of those names.
+///
+/// `secure_write` writes `.<target>.<uuid simple>.tmp` next to its target and
+/// unlinks it on failure, so one can only be left behind by a process that died
+/// mid-write - which is precisely the case this rollback exists for.
+fn is_secure_write_temporary(name: &str, is_target: impl Fn(&str) -> bool) -> bool {
+    let Some(body) = name
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Some((target, random)) = body.rsplit_once('.') else {
+        return false;
+    };
+    random.len() == 32
+        && random.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && is_target(target)
 }
 
 fn validate_state_name(state_name: &str) -> AgentWalletResult<()> {

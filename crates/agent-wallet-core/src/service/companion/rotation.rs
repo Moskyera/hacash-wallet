@@ -976,6 +976,22 @@ impl AgentWalletManager {
             .witness_rotation
             .as_ref()
             .ok_or(AgentWalletError::RecoveryRequired)?;
+        // A RE-DELIVERY OF THE ACCEPTANCE ALREADY DURABLE HERE IS NOT AN ERROR.
+        //
+        // The phone persists `rotation_candidate_acceptance` and only then hands
+        // it over, so a crash on either side - or a QR scanned twice, which is
+        // the ordinary case - can present the same acceptance again. Refusing it
+        // told an owner whose delivery had in fact already landed that their
+        // rotation was in an invalid state. This is the same answer
+        // `accept_witness_rotation_baseline` gives for its own re-delivery, and
+        // it consumes nothing and journals nothing the second time.
+        if rotation.record.rotation_id == rotation_id
+            && rotation.phase == WitnessRotationPhase::CandidatePairedRestricted
+            && rotation.candidate_device.as_ref() == Some(&candidate)
+            && rotation.candidate_acceptance.as_ref() == Some(&signed_acceptance)
+        {
+            return Ok(());
+        }
         if rotation.record.rotation_id != rotation_id
             || rotation.phase != WitnessRotationPhase::RotationTicketIssued
             || rotation.ticket_consumed_at.is_some()
@@ -1076,40 +1092,18 @@ impl AgentWalletManager {
                 Some(candidate.device_id.as_str().as_bytes()),
                 now,
             )?;
+            // A durable write with a second step after it - the old phone is
+            // revoked and the witness epoch advanced below - so the sweep
+            // injects a crash here too. Test builds only.
+            #[cfg(test)]
+            {
+                if self.crash_after_rotation_baseline {
+                    return Err(AgentWalletError::RecoveryRequired);
+                }
+            }
         }
 
-        let registry = &mut state
-            .companion_security
-            .as_mut()
-            .ok_or(AgentWalletError::RotationOldDeviceRevokeFailed)?
-            .device_registry;
-        // The old device is revoked exactly once, but this checkpoint is reached
-        // again by a re-targeted rotation (`retarget_witness_rotation`), whose old
-        // device was already revoked by the abandoned attempt. `revoke` refuses a
-        // second call, so the invariant is asserted rather than re-applied: the
-        // device must exist and must end up revoked. Nothing is un-revoked here
-        // and an unknown device still fails closed.
-        let already_revoked = registry
-            .records()
-            .find(|device| device.device_id == record.old_mobile_device_id)
-            .ok_or(AgentWalletError::RotationOldDeviceRevokeFailed)?
-            .is_revoked();
-        if !already_revoked {
-            registry
-                .revoke(&record.old_mobile_device_id, now)
-                .map_err(|_| AgentWalletError::RotationOldDeviceRevokeFailed)?;
-        }
-        let witness = state
-            .rollback_witness
-            .as_mut()
-            .ok_or(AgentWalletError::RollbackWitnessRequired)?;
-        witness.witness_epoch = record.new_witness_epoch;
-        witness.pending = None;
-        state
-            .witness_rotation
-            .as_mut()
-            .ok_or(AgentWalletError::RecoveryRequired)?
-            .phase = WitnessRotationPhase::AwaitingCompletionAnchor;
+        apply_rotation_authority_transition(&mut state, &record, now)?;
         state.updated_at = now;
         self.persist_event(
             &mut state,
@@ -1121,6 +1115,63 @@ impl AgentWalletManager {
             now,
         )?;
         Ok(record)
+    }
+
+    /// Finishes an authority transition that a crash interrupted.
+    ///
+    /// `accept_witness_rotation_baseline` journals the new phone's baseline
+    /// receipt and only then, as a SECOND durable write, revokes the old phone
+    /// and advances the witness epoch. A process that dies between the two
+    /// leaves the baseline durable at `CandidatePairedRestricted` with the old
+    /// phone still registered - and that is a state with no owner control at
+    /// all: `cancel_witness_rotation` refuses because a baseline exists, and
+    /// `retarget_witness_rotation` refuses because nothing has been revoked yet.
+    /// A wallet left there can never issue another rollback anchor, because
+    /// `pending_rollback_anchor` refuses while a rotation is unfinished.
+    ///
+    /// The only pre-existing way out was the candidate handset re-sending the
+    /// identical baseline receipt, and that way out CLOSES: the re-send is
+    /// re-verified against the rotation record, whose `expires_at` passes.
+    ///
+    /// So this runs on unlock instead, off the baseline that is already on
+    /// disk. It admits nothing new: the durable baseline IS the record that a
+    /// real signature from the paired candidate over the exact rotation record
+    /// was verified, exactly as it was when it was written. No signature is
+    /// re-checked because none is being newly accepted, and nothing here can
+    /// run without one already stored.
+    pub(crate) fn resume_interrupted_rotation_baseline(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<bool> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let Some(rotation) = state.witness_rotation.as_ref() else {
+            return Ok(false);
+        };
+        // The one shape the interrupted second write leaves, and nothing else.
+        // The uninterrupted call never returns with this combination, because
+        // the phase moves on in the same call that writes the baseline.
+        if rotation.phase != WitnessRotationPhase::CandidatePairedRestricted
+            || rotation.new_mobile_baseline.is_none()
+        {
+            return Ok(false);
+        }
+        let record = rotation.record.clone();
+        apply_rotation_authority_transition(&mut state, &record, now)?;
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            AgentJournalEventKind::WitnessRotationOldDeviceRevoked,
+            None,
+            Some(record.old_mobile_device_id.as_str().as_bytes()),
+            now,
+        )?;
+        Ok(true)
     }
 
     pub async fn pending_witness_rotation_completion_anchor(
@@ -1333,6 +1384,51 @@ pub struct WitnessRotationControls {
 /// can never offer a cancel that the core refuses. In particular a re-targeted
 /// rotation is never cancellable: its old phone is already revoked, so undoing
 /// it would leave the wallet naming a revoked witness.
+/// The authority transition itself: revoke the old phone, burn the old witness
+/// epoch, and move the rotation to `AwaitingCompletionAnchor`.
+///
+/// Extracted so the live path and the crash resume cannot drift. It mutates
+/// state and persists nothing; the caller journals it.
+fn apply_rotation_authority_transition(
+    state: &mut AgentWalletState,
+    record: &WitnessRotationRecord,
+    now: u64,
+) -> AgentWalletResult<()> {
+    let registry = &mut state
+        .companion_security
+        .as_mut()
+        .ok_or(AgentWalletError::RotationOldDeviceRevokeFailed)?
+        .device_registry;
+    // The old device is revoked exactly once, but this checkpoint is reached
+    // again by a re-targeted rotation (`retarget_witness_rotation`), whose old
+    // device was already revoked by the abandoned attempt, and again by the
+    // crash resume. `revoke` refuses a second call, so the invariant is asserted
+    // rather than re-applied: the device must exist and must end up revoked.
+    // Nothing is un-revoked here and an unknown device still fails closed.
+    let already_revoked = registry
+        .records()
+        .find(|device| device.device_id == record.old_mobile_device_id)
+        .ok_or(AgentWalletError::RotationOldDeviceRevokeFailed)?
+        .is_revoked();
+    if !already_revoked {
+        registry
+            .revoke(&record.old_mobile_device_id, now)
+            .map_err(|_| AgentWalletError::RotationOldDeviceRevokeFailed)?;
+    }
+    let witness = state
+        .rollback_witness
+        .as_mut()
+        .ok_or(AgentWalletError::RollbackWitnessRequired)?;
+    witness.witness_epoch = record.new_witness_epoch;
+    witness.pending = None;
+    state
+        .witness_rotation
+        .as_mut()
+        .ok_or(AgentWalletError::RecoveryRequired)?
+        .phase = WitnessRotationPhase::AwaitingCompletionAnchor;
+    Ok(())
+}
+
 fn cancel_preconditions(
     state: &AgentWalletState,
     rotation: &AuthenticatedWitnessRotationState,

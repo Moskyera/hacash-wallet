@@ -148,7 +148,38 @@ to do, do not rely on this screen alone.
 ## 9. Testnet pilot status
 
 Mobile payment approval is a testnet pilot. It accepts only an exact testnet
-request with a verified network binding. It is not a mainnet feature, and this
-release has no verified Agent Wallet backup or recovery path.
+request with a verified network binding. It is not a mainnet feature.
 
 Do not fund an Agent Wallet with mainnet value you are not prepared to lose.
+
+## 10. Backup and restore
+
+There is a backup now, under **Backup and restore** on the desktop. It is not the
+same kind of thing as the Personal Wallet's backup, and the difference is the whole
+point.
+
+The Personal Wallet backs up a key. A key has no history, so restoring one loses
+nothing. An Agent Wallet's key is the least of it: what keeps it safe is the record
+of what has already been spent, which agents may spend, which agent you revoked, and
+which phone is your witness. That record is what gets saved, and **restoring it is a
+rewind, not a repair.**
+
+Four things follow from that, and the wallet makes you read and tick all four before
+it will make a backup, and again before it will restore one:
+
+1. **Restoring rewinds what has been spent.** Spending limits go back to what they
+   were when you made the backup, and the wallet may pay again for something it has
+   already paid for. That money is really gone twice.
+2. **A revoked agent comes back.** Every agent that could spend when you made the
+   backup comes back live with its allowance reset, including one you have revoked
+   since. You have to revoke it again yourself.
+3. **Your witness phone will refuse, for ever.** It can see the wallet has gone
+   backwards, so it stops approving. You have to run a lost-phone witness rotation
+   onto a different handset before the wallet can pay at all.
+4. **The backup file is a working wallet.** The file plus its passphrase can spend
+   your money, at the same time as the wallet you are holding. Store it as you would
+   store cash, and never beside the passphrase.
+
+A restore refuses rather than half-runs: the backup's four files are all parsed,
+decrypted, cross-checked and authenticated before a single byte is written, and it
+will not overwrite a wallet that is already on the computer.

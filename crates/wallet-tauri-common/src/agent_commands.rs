@@ -11,7 +11,8 @@ use std::sync::Arc;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 use agent_wallet_core::export_pilot_diagnostics;
 use agent_wallet_core::{
-    AgentId, AgentPaymentRequest, AgentPolicy, AgentRecord, AgentWalletId, ApprovalCommitment,
+    AGENT_WALLET_BACKUP_WARNING, AGENT_WALLET_RESTORE_WARNING, AgentId, AgentPaymentRequest,
+    AgentPolicy, AgentRecord, AgentWalletBackupAcknowledgement, AgentWalletId, ApprovalCommitment,
     ApprovalMode, CreateAgentWallet, OperationId, PaymentOperationView,
 };
 use agent_wallet_runtime::RuntimeStatus;
@@ -557,6 +558,94 @@ pub async fn agent_wallet_create(
     serde_json::to_value(created).map_err(|_| "Agent Wallet response encoding failed".into())
 }
 
+/// The two warnings, so the desktop renders the core's own words rather than a
+/// copy of them that can drift.
+///
+/// Both are handed over in full. A caller that shows three of the four lines has
+/// still failed the owner, which is why the acknowledgement below is four
+/// separate flags and not one.
+#[tauri::command]
+pub async fn agent_wallet_backup_warnings(webview: Webview) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    Ok(json!({
+        "backup": AGENT_WALLET_BACKUP_WARNING,
+        "restore": AGENT_WALLET_RESTORE_WARNING,
+    }))
+}
+
+/// Creates an encrypted state backup and returns the document to the frontend.
+///
+/// It writes no file: where a working copy of the owner's agent wallet is stored
+/// is the owner's decision, made in their own save dialog, and never this
+/// command's. The passphrase is used to open the wallet's own vault and is not
+/// retained, logged, or echoed.
+#[tauri::command]
+pub async fn agent_wallet_backup_create(
+    wallet_id: String,
+    passphrase: String,
+    acknowledgement: AgentWalletBackupAcknowledgement,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    let wallet_id = parse_wallet_id(wallet_id)?;
+    let _transition = state.transition.lock().await;
+    let manager = require_manager(&state)?;
+    let guard = manager.lock().await;
+    let document = guard
+        .create_agent_wallet_backup(&wallet_id, &passphrase, acknowledgement, unix_now()?)
+        .map_err(public_error)?;
+    Ok(json!({
+        "document": document,
+        "warning": AGENT_WALLET_BACKUP_WARNING,
+    }))
+}
+
+/// What a backup file says about itself, with no passphrase.
+///
+/// The restore warning travels with it, because this is the screen the owner is
+/// looking at when they decide.
+#[tauri::command]
+pub async fn agent_wallet_backup_preview(
+    document: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    let manager = require_manager(&state)?;
+    let guard = manager.lock().await;
+    let preview = guard
+        .preview_agent_wallet_backup(&document)
+        .map_err(public_error)?;
+    serde_json::to_value(preview).map_err(|_| "Agent Wallet response encoding failed".into())
+}
+
+/// Restores a wallet from a backup document, in full, or refuses and writes
+/// nothing.
+#[tauri::command]
+pub async fn agent_wallet_backup_restore(
+    document: String,
+    passphrase: String,
+    acknowledgement: AgentWalletBackupAcknowledgement,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    let _transition = state.transition.lock().await;
+    let manager = require_manager(&state)?;
+    let mut guard = manager.lock().await;
+    let outcome = guard
+        .restore_agent_wallet_backup(&document, &passphrase, acknowledgement, unix_now()?)
+        .map_err(public_error)?;
+    let controller = guard
+        .emergency_controller(&outcome.wallet_id)
+        .map_err(public_error)?;
+    state
+        .runtime
+        .cache_emergency_controller(&outcome.wallet_id, controller);
+    serde_json::to_value(outcome).map_err(|_| "Agent Wallet response encoding failed".into())
+}
+
 #[tauri::command]
 pub async fn agent_wallet_unlock(
     wallet_id: String,
@@ -572,6 +661,38 @@ pub async fn agent_wallet_unlock(
     let status = guard
         .unlock(&wallet_id, &passphrase, unix_now()?)
         .map_err(public_error)?;
+    // Finish a witness the last run was interrupted in the middle of.
+    //
+    // `AgentWalletManager::unlock` already completed every interrupted witness
+    // whose remaining step is pure state. The one residue it cannot reach is a
+    // payment the phone witnessed and the process died before broadcasting,
+    // because finishing that needs the node. This is the first place after an
+    // unlock that can await, so it runs here.
+    //
+    // A failure is not an unlock failure: the owner is already in, the residue
+    // is untouched, and the next unlock tries again. It broadcasts nothing that
+    // was not already approved by the owner and witnessed by the paired phone.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let _ = guard
+            .resume_interrupted_witness(&wallet_id, unix_now()?)
+            .await;
+    }
+    // And finish an approval the last run was interrupted in the middle of.
+    //
+    // Both approval paths journal the decision and only then sign, so a process
+    // that dies in that gap leaves a payment durably `Approved` with nothing
+    // pointed at it. On the phone path the owner cannot even repeat the press:
+    // the decision's replay token went out with the same durable write.
+    //
+    // It needs the node for the same reason the witness resume does - the
+    // approved transaction has to be built against the bound node before it is
+    // signed - so it runs here rather than inside `unlock`. It signs only an
+    // approval that is already on disk, refuses an expired one, and a failure
+    // is not an unlock failure.
+    let _ = guard
+        .resume_interrupted_approval(&wallet_id, unix_now()?)
+        .await;
     let controller = guard
         .emergency_controller(&wallet_id)
         .map_err(public_error)?;

@@ -2499,6 +2499,102 @@ mod tests {
         assert!(restored.current().await.unwrap().is_some());
     }
 
+    /// EXECUTED: THE CRASH AT THE ROTATION CANDIDATE'S DURABLE WRITE.
+    ///
+    /// `confirm_rotation_candidate_pairing` persists `CandidatePairedRestricted`
+    /// with the signed ticket and the signed acceptance, and only then returns
+    /// the acceptance for the owner to carry to the desktop by QR. A crash in
+    /// that gap leaves the phone durably a restricted candidate with the ticket
+    /// consumed while the desktop rotation is still waiting for it, and - unlike
+    /// the normal pairing at `pairing.rs:223` - there is no `pending_pairing_ack`
+    /// to re-send, so the QR cannot be produced again.
+    ///
+    /// This is that exact disk, written through the real store to a real file and
+    /// read back by a real reopen. What it establishes:
+    ///
+    ///   * the SIGNED ACCEPTANCE SURVIVES. It is part of the durable record, so
+    ///     the half of the delivery that carries rotation authority is not lost,
+    ///     and the desktop accepts a re-delivery of it idempotently - executed on
+    ///     the desktop side by
+    ///     `a_redelivered_candidate_acceptance_is_accepted_rather_than_refused`.
+    ///   * the OWNER HAS AN EXIT. The candidate handset is fresh: no pending
+    ///     approval, no pending witness, no witness record, so
+    ///     `rotation_blocking_phase` is `None` and the pairing reset SUCCEEDS.
+    ///     The enumeration recorded this site as blocked on that predicate; it is
+    ///     not, and the difference is executed here rather than read.
+    ///
+    /// The encrypted acknowledgement is deliberately NOT made durable for the
+    /// candidate: `pending_pairing_ack` is what drives
+    /// `pending_pairing_finalization`, which on the phone gates auto-connect and
+    /// replaces the candidate's whole screen with the LAN finalisation step. That
+    /// is a behaviour change on a path that only runs on the handset, so it is
+    /// named rather than guessed at.
+    #[tokio::test]
+    async fn a_crash_at_the_rotation_candidate_write_keeps_the_acceptance_and_an_exit() {
+        let now = unix_now().unwrap();
+        let mut state = rotation_candidate_state(now).await;
+        // The state as `confirm_rotation_candidate_pairing` installs it: a fresh
+        // handset that has confirmed nothing yet.
+        state.pending_witness = None;
+        state.validate_at(now).unwrap();
+        let acceptance = state.rotation_candidate_acceptance.clone().unwrap();
+
+        let root = std::env::temp_dir().join(format!(
+            "hpay-mobile-rotation-candidate-crash-{}-{now}",
+            std::process::id()
+        ));
+        let companion = root.join("agent-companion").join("state.json");
+        let store: Arc<dyn CompanionStateStore> =
+            Arc::new(FileCompanionStateStore::new(companion.clone()));
+        let shared = SharedCompanionState::open(Arc::clone(&store));
+        // THE DURABLE WRITE. Nothing after it runs: this is the crash.
+        shared.install_new(state).await.unwrap();
+        assert!(companion.exists());
+        drop(shared);
+
+        // THE REBOOT.
+        let rebooted = SharedCompanionState::open(Arc::clone(&store));
+        let after = rebooted
+            .current()
+            .await
+            .unwrap()
+            .expect("the phone must still load after the crash");
+        assert_eq!(
+            after.rotation_phase,
+            WitnessRotationPhase::CandidatePairedRestricted
+        );
+        assert_eq!(
+            after.rotation_candidate_acceptance.as_ref(),
+            Some(&acceptance),
+            "the signed acceptance must survive the crash, or the rotation \
+             authority the phone already granted is unrecoverable"
+        );
+        assert!(after.rotation_ticket.is_some());
+        assert!(
+            after.pending_pairing_ack.is_none(),
+            "and the encrypted acknowledgement is not durable for a candidate, \
+             by decision - see this test's own note"
+        );
+
+        // THE OWNER'S EXIT, EXECUTED. This is not blocked.
+        assert_eq!(
+            after.rotation_blocking_phase(),
+            None,
+            "a fresh candidate handset blocks nothing"
+        );
+        rebooted
+            .reset_before_witness_rotation()
+            .await
+            .expect("the candidate handset must be resettable so the owner can start again");
+        assert!(rebooted.current().await.unwrap().is_none());
+        let fresh = SharedCompanionState::open(Arc::clone(&store));
+        assert!(fresh.current().await.unwrap().is_none());
+
+        let _ = fs::remove_file(&companion);
+        let _ = fs::remove_dir(root.join("agent-companion"));
+        let _ = fs::remove_dir(root);
+    }
+
     /// The owner's discard survives a refused reset on the same phone.
     #[tokio::test]
     async fn the_owner_discard_survives_a_refused_reset_on_a_rotation_candidate() {

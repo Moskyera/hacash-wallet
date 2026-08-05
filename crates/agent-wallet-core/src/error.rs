@@ -250,6 +250,24 @@ pub enum AgentWalletError {
     DiagnosticConfirmationMismatch,
     #[error("pilot diagnostics exceeds the local export size limit")]
     DiagnosticTooLarge,
+    // A backup's four files only mean anything together. This is the refusal
+    // that keeps a restore from writing three of them.
+    #[error(
+        "this backup's four files do not agree with each other, so nothing was restored"
+    )]
+    BackupInconsistent,
+    #[error("the backup warning has not been read and acknowledged in full")]
+    BackupWarningNotAcknowledged,
+    // A backup written by a different version of this wallet. Said by name and
+    // not folded into `Vault`, because an owner told only "vault error" retypes
+    // a passphrase that was never wrong. The three fields this rests on -
+    // format kind, backup version, state schema version - are non-secret and
+    // are in the clear in the file the reader is already holding, so naming the
+    // mismatch reveals nothing that opening the file would not.
+    #[error(
+        "this backup was written by a different version of the Agent Wallet and cannot be restored by this one"
+    )]
+    BackupUnsupportedVersion,
 }
 
 pub type AgentWalletResult<T> = Result<T, AgentWalletError>;

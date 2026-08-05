@@ -1,4 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  requireSealedAcknowledgement,
+  type SealedAcknowledgement,
+} from "./backupWarning";
 
 export type AgentWalletRegistryEntry = {
   wallet_id: string;
@@ -473,8 +477,88 @@ export type SignedRotationCandidateAcceptance = {
   candidate_signature_hex: string;
 };
 
+/// The four facts an owner must be told, in the core's own words. Never
+/// re-worded here: a second copy of a warning is a copy that can go stale while
+/// the thing it warns about does not.
+export type AgentBackupWarning = {
+  headline: string;
+  restore_rewinds_spending: string;
+  revoked_agents_return: string;
+  old_phone_must_be_replaced: string;
+  the_file_is_a_working_wallet: string;
+};
+
+export type AgentBackupWarnings = {
+  backup: AgentBackupWarning;
+  restore: AgentBackupWarning;
+};
+
+/// One tick per fact. The core refuses unless all four are true, so a screen
+/// that omits one cannot complete the flow.
+export type AgentBackupAcknowledgement = {
+  restore_rewinds_spending: boolean;
+  revoked_agents_return: boolean;
+  old_phone_must_be_replaced: boolean;
+  the_file_is_a_working_wallet: boolean;
+};
+
+export type AgentBackupPreview = {
+  wallet_id: string;
+  address: string;
+  network_mode: string;
+  journal_sequence: number;
+  backed_up_at_unix: number;
+  wallet_created_at_unix: number;
+  already_present: boolean;
+  warning: AgentBackupWarning;
+};
+
+export type AgentRestoreOutcome = {
+  wallet_id: string;
+  address: string;
+  network_mode: string;
+  journal_sequence: number;
+  witness_phone_must_be_replaced: boolean;
+  restored_active_agents: number;
+};
+
 export const agentWalletApi = {
   runtimeStatus: () => invoke<AgentRuntimeStatus>("agent_wallet_runtime_status"),
+  backupWarnings: () =>
+    invoke<AgentBackupWarnings>("agent_wallet_backup_warnings"),
+  // THE WARNING GATE IS ON THE CALL, NOT ON THE SCREEN.
+  //
+  // Both of these take a `SealedAcknowledgement`, which only
+  // `sealAcknowledgement` produces and only after every point of the warning the
+  // owner was shown has been ticked. `requireSealedAcknowledgement` asks again at
+  // runtime and throws BEFORE `invoke`, so a caller that casts past the type
+  // system never reaches the core at all. A disabled button is a styling
+  // decision; this is the control.
+  backupCreate: (
+    walletId: string,
+    passphrase: string,
+    acknowledgement: SealedAcknowledgement,
+  ) =>
+    invoke<{ document: string; warning: AgentBackupWarning }>(
+      "agent_wallet_backup_create",
+      {
+        walletId,
+        passphrase,
+        acknowledgement: requireSealedAcknowledgement(acknowledgement),
+      },
+    ),
+  backupPreview: (document: string) =>
+    invoke<AgentBackupPreview>("agent_wallet_backup_preview", { document }),
+  backupRestore: (
+    document: string,
+    passphrase: string,
+    acknowledgement: SealedAcknowledgement,
+  ) =>
+    invoke<AgentRestoreOutcome>("agent_wallet_backup_restore", {
+      document,
+      passphrase,
+      acknowledgement: requireSealedAcknowledgement(acknowledgement),
+    }),
   companionStatus: () =>
     invoke<MobileCompanionStatus>("agent_wallet_companion_status"),
   companionPairingStatus: (walletId: string) =>
