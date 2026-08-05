@@ -81,6 +81,40 @@ export type RotationCandidatePairingCompletionView =
     signedAcceptance: SignedRotationCandidateAcceptance;
   };
 
+/**
+ * Every witness rotation phase the native side can persist, in the exact
+ * snake_case spelling `WitnessRotationPhase` serialises to
+ * (crates/companion-protocol/src/rotation.rs). This is the single source of
+ * truth for both the declared type and the runtime validator in
+ * companionView.ts, so the two can never drift apart: a phase missing from the
+ * runtime set makes the whole stored state unreadable and the phone reports
+ * itself unpaired while it is still paired.
+ */
+export const COMPANION_ROTATION_PHASES = [
+  "stable",
+  "rotation_required",
+  "rotation_prepared",
+  "rotation_requested",
+  "awaiting_old_witness_authorization",
+  "rotation_ticket_issued",
+  "awaiting_candidate_pairing",
+  "candidate_paired_restricted",
+  "candidate_baseline_verified",
+  "awaiting_old_device_revocation",
+  "awaiting_completion_anchor",
+  "awaiting_new_device_pairing",
+  "awaiting_new_witness_baseline",
+  "awaiting_rotation_completion_anchor",
+  "completed",
+  "blocked_by_pending_approval",
+  "blocked_by_unresolved_signed_operation",
+  "blocked_by_broadcast_uncertainty",
+  "recovery_rotation_required",
+  "rotation_recovery_required",
+] as const;
+
+export type CompanionRotationPhase = (typeof COMPANION_ROTATION_PHASES)[number];
+
 export type CompanionStoredStateView = {
   configured: boolean;
   connected: boolean;
@@ -92,30 +126,115 @@ export type CompanionStoredStateView = {
   pendingPairingFinalization: boolean;
   pilotEnabled: boolean;
   controlledRotationRequired: boolean;
-  rotationPhase:
-    | "stable"
-    | "rotation_required"
-    | "rotation_prepared"
-    | "rotation_requested"
-    | "awaiting_old_witness_authorization"
-    | "rotation_ticket_issued"
-    | "awaiting_candidate_pairing"
-    | "candidate_paired_restricted"
-    | "candidate_baseline_verified"
-    | "awaiting_old_device_revocation"
-    | "awaiting_completion_anchor"
-    | "awaiting_new_device_pairing"
-    | "awaiting_new_witness_baseline"
-    | "awaiting_rotation_completion_anchor"
-    | "completed"
-    | "blocked_by_pending_approval"
-    | "blocked_by_unresolved_signed_operation"
-    | "blocked_by_broadcast_uncertainty"
-    | "recovery_rotation_required"
-    | "rotation_recovery_required"
-    | null;
+  rotationPhase: CompanionRotationPhase | null;
+  /**
+   * What the pairing-only reset would actually refuse with right now.
+   *
+   * `controlledRotationRequired` only reads `rotationPhase`, but
+   * `reset_before_witness_rotation`
+   * (apps/mobile/src-tauri/src/agent_companion/storage.rs) refuses on the wider
+   * `rotation_blocking_phase()`, which also covers a pending pilot approval and
+   * any witness record. The screen could not see those two facts, so it offered
+   * a reset that could only refuse - and the refusal durably replaced the reset
+   * section for good.
+   */
+  resetBlockingPhase: CompanionRotationPhase | null;
+  /** Whether this phone still holds the key its stored pairing is bound to. */
+  pairingIdentity: CompanionPairingIdentity;
   hardwareIdentityRetainedOnReset: boolean;
+  /**
+   * The one payment this phone is still holding a consent record for.
+   *
+   * Holding one blocks the pairing-only reset, blocks pairing again, and blocks
+   * every other payment this phone could approve or witness. Until this field
+   * existed the record was invisible: the only screen that could reach it was
+   * the witness card, and that card disappears the moment the desktop stops
+   * offering the operation. The owner has to be able to read what they are
+   * holding before they can be asked to discard it.
+   */
+  pendingConsent: CompanionPendingConsentView | null;
+  /**
+   * Every consent record this phone stopped holding, newest first.
+   *
+   * This was a single record, so a second discard erased the first receipt
+   * before the owner could ever read it - and losing that evidence is the one
+   * thing the receipt exists to prevent. The native side now keeps a bounded
+   * append-only history; see `MAX_COMPANION_DISCARDED_CONSENTS`.
+   */
+  discardedConsents: CompanionDiscardedConsentView[];
+  /**
+   * How many older receipts the cap has pushed out of that history, decimal.
+   *
+   * Shown to the owner verbatim. A history that dropped something without
+   * saying so would be the same defect as the single slot.
+   */
+  discardedConsentsDropped: string;
 };
+
+/**
+ * How many discard receipts the phone keeps.
+ *
+ * Mirrors `MAX_DISCARDED_CONSENTS` in
+ * apps/mobile/src-tauri/src/agent_companion/storage.rs. The screen refuses a
+ * longer list rather than rendering a history the native side could not have
+ * written.
+ */
+export const MAX_COMPANION_DISCARDED_CONSENTS = 32;
+
+export const COMPANION_CONSENT_KINDS = [
+  "witness_confirmation",
+  "pilot_approval",
+] as const;
+
+export type CompanionConsentKind = (typeof COMPANION_CONSENT_KINDS)[number];
+
+/** A consent record this phone is holding right now. */
+export type CompanionPendingConsentView = {
+  kind: CompanionConsentKind;
+  operationId: string;
+  amountUnits: string;
+  recipient: string;
+  recordedAtUnix: string;
+};
+
+/**
+ * A consent record this phone stopped holding.
+ *
+ * A receipt, not a witness. It says nothing about whether the payment was
+ * signed, broadcast or committed, and the native side never consults it when
+ * admitting a rollback anchor.
+ */
+export type CompanionDiscardedConsentView = {
+  kind: CompanionConsentKind;
+  operationId: string;
+  amountUnits: string;
+  recipient: string;
+  recordedAtUnix: string;
+  discardedAtUnix: string;
+  reason: string;
+};
+
+export type CompanionDiscardConsentView = {
+  discarded: CompanionDiscardedConsentView;
+};
+
+export const COMPANION_PAIRING_IDENTITIES = [
+  "not_paired",
+  "matches",
+  "replaced",
+  "absent",
+  "unknown",
+] as const;
+
+/**
+ * How the Android identity this phone holds relates to its stored pairing.
+ *
+ * Only `replaced` and `absent` mean the durable witness state can never be
+ * presented again. `unknown` is a failed or unavailable read and concludes
+ * nothing.
+ */
+export type CompanionPairingIdentity =
+  (typeof COMPANION_PAIRING_IDENTITIES)[number];
 
 export type CompanionSessionView = {
   connected: boolean;
@@ -227,6 +346,12 @@ export type CompanionPilotDecisionView = {
   approved: boolean;
   witnessed: boolean;
   anchorId: string | null;
+  detail: string;
+};
+
+export type CompanionWitnessView = {
+  anchorId: string;
+  accepted: boolean;
   detail: string;
 };
 

@@ -18,12 +18,17 @@ pub(super) fn inbound_payload_allowed(payload: &CompanionPayload) -> bool {
             | CompanionPayload::Pong
             | CompanionPayload::AdminAck { .. }
             | CompanionPayload::Disconnect { .. }
+            // A rotation proposal is a desktop-signed record describing this
+            // phone's own replacement. Reading it authorizes nothing and can
+            // move no money. It is admitted in every build so that a handset
+            // which was left mid-rotation by a pilot build, and then updated to
+            // a read-only one, can still hand its authority over instead of
+            // being stuck at "Controlled witness rotation required" for good.
+            | CompanionPayload::WitnessRotationProposal(_)
     ) || (cfg!(feature = "agent-wallet-testnet-pilot")
         && matches!(
             payload,
-            CompanionPayload::RollbackAnchorProposal(_)
-                | CompanionPayload::WitnessRotationProposal(_)
-                | CompanionPayload::WitnessAck { .. }
+            CompanionPayload::RollbackAnchorProposal(_) | CompanionPayload::WitnessAck { .. }
         ))
 }
 
@@ -34,14 +39,24 @@ pub(super) fn outbound_payload_allowed(payload: &CompanionPayload) -> bool {
         CompanionPayload::SyncRequest { .. }
             | CompanionPayload::Ping
             | CompanionPayload::Disconnect { .. }
+            // The old phone's half of a controlled rotation: ask what rotation
+            // the desktop has prepared, and sign an authorization for this
+            // handset's own replacement. Neither is an approval and neither is
+            // a payment witness; both are desktop-initiated and desktop-
+            // verified, and the wallet keeps refusing every payment until the
+            // replacement phone signs a real baseline and a real completion
+            // receipt. Withholding them from a read-only build left such a
+            // handset with no way to hand over at all.
+            | CompanionPayload::WitnessRotationPoll { .. }
+            | CompanionPayload::WitnessRotationAuthorization(_)
     ) || (cfg!(feature = "agent-wallet-testnet-pilot")
         && matches!(
             payload,
             CompanionPayload::ApprovalDecision(_)
                 | CompanionPayload::RecoverPendingWitness { .. }
                 | CompanionPayload::WitnessReceipt(_)
-                | CompanionPayload::WitnessRotationPoll { .. }
-                | CompanionPayload::WitnessRotationAuthorization(_)
+                // The replacement phone's half stays pilot-only: it ends in a
+                // witness receipt over a rollback anchor.
                 | CompanionPayload::WitnessRotationBaseline(_)
         ))
 }
@@ -689,6 +704,9 @@ mod tests {
             approval_sequence: 0,
             pending_pairing_ack: None,
             pending_approval: None,
+            pending_witness: None,
+            discarded_consents: Vec::new(),
+            discarded_consents_dropped: 0,
             witness: None,
             rotation_phase: hpay_companion_protocol::WitnessRotationPhase::Stable,
             pending_rotation_authorization: None,
@@ -775,6 +793,44 @@ mod tests {
             accepted: true,
             detail: "paused".to_owned(),
         }));
+        // Dead end 3: a read-only build that had been marked as needing a
+        // controlled rotation could not even ask the desktop what rotation was
+        // prepared, so it could never run its half and the reset stayed blocked
+        // forever. The old-phone half is admitted in every build; everything
+        // that ends in a witness receipt is still pilot-only.
+        assert!(outbound_payload_allowed(
+            &CompanionPayload::WitnessRotationPoll {
+                rotation_id: Some("rotation_one".to_owned()),
+            }
+        ));
+        assert_eq!(
+            outbound_payload_allowed(&CompanionPayload::WitnessReceipt(witness_receipt_fixture())),
+            cfg!(feature = "agent-wallet-testnet-pilot")
+        );
+    }
+
+    fn witness_receipt_fixture() -> hpay_companion_protocol::SignedWitnessReceipt {
+        hpay_companion_protocol::SignedWitnessReceipt {
+            receipt: hpay_companion_protocol::WitnessReceipt {
+                receipt_version: 1,
+                anchor_id: "anchor_one".to_owned(),
+                anchor_hash: "11".repeat(32),
+                agent_wallet_id: "wallet_one".to_owned(),
+                desktop_device_id: hpay_companion_protocol::DeviceId::parse(
+                    "desktop_".to_owned() + &"b".repeat(32),
+                )
+                .unwrap(),
+                mobile_device_id: hpay_companion_protocol::DeviceId::parse(
+                    "mobile_".to_owned() + &"a".repeat(32),
+                )
+                .unwrap(),
+                mobile_authorization_epoch: 1,
+                witness_epoch: 1,
+                anchor_sequence: 1,
+                accepted_at: 1_000,
+            },
+            signature_hex: "11".repeat(64),
+        }
     }
 
     #[test]

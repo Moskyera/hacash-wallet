@@ -24,8 +24,31 @@ pub struct AgentPolicy {
     pub max_pending_operations: u16,
     pub allowed_recipients: BTreeSet<String>,
     pub blocked_recipients: BTreeSet<String>,
+    /// Owner-only, per-agent, default off.
+    ///
+    /// When false (the only value any wallet has until its owner deliberately
+    /// changes it) a recipient absent from `allowed_recipients` is refused at
+    /// intent time, exactly as before this field existed.
+    ///
+    /// When true the agent may only *propose* such a payment. It still passes
+    /// every other limit, still reaches the same approval ceremony bound to the
+    /// exact recipient, amount, fee and total debit, and is admitted only by an
+    /// exact owner approval. `blocked_recipients` is unaffected and stays
+    /// absolute, and approving one payment never writes the recipient into
+    /// `allowed_recipients`.
+    ///
+    /// `skip_serializing_if` is load bearing, not cosmetic: the whole state is
+    /// re-serialized by `state_commitment` and compared against the commitment
+    /// stored in the authenticated journal head. Omitting the field when false
+    /// keeps already-stored wallets byte-identical, so they still verify.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_unlisted_recipient_with_approval: bool,
     pub approval_mode: crate::operation::ApprovalMode,
     pub policy_epoch: u64,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Default for AgentPolicy {
@@ -37,6 +60,7 @@ impl Default for AgentPolicy {
             max_pending_operations: 0,
             allowed_recipients: BTreeSet::new(),
             blocked_recipients: BTreeSet::new(),
+            allow_unlisted_recipient_with_approval: false,
             approval_mode: crate::operation::ApprovalMode::DesktopManual,
             policy_epoch: 1,
         }

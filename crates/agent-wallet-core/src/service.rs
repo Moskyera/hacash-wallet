@@ -5,9 +5,9 @@ use std::sync::Mutex;
 use hacash_wallet_core::settings::validate_node_url;
 use hpay_companion_protocol::{
     DesktopChallengeSequence, DeviceId, DevicePublicRecord, SignedRollbackAnchor,
-    SignedRotationCandidateAcceptance,
-    SignedRotationPairingTicket, SignedWitnessReceipt, SignedWitnessRotationAuthorization,
-    SignedWitnessRotationBaselineReceipt, WitnessRotationPhase, WitnessRotationRecord,
+    SignedRotationCandidateAcceptance, SignedRotationPairingTicket, SignedWitnessReceipt,
+    SignedWitnessRotationAuthorization, SignedWitnessRotationBaselineReceipt, WitnessRotationPhase,
+    WitnessRotationRecord,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -50,7 +50,10 @@ use state::{journal_path, scoped_idempotency_key};
 pub use companion::{
     AgentCompanionPairingAttempt, AgentCompletedCompanionPairing, AgentDesktopSessionAttempt,
     AgentPairingAttemptBudget, MAX_PAIRING_REQUEST_ATTEMPTS,
+    WITNESS_PENDING_OPERATION_STATUS_NAMES,
 };
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use companion::{StrandedWitnessRecovery, WitnessRotationControls};
 
 const STATE_SCHEMA_VERSION: u32 = 1;
 const STATE_NAME: &str = "wallet_state";

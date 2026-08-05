@@ -3,44 +3,69 @@ import {
   COMPANION_REFRESH_ACTION,
   COMPANION_REVIEW_APPROVAL_ACTION,
 } from "./companionStatus";
+import { COMPANION_CONNECTION_SECTION_TITLE } from "./companionLayout";
 
 /**
  * How the read-only tabs point at the one control that would fill them.
  *
- * Deliberately not a quoted label. There is exactly one connect control on the
- * screen, and it reads "Connect to the desktop" from cold and "Try connecting
- * again" after a refusal, because that is what every failure sentence tells the
- * owner to tap. Quoting either name would be wrong in the other state.
+ * With no session, deliberately not a quoted label: there is exactly one
+ * connect control on the screen, and it reads "Connect to the desktop" from
+ * cold and "Try connecting again" after a refusal, because that is what every
+ * failure sentence tells the owner to tap. Quoting either name would be wrong
+ * in the other state.
+ *
+ * With a live session there is no connect button on the screen at all - the
+ * connection block renders its connected form, which offers only the refresh
+ * and close controls - so the cold sentence named a control that is not there.
  */
-const CONNECT_ROUTE =
-  "Use the connect button on this screen once HPAY Desktop is open and unlocked on the same Wi-Fi.";
+export function connectRoute(hasSession: boolean): string {
+  return hasSession
+    ? `The connection to HPAY Desktop is already open, so there is nothing to connect. This phone is waiting for data it can check as a set. It refreshes by itself every few seconds; ${COMPANION_REFRESH_ACTION}, in ${COMPANION_CONNECTION_SECTION_TITLE} above, does it immediately.`
+    : "Use the connect button on this screen once HPAY Desktop is open and unlocked on the same Wi-Fi.";
+}
 import {
   authorizedAgentForApproval,
+  pendingWitnessOperation,
+  recipientStanding,
   formatCompanionNodeStatus,
   formatCompanionTime,
   formatHacUnits,
   shortValue,
   verifiedAgentApprovalFacts,
 } from "./companionView";
+import type { RecipientStanding } from "./companionView";
 import type {
+  AgentCompanionActivity,
   AgentCompanionAgent,
   AgentCompanionPendingApproval,
   AgentCompanionPolicy,
   AgentCompanionSnapshot,
 } from "./types";
 
+/**
+ * The confirm control for a payment the owner already approved on the desktop.
+ *
+ * Deliberately not "Approve". The owner approved this payment on HPAY Desktop;
+ * pressing this is the second, different act of witnessing it, and calling both
+ * of them approval would teach the owner that two taps are one thing.
+ */
+export const COMPANION_CONFIRM_WITNESS_ACTION = "Confirm and sign witness";
+
 export function CompanionOverview({
   snapshot,
+  hasSession = false,
   onOpenActivity,
 }: {
   snapshot: AgentCompanionSnapshot | null;
+  /** A live authenticated session exists, so no connect control is rendered. */
+  hasSession?: boolean;
   onOpenActivity?: () => void;
 }) {
   if (!snapshot) {
     return (
       <Unavailable
         title="Wallet status unavailable"
-        body={`No figure is shown until a fresh authenticated snapshot arrives from the paired desktop, and no value is assumed to be zero. ${CONNECT_ROUTE}`}
+        body={`No figure is shown until a fresh authenticated snapshot arrives from the paired desktop, and no value is assumed to be zero. ${connectRoute(hasSession)}`}
       />
     );
   }
@@ -159,14 +184,16 @@ export function CompanionOverview({
 }
 export function CompanionAgents({
   snapshot,
+  hasSession = false,
 }: {
   snapshot: AgentCompanionSnapshot | null;
+  hasSession?: boolean;
 }) {
   if (!snapshot) {
     return (
       <Unavailable
         title="Agents unavailable"
-        body={`This list comes from the paired desktop and no fresh snapshot has arrived. ${CONNECT_ROUTE}`}
+        body={`This list comes from the paired desktop and no fresh snapshot has arrived. ${connectRoute(hasSession)}`}
       />
     );
   }
@@ -194,14 +221,16 @@ export function CompanionAgents({
 
 export function CompanionRules({
   snapshot,
+  hasSession = false,
 }: {
   snapshot: AgentCompanionSnapshot | null;
+  hasSession?: boolean;
 }) {
   if (!snapshot) {
     return (
       <Unavailable
         title="Policies unavailable"
-        body={`This tab comes from the paired desktop and no fresh snapshot has arrived. ${CONNECT_ROUTE}`}
+        body={`This tab comes from the paired desktop and no fresh snapshot has arrived. ${connectRoute(hasSession)}`}
       />
     );
   }
@@ -304,24 +333,37 @@ function PolicyCard({
 export function CompanionActivity({
   snapshot,
   busy = false,
+  hasSession = false,
   onRefresh,
   onDecision,
+  onWitness,
 }: {
   snapshot: AgentCompanionSnapshot | null;
   busy?: boolean;
+  hasSession?: boolean;
   /** Reloads the desktop's list. Absent when there is no live connection. */
   onRefresh?: () => void;
   onDecision?: (
     approval: AgentCompanionPendingApproval,
     decision: "approve" | "reject",
   ) => void;
+  /**
+   * Signs the rollback witness for a payment already approved on the desktop.
+   * Absent in a read-only build, which has no signing at all.
+   */
+  onWitness?: (operation: AgentCompanionActivity) => void;
 }) {
   const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
   if (!snapshot) {
+    // This early return used to swallow the tab's own refresh control too, so
+    // the state that names Refresh the status now rendered no such button.
     return (
       <Unavailable
         title="Activity unavailable"
-        body={`Requests waiting for your decision come from the paired desktop and no fresh snapshot has arrived. ${CONNECT_ROUTE}`}
+        body={`Requests waiting for your decision come from the paired desktop and no fresh snapshot has arrived. ${connectRoute(hasSession)}`}
+        action={onRefresh ? COMPANION_REFRESH_ACTION : undefined}
+        actionDisabled={busy}
+        onAction={onRefresh}
       />
     );
   }
@@ -330,11 +372,58 @@ export function CompanionActivity({
         (approval) => approval.approvalId === selectedApprovalId,
       ) ?? null
     : null;
+  const awaitingWitness = pendingWitnessOperation(snapshot);
+  // Everything the recent-activity list is allowed to show: the disclosed
+  // witness entry is rendered in its own section above and must not appear
+  // twice.
+  const history = snapshot.activity.filter(
+    (item) => item.activityId !== awaitingWitness?.activityId,
+  );
   // Recent activity is blank by design on every phone, and it used to render
   // above the only actionable thing in the whole app. Whatever is waiting for a
   // decision goes first; the empty-by-design list follows it.
   return (
     <>
+      {awaitingWitness ? (
+        <section
+          className="agent-list"
+          aria-label="Payment waiting for your witness"
+        >
+          <h2>Waiting for your witness</h2>
+          <article className="agent-panel">
+            <div className="agent-record-head">
+              <div>
+                <p className="agent-eyebrow">Already approved on HPAY Desktop</p>
+                <h3>{formatHacUnits(awaitingWitness.amountUnits)}</h3>
+              </div>
+            </div>
+            <p className="agent-muted">
+              To {shortValue(awaitingWitness.recipient)}
+            </p>
+            <p className="agent-muted">
+              You approved this payment on HPAY Desktop. Your phone is the
+              rollback witness for it, so it cannot go out until you sign here.
+              This is not a second approval and it cannot change the amount or
+              the recipient.
+            </p>
+            {onWitness && snapshot.pilotEnabled ? (
+              <button
+                type="button"
+                className="agent-primary-action"
+                disabled={busy}
+                onClick={() => onWitness(awaitingWitness)}
+              >
+                {COMPANION_CONFIRM_WITNESS_ACTION}
+              </button>
+            ) : (
+              <p className="agent-muted" role="status">
+                This build is read-only, so it cannot sign a witness. Nothing
+                about this payment failed a check.
+              </p>
+            )}
+          </article>
+        </section>
+      ) : null}
       <section className="agent-list" aria-label="Pending testnet approvals">
         <div className="agent-record-head">
           <h2>Pending approvals</h2>
@@ -357,6 +446,7 @@ export function CompanionActivity({
           snapshot.pendingApprovals.map((approval) => {
             const facts = verifiedAgentApprovalFacts(approval, snapshot);
             const requestingAgent = authorizedAgentForApproval(approval, snapshot);
+            const standing = recipientStanding(approval, snapshot);
             const canReview = Boolean(
               snapshot.pilotEnabled &&
                 facts &&
@@ -374,6 +464,11 @@ export function CompanionActivity({
                     {requestingAgent?.displayName ?? "Unknown agent"}
                   </span>
                 </div>
+                {standing !== "allowlisted" && (
+                  <p className="agent-blocked-note" role="alert">
+                    {RECIPIENT_STANDING_LABEL[standing]}
+                  </p>
+                )}
                 <p className="agent-muted">
                   Recipient {shortValue(approval.recipient)}
                 </p>
@@ -401,6 +496,16 @@ export function CompanionActivity({
                   >
                     {COMPANION_REVIEW_APPROVAL_ACTION}
                   </button>
+                ) : !snapshot.pilotEnabled ? (
+                  // canReview requires snapshot.pilotEnabled, which is false by
+                  // construction in a read-only build. Nothing failed
+                  // verification, and printing a verification failure for it
+                  // read as a security alarm about this exact request.
+                  <p className="agent-muted" role="status">
+                    This build is read-only. Approve and Reject are on HPAY
+                    Desktop, under Security and approvals. Nothing about this
+                    request failed a check.
+                  </p>
                 ) : (
                   <p className="agent-blocked-note" role="alert">
                     Approval is disabled because the request, agent identity or
@@ -425,11 +530,20 @@ export function CompanionActivity({
 
       <section className="agent-list" aria-label="Agent Wallet activity">
         <h2>Recent activity</h2>
-        {snapshot.activity.length === 0 ? (
-          // The desktop blanks the activity list for every paired device, so an
-          // empty list here never means "nothing happened". Saying so avoids
-          // reading a payment history that does not exist as a clean record.
-          // It is a standing fact rather than news, so it folds away.
+        {history.length === 0 ? (
+          // The desktop blanks the activity list for every paired device
+          // except for the single payment waiting on this phone's own witness,
+          // which is shown in its own section above. So an empty list here
+          // never means "nothing happened". Saying so avoids reading a payment
+          // history that does not exist as a clean record. It is a standing
+          // fact rather than news, so it folds away.
+          //
+          // The emptiness is measured AFTER the waiting payment is removed.
+          // Testing the unfiltered list instead put this section into its
+          // has-history branch whenever a witness was pending, and that branch
+          // then rendered nothing at all - so the one moment the owner is being
+          // asked to sign something is the moment the heading stood alone with
+          // no explanation under it.
           <details className="agent-disclosure">
             <summary>Empty by design</summary>
             <p className="agent-muted">
@@ -440,7 +554,7 @@ export function CompanionActivity({
             </p>
           </details>
         ) : (
-          snapshot.activity.map((item) => (
+          history.map((item) => (
             <article className="agent-panel" key={item.activityId}>
               <div className="agent-record-head">
                 <div>
@@ -480,6 +594,7 @@ function ApprovalReview({
 }) {
   const facts = verifiedAgentApprovalFacts(approval, snapshot);
   const requestingAgent = authorizedAgentForApproval(approval, snapshot);
+  const standing = recipientStanding(approval, snapshot);
   if (!facts || !requestingAgent) {
     return (
       <section className="agent-boundary-card" role="alert">
@@ -497,6 +612,16 @@ function ApprovalReview({
           <h2>Review the exact payment</h2>
         </div>
         <span className="agent-testnet-badge">TESTNET</span>
+      </div>
+      {/* Before the figures, not after them: whether this address is one the
+          owner already vetted, with the address itself in full. */}
+      <div
+        className={standing === "allowlisted" ? "agent-muted" : "agent-blocked-note"}
+        role={standing === "allowlisted" ? undefined : "alert"}
+      >
+        <strong>{RECIPIENT_STANDING_LABEL[standing]}</strong>
+        <p>{RECIPIENT_STANDING_DETAIL[standing]}</p>
+        <code className="agent-exact-address">{approval.recipient}</code>
       </div>
       <p className="agent-warning-copy">
         Approve signs only this exact testnet decision. Reject signs only the
@@ -559,6 +684,21 @@ function ApprovalReview({
   );
 }
 
+const RECIPIENT_STANDING_LABEL: Record<RecipientStanding, string> = {
+  allowlisted: "Allowed recipient",
+  not_on_allowlist: "New recipient. This address is not on this agent's allowlist.",
+  unverified: "Recipient not checked. No policy for this agent is in this snapshot.",
+};
+
+const RECIPIENT_STANDING_DETAIL: Record<RecipientStanding, string> = {
+  allowlisted:
+    "The desktop owner added this address to this agent's allowed recipients. Read it anyway.",
+  not_on_allowlist:
+    "Approval covers this one payment only. The address is not added to the allowlist, so a later payment to it asks again. Read every character.",
+  unverified:
+    "This address could not be compared against the allowlist. Read every character.",
+};
+
 function ExactValue({
   label,
   value,
@@ -607,11 +747,29 @@ export function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function Unavailable({ title, body }: { title: string; body: string }) {
+export function Unavailable({
+  title,
+  body,
+  action,
+  actionDisabled = false,
+  onAction,
+}: {
+  title: string;
+  body: string;
+  /** Only ever the label of a control this component itself renders. */
+  action?: string;
+  actionDisabled?: boolean;
+  onAction?: () => void;
+}) {
   return (
     <section className="agent-panel">
       <h2>{title}</h2>
       <p className="agent-muted">{body}</p>
+      {action && onAction ? (
+        <button type="button" disabled={actionDisabled} onClick={onAction}>
+          {action}
+        </button>
+      ) : null}
     </section>
   );
 }

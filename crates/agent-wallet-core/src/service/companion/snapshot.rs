@@ -178,7 +178,21 @@ fn permission_name(permission: AgentPermission) -> &'static str {
     }
 }
 
-fn operation_status_name(status: OperationStatus) -> &'static str {
+/// The `ActivitySummary::status` names for operations that are waiting on the
+/// paired mobile witness.
+///
+/// Derived from [`OperationStatus::awaits_mobile_witness`] rather than restated,
+/// so the wire names and the anchor admission set cannot drift apart. This is
+/// the only status set for which an operation id may be disclosed to a witness
+/// phone; see `filter_snapshot_for_permissions`.
+pub const WITNESS_PENDING_OPERATION_STATUS_NAMES: [&str; 4] = [
+    operation_status_name(OperationStatus::SignedAwaitingWitness),
+    operation_status_name(OperationStatus::SubmittedAwaitingFinalWitness),
+    operation_status_name(OperationStatus::BroadcastUncertain),
+    operation_status_name(OperationStatus::ReconciledAwaitingFinalWitness),
+];
+
+pub(crate) const fn operation_status_name(status: OperationStatus) -> &'static str {
     match status {
         OperationStatus::PaymentIntentCreated => "payment_intent_created",
         OperationStatus::FundsReserved => "funds_reserved",

@@ -146,10 +146,11 @@ fn rust_adapter_has_no_js_command_or_personal_wallet_dependency() {
     assert!(rust.contains("DeviceSignaturePurpose::SessionConfirmation"));
     assert!(rust.contains("\"signPairingMobileProof\""));
     assert!(rust.contains("\"signSessionResponse\""));
+    // Everything that can end in money moving, or in a rollback witness
+    // receipt, stays behind the pilot feature.
     for purpose in [
         "ApprovalDecision",
         "WitnessReceipt",
-        "WitnessRotationAuthorization",
         "RotationCandidateAcceptance",
         "WitnessRotationBaselineReceipt",
     ] {
@@ -157,6 +158,14 @@ fn rust_adapter_has_no_js_command_or_personal_wallet_dependency() {
             "DeviceSignaturePurpose::{purpose}ifcfg!(feature=\"agent-wallet-testnet-pilot\")=>"
         )));
     }
+    // WitnessRotationAuthorization is deliberately available in every build: it
+    // authorizes this handset's own replacement, spends nothing and signs no
+    // transaction. Gating it left a read-only build marked as needing a
+    // controlled rotation with no way to run one.
+    assert!(compact_rust.contains("DeviceSignaturePurpose::WitnessRotationAuthorization=>"));
+    assert!(!compact_rust.contains(
+        "DeviceSignaturePurpose::WitnessRotationAuthorizationifcfg!(feature=\"agent-wallet-testnet-pilot\")=>"
+    ));
     assert!(rust.contains("\"signApprovalDecisionApprove\""));
     assert!(rust.contains("\"signApprovalDecisionReject\""));
     assert!(rust.contains("MobileApprovalDecision::from_canonical_bytes"));

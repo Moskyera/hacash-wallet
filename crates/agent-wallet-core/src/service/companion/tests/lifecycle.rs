@@ -238,6 +238,7 @@ fn pairing_epoch_change_cancels_approved_operations_and_releases_reservations() 
         max_pending_operations: 4,
         allowed_recipients: BTreeSet::new(),
         blocked_recipients: BTreeSet::new(),
+        allow_unlisted_recipient_with_approval: false,
         approval_mode: ApprovalMode::DesktopManual,
         policy_epoch: before.policy_epoch,
     };

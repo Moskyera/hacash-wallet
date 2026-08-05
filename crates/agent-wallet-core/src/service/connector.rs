@@ -459,7 +459,13 @@ fn map_core_error(error: super::AgentWalletError) -> ConnectorError {
         | super::AgentWalletError::DailyLimitExceeded
         | super::AgentWalletError::RecipientNotAllowed
         | super::AgentWalletError::SigningBlocked
-        | super::AgentWalletError::ApprovalRequired => ConnectorError::CapabilityDenied,
+        | super::AgentWalletError::ApprovalRequired
+        // No agent can reach the desktop approval command, but classify its
+        // refusals with the other "this caller may not do that" outcomes rather
+        // than letting the catch-all report them as malformed messages.
+        | super::AgentWalletError::WitnessPhoneRequiredForApproval => {
+            ConnectorError::CapabilityDenied
+        }
         super::AgentWalletError::InvalidIdentifier => ConnectorError::InvalidIdentifier,
         super::AgentWalletError::InvalidWalletScope => ConnectorError::SessionMismatch,
         super::AgentWalletError::RequestExpired | super::AgentWalletError::ApprovalExpired => {
@@ -582,6 +588,7 @@ mod tests {
             max_pending_operations: 0,
             allowed_recipients: Default::default(),
             blocked_recipients: Default::default(),
+            allow_unlisted_recipient_with_approval: false,
             approval_mode: ApprovalMode::DesktopManual,
             policy_epoch: 1,
         };

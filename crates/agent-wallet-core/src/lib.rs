@@ -41,5 +41,8 @@ pub use service::{
     AgentCompanionPairingAttempt, AgentCompletedCompanionPairing, AgentDesktopSessionAttempt,
     AgentPairingAttemptBudget, AgentWalletManager, AgentWalletOverview, CreateAgentWallet,
     MAX_PAIRING_REQUEST_ATTEMPTS, UnlockedAgentWalletStatus,
+    WITNESS_PENDING_OPERATION_STATUS_NAMES,
 };
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use service::{StrandedWitnessRecovery, WitnessRotationControls};
 pub use types::{AgentId, AgentWalletId, OperationId, WalletScope};

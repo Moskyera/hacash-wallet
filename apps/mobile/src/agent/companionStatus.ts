@@ -65,6 +65,34 @@ export type CompanionPairingStateInput = {
   hasTrustedSnapshot: boolean;
   /** The most recent failure text, if any. */
   lastError: string;
+  /**
+   * This phone's own security status could be read. When it could not, the
+   * Security tab renders only "Check this phone's security status again", so
+   * naming Create mobile identity there is an instruction to press a button
+   * that is not on the screen.
+   */
+  identityKnown?: boolean;
+  /** Android can hold the companion identity on this handset. */
+  platformSupported?: boolean;
+  /** This phone's secure identity already exists. */
+  identityConfigured?: boolean;
+  /**
+   * Android will open this phone's secure identity right now.
+   *
+   * `identityConfigured` on its own is not enough to name the scanner. The
+   * pairing panel renders `Scan desktop QR` only under `identity.ready`
+   * (CompanionPairingPanel.tsx); when the identity exists but Android will not
+   * open it, that panel renders "This phone's secure identity is locked" and no
+   * scanner at all. Left undefined the readiness is simply unknown and the
+   * sentence stays as it was.
+   */
+  identityReady?: boolean;
+  /**
+   * The trusted snapshot is missing only because a payment request expired.
+   * The connection is fine and the next refresh restores everything, so this
+   * must not be reported as the desktop's data failing a check.
+   */
+  approvalExpiredThisTick?: boolean;
 };
 
 /**
@@ -206,7 +234,7 @@ export function companionPairingStateView(
         : "This phone is not linked to an Agent Wallet on any desktop. It holds no wallet key and can see nothing.",
       nextAction: input.pairingInProgress
         ? "Follow the steps on this screen. Nothing is linked until the same six digits are confirmed on both devices."
-        : `Open the Security tab, use ${COMPANION_CREATE_IDENTITY_ACTION} once, then use ${COMPANION_SCAN_QR_ACTION} to read the code shown by HPAY Desktop.`,
+        : unpairedNextAction(input),
     };
   }
   if (input.pendingPairingFinalization) {
@@ -230,14 +258,25 @@ export function companionPairingStateView(
             "The encrypted connection to HPAY Desktop is open and the latest desktop data passed every check.",
           nextAction: "",
         }
-      : {
-          state: "connected_checking_data",
-          pill: "Connected, checking",
-          label: "Connected. Checking the desktop's data",
-          detail:
-            "The encrypted connection is open. No wallet figure is shown until a fresh snapshot passes every check.",
-          nextAction: "",
-        };
+      : input.approvalExpiredThisTick
+        ? {
+            // Same state, different cause. Everything vanished at once because
+            // one request timed out, not because anything failed a check.
+            state: "connected_checking_data",
+            pill: "Connected, request expired",
+            label: "Connected. A payment request on this screen ran out of time",
+            detail:
+              "The encrypted connection is open and nothing is wrong with it. One payment request expired, and this phone hides the whole screen rather than show figures it can no longer check as a set. Nothing was paid, signed or lost.",
+            nextAction: `The next automatic refresh clears it within a few seconds. ${COMPANION_REFRESH_ACTION} does the same immediately.`,
+          }
+        : {
+            state: "connected_checking_data",
+            pill: "Connected, checking",
+            label: "Connected. Checking the desktop's data",
+            detail:
+              "The encrypted connection is open. No wallet figure is shown until a fresh snapshot passes every check.",
+            nextAction: "",
+          };
   }
   if (companionDesktopRefusedDevice(input.lastError)) {
     return {
@@ -264,6 +303,45 @@ export function companionPairingStateView(
     nextAction:
       "Make sure HPAY Desktop is open and unlocked on the same Wi-Fi, then use the connect button on this screen.",
   };
+}
+
+/**
+ * What an unpaired phone should do next, checked against what the state renders.
+ *
+ * The single sentence this replaces named Create mobile identity for every
+ * unpaired phone. That button is gated on `identity?.platformSupported` in
+ * CompanionSecurity, so on a handset that cannot hold the key, and on a phone
+ * whose identity status could not be read at all, the instruction named a
+ * control the Security tab does not render. Both of those states are reachable
+ * from any failure of agent_wallet_companion_identity_status, and the second is
+ * also reachable from any failure of agent_wallet_companion_state.
+ */
+function unpairedNextAction(input: CompanionPairingStateInput): string {
+  if (input.platformSupported === false) {
+    // No control on this phone can change this, and the Security tab says so
+    // in full. Naming any button here would be the same defect again.
+    return "No control on this phone can change this: it cannot hold the secure identity an Agent Wallet pairing needs. Open the Security tab to read why, then pair a different Android phone from HPAY Desktop.";
+  }
+  if (input.identityKnown === false) {
+    return `This phone's security status could not be read, so pairing cannot start yet and the Security tab offers no other control. Open the Security tab and use ${COMPANION_RECHECK_IDENTITY_ACTION}. It reads this phone only, costs nothing and changes nothing.`;
+  }
+  if (input.identityConfigured) {
+    if (input.identityReady === false) {
+      // The identity exists but Android will not open it, so the pairing panel
+      // renders "This phone's secure identity is locked" and NO scanner. Naming
+      // the scanner here would be the same defect this function exists to close.
+      return `This phone's secure identity is locked, so pairing cannot start and no scanner is shown. Unlock the phone and confirm the fingerprint or face prompt, then open the Security tab and use ${COMPANION_RECHECK_IDENTITY_ACTION}. Nothing is wrong with your wallet and nothing was changed.`;
+    }
+    // The identity already exists and opens, so the create control is not
+    // rendered and the scanner is.
+    return `Use ${COMPANION_SCAN_QR_ACTION} to read the code shown by HPAY Desktop.`;
+  }
+  if (input.identityReady === false) {
+    // Not created and not ready: the pairing panel sends the owner to create it
+    // first, and only then to the scanner. Same order, same two controls.
+    return `Open the Security tab, use ${COMPANION_CREATE_IDENTITY_ACTION} once, then come back and use ${COMPANION_SCAN_QR_ACTION}.`;
+  }
+  return `Open the Security tab, use ${COMPANION_CREATE_IDENTITY_ACTION} once, then use ${COMPANION_SCAN_QR_ACTION} to read the code shown by HPAY Desktop.`;
 }
 
 /**
@@ -296,6 +374,44 @@ export const COMPANION_EMPTY_FAILURE = `The phone could not finish that step and
  * specific markers are listed first.
  */
 const COMPANION_FAILURE_RULES: readonly CompanionFailureRule[] = [
+  {
+    // AgentCompanionIdentityPlugin.kt: no Class 3 biometric is enrolled. This
+    // is the first thing a new owner without a fingerprint hits when they press
+    // Create mobile identity, and the unclassified tail used to send them to
+    // the desktop's Authorized mobile devices list, which has nothing to do
+    // with it and lists nothing for a phone that was never paired.
+    match: "class 3 biometric",
+    text: "This phone has no fingerprint or face unlock enrolled, and the Agent Wallet identity can only be protected by one. Nothing was created, paid or changed, and nothing is wrong with your wallet. Open the Android Settings app, add a fingerprint or face unlock under Security, then come back to the Security tab here and try again.",
+  },
+  {
+    // AgentCompanionIdentityPlugin.kt. Deliberate and load-bearing: it is the
+    // refusal that stops a healthy existing key being replaced.
+    match: "no key was replaced",
+    text: `This phone's secure identity could not be opened just now, so nothing was created and the identity you already have was left exactly as it was. No money moved and no pairing changed. Unlock the phone, confirm the fingerprint or face prompt, then use ${COMPANION_RECHECK_IDENTITY_ACTION} on the Security tab.`,
+  },
+  {
+    // storage.rs reset_before_witness_rotation. It durably rewrites the stored
+    // rotation phase before returning this, so the state the owner is in
+    // afterwards is not the state they were in when they pressed.
+    match: "companion reset is blocked after pilot approval or witness initialization",
+    text: "This phone holds pilot approval or witness state, so the pairing was not deleted and nothing was reset. This phone is still paired and nothing was paid or signed. It is now marked as needing a controlled rotation, so Reset this phone's pairing only is no longer offered and cannot be run again. Finish the replacement from AI Agent Wallet on HPAY Desktop, under Replace the paired phone.",
+  },
+  {
+    // companionView.ts validatedStoredState. A phase the runtime whitelist did
+    // not know made the whole stored state unreadable, and the phone then
+    // reported itself unpaired while it was still fully paired.
+    match: "companion rotation phase is invalid",
+    text: "This phone could not read its own saved pairing because it does not recognise the rotation state stored in it. Nothing was paid, signed or unpaired, and this phone is still paired. This is a version mismatch: HPAY Desktop and this phone are from different releases. Update the older one, then reopen this screen.",
+  },
+  {
+    // exactObject in companionView.ts, for the approval summary. pilotEnabled
+    // is this phone's build feature, while the approval version and its network
+    // binding are decided by the desktop's, so a read-only phone paired with a
+    // pilot desktop fails every sync for as long as one request is pending, and
+    // no retry can ever succeed.
+    match: "approval summary contains missing or unknown fields",
+    text: "HPAY Desktop sent a payment request in a shape this phone's release does not accept, so this phone refused the whole update rather than show something it could not check. Nothing was paid, signed or changed. HPAY Desktop and this phone are from different releases: update the older one. Trying again will keep failing until you do.",
+  },
   {
     // LanRuntimeError::StaleDesktopChallengeSequence. The phone's replay guard
     // is doing its job: the desktop's challenge counter had not cleared the mark

@@ -5,7 +5,13 @@ import {
   parseCompanionRequest,
   type CompanionPairingOffer,
 } from "@hacash/wallet-ui";
+import {
+  COMPANION_PAIRING_IDENTITIES,
+  COMPANION_ROTATION_PHASES,
+  MAX_COMPANION_DISCARDED_CONSENTS,
+} from "./types";
 import type {
+  AgentCompanionActivity,
   AgentCompanionIdentityStatus,
   AgentCompanionPendingApproval,
   AgentCompanionSnapshot,
@@ -32,20 +38,12 @@ const MAX_POLICY_RECIPIENTS = 256;
 const MAX_CLOCK_SKEW_SECONDS = 60;
 const AGENT_NETWORK_FEE_UNITS = 1_000n;
 const MAX_PAIRING_TTL_SECONDS = 5 * 60;
-const ROTATION_PHASES = new Set([
-  "stable",
-  "rotation_required",
-  "rotation_prepared",
-  "awaiting_old_witness_authorization",
-  "awaiting_new_device_pairing",
-  "awaiting_new_witness_baseline",
-  "awaiting_rotation_completion_anchor",
-  "completed",
-  "blocked_by_pending_approval",
-  "blocked_by_unresolved_signed_operation",
-  "recovery_rotation_required",
-  "rotation_recovery_required",
-]);
+const ROTATION_PHASES: ReadonlySet<string> = new Set<string>(
+  COMPANION_ROTATION_PHASES,
+);
+const PAIRING_IDENTITIES: ReadonlySet<string> = new Set<string>(
+  COMPANION_PAIRING_IDENTITIES,
+);
 export const MAX_COMPANION_SESSION_TTL_SECONDS = 5 * 60;
 export const MAX_COMPANION_MESSAGE_TTL_SECONDS = 15 * 60;
 
@@ -61,8 +59,30 @@ const STORED_STATE_FIELDS = [
   "pilotEnabled",
   "controlledRotationRequired",
   "rotationPhase",
+  "resetBlockingPhase",
+  "pairingIdentity",
   "hardwareIdentityRetainedOnReset",
+  "pendingConsent",
+  "discardedConsents",
+  "discardedConsentsDropped",
 ] as const;
+const PENDING_CONSENT_FIELDS = [
+  "kind",
+  "operationId",
+  "amountUnits",
+  "recipient",
+  "recordedAtUnix",
+] as const;
+const DISCARDED_CONSENT_FIELDS = [
+  "kind",
+  "operationId",
+  "amountUnits",
+  "recipient",
+  "recordedAtUnix",
+  "discardedAtUnix",
+  "reason",
+] as const;
+const CONSENT_KINDS = new Set(["witness_confirmation", "pilot_approval"]);
 const SESSION_FIELDS = [
   "connected",
   "sessionId",
@@ -343,7 +363,54 @@ export function validatedStoredState(
   if (rotationPhase !== null && !ROTATION_PHASES.has(rotationPhase)) {
     throw new Error("The companion rotation phase is invalid.");
   }
+  const resetBlockingPhase = optionalNonemptyString(record.resetBlockingPhase);
+  if (resetBlockingPhase !== null && !ROTATION_PHASES.has(resetBlockingPhase)) {
+    throw new Error("The companion rotation phase is invalid.");
+  }
+  const pairingIdentity = requireNonemptyString(record, "pairingIdentity");
+  if (!PAIRING_IDENTITIES.has(pairingIdentity)) {
+    throw new Error("The companion pairing identity state is invalid.");
+  }
   requireBoolean(record, "hardwareIdentityRetainedOnReset");
+  const pendingConsent = validatedConsentRecord(
+    record.pendingConsent,
+    PENDING_CONSENT_FIELDS,
+    "held payment confirmation",
+  );
+  // Bounded on the way in as well as on the way out. The native side caps the
+  // history at MAX_COMPANION_DISCARDED_CONSENTS, so a longer list is a state
+  // it could not have written and is refused rather than rendered.
+  const discardedRaw = record.discardedConsents;
+  if (
+    !Array.isArray(discardedRaw) ||
+    discardedRaw.length > MAX_COMPANION_DISCARDED_CONSENTS
+  ) {
+    throw new Error("The discarded payment confirmation history is invalid.");
+  }
+  const discardedConsents = discardedRaw.map((entry) => {
+    const validated = validatedConsentRecord(
+      entry,
+      DISCARDED_CONSENT_FIELDS,
+      "discarded payment confirmation",
+    );
+    if (validated === null) {
+      throw new Error("The discarded payment confirmation history is invalid.");
+    }
+    return validated;
+  });
+  const discardedConsentsDropped = requireDecimal(
+    record,
+    "discardedConsentsDropped",
+  );
+  // The count and the list have to agree: the native side only ever drops a
+  // receipt once the history is full, so a non-zero count on a short list is
+  // a claim the phone cannot have made.
+  if (
+    discardedConsentsDropped !== "0" &&
+    discardedConsents.length !== MAX_COMPANION_DISCARDED_CONSENTS
+  ) {
+    throw new Error("The discarded payment confirmation history is invalid.");
+  }
   const endpoints = requireStringArray(record, "endpoints", false);
   const responseSequence = optionalDecimal(record.responseSequence);
   const agentWalletId = optionalNonemptyString(record.agentWalletId);
@@ -364,12 +431,52 @@ export function validatedStoredState(
         desktopDeviceId !== null ||
         mobileDeviceId !== null ||
         rotationPhase !== null ||
+        resetBlockingPhase !== null ||
+        pairingIdentity !== "not_paired" ||
         endpoints.length !== 0 ||
-        responseSequence !== null))
+        responseSequence !== null ||
+        // A phone with no pairing holds no payment and has discarded none.
+        // Both records are written only inside a pairing and are erased with
+        // it, so either one here means the state is not what it claims.
+        pendingConsent !== null ||
+        discardedConsents.length !== 0 ||
+        discardedConsentsDropped !== "0"))
   ) {
     throw new Error("The stored companion state is inconsistent.");
   }
   return value;
+}
+
+/**
+ * A consent record the native side reported, or null.
+ *
+ * These are the only two records that can block the reset, block pairing and
+ * block every other payment, and the screen renders them as the words the owner
+ * types a confirmation against. So they are checked exactly like everything
+ * else that crosses the native boundary: exact fields, no extras, a kind from
+ * the known set, a decimal amount and a recipient that is actually there. A
+ * malformed record is refused rather than rendered as a blank confirmation.
+ */
+function validatedConsentRecord(
+  value: unknown,
+  fields: readonly string[],
+  label: string,
+): Record<string, unknown> | null {
+  if (value === null || value === undefined) return null;
+  const record = exactObject(value, fields, label);
+  const kind = requireNonemptyString(record, "kind");
+  if (!CONSENT_KINDS.has(kind)) {
+    throw new Error(`The ${label} names an unknown kind.`);
+  }
+  requireNonemptyString(record, "operationId");
+  requireNonemptyString(record, "recipient");
+  requireDecimal(record, "amountUnits");
+  requireDecimal(record, "recordedAtUnix");
+  if (fields.includes("discardedAtUnix")) {
+    requireDecimal(record, "discardedAtUnix");
+    requireNonemptyString(record, "reason");
+  }
+  return record;
 }
 
 export function validatedSession(
@@ -849,6 +956,42 @@ export function authenticatedSnapshot(
   return snapshot;
 }
 
+/**
+ * True when the ONLY thing that failed the trusted-snapshot check is a payment
+ * request that ran out of time.
+ *
+ * `authenticatedSnapshot` returns null for the whole snapshot if any single
+ * approval fails, and `companionSessionExpiryMilliseconds` schedules a
+ * re-render for exactly that instant, so at the second one request times out
+ * the balance, the agent list, the activity list and any open review all vanish
+ * at once while the header still says connected. The status strip then said
+ * "Connected. Checking the desktop's data", which names the wrong cause:
+ * nothing is being checked, nothing is wrong with the connection, and the next
+ * heartbeat restores everything.
+ *
+ * This is a read. It builds a filtered copy to answer the question and throws
+ * it away; the fail-closed nulling above is untouched and the filtered copy is
+ * never rendered or trusted.
+ */
+export function snapshotBlockedOnlyByExpiredApproval(
+  snapshot: AgentCompanionSnapshot | null,
+  nowMilliseconds = Date.now(),
+): boolean {
+  if (!snapshot) return false;
+  if (authenticatedSnapshot(snapshot, nowMilliseconds) !== null) return false;
+  const kept = snapshot.pendingApprovals.filter(
+    (approval) =>
+      verifiedAgentApprovalFacts(approval, snapshot, nowMilliseconds) !== null,
+  );
+  if (kept.length === snapshot.pendingApprovals.length) return false;
+  return (
+    authenticatedSnapshot(
+      { ...snapshot, pendingApprovals: kept },
+      nowMilliseconds,
+    ) !== null
+  );
+}
+
 export function formatHacUnits(raw: string | null): string {
   if (raw === null) return "Unavailable";
   const units = parseU64Decimal(raw);
@@ -949,6 +1092,31 @@ export function verifiedAgentApprovalFacts(
   };
 }
 
+/**
+ * Whether the address in a pending approval is on the requesting agent's
+ * allowlist, computed from the snapshot the phone already holds.
+ *
+ * "not_on_allowlist" says exactly what was checked. Approving a payment never
+ * adds the address to the allowlist, so a repeat payment to the same address
+ * is reported the same way and asks again. "unverified" is returned when the
+ * snapshot carries no policy for the requesting agent, so a missing policy can
+ * never be mistaken for a vetted address.
+ */
+export type RecipientStanding = "allowlisted" | "not_on_allowlist" | "unverified";
+
+export function recipientStanding(
+  approval: AgentCompanionPendingApproval,
+  snapshot: AgentCompanionSnapshot,
+): RecipientStanding {
+  const policy = snapshot.policies.find(
+    (item) => item.agentId === approval.agentId,
+  );
+  if (!policy) return "unverified";
+  return policy.allowedRecipients.includes(approval.recipient)
+    ? "allowlisted"
+    : "not_on_allowlist";
+}
+
 export function authorizedAgentForApproval(
   approval: AgentCompanionPendingApproval,
   snapshot: AgentCompanionSnapshot,
@@ -957,6 +1125,58 @@ export function authorizedAgentForApproval(
     (agent) =>
       agent.agentId === approval.agentId && agent.authorization === "authorized",
   ) ?? null;
+}
+
+/**
+ * The `ActivitySummary.status` values that mean "this payment is waiting on this
+ * phone's rollback witness".
+ *
+ * This mirrors `WITNESS_PENDING_ACTIVITY_STATUSES` in the companion protocol,
+ * which is the same set the desktop will hand over an anchor for. Anything
+ * outside it is not something this phone can witness, so it is never offered.
+ */
+export const WITNESS_PENDING_ACTIVITY_STATUSES = [
+  "signed_awaiting_witness",
+  "submitted_awaiting_final_witness",
+  "broadcast_uncertain",
+  "reconciled_awaiting_final_witness",
+] as const;
+
+/**
+ * The single payment waiting on this phone's witness, or null.
+ *
+ * The desktop never sends a phone the wallet's activity list. The one exception
+ * is this: a phone holding the rollback-witness permission is told the id of the
+ * one operation that cannot proceed without its signature, because
+ * `RecoverPendingWitness` takes an operation id and nothing else on the wire
+ * carries one. Without it a payment approved on the desktop signs and then
+ * strands forever with no phone ever prompted.
+ *
+ * Fails closed the same way the desktop filter does. Two operations cannot
+ * legitimately be waiting at once, and if two somehow appear neither can be
+ * witnessed, so nothing is offered rather than the wrong one.
+ */
+export function pendingWitnessOperation(
+  snapshot: AgentCompanionSnapshot | null,
+): AgentCompanionActivity | null {
+  if (!snapshot) return null;
+  const waiting = snapshot.activity.filter((item) =>
+    (WITNESS_PENDING_ACTIVITY_STATUSES as readonly string[]).includes(
+      item.status,
+    ),
+  );
+  if (waiting.length !== 1) return null;
+  const [operation] = waiting;
+  const amount = parseU64Decimal(operation.amountUnits);
+  if (
+    !operation.activityId ||
+    !operation.recipient ||
+    amount === null ||
+    amount === 0n
+  ) {
+    return null;
+  }
+  return operation;
 }
 
 export function shortValue(value: string): string {

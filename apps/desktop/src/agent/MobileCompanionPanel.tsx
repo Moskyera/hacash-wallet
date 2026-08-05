@@ -20,7 +20,10 @@ import {
   parseAck,
   parseRequest,
 } from "./companionPairing";
-import { companionPairingWaitingView } from "./companionWaitingView";
+import {
+  companionPairingWaitingView,
+  companionPhoneAppName,
+} from "./companionWaitingView";
 import {
   COMPANION_ACTION_GUIDE,
   COMPANION_PAIR_ACTION,
@@ -41,10 +44,12 @@ import {
 } from "./companionPairingFeedback";
 import { DESKTOP_CONTROLS } from "./desktopControls";
 import { CompanionQrDisplay, CompanionQrScanner } from "@hacash/wallet-ui";
+import { pairingRefusalText, type AgentWalletWriteReadiness } from "./access";
 import {
-  PAIRING_BLOCKER_LABELS,
-  type AgentWalletWriteReadiness,
-} from "./access";
+  PHONE_CONNECTION_REFUSED_WHILE_STOPPED,
+  PHONE_LISTENER_FAILED_ROUTE,
+  PHONE_LISTENER_RELEASED_INFO,
+} from "./overviewLayout";
 
 /**
  * What the Overview strip needs to know about the phone, in primitives only.
@@ -57,24 +62,38 @@ export type CompanionSnapshot = {
   statusLoaded: boolean;
   belongsToAnotherWallet: boolean;
   enabled: boolean;
+  /**
+   * The listener slot is held but its server is no longer running.
+   * `agent_wallet_companion_status` reports `"enabled": true` for this phase,
+   * so it has to be carried separately or Overview reads a dead listener as a
+   * healthy one.
+   */
+  listenerFailed: boolean;
   /** A pairing offer is live, so the pairing owns the private-LAN port. */
   pairingActive: boolean;
   hasAuthorizedPhone: boolean;
   /** This desktop knows its private Wi-Fi address. */
   addressReady: boolean;
   canTurnOn: boolean;
+  /** The panel is offering "Turn off the phone connection" right now. */
+  canTurnOff: boolean;
   canStartPairing: boolean;
+  /** The panel is offering "Try automatic setup again" right now. */
+  canRetryAutomaticSetup: boolean;
 };
 
 export const EMPTY_COMPANION_SNAPSHOT: CompanionSnapshot = {
   statusLoaded: false,
   belongsToAnotherWallet: false,
   enabled: false,
+  listenerFailed: false,
   pairingActive: false,
   hasAuthorizedPhone: false,
   addressReady: false,
   canTurnOn: false,
+  canTurnOff: false,
   canStartPairing: false,
+  canRetryAutomaticSetup: false,
 };
 
 /**
@@ -83,7 +102,18 @@ export const EMPTY_COMPANION_SNAPSHOT: CompanionSnapshot = {
  */
 export type CompanionActions = {
   turnOn: (() => void) | null;
+  /**
+   * Releases the listener slot. It is the only control that can succeed while
+   * the slot is held and its server is dead, so the strip presses this one.
+   */
+  turnOff: (() => void) | null;
   startPairing: (() => void) | null;
+  /**
+   * Without a private Wi-Fi address neither phone control can run, so this is
+   * the control that state depends on. It was reachable only by scrolling into
+   * this panel; the strip presses the same handler.
+   */
+  retryAutomaticSetup: (() => void) | null;
 };
 
 type Props = {
@@ -98,6 +128,18 @@ type Props = {
    * nothing, contacts no node and needs no witness.
    */
   pairingBlockers: AgentWalletWriteReadiness[];
+  /**
+   * What stops the emergency stop being cleared from this desktop. The pairing
+   * refusal names "Enable locally" as the escape route, and this is what says
+   * whether that route is itself open.
+   */
+  localEnableBlockers: AgentWalletWriteReadiness[];
+  /**
+   * Bumped by the parent after anything that can tear the listener down
+   * (the emergency stop) or after a manual Refresh. The panel's own refresh is
+   * idempotent, so re-running it is a read and nothing else.
+   */
+  refreshToken?: number;
   /** Reports the phone state upward so the top strip can show one line. */
   onSnapshot?: (snapshot: CompanionSnapshot) => void;
   /** Filled with this panel's own handlers. Never called during render. */
@@ -112,6 +154,8 @@ export default function MobileCompanionPanel({
   run,
   onInfo,
   pairingBlockers,
+  localEnableBlockers,
+  refreshToken = 0,
   onSnapshot,
   actionsRef,
   onLockAndSwitch,
@@ -204,11 +248,19 @@ export default function MobileCompanionPanel({
   }, [walletId]);
 
   useEffect(() => {
-    void refresh().catch(() => {
+    void refresh().catch((reason) => {
+      // A failed read is not an answer. Setting statusLoaded and leaving the
+      // device list empty asserted "no phone is authorized yet" from a read
+      // that never happened, and Overview then offered Pair a phone as its
+      // primary action - which ends at PairingDeviceAlreadyRegistered for an
+      // owner whose phone was paired all along. The state stays unknown and
+      // the failure is named.
       setStatus(null);
-      setStatusLoaded(true);
+      setLocalError(
+        `This desktop could not read the phone connection status, so nothing below is known to be current. Nothing was changed and no phone was unpaired. Choose ${DESKTOP_CONTROLS.refresh} at the top of this page to read it again. ${readableError(reason)}`,
+      );
     });
-  }, [refresh]);
+  }, [refresh, refreshToken]);
 
   useEffect(() => {
     if (!offer) return undefined;
@@ -248,13 +300,18 @@ export default function MobileCompanionPanel({
     : null;
   const pairingExpired = pairingSecondsRemaining === 0;
   const hasAuthorizedDevice = devices.some((device) => !device.revoked_at);
-  const linkOn = Boolean(status?.enabled);
+  // "failed" means the slot is still held and the server behind it is not
+  // running. The backend reports enabled:true for it exactly as it does for a
+  // healthy listener, so reading enabled alone told the owner the connection
+  // was on while every phone was being refused.
+  const listenerFailed = status?.phase === "failed";
+  const linkOn = Boolean(status?.enabled) && !listenerFailed;
+  const paymentsSuspended = pairingBlockers.includes("payments_suspended");
   // Explaining the refusal before the click is the whole point. Rust already
   // rejects pairing while the emergency stop is engaged; saying so here turns a
-  // thrown error into an instruction that names the escape route.
-  const pairingRefusal = pairingBlockers
-    .map((blocker) => PAIRING_BLOCKER_LABELS[blocker])
-    .join(" ");
+  // thrown error into an instruction that names the escape route, and says so
+  // when that escape route is itself closed.
+  const pairingRefusal = pairingRefusalText(pairingBlockers, localEnableBlockers);
   const pairingIsBlocked = pairingBlockers.length > 0;
   // Presentation only. While the phone's acknowledgement is outstanding the
   // finish step cannot render, so without this the owner stares at a six digit
@@ -294,23 +351,56 @@ export default function MobileCompanionPanel({
   }
 
   // Written as the refusal, not the permission, so the exact condition the
-  // previous control used is preserved verbatim.
+  // previous control used is preserved verbatim. `listenerFailed` is added
+  // because CompanionSupervisor::start refuses outright while a dead slot is
+  // still held ("stop the active mobile companion before starting another"), so
+  // in that one state the control could not succeed.
   const turnOnUnavailable =
-    busy || !bindAddress || !hasAuthorizedDevice || Boolean(offer);
+    busy ||
+    !bindAddress ||
+    !hasAuthorizedDevice ||
+    Boolean(offer) ||
+    listenerFailed;
   const canTurnOn = !turnOnUnavailable;
+  // Written as the condition the button is rendered and enabled under, so the
+  // strip can never offer a press this panel is not offering.
+  const canTurnOff = !busy && !Boolean(offer) && (linkOn || listenerFailed);
   const startPairingUnavailable =
     busy || !endpoint.trim() || pairingBlockers.length > 0 || Boolean(offer);
   const canStartPairing = !startPairingUnavailable;
+  // The exact condition the panel's own button is rendered and enabled under,
+  // written once so the strip can never offer a control this panel is not.
+  //
+  // It used to read `!endpoint`, while every sentence that named it and the
+  // Overview row that pressed it were derived from `bindAddress`, which is the
+  // endpoint with "hpay-lan://" stripped. An endpoint holding only the scheme,
+  // or a half-edited address, produced a state that told the owner twice to
+  // choose a button that neither surface rendered.
+  const canRetryAutomaticSetup = !busy && !bindAddress && !offer;
+
+  const turnOffConnection = useCallback(() => {
+    void run(async () => {
+      await agentWalletApi.stopCompanion(walletId);
+      await refresh();
+      onInfo(
+        listenerFailed
+          ? PHONE_LISTENER_RELEASED_INFO
+          : "The phone connection is off. Every paired phone stays paired and can connect again once you turn it back on.",
+      );
+    });
+  }, [run, walletId, refresh, onInfo, listenerFailed]);
 
   const turnOnConnection = useCallback(() => {
     void runPairingStep("reconnect", async () => {
       await agentWalletApi.startCompanion(walletId, bindAddress);
       await refresh();
       onInfo(
-        "The phone connection is on. A paired phone can now reach this desktop on your private Wi-Fi.",
+        paymentsSuspended
+          ? `The phone connection is open on your private Wi-Fi. ${PHONE_CONNECTION_REFUSED_WHILE_STOPPED}`
+          : "The phone connection is on. A paired phone can now reach this desktop on your private Wi-Fi.",
       );
     });
-  }, [runPairingStep, walletId, bindAddress, refresh, onInfo]);
+  }, [runPairingStep, walletId, bindAddress, refresh, onInfo, paymentsSuspended]);
 
   const startPairing = useCallback(() => {
     void runPairingStep("start", async () => {
@@ -320,9 +410,24 @@ export default function MobileCompanionPanel({
         endpoint.trim(),
       );
       setOffer(next);
-      onInfo("Open HPAY Agent Wallet on the phone and scan this QR once.");
+      // "HPAY Agent Wallet" was the name of nothing. The phone app is
+      // companionPhoneAppName, and companionWaiting.test.ts pins that against
+      // the phone sources.
+      onInfo(`Open ${companionPhoneAppName} on the phone and scan this QR once.`);
     });
   }, [runPairingStep, walletId, endpoint, onInfo]);
+
+  // Exactly what the panel's own button does, lifted so the strip presses the
+  // same call rather than a second implementation of it.
+  const retryAutomaticSetup = useCallback(() => {
+    void agentWalletApi
+      .suggestCompanionEndpoint()
+      .then((value) => {
+        setEndpoint(value);
+        setLocalError("");
+      })
+      .catch((reason) => setLocalError(readableError(reason)));
+  }, []);
 
   // Assigned, never read, during render. No state changes here, so this cannot
   // feed back into the parent and re-render it.
@@ -330,7 +435,9 @@ export default function MobileCompanionPanel({
     if (!actionsRef) return;
     actionsRef.current = {
       turnOn: canTurnOn ? turnOnConnection : null,
+      turnOff: canTurnOff ? turnOffConnection : null,
       startPairing: canStartPairing ? startPairing : null,
+      retryAutomaticSetup: canRetryAutomaticSetup ? retryAutomaticSetup : null,
     };
   });
 
@@ -339,22 +446,28 @@ export default function MobileCompanionPanel({
       statusLoaded,
       belongsToAnotherWallet: otherWallet,
       enabled: linkOn,
+      listenerFailed,
       pairingActive: Boolean(offer),
       hasAuthorizedPhone: hasAuthorizedDevice,
       addressReady: Boolean(bindAddress),
       canTurnOn,
+      canTurnOff,
       canStartPairing,
+      canRetryAutomaticSetup,
     });
   }, [
     onSnapshot,
     statusLoaded,
     otherWallet,
     linkOn,
+    listenerFailed,
     offer,
     hasAuthorizedDevice,
     bindAddress,
     canTurnOn,
+    canTurnOff,
     canStartPairing,
+    canRetryAutomaticSetup,
   ]);
 
   return (
@@ -388,32 +501,35 @@ export default function MobileCompanionPanel({
           disclosure: this is the control the whole phone connection depends on
           and it used to sit 2.8 screens below the fold. */}
       <div className="agent-companion-primary">
-        {linkOn ? (
+        {linkOn || listenerFailed ? (
           <div className="agent-control-row">
             <code>{status?.localAddress}</code>
             <button
               type="button"
-              disabled={busy || Boolean(offer)}
-              onClick={() =>
-                void run(async () => {
-                  await agentWalletApi.stopCompanion(walletId);
-                  await refresh();
-                  onInfo(
-                    "The phone connection is off. Every paired phone stays paired and can connect again once you turn it back on.",
-                  );
-                })
-              }
+              className={listenerFailed ? "agent-primary-action" : ""}
+              disabled={!canTurnOff}
+              onClick={turnOffConnection}
             >
               {COMPANION_STOP_LINK_ACTION}
             </button>
           </div>
         ) : null}
 
+        {/* The listener slot is still held and its server is not running, so
+            every phone is refused and starting it again is refused too. Only
+            the control that can succeed is offered, and the sentence names the
+            two presses in the order that works. */}
+        {listenerFailed && !offer && (
+          <p className="agent-warning" role="status">
+            {PHONE_LISTENER_FAILED_ROUTE}
+          </p>
+        )}
+
         {/* Turning the connection on is hidden, not disabled, when there is
             nothing for it to connect to: with no authorized phone the desktop
             refuses it outright. The sentence that replaces it names the control
             that does work. */}
-        {!linkOn && !offer && hasAuthorizedDevice && (
+        {!linkOn && !listenerFailed && !offer && hasAuthorizedDevice && (
           <>
             <div className="agent-control-row">
               <span className="agent-muted">
@@ -436,8 +552,16 @@ export default function MobileCompanionPanel({
             {!bindAddress && (
               <p className="agent-warning" role="status">
                 {COMPANION_START_LINK_ACTION} is unavailable because this desktop
-                has no private Wi-Fi address yet. Choose Try automatic setup
-                again, or open Advanced connection settings and enter it.
+                has no private Wi-Fi address yet. Choose{" "}
+                {DESKTOP_CONTROLS.retry_automatic_setup} just below, or open
+                Advanced connection settings and enter it.
+              </p>
+            )}
+            {/* Said before the press, not after it: the listener really does
+                start, and every session a phone then opens is still refused. */}
+            {bindAddress && paymentsSuspended && (
+              <p className="agent-warning" role="status">
+                {PHONE_CONNECTION_REFUSED_WHILE_STOPPED}
               </p>
             )}
             {stepError("reconnect") && (
@@ -446,7 +570,7 @@ export default function MobileCompanionPanel({
           </>
         )}
 
-        {!linkOn && !offer && !hasAuthorizedDevice && (
+        {!linkOn && !listenerFailed && !offer && statusLoaded && !hasAuthorizedDevice && (
           <p className="agent-muted" role="status">
             {COMPANION_START_LINK_ACTION} is not shown because no phone is
             authorized on this Agent Wallet yet. There is nothing for it to
@@ -505,7 +629,8 @@ export default function MobileCompanionPanel({
         {!offer && !endpoint.trim() && !pairingIsBlocked && (
           <p className="agent-warning" role="status">
             {COMPANION_PAIR_ACTION} is unavailable because this desktop has no
-            private Wi-Fi address yet. Choose Try automatic setup again, or open
+            private Wi-Fi address yet. Choose{" "}
+            {DESKTOP_CONTROLS.retry_automatic_setup} just below, or open
             Advanced connection settings and enter it.
           </p>
         )}
@@ -513,20 +638,14 @@ export default function MobileCompanionPanel({
           <PairingFailure message={stepError("start")} />
         )}
 
-        {!endpoint && !offer ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() =>
-              void agentWalletApi
-                .suggestCompanionEndpoint()
-                .then((value) => {
-                  setEndpoint(value);
-                  setLocalError("");
-                })
-                .catch((reason) => setLocalError(readableError(reason)))
-            }
-          >
+        {/* Rendered from `bindAddress`, the same fact every sentence that names
+            this button and the Overview row that presses it are derived from.
+            It used to render from `endpoint`, so an endpoint holding only
+            "hpay-lan://" left two sentences pointing at a button that was not
+            on the screen. It is a read: it asks this desktop for its own
+            private Wi-Fi address and costs nothing. */}
+        {!bindAddress && !offer ? (
+          <button type="button" disabled={busy} onClick={retryAutomaticSetup}>
             {DESKTOP_CONTROLS.retry_automatic_setup}
           </button>
         ) : null}
@@ -709,7 +828,11 @@ export default function MobileCompanionPanel({
 
         {offer && confirmation && ack && (
           <div className="agent-companion-step">
-            <h3>5. Confirm locally on this desktop</h3>
+            {/* This is step 3 of the manual fallback path, which goes 1, 2,
+                then here. It was numbered 5 because the automatic path has two
+                steps of its own that the fallback never renders, so an owner on
+                this path went looking for two steps that do not exist. */}
+            <h3>3. Confirm locally on this desktop</h3>
             <label className="agent-field">
               Enter the code shown above
               <input
@@ -751,7 +874,10 @@ export default function MobileCompanionPanel({
           </div>
         )}
 
-        {offer && (
+        {/* The waiting card renders the same control, with the same handler and
+            the same label, as its own primary once the offer has expired. Two
+            identical buttons would be the same press twice. */}
+        {offer && !waiting?.restartAction && (
           <>
             <button
               type="button"
@@ -770,12 +896,24 @@ export default function MobileCompanionPanel({
       <div className="agent-companion-devices">
         <h3>Authorized mobile devices</h3>
         {devices.length === 0 ? (
-          <p className="agent-muted">
-            No phone is authorized yet. A phone that shows One last step or
-            Complete pairing on HPAY Desktop is not authorized here and every
-            connection it attempts will be refused until {COMPANION_PAIR_ACTION}{" "}
-            is finished on this desktop.
-          </p>
+          // Only claimed once the list has actually been read. An unread list
+          // is not an empty list, and asserting "no phone is authorized yet"
+          // from a failed read is what sent an owner whose phone was already
+          // paired into a pairing that ends at "already authorized".
+          statusLoaded ? (
+            <p className="agent-muted">
+              No phone is authorized yet. A phone that shows One last step or
+              Complete pairing on HPAY Desktop is not authorized here and every
+              connection it attempts will be refused until{" "}
+              {COMPANION_PAIR_ACTION} is finished on this desktop.
+            </p>
+          ) : (
+            <p className="agent-muted" role="status">
+              The list of authorized phones has not been read yet, so this is
+              not a statement that no phone is paired. Choose{" "}
+              {DESKTOP_CONTROLS.refresh} at the top of this page to read it.
+            </p>
+          )
         ) : (
           devices.map((device) => (
             <div className="agent-companion-device" key={device.device_id}>
@@ -893,6 +1031,22 @@ export default function MobileCompanionPanel({
             detection fails.
           </small>
         </label>
+        {/* Once an address had been detected once, the retry above stopped
+            rendering for good, so an owner whose private Wi-Fi address changed
+            had no way to detect the new one. Same handler, same read, always
+            reachable. */}
+        <p className="agent-muted">
+          Moved to a different Wi-Fi network? This asks the desktop for its
+          current private address and overwrites the field above. It costs
+          nothing, moves no money and unpairs no phone.
+        </p>
+        <button
+          type="button"
+          disabled={busy || Boolean(offer)}
+          onClick={retryAutomaticSetup}
+        >
+          {DESKTOP_CONTROLS.retry_automatic_setup}
+        </button>
       </details>
     </section>
   );

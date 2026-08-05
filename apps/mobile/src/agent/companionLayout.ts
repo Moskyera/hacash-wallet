@@ -189,6 +189,162 @@ export function companionPageLeadsWithOwnContent(
  * and pretending a button could change that is exactly the kind of instruction
  * that has already cost an owner a device.
  */
+/* -------------------------------------------------------------------------- */
+/* Placement: which block is on the first screen, and what it owns             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The blocks the phone stacks inside <main>, named so their order can be
+ * decided in one place and tested.
+ *
+ * The desktop had the same fault and the same shape of fix: a control the
+ * current state depends on rendered three blocks down, so it could only be
+ * found by scrolling. `companionPageLeadsWithOwnContent` moved the selected
+ * tab, which was complaint 2 above; it did nothing for the shared blocks, so a
+ * phone waiting on "Send my confirmation" still rendered a full Security tab
+ * above the only control that state has.
+ */
+export type CompanionBlockId =
+  /** The one-line status and the standing boundary note. Always first. */
+  | "status_strip"
+  /** The unpaired onboarding hero. Explanation, plus the setup route. */
+  | "onboarding"
+  /** The pairing ceremony, step by step. */
+  | "pairing"
+  /** "Complete pairing on HPAY Desktop", the shared one-last-step block. */
+  | "pending_pairing_step"
+  /** The desktop connection card. */
+  | "connection"
+  /** The selected tab. */
+  | "page_content";
+
+/**
+ * The resting order: exactly the order these blocks were already rendered in.
+ * Nothing is added, removed or re-wired here; one block is moved up.
+ */
+const COMPANION_RESTING_ORDER: readonly CompanionBlockId[] = [
+  "status_strip",
+  "onboarding",
+  "pairing",
+  "pending_pairing_step",
+  "connection",
+  "page_content",
+];
+
+/**
+ * The block that renders each primary action's control.
+ *
+ * Checked against the sources, so a control that moves block breaks the build
+ * rather than quietly dropping below the fold.
+ */
+export const COMPANION_PRIMARY_ACTION_BLOCK: Readonly<
+  Record<Exclude<CompanionPrimaryActionId, "none">, CompanionBlockId>
+> = {
+  open_security_setup: "onboarding",
+  create_identity: "page_content",
+  scan_desktop_qr: "pairing",
+  send_confirmation: "pending_pairing_step",
+  connect: "connection",
+  try_again: "connection",
+  review_approval: "page_content",
+};
+
+export type CompanionBlockOrderInput = CompanionPrimaryActionInput & {
+  /** The pairing ceremony has completed on this phone and is still on screen. */
+  pairingCompleted: boolean;
+  /** A snapshot that passed every validation is available. */
+  hasTrustedSnapshot: boolean;
+};
+
+/**
+ * The block that owns the one control this state depends on, or null when the
+ * state has no primary action at all.
+ */
+export function companionPrimaryActionBlock(
+  input: CompanionBlockOrderInput,
+): CompanionBlockId | null {
+  const primary = companionPrimaryAction(input);
+  if (primary.id === "none") return null;
+  if (primary.id === "send_confirmation" && input.pairingCompleted) {
+    // Two blocks carry that button, and only one of them is on screen at a
+    // time. While the ceremony is still showing, it is the ceremony's own last
+    // step; the shared block takes over once the ceremony is dismissed.
+    return "pairing";
+  }
+  return COMPANION_PRIMARY_ACTION_BLOCK[primary.id];
+}
+
+/** The block that goes directly under the status strip, or null for the resting order. */
+function companionLeadBlock(
+  input: CompanionBlockOrderInput,
+): CompanionBlockId | null {
+  const owner = companionPrimaryActionBlock(input);
+  if (owner) return owner;
+  // A ceremony in progress carries one primary per step rather than one for
+  // the whole state, so no label can be named, but the panel still owns every
+  // control the owner needs.
+  if (input.pairingInProgress) return "pairing";
+  return companionPageLeadsWithOwnContent(input) ? "page_content" : null;
+}
+
+/**
+ * The blocks this state renders, top first.
+ *
+ * The status strip is always first: it is one line, and it is the only thing
+ * that is allowed above the control a state depends on.
+ */
+export function companionBlockOrder(
+  input: CompanionBlockOrderInput,
+): CompanionBlockId[] {
+  const rendered = COMPANION_RESTING_ORDER.filter((block) =>
+    companionBlockIsRendered(block, input),
+  );
+  const lead = companionLeadBlock(input);
+  if (!lead || !rendered.includes(lead)) return [...rendered];
+  return [
+    "status_strip",
+    lead,
+    ...rendered.filter(
+      (block) => block !== "status_strip" && block !== lead,
+    ),
+  ];
+}
+
+/** Whether a block renders at all in this state. Mirrors the JSX guards. */
+export function companionBlockIsRendered(
+  block: CompanionBlockId,
+  input: CompanionBlockOrderInput,
+): boolean {
+  switch (block) {
+    case "status_strip":
+    case "page_content":
+      return true;
+    case "onboarding":
+      return !input.configured;
+    case "pairing":
+      return !input.configured || input.pairingCompleted;
+    case "pending_pairing_step":
+      return input.pendingPairingFinalization && !input.pairingCompleted;
+    case "connection":
+      return input.configured;
+  }
+}
+
+/**
+ * How much of the phone screen is visible without scrolling at 960px.
+ *
+ * Measured: the app header, the one-line status strip and the bottom tab bar
+ * take the top and the bottom, and one panel fits between them.
+ */
+export const COMPANION_ABOVE_THE_FOLD_PANELS = 1;
+
+/** The blocks a 960px phone shows without scrolling. */
+export function companionAboveTheFold(
+  order: readonly CompanionBlockId[],
+): CompanionBlockId[] {
+  return order.slice(0, 1 + COMPANION_ABOVE_THE_FOLD_PANELS);
+}
+
 export const COMPANION_PLATFORM_UNSUPPORTED_TITLE =
   "This phone cannot hold the secure identity";
 

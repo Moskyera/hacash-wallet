@@ -30,8 +30,12 @@ import {
 } from "./access";
 import { connectorStatusForWallet } from "./controlSafety";
 import { DESKTOP_CONTROLS, type DesktopControlId } from "./desktopControls";
-import { EMERGENCY_STOP_WARNING } from "./irreversibleActions";
 import {
+  EMERGENCY_STOP_STOPS_LISTENERS,
+  EMERGENCY_STOP_WARNING,
+} from "./irreversibleActions";
+import {
+  CLEAR_STOP_CANCELS_PENDING_REQUESTS,
   nodeAlertState,
   overviewAlerts,
   overviewBlockOrder,
@@ -88,9 +92,16 @@ export default function AgentWalletApp({
   const [companion, setCompanion] = useState<CompanionSnapshot>(
     EMPTY_COMPANION_SNAPSHOT,
   );
+  /**
+   * Bumped whenever the phone panel must re-read. Its own refresh is a read and
+   * is idempotent, so this triggers a status read and nothing else.
+   */
+  const [companionRefreshToken, setCompanionRefreshToken] = useState(0);
   const companionActions = useRef<CompanionActions>({
     turnOn: null,
+    turnOff: null,
     startPairing: null,
+    retryAutomaticSetup: null,
   });
 
   const refreshRuntime = useCallback(async () => {
@@ -109,6 +120,24 @@ export default function AgentWalletApp({
     const next = await agentWalletApi.overview(selected.wallet_id);
     setOverview(next);
   }, [selected]);
+
+  /**
+   * Everything the Overview shows, re-read together.
+   *
+   * Refresh used to read only `agent_wallet_overview`, so the connector phase
+   * and the phone connection status were never re-read at all. That is why the
+   * connector could sit on "starting" for good beside a sentence saying "wait
+   * for it to finish, then try again": nothing ever asked again. It is also
+   * what left the connector and phone panels asserting they were on after an
+   * emergency stop had torn both listeners down.
+   *
+   * Three reads and one state bump. Nothing here starts, stops or changes
+   * anything.
+   */
+  const refreshAll = useCallback(async () => {
+    setCompanionRefreshToken((token) => token + 1);
+    await Promise.all([refreshOverview(), refreshRuntime()]);
+  }, [refreshOverview, refreshRuntime]);
 
   useEffect(() => {
     void refreshRuntime().catch((reason) =>
@@ -131,10 +160,12 @@ export default function AgentWalletApp({
   useEffect(() => {
     if (!overview?.unlocked) return;
     const timer = window.setInterval(() => {
-      void refreshOverview().catch(() => undefined);
+      // The runtime read belongs here too: without it a connector that finished
+      // starting, failed, or was stopped by something else never showed up.
+      void refreshAll().catch(() => undefined);
     }, 15_000);
     return () => window.clearInterval(timer);
-  }, [overview?.unlocked, refreshOverview]);
+  }, [overview?.unlocked, refreshAll]);
 
   const run = useCallback(async (work: () => Promise<void>) => {
     setBusy(true);
@@ -340,27 +371,43 @@ export default function AgentWalletApp({
           busy={busy}
           run={run}
           onInfo={setInfo}
-          onRefresh={refreshOverview}
+          onError={setError}
+          onRefresh={refreshAll}
           paymentBlockers={paymentBlockers}
           localEnableBlockers={localEnableBlockers}
           pairingBlockers={pairingBlockers}
           companion={companion}
           companionActions={companionActions}
+          companionRefreshToken={companionRefreshToken}
           onCompanionSnapshot={setCompanion}
           onOpenPage={setPage}
           onLockAndSwitch={() => void lockAgentWallet()}
           onEmergencyStop={() =>
             run(async () => {
               await agentWalletApi.emergencyStop(overview.wallet_id);
-              setInfo("All Agent Wallet payments are disabled.");
-              await refreshOverview();
+              // agent_wallet_emergency_stop also tears down the AI agent
+              // connector and the phone listener, and cancels any pairing that
+              // was on screen. Re-reading only the overview left both panels
+              // reporting that they were still on.
+              setPairingActivation(null);
+              setPendingPairing(null);
+              setInfo(
+                "All Agent Wallet payments are disabled. The AI agent connector and the phone connection on this desktop were stopped too, and any pairing in progress was cancelled. Paired phones and agents stay paired.",
+              );
+              await refreshAll();
             })
           }
           onEnable={() =>
             run(async () => {
               await agentWalletApi.enablePayments(overview.wallet_id);
-              setInfo("Agent payments are enabled. Every payment still requires manual approval.");
-              await refreshOverview();
+              // enable_agent_payments_locally cancels every pending
+              // pre-signing operation on the wallet, for every agent. Saying so
+              // afterwards is not enough on its own; PaymentControlPanel and
+              // the Security page both say it before the press.
+              setInfo(
+                "Agent payments are enabled. Every payment still requires manual approval. Every payment request that was waiting for your decision was cancelled, so each agent has to ask again.",
+              );
+              await refreshAll();
             })
           }
           onStartConnector={() =>
@@ -430,14 +477,17 @@ export default function AgentWalletApp({
                   max_pending_operations: 1,
                   allowed_recipients: [],
                   blocked_recipients: [],
+                  allow_unlisted_recipient_with_approval: false,
                   approval_mode: "desktop_manual",
                   policy_epoch: 1,
                 },
               );
               setPairingActivation(null);
               setPendingPairing(null);
-              setInfo("The local agent is paired read-only. Spending remains disabled in Rules.");
-              await refreshOverview();
+              setInfo(
+                "The local agent is paired read-only. Spending remains disabled in Rules. Every payment request that was waiting for your decision, on every other agent, was cancelled and has to be asked again.",
+              );
+              await refreshAll();
             })
           }
           onRejectPairing={() =>
@@ -535,7 +585,18 @@ function CreateAgentWallet({
         <summary>What this wallet can and cannot do</summary>
         <ul>
           <li>Testnet foundation only in this release.</li>
-          <li>Every payment requires manual desktop approval.</li>
+          {/* This said "Every payment requires manual desktop approval." In a
+              Testnet Pilot build the desktop cannot complete an approval at
+              all, so that read as a description of a working flow. */}
+          <li>
+            Every payment requires an explicit decision, and no payment is ever
+            approved automatically.
+          </li>
+          <li>
+            Approving a payment is not available in this pilot build, on this
+            desktop or on the paired phone, so no agent payment can complete
+            yet. Requesting, reviewing and rejecting all work.
+          </li>
           <li>Agents never receive a private key or raw signing access.</li>
           <li>Agent L2 Fast Pay is not enabled in this release.</li>
           <li>
@@ -546,6 +607,16 @@ function CreateAgentWallet({
         </ul>
       </details>
       {(error || localError) && <div className="alert">{error || localError}</div>}
+      {/* Before the passphrase is chosen, not after the fact on another screen.
+          The only place this release stated it was inside Local Pilot health,
+          which an owner reaches long after creating the wallet. */}
+      <div className="agent-warning">
+        This release has no Agent Wallet backup and no recovery path. This
+        passphrase is the only thing that opens this wallet. If it is lost, the
+        wallet and anything ever sent to its address are lost for good, and
+        nothing on this desktop or on a paired phone can recover them. Write it
+        down somewhere you will still have in a year before continuing.
+      </div>
       <label>
         Agent Wallet passphrase
         <input
@@ -682,6 +753,8 @@ type PageContentProps = {
   busy: boolean;
   run: (work: () => Promise<void>) => Promise<void>;
   onInfo: (message: string) => void;
+  /** Reports a failure that never reaches `run`, such as a refused clipboard. */
+  onError: (message: string) => void;
   onRefresh: () => Promise<void>;
   /** Gates decision 1 only: making a payment. */
   paymentBlockers: AgentWalletWriteReadiness[];
@@ -691,6 +764,8 @@ type PageContentProps = {
   pairingBlockers: AgentWalletWriteReadiness[];
   companion: CompanionSnapshot;
   companionActions: React.MutableRefObject<CompanionActions>;
+  /** Bumped by the page-head Refresh and after an emergency stop. */
+  companionRefreshToken: number;
   onCompanionSnapshot: (snapshot: CompanionSnapshot) => void;
   onOpenPage: (page: AgentPage) => void;
   onLockAndSwitch: () => void;
@@ -713,12 +788,14 @@ function AgentPageContent(props: PageContentProps) {
     busy,
     run,
     onInfo,
+    onError,
     onRefresh,
     paymentBlockers,
     localEnableBlockers,
     pairingBlockers,
     companion,
     companionActions,
+    companionRefreshToken,
     onCompanionSnapshot,
     onOpenPage,
     onLockAndSwitch,
@@ -757,6 +834,7 @@ function AgentPageContent(props: PageContentProps) {
     statusLoaded: companion.statusLoaded,
     belongsToAnotherWallet: companion.belongsToAnotherWallet,
     enabled: companion.enabled,
+    listenerFailed: companion.listenerFailed,
     pairingActive: companion.pairingActive,
   });
   const alerts = overviewAlerts({
@@ -792,8 +870,19 @@ function AgentPageContent(props: PageContentProps) {
     turn_on_phone_connection: companion.canTurnOn
       ? () => companionActions.current.turnOn?.()
       : undefined,
+    // Against a dead listener slot this is the only press that can succeed:
+    // start is refused while the slot is held.
+    turn_off_phone_connection: companion.canTurnOff
+      ? () => companionActions.current.turnOff?.()
+      : undefined,
     pair_a_phone: companion.canStartPairing
       ? () => companionActions.current.startPairing?.()
+      : undefined,
+    // Without a private Wi-Fi address neither phone control can run, so this
+    // is the control that state depends on. It was named by the strip but had
+    // to be scrolled to; now the strip presses the panel's own handler.
+    retry_automatic_setup: companion.canRetryAutomaticSetup
+      ? () => companionActions.current.retryAutomaticSetup?.()
       : undefined,
   };
 
@@ -832,6 +921,8 @@ function AgentPageContent(props: PageContentProps) {
             run={run}
             onInfo={onInfo}
             pairingBlockers={pairingBlockers}
+            localEnableBlockers={localEnableBlockers}
+            refreshToken={companionRefreshToken}
             onSnapshot={onCompanionSnapshot}
             actionsRef={companionActions}
             onLockAndSwitch={onLockAndSwitch}
@@ -891,18 +982,37 @@ function AgentPageContent(props: PageContentProps) {
         <div>
           <span className="agent-eyebrow">Manual approval only</span>
           <h1>AI Agent Wallet</h1>
-          <p>{overview.address}</p>
+          {/* The second route. Copy address can fail, and this is selectable
+              text, so the address the owner has to fund is never only behind a
+              button. */}
+          <p className="agent-exact-address">{overview.address}</p>
         </div>
         <div className="agent-control-row">
           {/* Funding this wallet means sending HAC to this address, and there
-              was no way to get the address off the screen. */}
+              was no way to get the address off the screen.
+
+              The optional chain used to short-circuit the whole expression when
+              navigator.clipboard was absent, and the trailing catch discarded a
+              rejected write, so the press produced no line, no error, nothing
+              at all. Both now report. */}
           <button
             type="button"
             onClick={() => {
-              void navigator.clipboard
-                ?.writeText(overview.address)
+              const clipboard = navigator.clipboard;
+              if (!clipboard) {
+                onError(
+                  "This desktop did not offer a clipboard, so nothing was copied. The full address is shown above this row and can be selected and copied by hand.",
+                );
+                return;
+              }
+              void clipboard
+                .writeText(overview.address)
                 .then(() => onInfo("The Agent Wallet address was copied."))
-                .catch(() => undefined);
+                .catch((reason) =>
+                  onError(
+                    `The address could not be copied to the clipboard, so nothing was copied. The full address is shown above this row and can be selected and copied by hand. ${readableError(reason)}`,
+                  ),
+                );
             }}
           >
             {DESKTOP_CONTROLS.copy_address}
@@ -1010,6 +1120,10 @@ function NodeHealthPanel({
           <div><dt>Rollback witness</dt><dd>{overview.mobile_witness_synchronized ? "Synchronized" : overview.mobile_witness_ready ? "Out of sync" : "Not initialized"}</dd></div>
           <div><dt>Latest anchor</dt><dd>{overview.latest_anchor_sequence || "None"}</dd></div>
           <div><dt>Unresolved signed</dt><dd>{overview.unresolved_signed_operations}</dd></div>
+          <div><dt>Witness rotation</dt><dd>{overview.witness_rotation_phase?.replace(/_/g, " ") ?? "stable"}</dd></div>
+          {/* Fetched all along and rendered nowhere, so the real reason a node
+              check failed was discarded and the strip guessed at it instead. */}
+          <div className="wide"><dt>Last node check</dt><dd>{overview.node_error ?? "No failure reported"}</dd></div>
         </dl>
       </details>
       {!overview.mainnet_spending_ready && (
@@ -1022,10 +1136,15 @@ function NodeHealthPanel({
       <details className="agent-advanced-details">
         <summary>What this release supports</summary>
         <p>
-          Available now: HAC on L1 with desktop approval and a paired mobile
-          read-only rollback witness. HACD, BTC, HIP-20, providers and Agent
-          Fast Pay remain unavailable until their security paths are implemented
-          and verified.
+          {/* This claimed "HAC on L1 with desktop approval" was available. The
+              desktop approval command refuses unconditionally in a pilot
+              build, and the Desktop only approval mode this desktop writes
+              also refuses the phone, so nothing could be approved. */}
+          Available now: proposing, reviewing and rejecting HAC payments on L1,
+          with a paired mobile read-only rollback witness. Completing a payment
+          is not available: this pilot build has no device that can approve one.
+          HACD, BTC, HIP-20, providers and Agent Fast Pay remain unavailable
+          until their security paths are implemented and verified.
         </p>
       </details>
     </section>
@@ -1117,6 +1236,19 @@ function PaymentControlPanel({
       </div>
       {stopControl.action === "enable" && localEnableBlockers.length > 0 && (
         <p className="agent-warning" role="status">{stopControl.reason}</p>
+      )}
+      {/* Before the press and never behind a disclosure. Enabling was described
+          everywhere as a control that changes nothing but the flag; it cancels
+          every pending payment request on the wallet. */}
+      {stopControl.action === "enable" && (
+        <p className="agent-warning" role="status">
+          {CLEAR_STOP_CANCELS_PENDING_REQUESTS}
+        </p>
+      )}
+      {stopControl.action === "disable" && (
+        <p className="agent-warning" role="status">
+          {EMERGENCY_STOP_STOPS_LISTENERS}
+        </p>
       )}
       <p>{EMERGENCY_STOP_WARNING}</p>
       <details className="agent-advanced-details">
@@ -1219,7 +1351,10 @@ function ConnectorPanel({
       {!canStop && connector.phase !== "stopped" && (
         <p className="agent-muted" role="status">
           {DESKTOP_CONTROLS.start_connector} is unavailable while it is{" "}
-          {connector.phase}. Wait for it to finish, then try again.
+          {connector.phase}. Nothing on this screen changes that. Choose{" "}
+          {DESKTOP_CONTROLS.refresh} at the top of this page to ask again: it
+          re-reads the connector, the phone connection and the node, and costs
+          nothing. This state also re-reads itself every fifteen seconds.
         </p>
       )}
       <details className="agent-advanced-details">
@@ -1274,6 +1409,16 @@ function ConnectorPanel({
               <p>
                 Initial approval is read-only with zero spending limits. You
                 can review any later permission change in Rules.
+              </p>
+              {/* Before the press. `record_pairing_approval`
+                  (crates/agent-wallet-core/src/service/connector.rs) cancels
+                  every pre-signing operation on the wallet, scope None, before
+                  it records the new agent. Nothing here said so. */}
+              <p className="agent-warning" role="status">
+                Approving also cancels every payment request that is waiting for
+                your decision, on every other agent on this wallet. Those
+                requests are gone and each agent has to ask again. Reject
+                changes nothing.
               </p>
               <div className="agent-control-row">
                 <button

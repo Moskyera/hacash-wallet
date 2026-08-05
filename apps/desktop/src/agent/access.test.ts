@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { AgentRuntimeStatus, AgentWalletOverview } from "./api";
+import { readFileSync } from "node:fs";
 import {
+  APPROVE_OUTCOME_NOTICE,
   HPAY_LOCAL_PILOT,
   agentWalletLocalEnableBlockers,
   agentWalletPairingBlockers,
   agentWalletPaymentBlockers,
   agentWalletUiState,
+  approvalOutcome,
+  approvalResultNotice,
   emergencyStopControl,
+  pairingRefusalText,
+  rotationBlocksAgentWrites,
 } from "./access";
+import type { WitnessRotationPhase } from "./api";
 
 const runtime = (overrides: Partial<AgentRuntimeStatus> = {}): AgentRuntimeStatus => ({
   available: true,
@@ -351,5 +358,232 @@ describe("pairing a phone is gated only on what pairing genuinely needs", () => 
     expect(
       agentWalletPairingBlockers(runtime({ pilot_enabled: false }), overview()),
     ).toEqual(["disabled_by_build"]);
+  });
+});
+
+
+/**
+ * The desktop offers the Approve control again, and everything printed around
+ * it has to be true in the state it is printed in.
+ *
+ * `approve_desktop_and_broadcast` no longer refuses every desktop approval
+ * under `agent-wallet-testnet-pilot`. What it does instead is build-dependent
+ * in exactly one way: a pilot approval signs and stops at
+ * `signed_awaiting_witness`, and the payment reaches the network only after the
+ * paired phone witnesses it. Rust pins the whole path in
+ * crates/agent-wallet-core/src/service/companion/tests/desktop_witness_flow.rs.
+ */
+describe("the desktop says what approving actually does", () => {
+  it("names the pilot outcome as signing that stops for the phone", () => {
+    expect(approvalOutcome(overview({ pilot_enabled: true }))).toBe(
+      "signs_then_waits_for_the_phone",
+    );
+    expect(approvalOutcome(overview({ pilot_enabled: false }))).toBe(
+      "signs_and_broadcasts",
+    );
+  });
+
+  it("keys on the build and nothing else", () => {
+    // Not payment readiness, not the emergency stop, not the phone, not the
+    // node. Whether an individual approval succeeds is Rust's decision and
+    // carries its own message; this only says what a success means.
+    for (const irrelevant of [
+      { payments_suspended: true },
+      { mobile_witness_ready: false },
+      { confirmed_balance_units: "0" },
+      { node_status: "offline" as const },
+    ]) {
+      expect(
+        approvalOutcome(overview({ pilot_enabled: true, ...irrelevant })),
+      ).toBe("signs_then_waits_for_the_phone");
+    }
+  });
+
+  it("never claims a pilot approval pays anyone", () => {
+    const pilot = APPROVE_OUTCOME_NOTICE.signs_then_waits_for_the_phone;
+    expect(pilot).toContain("signs this exact transaction and then stops");
+    expect(pilot).toContain("Nothing is sent to the network");
+    expect(pilot).toContain("confirm it on your paired phone");
+    // It must hold in the state where no phone is paired yet, which is the one
+    // state a yes is refused outright. Rust refuses before signing there.
+    expect(pilot).toContain("nothing is signed");
+    expect(pilot).not.toMatch(/submitted|broadcast to the network/i);
+  });
+
+  it("says the non-pilot outcome plainly and differently", () => {
+    const direct = APPROVE_OUTCOME_NOTICE.signs_and_broadcasts;
+    expect(direct).toContain("submits it to the network");
+    expect(direct).not.toBe(
+      APPROVE_OUTCOME_NOTICE.signs_then_waits_for_the_phone,
+    );
+  });
+
+  it("reports the result from the status Rust returned, not from the build", () => {
+    // The old code printed "was submitted" for every success. A pilot approval
+    // succeeds into signed_awaiting_witness, where nothing was submitted.
+    const awaiting = approvalResultNotice("signed_awaiting_witness");
+    expect(awaiting).toContain("Nothing has been sent to the network yet");
+    expect(awaiting).toContain("paired phone");
+    expect(awaiting).not.toMatch(/was submitted/);
+
+    expect(approvalResultNotice("submitted_awaiting_final_witness")).toBe(
+      "The exact approved transaction was submitted.",
+    );
+    expect(approvalResultNotice("broadcast_submitted")).toBe(
+      "The exact approved transaction was submitted.",
+    );
+    expect(approvalResultNotice("broadcast_uncertain")).toContain(
+      "Do not retry automatically",
+    );
+    // A recorded approval whose signing did not happen must not read as a
+    // payment either.
+    expect(approvalResultNotice("approved")).toContain("has not been signed");
+    // Anything else names the state rather than inventing an outcome.
+    expect(approvalResultNotice("recovery_required")).toContain(
+      "recovery required",
+    );
+  });
+
+  it("renders the control and its outcome notice, out of any disclosure", () => {
+    const view = readFileSync(
+      new URL("./AgentAdminPages.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(view).toContain("DESKTOP_CONTROLS.approve_exact_transaction");
+    expect(view).toContain("{APPROVE_OUTCOME_NOTICE[approvalOutcome(overview)]}");
+    // The old build gate is gone from the view entirely, so the control cannot
+    // be hidden by it again without this failing.
+    expect(view).not.toContain("approvalSurface");
+    expect(view).not.toContain("APPROVAL_UNAVAILABLE_NOTICE");
+    // The success sentence is no longer a literal in the view: it comes from
+    // the returned status.
+    expect(view).toContain("approvalResultNotice(result.status)");
+    expect(view).not.toContain("The exact approved transaction was submitted.");
+  });
+
+  it("keeps review and reject beside it", () => {
+    const view = readFileSync(
+      new URL("./AgentAdminPages.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(view).toContain("DESKTOP_CONTROLS.review_exact_transaction");
+    expect(view).toContain("DESKTOP_CONTROLS.reject_payment");
+  });
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* The rotation that refuses every payment and said nothing                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Every phase the protocol enum declares, read from the Rust source rather
+ * than retyped, so a phase added there and not handled here fails the build.
+ */
+const ROTATION_PHASES_FROM_RUST: WitnessRotationPhase[] = (() => {
+  const source = readFileSync(
+    new URL("../../../../crates/companion-protocol/src/rotation.rs", import.meta.url),
+    "utf8",
+  );
+  const body = source
+    .split("pub enum WitnessRotationPhase {")[1]
+    .split("}")[0];
+  return body
+    .split("\n")
+    .map((line) => line.trim().replace(/,$/, ""))
+    .filter((line) => /^[A-Z][A-Za-z]*$/.test(line))
+    .map(
+      (variant) =>
+        variant
+          .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+          .toLowerCase() as WitnessRotationPhase,
+    );
+})();
+
+describe("a rotation in progress is reported as what blocks the payment", () => {
+  it("mirrors permits_agent_writes exactly, phase by phase", () => {
+    // create_payment_intent refuses every intent while the phase is not Stable
+    // or Completed (crates/agent-wallet-core/src/service/payment.rs), and the
+    // agent is told the wallet needs manual recovery. This desktop printed
+    // "Agent payments: ready" for all of them.
+    expect(ROTATION_PHASES_FROM_RUST.length).toBeGreaterThan(15);
+    for (const phase of ROTATION_PHASES_FROM_RUST) {
+      const writesPermitted = phase === "stable" || phase === "completed";
+      expect(
+        rotationBlocksAgentWrites(phase),
+        `${phase} disagrees with WitnessRotationPhase::permits_agent_writes`,
+      ).toBe(!writesPermitted);
+      expect(
+        agentWalletPaymentBlockers(
+          runtime(),
+          overview({ witness_rotation_phase: phase }),
+        ).includes("rotation_in_progress"),
+        `${phase} is reported as ready to pay`,
+      ).toBe(!writesPermitted);
+    }
+    expect(rotationBlocksAgentWrites(null)).toBe(false);
+  });
+
+  it("leaves a healthy wallet with no blocker at all", () => {
+    expect(agentWalletPaymentBlockers(runtime(), overview())).toEqual([]);
+  });
+
+  it("does not pretend a rotation blocks the stop or the pairing", () => {
+    // Neither enable_agent_payments_locally nor start_companion_pairing
+    // consults the rotation, so claiming otherwise would be a new refusal.
+    const rotating = overview({ witness_rotation_phase: "awaiting_completion_anchor" });
+    expect(agentWalletLocalEnableBlockers(runtime(), rotating)).toEqual([]);
+    expect(agentWalletPairingBlockers(runtime(), rotating)).toEqual([]);
+  });
+});
+
+describe("the pairing refusal never names an escape route that is closed", () => {
+  it("says so when Enable locally is itself refused", () => {
+    // The stop blocks pairing, and PAIRING_BLOCKER_LABELS tells the owner to
+    // clear it first. With a wrong network that control is disabled, so the
+    // instruction named a control that is refused.
+    const suspended = overview({
+      payments_suspended: true,
+      network_mode: "mainnet" as AgentWalletOverview["network_mode"],
+    });
+    const pairing = agentWalletPairingBlockers(runtime(), suspended);
+    const enable = agentWalletLocalEnableBlockers(runtime(), suspended);
+    expect(pairing).toContain("payments_suspended");
+    expect(enable).toContain("wrong_network");
+
+    const text = pairingRefusalText(pairing, enable);
+    expect(text).toContain("Clear the emergency stop in Payment control first");
+    expect(text).toContain("Enable locally is unavailable too");
+    // And it must carry the actual reason, not merely say "unavailable".
+    expect(text).toContain("does not match this Local Pilot network");
+    // The control the sentence names is genuinely disabled in that state.
+    expect(
+      emergencyStopControl({
+        paymentsSuspended: true,
+        busy: false,
+        localEnableBlockers: enable,
+      }).disabled,
+    ).toBe(true);
+  });
+
+  it("adds nothing while the route it names is open", () => {
+    const suspended = overview({ payments_suspended: true });
+    const pairing = agentWalletPairingBlockers(runtime(), suspended);
+    const enable = agentWalletLocalEnableBlockers(runtime(), suspended);
+    expect(enable).toEqual([]);
+    expect(pairingRefusalText(pairing, enable)).not.toContain(
+      "Enable locally is unavailable too",
+    );
+    expect(
+      emergencyStopControl({
+        paymentsSuspended: true,
+        busy: false,
+        localEnableBlockers: enable,
+      }).disabled,
+    ).toBe(false);
+  });
+
+  it("says nothing at all when pairing is not blocked", () => {
+    expect(pairingRefusalText([], ["wrong_network"])).toBe("");
   });
 });

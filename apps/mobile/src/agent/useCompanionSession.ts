@@ -4,6 +4,7 @@ import { companionFailureText } from "./companionStatus";
 import {
   authenticatedSnapshot,
   companionSessionExpiryMilliseconds,
+  snapshotBlockedOnlyByExpiredApproval,
   validateCompanionStatusSnapshot,
   validatePong,
   validatedIdentityStatus,
@@ -27,6 +28,16 @@ export function useCompanionSession() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [connectFailed, setConnectFailed] = useState(false);
+  /**
+   * Mirrors `heartbeatInFlight` into render.
+   *
+   * `syncNow` opens with a bare `return` while the eight-second heartbeat is
+   * running, and the ref never reached `busy`, so "Refresh the status now" was
+   * fully enabled and tapping it did nothing at all: no spinner, no error, no
+   * state change. That is the same shape as the acceptOffer defect, on the very
+   * button the stale-request message tells the owner to tap.
+   */
+  const [syncInFlight, setSyncInFlight] = useState(false);
   const [snapshotClock, setSnapshotClock] = useState(() => Date.now());
   const storedRef = useRef<CompanionStoredStateView | null>(null);
   const connectInFlight = useRef(false);
@@ -35,6 +46,15 @@ export function useCompanionSession() {
   const autoConnectAttempted = useRef(false);
 
   const trustedSnapshot = authenticatedSnapshot(
+    snapshot,
+    Math.max(snapshotClock, Date.now()),
+  );
+  /**
+   * The trusted snapshot is null only because a payment request ran out of
+   * time. Nothing is wrong with the connection and the next heartbeat clears
+   * it, so the status must not report the state as "checking the data".
+   */
+  const approvalExpiredThisTick = snapshotBlockedOnlyByExpiredApproval(
     snapshot,
     Math.max(snapshotClock, Date.now()),
   );
@@ -64,14 +84,40 @@ export function useCompanionSession() {
     let cancelled = false;
     setBusy("bootstrap");
     setError("");
-    void Promise.all([agentCompanionApi.identityStatus(), agentCompanionApi.state()])
-      .then(([identityValue, stateValue]) => {
+    void Promise.allSettled([
+      agentCompanionApi.identityStatus(),
+      agentCompanionApi.state(),
+    ])
+      .then(([identityResult, stateResult]) => {
         if (cancelled) return;
-        const nextIdentity = validatedIdentityStatus(identityValue);
-        const nextState = validatedStoredState(stateValue);
-        storedRef.current = nextState;
-        setIdentity(nextIdentity);
-        setStored(nextState);
+        // Validated and applied separately. They used to share one try: the
+        // identity was validated first and the state second, inside the same
+        // then, so a state that failed validation threw before setIdentity ran
+        // and left identity null as well. Every control on the Security tab is
+        // gated on identity.platformSupported, so one unreadable field in the
+        // stored state removed the whole screen.
+        const failures: unknown[] = [];
+        if (identityResult.status === "fulfilled") {
+          try {
+            setIdentity(validatedIdentityStatus(identityResult.value));
+          } catch (reason) {
+            failures.push(reason);
+          }
+        } else {
+          failures.push(identityResult.reason);
+        }
+        if (stateResult.status === "fulfilled") {
+          try {
+            const nextState = validatedStoredState(stateResult.value);
+            storedRef.current = nextState;
+            setStored(nextState);
+          } catch (reason) {
+            failures.push(reason);
+          }
+        } else {
+          failures.push(stateResult.reason);
+        }
+        if (failures.length > 0) setError(readableError(failures[0]));
       })
       .catch((reason) => {
         if (!cancelled) setError(readableError(reason));
@@ -124,6 +170,7 @@ export function useCompanionSession() {
         return;
       }
       heartbeatInFlight.current = true;
+      setSyncInFlight(true);
       try {
         const lifecycle = await agentCompanionApi.lifecycle("foreground_heartbeat");
         if (lifecycle.sessionAllowedInBackground || !lifecycle.nativeDisconnectEnforced) {
@@ -151,6 +198,7 @@ export function useCompanionSession() {
         }
       } finally {
         heartbeatInFlight.current = false;
+        setSyncInFlight(false);
       }
     };
 
@@ -288,8 +336,11 @@ export function useCompanionSession() {
   }, [busy, connectAndSync, session, stored?.configured, stored?.pendingPairingFinalization]);
 
   const syncNow = async () => {
+    // Still a guard, never a silent one: `syncInFlight` disables the button
+    // that calls this, so the press cannot land here and vanish.
     if (!session || heartbeatInFlight.current) return;
     heartbeatInFlight.current = true;
+    setSyncInFlight(true);
     setBusy("sync");
     setError("");
     try {
@@ -309,6 +360,7 @@ export function useCompanionSession() {
       setError(readableError(reason));
     } finally {
       heartbeatInFlight.current = false;
+      setSyncInFlight(false);
       setBusy("");
     }
   };
@@ -343,10 +395,57 @@ export function useCompanionSession() {
   };
 
   const resetCompanion = async () => {
-    setBusy("reset");
+    await runReset("reset", () => agentCompanionApi.reset());
+  };
+
+  /**
+   * Retires a pairing whose Android identity this phone no longer holds.
+   *
+   * The native side re-reads the Keystore and refuses if the key is still live,
+   * so this cannot erase a working phone's rollback memory. It exists because a
+   * revoked phone that also holds witness state had no way out at all: the
+   * pairing-only reset refuses, and being refused permanently replaced the
+   * reset section with a rotation that desktop can no longer run with it.
+   */
+  const retireOrphanedPairing = async () => {
+    await runReset("retire", () => agentCompanionApi.retireOrphanedPairing());
+  };
+
+  /**
+   * Ends this phone's intent to sign one exact payment it is still holding.
+   *
+   * Not a reset: no pairing, identity, witness memory or session is touched, so
+   * this deliberately does not go through `runReset`. Afterwards the stored
+   * state is re-read, because clearing the record is what unblocks the reset,
+   * pairing and every other payment - and the screen has to see that.
+   */
+  const discardHeldConsent = async (operationId: string) => {
+    setBusy("discard");
     setError("");
     try {
-      const result = await agentCompanionApi.reset();
+      const result = await agentCompanionApi.discardHeldConsent(operationId);
+      if (result.discarded.operationId !== operationId) {
+        throw new Error(
+          "The native side discarded a different payment than the one shown.",
+        );
+      }
+      await refreshStoredState();
+    } catch (reason) {
+      setError(readableError(reason));
+      throw reason;
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const runReset = async (
+    label: string,
+    call: () => Promise<Awaited<ReturnType<typeof agentCompanionApi.reset>>>,
+  ) => {
+    setBusy(label);
+    setError("");
+    try {
+      const result = await call();
       if (
         !result.reset ||
         !result.disconnected ||
@@ -372,7 +471,10 @@ export function useCompanionSession() {
     stored,
     session,
     trustedSnapshot,
+    approvalExpiredThisTick,
     busy,
+    /** A status read is already running, so the refresh control is disabled. */
+    syncInFlight,
     error,
     setError,
     connectRetryAvailable,
@@ -384,6 +486,8 @@ export function useCompanionSession() {
     disconnect,
     createIdentity,
     resetCompanion,
+    retireOrphanedPairing,
+    discardHeldConsent,
   };
 }
 

@@ -49,6 +49,45 @@ test("Agent Wallet approval review remains wallet-fee free", () => {
   assert.match(source, /networkFee === 1_000n/);
 });
 
+test("payments to addresses the owner never vetted are owner-enabled, per agent, and off by default", () => {
+  // The owner control exists on the unlocked desktop Rules page and is the
+  // only place this is settable.
+  assert.match(source, /allowUnlistedWithApproval: boolean;/);
+  assert.match(source, /checked={draft\.allowUnlistedWithApproval}/);
+  assert.match(
+    source,
+    /Let this agent propose payments to addresses that are not allowed above/,
+  );
+  // The draft round-trips it, so editing an unrelated field cannot silently
+  // switch the owner's choice back off.
+  assert.match(
+    source,
+    /allowUnlistedWithApproval: policy\.allow_unlisted_recipient_with_approval/,
+  );
+  assert.match(
+    source,
+    /allow_unlisted_recipient_with_approval: draft\.allowUnlistedWithApproval/,
+  );
+  // A pairing that has not been given rules keeps it off.
+  assert.match(agentAppSource, /allow_unlisted_recipient_with_approval: false/);
+});
+
+test("an approval for an address that is not on the allowlist says so, in full", () => {
+  assert.match(source, /RECIPIENT_STANDING_LABEL\[standing\]/);
+  assert.match(
+    source,
+    /New recipient\. This address is not on this agent's allowlist\./,
+  );
+  // The copy states the property the backend actually holds: approving pays
+  // once and grants nothing standing.
+  assert.match(source, /not added to the allowlist/);
+  assert.match(source, /className="agent-exact-address">\{approval\.recipient\}/);
+  assert.match(source, /recipientStanding\(next\.recipient, policy\)/);
+  assert.match(agentStyles, /\.agent-exact-address \{/);
+  // A policy that fails to load is never reported as vetted.
+  assert.match(source, /if \(!policy\) return "unverified";/);
+});
+
 test("wallet-space switches lock the wallet being left before navigation", () => {
   assert.match(
     appSource,
@@ -65,7 +104,12 @@ test("expired mobile pairing offers cannot remain actionable", () => {
   assert.match(companionSource, /Pairing expires in/);
   assert.match(companionSource, /busy \|\| pairingExpired/);
   assert.match(companionSource, /nextStatus\.walletId !== walletId/);
-  assert.match(companionSource, /!bindAddress \|\| !hasAuthorizedDevice/);
+  assert.match(companionSource, /!bindAddress \|\|\s+!hasAuthorizedDevice/);
+  // A dead listener slot is held, so CompanionSupervisor::start refuses
+  // outright. Turning it on cannot succeed in that state and must not be
+  // offered as if it could.
+  assert.match(companionSource, /const listenerFailed = status\?\.phase === "failed"/);
+  assert.match(companionSource, /Boolean\(offer\) \|\|\s+listenerFailed;/);
 });
 
 
@@ -185,7 +229,11 @@ test("pairing a phone is gated only on what pairing genuinely needs", () => {
     );
   }
   assert.match(companionSource, /pairingBlockers/);
-  assert.match(companionSource, /PAIRING_BLOCKER_LABELS/);
+  // The panel renders the refusal through pairingRefusalText, which is built
+  // from PAIRING_BLOCKER_LABELS and additionally says when the escape route it
+  // names ("Enable locally") is itself refused.
+  assert.match(companionSource, /pairingRefusalText\(pairingBlockers, localEnableBlockers\)/);
+  assert.match(accessSource, /PAIRING_BLOCKER_LABELS\[blocker\]/);
   assert.match(companionSource, /pairingBlockers\.length > 0/);
 });
 

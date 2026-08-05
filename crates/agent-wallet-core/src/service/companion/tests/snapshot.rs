@@ -233,3 +233,109 @@ fn canonical_payload_validation_rejects_invalid_activity_and_scope() {
     status.agent_wallet_id = AgentWalletId::new().to_string();
     assert!(wrong_scope.validate_for_wallet(wallet_id.as_str()).is_err());
 }
+
+/// Every `OperationStatus`, listed once.
+///
+/// The exhaustive `match` in
+/// `every_operation_status_appears_exactly_once_in_the_status_inventory` has no
+/// wildcard arm, so adding a variant to `OperationStatus` fails to compile until
+/// it is listed here. That is what makes the set-equality test below a proof
+/// over the whole enum rather than over a hand-picked sample.
+const ALL_OPERATION_STATUSES: [OperationStatus; 18] = [
+    OperationStatus::PaymentIntentCreated,
+    OperationStatus::FundsReserved,
+    OperationStatus::UnsignedTransactionPersisted,
+    OperationStatus::ApprovalRequested,
+    OperationStatus::Approved,
+    OperationStatus::Rejected,
+    OperationStatus::Signed,
+    OperationStatus::SignedAwaitingWitness,
+    OperationStatus::WitnessedAwaitingBroadcast,
+    OperationStatus::BroadcastSubmitted,
+    OperationStatus::BroadcastUncertain,
+    OperationStatus::SubmittedAwaitingFinalWitness,
+    OperationStatus::ReconciliationRequired,
+    OperationStatus::ReconciledAwaitingFinalWitness,
+    OperationStatus::Committed,
+    OperationStatus::Failed,
+    OperationStatus::Cancelled,
+    OperationStatus::RecoveryRequired,
+];
+
+#[test]
+fn every_operation_status_appears_exactly_once_in_the_status_inventory() {
+    use super::super::snapshot::operation_status_name;
+
+    let mut seen = BTreeSet::new();
+    for status in ALL_OPERATION_STATUSES {
+        assert!(
+            seen.insert(operation_status_name(status)),
+            "{status:?} is listed twice"
+        );
+        #[allow(clippy::match_same_arms)]
+        match status {
+            OperationStatus::PaymentIntentCreated => {}
+            OperationStatus::FundsReserved => {}
+            OperationStatus::UnsignedTransactionPersisted => {}
+            OperationStatus::ApprovalRequested => {}
+            OperationStatus::Approved => {}
+            OperationStatus::Rejected => {}
+            OperationStatus::Signed => {}
+            OperationStatus::SignedAwaitingWitness => {}
+            OperationStatus::WitnessedAwaitingBroadcast => {}
+            OperationStatus::BroadcastSubmitted => {}
+            OperationStatus::BroadcastUncertain => {}
+            OperationStatus::SubmittedAwaitingFinalWitness => {}
+            OperationStatus::ReconciliationRequired => {}
+            OperationStatus::ReconciledAwaitingFinalWitness => {}
+            OperationStatus::Committed => {}
+            OperationStatus::Failed => {}
+            OperationStatus::Cancelled => {}
+            OperationStatus::RecoveryRequired => {}
+        }
+    }
+    assert_eq!(seen.len(), ALL_OPERATION_STATUSES.len());
+}
+
+/// The proof obligation for the witness-discovery disclosure.
+///
+/// `WITNESS_PENDING_OPERATION_STATUS_NAMES` is the exact set of wire status
+/// names for which the companion snapshot filter will disclose an operation id
+/// to a phone holding `WitnessRollbackAnchor`. `pending_rollback_anchor` admits
+/// exactly `OperationStatus::awaits_mobile_witness`. If the disclosure set were
+/// wider the phone would receive a pointer it could not act on - a leak with no
+/// purpose. If it were narrower an operation would strand with no way for the
+/// phone to find it. Equality is checked over every variant.
+#[test]
+fn witness_pending_status_names_equal_the_anchor_admission_set() {
+    use super::super::snapshot::operation_status_name;
+
+    for status in ALL_OPERATION_STATUSES {
+        let name = operation_status_name(status);
+        assert_eq!(
+            status.awaits_mobile_witness(),
+            crate::WITNESS_PENDING_OPERATION_STATUS_NAMES.contains(&name),
+            "{status:?} ({name}) is admitted by exactly one of the anchor gate and the disclosure filter"
+        );
+    }
+    assert_eq!(
+        crate::WITNESS_PENDING_OPERATION_STATUS_NAMES.len(),
+        ALL_OPERATION_STATUSES
+            .into_iter()
+            .filter(|status| status.awaits_mobile_witness())
+            .count(),
+        "the disclosure list must not carry a name that no status produces"
+    );
+    // The phone matches against the protocol's copy of this vocabulary, because
+    // it has no access to the desktop's operation state machine. The two must
+    // name the same set or the phone would offer the owner a confirmation for
+    // an operation the desktop will not hand it an anchor for.
+    assert_eq!(
+        crate::WITNESS_PENDING_OPERATION_STATUS_NAMES
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        hpay_companion_protocol::WITNESS_PENDING_ACTIVITY_STATUSES
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+    );
+}

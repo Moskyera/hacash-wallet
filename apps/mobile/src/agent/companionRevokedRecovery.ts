@@ -41,6 +41,31 @@ export const COMPANION_REVOKED_ROUTE =
   "The way back is a new mobile identity. A new identity is a new key, so the desktop sees a genuinely different phone and pairs it as a first-time phone. The revoked record stays revoked.";
 
 /**
+ * Why the order below changed, and why it is not a detail.
+ *
+ * The guide used to put the pairing-only reset first, as step 2. That is an
+ * instruction the code refuses: `reset_before_witness_rotation`
+ * (apps/mobile/src-tauri/src/agent_companion/storage.rs) refuses the moment a
+ * pilot approval or any witness record exists, which is exactly the situation a
+ * phone that has been used and then revoked is in. Worse, the refusal is not a
+ * no-op - it durably rewrites the rotation phase, which permanently replaces the
+ * reset section with "Controlled witness rotation required" and names a joint
+ * flow with a desktop that has already revoked this phone. Following the guide
+ * made the handset permanently unrecoverable.
+ *
+ * The identity is replaced first now. Once the companion key this pairing is
+ * bound to is gone, the phone can never sign as that device again, so the
+ * witness state it is holding can never be presented to anyone and clearing it
+ * takes nothing away. That is the reset the phone then offers, under its own
+ * separate words.
+ */
+export const COMPANION_REVOKED_ORDER_MATTERS =
+  "Do these in order. Replacing the identity has to come before clearing the pairing: while this phone still holds the key it was paired with, clearing the pairing is refused, and being refused permanently replaces that section with a rotation you cannot finish with a desktop that has already revoked this phone.";
+
+/** The exact label of the reset offered once the old identity is gone. */
+export const COMPANION_RETIRE_PAIRING_ACTION = "Retire this pairing";
+
+/**
  * The one route that returns this handset to service.
  *
  * Step 3 is the honest part: the app never replaces a healthy companion key on
@@ -58,21 +83,21 @@ export const COMPANION_REVOKED_RECOVERY_STEPS: readonly CompanionRevokedRecovery
     },
     {
       where: "Phone",
-      action: `Run ${COMPANION_RESET_PAIRING_ACTION}, in the reset section below.`,
-      detail:
-        "This clears the stale pairing this phone still holds. On its own it fixes nothing; it only leaves a clean slate for the new identity.",
-    },
-    {
-      where: "Phone",
       action:
         "In Android Settings, enrol a new fingerprint or face for this phone.",
       detail:
-        "The companion key was created to become invalid as soon as a new biometric is enrolled, and that is what makes replacing it possible. This is a real change to the phone: other apps that also bind keys to your biometrics may ask you to set them up again. Read that cost before you do it.",
+        "Do this before touching the reset section. The companion key was created to become invalid as soon as a new biometric is enrolled, and that is what makes replacing it possible. This is a real change to the phone: other apps that also bind keys to your biometrics may ask you to set them up again. Read that cost before you do it.",
+    },
+    {
+      where: "Phone",
+      action: `Reopen this screen. The reset section now offers ${COMPANION_RETIRE_PAIRING_ACTION}; run it and type the words it asks for.`,
+      detail:
+        `This clears the stale pairing this phone still holds. It is offered only because the key that pairing was bound to is gone, so the rollback memory it carries can never be presented to anyone again and clearing it takes nothing away. ${COMPANION_RESET_PAIRING_ACTION} is the wrong control here and is refused, because it is for a phone that still holds its key.`,
     },
     {
       where: "Phone",
       action:
-        "Reopen this screen. Identity now reads Not created, so tap Create mobile identity and confirm.",
+        "Identity now reads Not created, so tap Create mobile identity and confirm.",
       detail:
         "The old key is deleted and a brand new one is generated in hardware. This identity is still not a Hacash private key and still cannot access My Wallet.",
     },

@@ -83,13 +83,24 @@ export function CompanionPairingPanel({
 
   const expiresAt = Number(pairing?.confirmation?.expires_at ?? "0");
   const expired = Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= nowUnix;
-  if (!identity?.ready) {
+  if (!identity) {
+    // The identity status could not be read at all. The Security tab renders
+    // only "Check this phone's security status again" in that state, so naming
+    // Create mobile identity here named a button that is not on the screen.
+    return (
+      <Unavailable
+        title="This phone's security status could not be read"
+        body={`Pairing cannot start until this phone can read its own secure identity. Nothing is wrong with your wallet, nothing was paired and nothing was changed. Open the Security tab and use ${COMPANION_RECHECK_IDENTITY_ACTION}. It reads this phone only and costs nothing.`}
+      />
+    );
+  }
+  if (!identity.ready) {
     // Three different reasons used to render one sentence that sent every one
     // of them to "Create mobile identity". On a handset that cannot hold the
     // key that button never appears, and on a phone whose key exists but is
     // locked it does not appear either, so for two of the three the instruction
     // named a control that was not on the screen.
-    if (identity && !identity.platformSupported) {
+    if (!identity.platformSupported) {
       return (
         <Unavailable
           title={COMPANION_PLATFORM_UNSUPPORTED_TITLE}
@@ -97,7 +108,7 @@ export function CompanionPairingPanel({
         />
       );
     }
-    if (identity?.configured) {
+    if (identity.configured) {
       return (
         <Unavailable
           title="This phone's secure identity is locked"
@@ -263,12 +274,34 @@ export function CompanionPairingPanel({
             label="Encrypted HPAY rotation acknowledgement"
           />
           <p className="agent-muted">Scan this final rotation QR on the desktop.</p>
+          {/* Warned before the press, not after it. This QR is the only
+              delivery path for step 4 of the desktop rotation flow, it is held
+              in React state alone, and the pairing block stops rendering once
+              the durable state is installed - so dismissing it destroys the
+              only copy. The button below reads "hide", which promises the
+              opposite. */}
+          <p className="agent-warning-copy" role="alert">
+            This QR code cannot be shown again. HPAY Desktop has to scan it to
+            finish the rotation, and there is no control on this phone or on the
+            desktop that brings it back. Leave this screen open until the
+            desktop has scanned it.
+          </p>
         </>
       )}
       {/* "Done" reads like "finish pairing". It does not: it only hides these
-          steps on this phone. The desktop step is still outstanding. */}
-      <button type="button" disabled={busy} onClick={onCancel}>
-        Hide these steps on this phone
+          steps on this phone. The desktop step is still outstanding.
+
+          On the rotation path it is destructive rather than merely tidy, so it
+          says which one it is and carries the danger styling. */}
+      <button
+        type="button"
+        className={automaticPairing ? "" : "agent-danger-action"}
+        disabled={busy}
+        onClick={onCancel}
+      >
+        {automaticPairing
+          ? "Hide these steps on this phone"
+          : "Discard this rotation QR permanently"}
       </button>
     </section>
   );
@@ -282,6 +315,10 @@ type ConnectionProps = {
   lastError: string;
   /** A connect attempt has failed and the retry wording applies. */
   retryAvailable: boolean;
+  /** A heartbeat already owns the status read, so the refresh cannot run. */
+  syncBusy: boolean;
+  /** A snapshot that passed every check is on screen. */
+  hasTrustedSnapshot: boolean;
   /** The one control this whole screen is about, decided in companionLayout. */
   primaryActionId: CompanionPrimaryActionId;
   onConnect: () => void;
@@ -295,6 +332,8 @@ export function CompanionConnectionPanel({
   busy,
   lastError,
   retryAvailable,
+  syncBusy,
+  hasTrustedSnapshot,
   primaryActionId,
   onConnect,
   onSync,
@@ -411,7 +450,11 @@ export function CompanionConnectionPanel({
   // to show, including both controls, is one tap inside.
   return (
     <section className="agent-panel agent-session-bar" aria-label="Desktop connection">
-      <details className="agent-disclosure">
+      {/* Open by itself while the wallet figures are missing: the four
+          read-only tabs name Refresh the status now for exactly that state, and
+          it lives in here. A named control folded away by default is the same
+          defect as one that is not on the screen. */}
+      <details className="agent-disclosure" open={!hasTrustedSnapshot}>
         <summary>
           <span className="agent-status-text">{COMPANION_CONNECTION_SECTION_TITLE}</span>
           {devicePill}
@@ -420,7 +463,10 @@ export function CompanionConnectionPanel({
         {walletLine}
         {boundaryNote}
         <div className="agent-control-row">
-          <button type="button" disabled={busy} onClick={onSync}>
+          {/* syncNow returns immediately while the heartbeat is in flight, so
+              an enabled button there produced no spinner, no error and no
+              change at all. */}
+          <button type="button" disabled={syncBusy} onClick={onSync}>
             {COMPANION_REFRESH_ACTION}
           </button>
           <button type="button" disabled={busy} onClick={onDisconnect}>

@@ -10,6 +10,7 @@
  * no side effects, and can never approve anything: it decides what to say, not
  * what to do.
  */
+import { DESKTOP_CONTROLS } from "./desktopControls";
 
 /**
  * The exact label of the button the owner has to tap in the phone app.
@@ -75,10 +76,16 @@ export function companionPairingWaitingView(
       ? "This pairing request has expired. Nothing was paired and your phone was not authorized."
       : `This pairing request expires in ${formatPairingValidity(input.secondsRemaining)}.`,
     expired,
+    // The expired button is wired to agent_wallet_companion_pairing_cancel and
+    // to nothing else: it cancels, clears the wizard and produces no offer and
+    // no QR. Labelling it "Start again" beside a sentence promising a new QR
+    // code named an action the press does not perform, and left the owner to
+    // find Pair a phone unaided. The label is now the control it really is, and
+    // the sentence names the second press that does produce the new code.
     restart: expired
-      ? "Choose Start again, then scan the new QR code with your phone. The expired code can no longer be used."
-      : "If the phone shows nothing, choose Cancel pairing and run Pair a phone again. Starting over is always safe.",
-    restartAction: expired ? "Start again" : null,
+      ? `Choose ${DESKTOP_CONTROLS.cancel_phone_pairing}, then ${DESKTOP_CONTROLS.pair_a_phone} for a new QR code to scan. The expired code can no longer be used.`
+      : `If the phone shows nothing, choose ${DESKTOP_CONTROLS.cancel_phone_pairing} and run ${DESKTOP_CONTROLS.pair_a_phone} again. Starting over is always safe.`,
+    restartAction: expired ? DESKTOP_CONTROLS.cancel_phone_pairing : null,
     humanCheck:
       "Nothing is paired automatically. You still have to compare the six digits on both devices yourself and choose Yes, the codes match on this desktop.",
   };

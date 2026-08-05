@@ -1,4 +1,8 @@
-import type { AgentRuntimeStatus, AgentWalletOverview } from "./api";
+import type {
+  AgentRuntimeStatus,
+  AgentWalletOverview,
+  OperationStatus,
+} from "./api";
 
 export const HPAY_LOCAL_PILOT = Object.freeze({
   label: "HPAY Local Pilot Chain V1",
@@ -31,7 +35,34 @@ export type AgentWalletWriteReadiness =
   | "wallet_not_funded"
   | "payments_suspended"
   | "recovery_required"
+  /**
+   * A witness rotation is part-way through.
+   *
+   * `create_payment_intent` (crates/agent-wallet-core/src/service/payment.rs)
+   * returns `RecoveryRequired` for every intent while the rotation phase is
+   * not Stable or Completed. That surfaces to the agent as "Agent Wallet state
+   * requires manual recovery" while this desktop printed "Agent payments:
+   * ready", so the two surfaces named opposite causes for the same refusal.
+   * This mirrors the existing Rust gate; it adds none.
+   */
+  | "rotation_in_progress"
   | "ready";
+
+/**
+ * The rotation phases in which Rust permits an agent write.
+ *
+ * `WitnessRotationPhase::permits_agent_writes`
+ * (crates/companion-protocol/src/rotation.rs) is exactly this set. Nothing
+ * else is derived from it here.
+ */
+const ROTATION_PHASES_THAT_PERMIT_WRITES = new Set(["stable", "completed"]);
+
+/** True when a rotation is far enough along to be refusing agent writes. */
+export function rotationBlocksAgentWrites(
+  phase: AgentWalletOverview["witness_rotation_phase"],
+): boolean {
+  return phase !== null && !ROTATION_PHASES_THAT_PERMIT_WRITES.has(phase);
+}
 
 /**
  * Prerequisites for MAKING A PAYMENT.
@@ -81,6 +112,12 @@ export function agentWalletPaymentBlockers(
   if (overview.payments_suspended) blockers.push("payments_suspended");
   if (overview.unresolved_signed_operations > 0) {
     blockers.push("recovery_required");
+  }
+  // The rotation the owner started is what blocks every agent write, and until
+  // now nothing on either surface said so: Overview reported "Agent payments:
+  // ready" while the agent was told the wallet needed manual recovery.
+  if (rotationBlocksAgentWrites(overview.witness_rotation_phase)) {
+    blockers.push("rotation_in_progress");
   }
   return [...new Set(blockers)];
 }
@@ -198,6 +235,8 @@ export const WRITE_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, string> = {
   wallet_not_funded: "Funding is required before a test payment.",
   payments_suspended: "Agent payments are locally suspended.",
   recovery_required: "An unresolved signed operation requires recovery.",
+  rotation_in_progress:
+    "A phone replacement is part-way through. Every agent payment request is refused until it finishes or is cancelled, and the agent is told the wallet needs manual recovery. Finish or cancel it under Replace the paired phone on Security.",
   ready: "Payment prerequisites are satisfied.",
 };
 
@@ -231,6 +270,8 @@ export const LOCAL_ENABLE_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, stri
     "Agent payments are locally suspended. That is the state this action clears.",
   recovery_required:
     "An unresolved signed operation must be recovered before agent payments can be re-enabled.",
+  rotation_in_progress:
+    "A phone replacement in progress blocks agent payments, not the local re-enable. Clearing the stop still works.",
   ready: "Agent payments can be re-enabled locally from this unlocked desktop.",
 };
 
@@ -249,8 +290,138 @@ export const PAIRING_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, string> =
     "Agent payments are locally suspended, which also blocks the phone connection. Clear the emergency stop in Payment control first, then pair the phone.",
   recovery_required:
     "An unresolved signed operation must be recovered before a phone can be paired.",
+  rotation_in_progress:
+    "A phone replacement in progress does not block ordinary pairing. Use Replace the paired phone on Security to finish it.",
   ready: "A phone can be paired.",
 };
+
+/**
+ * The pairing refusal, with the escape route it names checked against reality.
+ *
+ * `PAIRING_BLOCKER_LABELS.payments_suspended` instructs the owner to clear the
+ * emergency stop first. That instruction is only followable while "Enable
+ * locally" is itself available: with a wrong network or a missing block 1
+ * anchor, `agentWalletLocalEnableBlockers` disables it, so the escape route is
+ * closed and the sentence named a control that is refused. Overview already
+ * drops the action in that case; the phone panel printed the refusal verbatim.
+ *
+ * Copy only. The refusals themselves are unchanged and still come from Rust.
+ */
+export function pairingRefusalText(
+  pairingBlockers: AgentWalletWriteReadiness[],
+  localEnableBlockers: AgentWalletWriteReadiness[],
+): string {
+  const base = pairingBlockers
+    .map((blocker) => PAIRING_BLOCKER_LABELS[blocker])
+    .join(" ");
+  if (!base) return "";
+  if (
+    !pairingBlockers.includes("payments_suspended") ||
+    localEnableBlockers.length === 0
+  ) {
+    return base;
+  }
+  const why = localEnableBlockers
+    .map((blocker) => LOCAL_ENABLE_BLOCKER_LABELS[blocker])
+    .join(" ");
+  return `${base} Enable locally is unavailable too, so that route is closed until this is fixed: ${why}`;
+}
+
+/**
+ * WHAT PRESSING APPROVE ACTUALLY DOES, IN THIS BUILD.
+ *
+ * `approve_desktop_and_broadcast`
+ * (crates/agent-wallet-core/src/service/payment.rs) used to refuse EVERY
+ * desktop approval under `agent-wallet-testnet-pilot`, so the desktop hid the
+ * control rather than offering one that could not succeed. That refusal was a
+ * fail-closed stub standing in for a phone that could not yet witness an
+ * operation it had not itself approved. The phone can now discover such an
+ * operation through the least-privilege witness disclosure and witness it, the
+ * whole path is executed end to end in
+ * crates/agent-wallet-core/src/service/companion/tests/desktop_witness_flow.rs,
+ * and the control is back.
+ *
+ * What is NOT the same in both builds is what a yes does, and the copy beside
+ * the control has to say which one it is:
+ *
+ * * Pilot build: approving signs the exact transaction and then STOPS at
+ *   `SignedAwaitingWitness`. Nothing reaches the network until the paired phone
+ *   signs the rollback anchor that witnesses it. Telling the owner the payment
+ *   was "submitted" at that point would be false.
+ * * Non-pilot build: approving signs and submits in the same call.
+ *
+ * This is the only build-dependent thing left about approval, so it is the only
+ * thing this exports. Whether an individual approval can succeed is decided by
+ * Rust - the agent's Approval device, the exactness of the commitment, its
+ * expiry, the emergency stop, and whether a phone that can witness is paired -
+ * and every one of those refusals carries its own message.
+ */
+export type ApprovalOutcome =
+  /** Signs now; the network sees nothing until the phone witnesses it. */
+  | "signs_then_waits_for_the_phone"
+  /** Signs and submits in the same call. */
+  | "signs_and_broadcasts";
+
+export function approvalOutcome(overview: AgentWalletOverview): ApprovalOutcome {
+  return overview.pilot_enabled
+    ? "signs_then_waits_for_the_phone"
+    : "signs_and_broadcasts";
+}
+
+/**
+ * Rendered beside the Approve control, before the press, never behind a
+ * disclosure.
+ *
+ * The pilot sentence has to hold in every state the button can be pressed in,
+ * including the one where no phone is paired yet. It does: in that state Rust
+ * refuses before signing and says so, which is why this promises a stop rather
+ * than a completed payment.
+ */
+export const APPROVE_OUTCOME_NOTICE: Record<ApprovalOutcome, string> = {
+  signs_then_waits_for_the_phone:
+    "Approving signs this exact transaction and then stops. Nothing is sent to the network until you confirm it on " +
+    "your paired phone, which is what witnesses the payment. If no phone is able to witness it - none paired yet, or " +
+    "the phone set up to witness was replaced or revoked - this is refused and nothing is signed.",
+  signs_and_broadcasts:
+    "Approving signs this exact transaction and submits it to the network in the same step.",
+};
+
+/**
+ * What the owner is told AFTER the press, derived from the status Rust actually
+ * returned rather than from the build.
+ *
+ * The old message said "The exact approved transaction was submitted." for
+ * every success. In a pilot build a successful approval returns
+ * `signed_awaiting_witness`, where nothing has been submitted and the owner
+ * still has something to do, so that sentence would have been the button's old
+ * lie moved one step later.
+ */
+export function approvalResultNotice(status: OperationStatus): string {
+  switch (status) {
+    case "signed_awaiting_witness":
+      return (
+        "Approved and signed. Nothing has been sent to the network yet: open the AI Agent Wallet on your paired " +
+        "phone and confirm this payment to complete it."
+      );
+    case "witnessed_awaiting_broadcast":
+      return (
+        "Your phone confirmed this payment and it is being submitted. Refresh to see where it got to; do not " +
+        "approve it again."
+      );
+    case "broadcast_submitted":
+    case "submitted_awaiting_final_witness":
+      return "The exact approved transaction was submitted.";
+    case "broadcast_uncertain":
+      return "Broadcast status is uncertain. Do not retry automatically.";
+    case "approved":
+      return (
+        "Your approval was recorded, but the transaction has not been signed yet. Check the node connection and " +
+        "open this payment again."
+      );
+    default:
+      return `Approval accepted. This payment is now ${status.replace(/_/g, " ")}.`;
+  }
+}
 
 export type EmergencyStopControl =
   /** The stop is engaged. This is the only control that can clear it. */

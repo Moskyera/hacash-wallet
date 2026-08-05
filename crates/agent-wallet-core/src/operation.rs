@@ -148,6 +148,27 @@ impl OperationStatus {
                 | Self::Approved
         )
     }
+
+    /// The statuses for which the desktop will hand the paired mobile witness a
+    /// rollback anchor to sign.
+    ///
+    /// This is the single definition of that set. `pending_rollback_anchor`
+    /// admits exactly these, and the companion snapshot filter discloses the id
+    /// of an operation to a witness phone only while it sits in exactly these.
+    /// If the two ever diverged the phone would either be handed a pointer it
+    /// cannot act on - a disclosure with no purpose - or be left unable to
+    /// discover an operation that is stranded waiting for it. Set equality is
+    /// asserted directly over every variant by
+    /// `witness_pending_status_names_equal_the_anchor_admission_set`.
+    pub const fn awaits_mobile_witness(self) -> bool {
+        matches!(
+            self,
+            Self::SignedAwaitingWitness
+                | Self::SubmittedAwaitingFinalWitness
+                | Self::BroadcastUncertain
+                | Self::ReconciledAwaitingFinalWitness
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -579,6 +600,27 @@ impl AgentOperation {
         }
         self.cancel_with_result(result)?;
         Ok(true)
+    }
+
+    /// Abandons a payment that was signed and then never witnessed.
+    ///
+    /// `SignedAwaitingWitness` is the one and only status admitted here, and
+    /// that is the whole safety argument: it is the status the desktop writes
+    /// before anything is offered to the node, and the only transition out of it
+    /// that leads to a broadcast is `mark_witnessed`, which needs a receipt.
+    /// So a payment in this status provably never reached the network, and
+    /// abandoning it cannot un-spend anything - it releases a reservation.
+    ///
+    /// It is deliberately not folded into `cancel_pre_signing`. That helper is
+    /// called by sweeps and by policy edits, on their own initiative; this one
+    /// exists only for an owner who pressed a control, and a signed transaction
+    /// must never be discarded by a timer.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub(crate) fn abandon_awaiting_witness(&mut self) -> AgentWalletResult<()> {
+        if self.status != OperationStatus::SignedAwaitingWitness {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        self.cancel_with_result("witness_abandoned")
     }
 
     fn cancel_with_result(&mut self, result: &str) -> AgentWalletResult<()> {

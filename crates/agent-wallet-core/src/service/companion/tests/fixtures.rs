@@ -113,6 +113,7 @@ pub(super) fn prepare_pending(
             max_pending_operations: 4,
             allowed_recipients: BTreeSet::new(),
             blocked_recipients: BTreeSet::new(),
+            allow_unlisted_recipient_with_approval: false,
             approval_mode,
             policy_epoch: state.policy_epoch,
         },

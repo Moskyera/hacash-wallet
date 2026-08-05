@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { COMPANION_DISCARD_CONSENT_PHRASE } from "./companionHeldConsent";
 import type {
+  AgentCompanionActivity,
   AgentCompanionIdentityStatus,
+  CompanionDiscardConsentView,
   CompanionDisconnectView,
   CompanionLifecycleEvent,
   CompanionLifecycleView,
@@ -19,6 +22,7 @@ import type {
   CompanionSessionView,
   CompanionStatusSnapshotView,
   CompanionStoredStateView,
+  CompanionWitnessView,
   NativeApprovalCommitment,
 } from "./types";
 
@@ -83,6 +87,23 @@ export const agentCompanionApi = {
       "agent_wallet_companion_decide_payment",
       { request: { commitment, decision } },
     ),
+  /**
+   * Signs the rollback witness for a payment the owner approved on HPAY Desktop.
+   *
+   * The arguments are the exact facts the confirmation screen showed, so the
+   * native side can record what the owner actually read before it fetches or
+   * signs anything. It is not an approval: the payment is already approved, and
+   * this phone's signature is the anti-rollback witness over it.
+   */
+  witnessPending: (operation: AgentCompanionActivity) =>
+    invoke<CompanionWitnessView>("agent_wallet_companion_witness_pending", {
+      request: {
+        operationId: operation.activityId,
+        amountUnits: operation.amountUnits,
+        recipient: operation.recipient,
+        status: operation.status,
+      },
+    }),
   ping: () => invoke<CompanionPongView>("agent_wallet_companion_ping"),
   disconnect: () =>
     invoke<CompanionDisconnectView>("agent_wallet_companion_disconnect"),
@@ -95,6 +116,36 @@ export const agentCompanionApi = {
       request: {
         confirmation: "RESET COMPANION",
         identity: "retain_hardware_identity",
+      },
+    }),
+  /**
+   * Retires a pairing whose Android identity this phone no longer holds.
+   *
+   * Separate words and a separate choice from the pairing-only reset on
+   * purpose. The native side re-reads the Keystore and refuses if the key that
+   * pairing is bound to is still live, so this can never be used to erase a
+   * working phone's rollback memory.
+   */
+  retireOrphanedPairing: () =>
+    invoke<CompanionResetView>("agent_wallet_companion_reset", {
+      request: {
+        confirmation: "RETIRE THIS PAIRING",
+        identity: "replaced_hardware_identity",
+      },
+    }),
+  /**
+   * Ends this phone's intent to sign one exact payment it is still holding.
+   *
+   * Its own wording, distinct from both resets, because it is a different act:
+   * it deletes no pairing and no witness memory, un-signs nothing, and cancels
+   * nothing on the desktop. The operation id is the one the screen showed, so
+   * the native side can refuse anything else.
+   */
+  discardHeldConsent: (operationId: string) =>
+    invoke<CompanionDiscardConsentView>("agent_wallet_companion_discard_consent", {
+      request: {
+        confirmation: COMPANION_DISCARD_CONSENT_PHRASE,
+        operationId,
       },
     }),
   rotationStep: () =>

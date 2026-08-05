@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  DESKTOP_CONTROLS,
+  isDesktopControlLabel,
+} from "./desktopControls";
+import {
   companionPairingWaitingView,
   companionPhoneAppName,
   companionPhoneConfirmationAction,
@@ -137,17 +141,36 @@ describe("desktop pairing waiting state", () => {
     expect(formatPairingValidity(null)).toBe("a few minutes");
   });
 
-  it("makes expiry obvious and offers a way to start again", () => {
+  it("makes expiry obvious and names the control the press really is", () => {
     const expired = companionPairingWaitingView(waitingInput({ secondsRemaining: 0 }));
     expect(expired?.expired).toBe(true);
     expect(expired?.validity).toMatch(/expired/i);
     expect(expired?.validity).toMatch(/nothing was paired/i);
-    expect(expired?.restartAction).toBe("Start again");
-    expect(expired?.restart).toMatch(/start again/i);
+
+    // The button is wired to agent_wallet_companion_pairing_cancel and to
+    // nothing else: it cancels, clears the wizard and produces no offer and no
+    // QR. It used to be labelled "Start again" beside a sentence promising a
+    // new QR code, so the label named an action the press does not perform and
+    // the owner had to find Pair a phone unaided. The label must be a
+    // registered control, must be the cancel control, and the sentence must
+    // name the second press that does produce the new code.
+    expect(expired?.restartAction).toBe(DESKTOP_CONTROLS.cancel_phone_pairing);
+    expect(isDesktopControlLabel(expired!.restartAction!)).toBe(true);
+    expect(expired?.restart).toContain(DESKTOP_CONTROLS.cancel_phone_pairing);
+    expect(expired?.restart).toContain(DESKTOP_CONTROLS.pair_a_phone);
+    // The retired label may never come back anywhere in the desktop surface.
+    expect(allText(expired!)).not.toContain("Start again");
+    expect(panelSource).not.toContain("Start again");
 
     const live = companionPairingWaitingView(waitingInput());
     expect(live?.restartAction).toBeNull();
     expect(live?.restart).toMatch(/cancel pairing/i);
+  });
+
+  it("never renders two buttons for the same cancel press", () => {
+    // The panel's own trailing Cancel pairing is withheld exactly when the
+    // waiting card renders the same handler under the same label.
+    expect(panelSource).toContain("{offer && !waiting?.restartAction && (");
   });
 
   it("keeps the human code comparison and never promises auto-approval", () => {

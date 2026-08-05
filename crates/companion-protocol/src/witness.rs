@@ -716,6 +716,49 @@ pub struct MobileWitnessState {
     pub mobile_device_id: DeviceId,
     pub network_id: String,
     pub genesis_identifier: String,
+    /// Trust-on-first-use pin, adopted from the first anchor this phone accepts.
+    ///
+    /// Until witness discovery existed, the phone re-checked the anchor's
+    /// `node_profile_id` against the network binding of the approval it had just
+    /// signed on this handset. A payment approved on the desktop has no such
+    /// approval here, and comparing an anchor against a binding the same desktop
+    /// supplied in the same exchange would be vacuous in any case. Pinning it
+    /// puts the field under the phone's own durable discipline, exactly like
+    /// `genesis_identifier`, so a desktop that changes node profile between
+    /// operations is caught by state this phone already holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_profile_id: Option<String>,
+    /// Trust-on-first-use pin. See [`Self::node_profile_id`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::serde_decimal_u64::option"
+    )]
+    pub transaction_format_version: Option<u64>,
+    /// High-water mark for the policy epoch the desktop claims.
+    ///
+    /// This is what stands in for the equality check the phone used to make
+    /// against the policy epoch of its own pending approval, and it is
+    /// deliberately weaker than equality: the epoch may never move backwards,
+    /// but it may move forwards. It has to, because `update_agent_policy_admin`
+    /// bumps `policy_epoch` and cancels only pre-signing operations, so an owner
+    /// who edits a spending rule while a payment is awaiting witness would
+    /// otherwise strand that payment permanently.
+    ///
+    /// So this catches a desktop replaying an older policy epoch, which is the
+    /// anti-rollback property, and not a desktop moving to a newer one. Stated
+    /// plainly because it is the one place where the witness-only path proves
+    /// less than the phone-approval path: there, the owner's own approval fixed
+    /// the epoch. Here, nothing the owner reads mentions the policy epoch, so
+    /// there is nothing honest to compare equality against. Before this field
+    /// existed `accept_anchor` checked the policy epoch not at all, so the
+    /// monotonic floor is a strict addition on every path.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::serde_decimal_u64::option"
+    )]
+    pub last_policy_epoch: Option<u64>,
     #[serde(with = "crate::serde_decimal_u64")]
     pub signer_epoch: u64,
     #[serde(with = "crate::serde_decimal_u64")]
@@ -756,6 +799,9 @@ impl MobileWitnessState {
             mobile_device_id,
             network_id,
             genesis_identifier,
+            node_profile_id: None,
+            transaction_format_version: None,
+            last_policy_epoch: None,
             signer_epoch,
             journal_epoch,
             witness_epoch,
@@ -829,6 +875,12 @@ impl MobileWitnessState {
             || !crate::is_supported_pilot_network_id(&self.network_id)
             || !is_hash(&self.genesis_identifier)
             || self.genesis_identifier == ZERO_HASH
+            || self
+                .node_profile_id
+                .as_deref()
+                .is_some_and(|value| !is_hash(value) || value == ZERO_HASH)
+            || self.transaction_format_version == Some(0)
+            || self.last_policy_epoch == Some(0)
             || self.signer_epoch == 0
             || self.journal_epoch == 0
             || self.witness_epoch == 0
@@ -893,6 +945,30 @@ impl MobileWitnessState {
             || anchor.witness_epoch != self.witness_epoch
         {
             return Err(CompanionError::AuthorizationEpochMismatch);
+        }
+        // Durable, phone-owned pins. On the first anchor these are adopted;
+        // afterwards the desktop cannot change either one without this phone
+        // refusing. This is what stands in for the network-binding comparison
+        // the phone used to make against its own pending approval, which does
+        // not exist for a payment the owner approved on the desktop.
+        if self
+            .node_profile_id
+            .as_deref()
+            .is_some_and(|pinned| pinned != anchor.node_profile_id)
+            || self
+                .transaction_format_version
+                .is_some_and(|pinned| pinned != anchor.transaction_format_version)
+        {
+            return Err(CompanionError::WalletScopeMismatch);
+        }
+        // The policy epoch may never go backwards. Equality within one
+        // operation's witness lifecycle is enforced with the transaction-state
+        // progression below.
+        if self
+            .last_policy_epoch
+            .is_some_and(|pinned| anchor.policy_epoch < pinned)
+        {
+            return Err(CompanionError::RollbackDetected);
         }
         if self.accepted_anchor_ids.contains(&anchor.anchor_id) {
             return Err(CompanionError::SequenceReplay);
@@ -978,6 +1054,9 @@ impl MobileWitnessState {
         self.last_anchor_hash = anchor_hash.clone();
         self.last_journal_sequence = anchor.journal_sequence;
         self.last_journal_head_hash = anchor.journal_head_hash.clone();
+        self.node_profile_id = Some(anchor.node_profile_id.clone());
+        self.transaction_format_version = Some(anchor.transaction_format_version);
+        self.last_policy_epoch = Some(anchor.policy_epoch);
         self.accepted_anchor_ids.push(anchor.anchor_id.clone());
         let receipt = WitnessReceipt::for_anchor(anchor, anchor_hash, now)?;
         self.last_receipt = Some(receipt.clone());

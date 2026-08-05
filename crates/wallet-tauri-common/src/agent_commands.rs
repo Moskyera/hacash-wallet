@@ -229,6 +229,191 @@ pub async fn agent_wallet_witness_rotation_cancel(
     }
 }
 
+/// The payment that is waiting on a phone witness, and which recovery controls
+/// would actually succeed on it right now.
+///
+/// Answers `null` when nothing is waiting. The core evaluates the same
+/// predicates it enforces, so this never offers a control that is then refused.
+#[tauri::command]
+pub async fn agent_wallet_stranded_witness(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let stranded = require_manager(&state)?
+            .lock()
+            .await
+            .stranded_witness_recovery(&wallet_id, unix_now()?)
+            .map_err(public_error)?;
+        serde_json::to_value(stranded)
+            .map_err(|_| "stranded witness encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Ok(Value::Null)
+    }
+}
+
+/// Gives up a signed payment that no phone can witness any more.
+///
+/// It releases the reservation and moves no money: a payment in
+/// `SignedAwaitingWitness` provably never reached the node. The desktop must
+/// say what it costs before the press; see `AgentAdminPages.tsx` and
+/// `ABANDON_STRANDED_PAYMENT_WARNING` in `irreversibleActions.ts`.
+#[tauri::command]
+pub async fn agent_wallet_abandon_stranded_witness(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = agent_wallet_core::OperationId::parse(operation_id)
+            .map_err(|_| "operation id is invalid".to_owned())?;
+        let _transition = state.transition.lock().await;
+        let view = require_manager(&state)?
+            .lock()
+            .await
+            .abandon_stranded_witness_operation(&wallet_id, &operation_id, unix_now()?)
+            .map_err(public_error)?;
+        serde_json::to_value(view).map_err(|_| "operation encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("stranded witness recovery is disabled in this build".to_owned())
+    }
+}
+
+/// Drops a rollback anchor that expired unwitnessed out of the single pending
+/// slot, leaving the payment exactly where it stands.
+///
+/// It moves no money, marks nothing witnessed and does not touch the operation:
+/// the returned view is the same one that was there before. It exists because
+/// that one occupied slot is what refuses the phone replacement, which is the
+/// only exit when the phone itself can no longer sign for the payment. The core
+/// accepts it only once nothing is outstanding that could still become a
+/// witness.
+#[tauri::command]
+pub async fn agent_wallet_release_dead_witness_anchor(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = agent_wallet_core::OperationId::parse(operation_id)
+            .map_err(|_| "operation id is invalid".to_owned())?;
+        let _transition = state.transition.lock().await;
+        let view = require_manager(&state)?
+            .lock()
+            .await
+            .release_dead_witness_anchor(&wallet_id, &operation_id, unix_now()?)
+            .map_err(public_error)?;
+        serde_json::to_value(view).map_err(|_| "operation encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("stranded witness recovery is disabled in this build".to_owned())
+    }
+}
+
+/// Which rotation escapes the desktop may offer right now.
+///
+/// The core answers with the same predicates it enforces, so the desktop never
+/// shows a control that would then be refused - and never hides the only one
+/// that still works.
+#[tauri::command]
+pub async fn agent_wallet_witness_rotation_controls(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let controls = require_manager(&state)?
+            .lock()
+            .await
+            .witness_rotation_controls(&wallet_id, unix_now()?)
+            .map_err(public_error)?;
+        serde_json::to_value(controls)
+            .map_err(|_| "witness rotation encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Ok(serde_json::json!({ "cancellable": false, "retargetable": false }))
+    }
+}
+
+/// Points a rotation stranded past the authority transition at a different
+/// replacement phone.
+///
+/// The abandoned candidate's baseline and registration are discarded and its
+/// witness epoch is burned. The caller must have said so before the press; see
+/// `WitnessRotationPanel.tsx`.
+#[tauri::command]
+pub async fn agent_wallet_witness_rotation_retarget(
+    wallet_id: String,
+    rotation_id: String,
+    new_rotation_id: String,
+    new_candidate_slot_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let new_candidate_slot_id = DeviceId::parse(new_candidate_slot_id)
+            .map_err(|_| "invalid replacement mobile device id".to_owned())?;
+        let _transition = state.transition.lock().await;
+        // Any half-finished candidate pairing belongs to the attempt being
+        // abandoned. It is dropped before the durable re-target, never after.
+        state
+            .companion
+            .cancel_pairing(&wallet_id, require_manager(&state)?)
+            .await?;
+        let record = require_manager(&state)?
+            .lock()
+            .await
+            .retarget_witness_rotation(
+                &wallet_id,
+                &rotation_id,
+                new_rotation_id,
+                &new_candidate_slot_id,
+                unix_now()?,
+            )
+            .map_err(public_error)?;
+        serde_json::to_value(record).map_err(|_| "witness rotation encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (
+            wallet_id,
+            rotation_id,
+            new_rotation_id,
+            new_candidate_slot_id,
+            state,
+        );
+        Err("witness rotation is disabled in this build".to_owned())
+    }
+}
+
 #[tauri::command]
 pub async fn agent_wallet_runtime_start(
     wallet_id: String,

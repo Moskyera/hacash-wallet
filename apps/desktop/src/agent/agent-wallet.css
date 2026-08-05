@@ -415,6 +415,17 @@
   overflow-wrap: anywhere;
 }
 
+/* The full address of a recipient under review. Never truncated, never
+   ellipsised: the owner has to be able to read every character. */
+.agent-exact-address {
+  margin: 8px 0 0;
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .agent-confirm-row {
   display: flex;
   align-items: center;

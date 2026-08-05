@@ -5,6 +5,26 @@
 //! companion messages only and must be stored by the platform keystore.
 
 pub const HPAY_LOCAL_PILOT_NETWORK_ID: &str = "local_pilot_v1";
+
+/// The `ActivitySummary::status` values that mean "this operation is waiting on
+/// the paired phone's rollback witness".
+///
+/// This is the shared vocabulary for the one narrow disclosure the desktop makes
+/// to a phone holding `DevicePermission::WitnessRollbackAnchor`: the id of the
+/// single operation that cannot proceed without that phone's signature. The
+/// desktop derives its own copy from its operation state machine and asserts
+/// equality with this list; the phone matches against this list before it offers
+/// the owner anything to confirm.
+///
+/// It is not a permission and grants nothing. A status outside this set is never
+/// a reason to disclose an operation, and an operation inside it is never a
+/// reason to skip a check.
+pub const WITNESS_PENDING_ACTIVITY_STATUSES: [&str; 4] = [
+    "signed_awaiting_witness",
+    "submitted_awaiting_final_witness",
+    "broadcast_uncertain",
+    "reconciled_awaiting_final_witness",
+];
 const LEGACY_PILOT_NETWORK_ID: &str = "testnet";
 
 pub(crate) fn is_supported_pilot_network_id(value: &str) -> bool {

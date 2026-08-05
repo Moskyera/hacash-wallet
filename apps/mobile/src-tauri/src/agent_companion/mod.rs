@@ -35,6 +35,17 @@ pub struct AgentCompanionMobileState {
     lifecycle: Mutex<()>,
     #[cfg(target_os = "android")]
     rotation: Mutex<()>,
+    /// Held for the whole of an approval or witness flow, from the durable
+    /// consent write to the desktop's final answer.
+    ///
+    /// The automatic sweep retires a consent record the desktop has stopped
+    /// listing, and inside a healthy flow an operation legitimately leaves that
+    /// list for a moment. Without this the sweep could delete the owner's
+    /// consent between two chained anchors and strand the payment it was trying
+    /// to protect. The sweep never waits for this lock; it simply does nothing
+    /// while a flow owns it.
+    #[cfg(any(target_os = "android", test))]
+    consent_flow: Mutex<()>,
     lifecycle_cancel: watch::Sender<u64>,
     #[cfg(target_os = "android")]
     pending: Mutex<Option<pairing::PendingPairing>>,
@@ -71,6 +82,8 @@ impl AgentCompanionMobileState {
             lifecycle: Mutex::new(()),
             #[cfg(target_os = "android")]
             rotation: Mutex::new(()),
+            #[cfg(any(target_os = "android", test))]
+            consent_flow: Mutex::new(()),
             lifecycle_cancel,
             #[cfg(target_os = "android")]
             pending: Mutex::new(None),
@@ -134,6 +147,29 @@ impl AgentCompanionMobileState {
         tokio::time::timeout(limit, operation)
             .await
             .map_err(|_| timeout_message.to_owned())?
+    }
+
+    /// Retires a consent record the desktop, or time, has proved obsolete.
+    ///
+    /// `desktop_awaiting` carries the operation ids an authenticated status
+    /// snapshot listed as awaiting this phone's witness, or `None` when no
+    /// statement is available - a transport failure must never be passed here
+    /// as an empty list, because "the desktop did not answer" is not "the
+    /// desktop does not want this".
+    ///
+    /// Does nothing at all while an approval or witness flow holds
+    /// [`Self::consent_flow`], and never blocks waiting for it.
+    #[cfg(any(target_os = "android", test))]
+    async fn sweep_obsolete_consent(
+        &self,
+        desktop_awaiting: Option<&[String]>,
+    ) -> Result<Option<storage::MobileDiscardedConsent>, String> {
+        let Ok(_flow) = self.consent_flow.try_lock() else {
+            return Ok(None);
+        };
+        self.shared
+            .sweep_obsolete_consent(desktop_awaiting, unix_now()?)
+            .await
     }
 
     #[cfg(target_os = "android")]
@@ -241,6 +277,35 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         state.signal_lifecycle_cancel();
         assert_eq!(task.await.unwrap().unwrap(), "signed");
+        let _ = std::fs::remove_dir(root.join("agent-companion"));
+        let _ = std::fs::remove_dir(root);
+    }
+
+    /// The sweep must never delete a consent record out from under the flow
+    /// that is using it.
+    ///
+    /// Inside a healthy witness lifecycle the operation legitimately leaves the
+    /// desktop's offered set for a moment - between the receipt being accepted
+    /// and the next chained anchor arriving. A sweep landing in that window
+    /// would retire the owner's consent mid-payment and strand the very thing
+    /// it exists to unstick. It never waits for the flow, it simply does
+    /// nothing while one is running.
+    #[tokio::test]
+    async fn a_flow_in_progress_is_never_swept_from_under_itself() {
+        let root = std::env::temp_dir().join(format!(
+            "hpay-companion-consent-flow-test-{}",
+            std::process::id()
+        ));
+        let state = AgentCompanionMobileState::open(&root);
+        let flow = state.consent_flow.lock().await;
+        assert_eq!(
+            state.sweep_obsolete_consent(Some(&[])).await.unwrap(),
+            None,
+            "a running approval or witness flow suspends the sweep entirely"
+        );
+        drop(flow);
+        // Unpaired, so there is still nothing to retire - but the sweep ran.
+        assert_eq!(state.sweep_obsolete_consent(Some(&[])).await.unwrap(), None);
         let _ = std::fs::remove_dir(root.join("agent-companion"));
         let _ = std::fs::remove_dir(root);
     }

@@ -127,6 +127,16 @@ pub(crate) enum AgentJournalEventKind {
     RollbackWitnessAccepted,
     RollbackWitnessInitialized,
     RollbackWitnessProposed,
+    /// A pending anchor that expired before its receipt arrived was replaced by
+    /// a fresh one for the same operation, at the same chain position.
+    RollbackWitnessAnchorReissued,
+    /// The owner abandoned a signed payment that was never broadcast and that no
+    /// phone can still witness. It releases the reservation; it moves no money.
+    RollbackWitnessAbandoned,
+    /// A pending anchor that expired unwitnessed was dropped out of the single
+    /// pending slot. The operation it named is untouched - same status, same
+    /// `tx_hash`, same reservation - and still needs a real phone signature.
+    RollbackWitnessAnchorReleased,
     RollbackWitnessArchived,
     PostSubmitWitnessProposed,
     PostSubmitWitnessAccepted,
@@ -144,6 +154,7 @@ pub(crate) enum AgentJournalEventKind {
     WitnessRotationCandidateAccepted,
     WitnessRotationOldDeviceRevoked,
     WitnessRotationCancelled,
+    WitnessRotationRetargeted,
     TransactionBroadcast,
     PaymentCommitted,
     PaymentFailed,
@@ -198,6 +209,10 @@ impl AgentJournalEventKind {
             Self::WitnessRotationCandidateAccepted => 67,
             Self::WitnessRotationOldDeviceRevoked => 68,
             Self::WitnessRotationCancelled => 69,
+            Self::WitnessRotationRetargeted => 70,
+            Self::RollbackWitnessAnchorReissued => 71,
+            Self::RollbackWitnessAbandoned => 72,
+            Self::RollbackWitnessAnchorReleased => 73,
             Self::TransactionBroadcast => 37,
             Self::PaymentCommitted => 38,
             Self::PaymentFailed => 39,

@@ -35,7 +35,12 @@ pub use pairing::{
     AgentCompanionPairingAttempt, AgentCompletedCompanionPairing, AgentPairingAttemptBudget,
     MAX_PAIRING_REQUEST_ATTEMPTS,
 };
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use rotation::WitnessRotationControls;
 pub use session::AgentDesktopSessionAttempt;
+pub use snapshot::WITNESS_PENDING_OPERATION_STATUS_NAMES;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use witness::StrandedWitnessRecovery;
 
 /// Optional state extension. Keeping the whole extension absent preserves the
 /// exact serialized bytes and journal commitment of legacy Agent Wallets.
@@ -99,6 +104,52 @@ impl CompanionSecurityState {
         ReplayGuard::from_snapshot(self.replay_guard.clone(), now)
             .map_err(map_companion_state_error)
     }
+
+    /// Whether any registered, unrevoked phone may witness a rollback anchor.
+    ///
+    /// `WitnessRollbackAnchor` is the permission `pending_rollback_anchor`
+    /// requires and the one the witness disclosure is gated on, so a wallet
+    /// where this is false has no device that can move a signed payment out of
+    /// `SignedAwaitingWitness`. `approve_desktop_and_broadcast` refuses before
+    /// signing in that case; see the comment there.
+    ///
+    /// The registry is read through the same accessor `validate` uses, rather
+    /// than by exposing the field, so a caller cannot reach past the record's
+    /// revocation flag.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub(super) fn has_active_witness_device(&self) -> bool {
+        self.device_registry.records().any(is_active_witness)
+    }
+
+    /// Whether ONE named phone may witness a rollback anchor.
+    ///
+    /// Needed because "some phone could witness" is not the question once
+    /// `rollback_witness` exists. That record pins `mobile_device_id` to the
+    /// first phone that ever fetched an anchor, and `pending_rollback_anchor`
+    /// refuses every other device with `RollbackDetected` - so after an
+    /// ordinary revoke-and-re-pair, which does not move the pin (only
+    /// `complete_witness_rotation` does), the registry holds a perfectly good
+    /// witness phone that this operation can never use. Asking the registry
+    /// alone would let the approval sign into `SignedAwaitingWitness` with no
+    /// device able to move it, which is the exact stranding the prerequisite
+    /// exists to prevent.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub(super) fn is_active_witness_device(
+        &self,
+        device_id: &hpay_companion_protocol::DeviceId,
+    ) -> bool {
+        self.device_registry
+            .records()
+            .any(|record| &record.device_id == device_id && is_active_witness(record))
+    }
+}
+
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn is_active_witness(record: &hpay_companion_protocol::DevicePublicRecord) -> bool {
+    !record.is_revoked()
+        && record
+            .permissions
+            .contains(&hpay_companion_protocol::DevicePermission::WitnessRollbackAnchor)
 }
 
 const fn is_zero(value: &u64) -> bool {

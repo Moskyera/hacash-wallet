@@ -175,6 +175,7 @@ mod tests {
                 max_pending_operations: 0,
                 allowed_recipients: Default::default(),
                 blocked_recipients: Default::default(),
+                allow_unlisted_recipient_with_approval: false,
                 approval_mode: ApprovalMode::DesktopManual,
                 policy_epoch: 1,
             },

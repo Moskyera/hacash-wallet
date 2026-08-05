@@ -6,9 +6,11 @@
 use hpay_companion_protocol::{
     CompanionError, DeviceId, DevicePermission, DeviceRole, RollbackAnchor, RollbackOperationPhase,
     SignedRollbackAnchor, SignedWitnessReceipt, WitnessReconciliationStatus,
-    WitnessReservationState, WitnessSubmissionStatus, WitnessTransactionState,
+    WitnessReservationState, WitnessRotationPhase, WitnessSubmissionStatus, WitnessTransactionState,
 };
+use serde::{Deserialize, Serialize};
 
+use crate::amount::HacUnits;
 use crate::error::{AgentWalletError, AgentWalletResult};
 use crate::journal::AgentJournalEventKind;
 use crate::node_binding::verified_agent_node;
@@ -20,7 +22,67 @@ use super::super::{
     AgentWalletManager, AuthenticatedCompletedWitness, AuthenticatedPendingWitness,
     AuthenticatedRollbackWitnessState,
 };
+use super::rotation::witness_dead_end;
 use super::session::composite_registry;
+
+/// A payment that is stranded waiting for a phone witness, with the facts the
+/// owner needs before pressing anything.
+///
+/// `amount_units`, `total_debit_units` and `recipient` are here so the desktop
+/// can name what is being given up. Nothing in here says a payment is
+/// witnessed; a stranded payment is one that never was.
+///
+/// FOUR statuses reach this shape, not one, and only the first of them is
+/// pre-broadcast. In the other three the transaction is already on the network,
+/// so `status`, `submitted` and `transaction_id` are here to make that
+/// impossible to render as "nothing was sent": the owner is entitled to know
+/// their money moved, and to the transaction id that lets them check it against
+/// the chain rather than against this wallet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StrandedWitnessRecovery {
+    pub operation_id: String,
+    pub agent_id: String,
+    pub asset: String,
+    pub amount_units: HacUnits,
+    pub total_debit_units: HacUnits,
+    pub recipient: String,
+    /// The exact lifecycle status this payment is stuck in.
+    pub status: OperationStatus,
+    /// The transaction is on the network. From here nothing may say, imply or
+    /// arrange for the payment not to have happened.
+    pub submitted: bool,
+    /// The id of the signed transaction, so the owner can look the payment up
+    /// on chain themselves rather than take this wallet's word for it. It
+    /// exists from signing onward, so it is NOT the answer to "did the money
+    /// move" - `submitted` is. Pre-broadcast this names a transaction that was
+    /// never sent.
+    pub transaction_id: Option<String>,
+    /// An anchor is recorded against this payment. False means none was ever
+    /// handed out, or one was and the payment has since been released from it.
+    pub anchor_issued: bool,
+    pub anchor_expires_at: Option<u64>,
+    /// Asking the phone for an anchor again will succeed. A dead anchor is
+    /// replaced by a fresh one at the same chain position.
+    pub retryable: bool,
+    /// `abandon_stranded_witness_operation` will succeed right now. Always false
+    /// once the payment has been submitted: giving it up would return the
+    /// reservation and mark it `Cancelled`, which would assert the payment did
+    /// not happen when it did.
+    pub abandonable: bool,
+    /// `release_dead_witness_anchor` will succeed right now.
+    pub anchor_releasable: bool,
+    /// This payment no longer blocks `prepare_witness_rotation`, so replacing
+    /// the phone is available and will KEEP the payment rather than give it up.
+    /// That is the only exit when the phone itself has run ahead of this
+    /// desktop and can never sign for this payment again.
+    ///
+    /// It is only ever true pre-broadcast. A rotated-in phone baselines with no
+    /// transaction state and therefore refuses any anchor that is not
+    /// `SignedPreBroadcast`, so post-submit a replacement would burn the
+    /// owner's old phone and leave the payment exactly as stuck - the core
+    /// refuses it there and this never offers it.
+    pub phone_replacement_unblocked: bool,
+}
 
 const STORE_VERSION: u64 = 1;
 const JOURNAL_EPOCH: u64 = 1;
@@ -62,16 +124,27 @@ impl AgentWalletManager {
             .get(operation_id.as_str())
             .ok_or(AgentWalletError::OperationNotFound)?
             .status();
-        if state.network_mode != "testnet"
-            || !matches!(
-                operation_status,
-                OperationStatus::SignedAwaitingWitness
-                    | OperationStatus::SubmittedAwaitingFinalWitness
-                    | OperationStatus::BroadcastUncertain
-                    | OperationStatus::ReconciledAwaitingFinalWitness
-            )
-        {
+        // The admitted set is `OperationStatus::awaits_mobile_witness` rather
+        // than a local `matches!`, because the companion snapshot filter
+        // discloses an operation id to a witness phone under exactly the same
+        // predicate. Restating it here would let the two drift.
+        if state.network_mode != "testnet" || !operation_status.awaits_mobile_witness() {
             return Err(AgentWalletError::InvalidOperationState);
+        }
+        // A rotation in flight is moving the witness pin itself, and
+        // `complete_authority_transition` clears the pending slot when it does.
+        // Minting an operation anchor across that transition would hand the OLD
+        // phone something real to sign and then throw it away. Refuse rather
+        // than race it. Nothing reaches this that could not before: no intent can
+        // be created while a rotation is in flight, and a rotation can only start
+        // from a wallet with nothing mid-flight or from the witness dead end,
+        // whose anchor has already been released.
+        if state
+            .witness_rotation
+            .as_ref()
+            .is_some_and(|rotation| rotation.phase != WitnessRotationPhase::Completed)
+        {
+            return Err(AgentWalletError::RecoveryRequired);
         }
         if state.operations.values().any(|operation| {
             operation.operation_id() != operation_id
@@ -126,17 +199,46 @@ impl AgentWalletManager {
         if witness.mobile_device_id != *mobile_device_id {
             return Err(AgentWalletError::RollbackDetected);
         }
+        // An anchor lives five minutes. Before this arm existed, an anchor that
+        // expired before its receipt came back left `pending` occupied by an
+        // object nothing could ever clear - `pending` is only vacated against a
+        // receipt that verifies, and a receipt for a dead anchor never does -
+        // and that one slot then refused every future payment, every witness
+        // rotation and the reservation behind the stranded payment, for good.
+        //
+        // Re-issuing is the recovery, and it replaces rather than adds:
+        // reaching this arm at all is the proof that the stored anchor can no
+        // longer be witnessed by anyone, so there is never a moment with two
+        // live anchors for one operation. The replacement is rebuilt from
+        // current state a few lines below - phase, journal head and state
+        // commitment are re-derived, never copied - and it sits at the same
+        // chain position, because issuing an anchor has never advanced
+        // `last_anchor_sequence` or `last_anchor_hash`; only an accepted receipt
+        // does. Only `anchor_id`, `created_at` and `expires_at` differ, and the
+        // new `anchor_id` is exactly what makes the old receipt unusable against
+        // it: `WitnessReceipt::matches_anchor` pins both the id and the hash.
+        //
+        // The window itself is untouched. It stops being one-shot; it does not
+        // get longer.
+        let mut reissuing_expired_anchor = false;
         if let Some(pending) = &witness.pending {
             if pending.operation_id == operation_id.as_str() {
                 match pending.proposal.verify(&registry, now) {
                     Ok(_) => return Ok(pending.proposal.clone()),
+                    // A receipt already sits against this anchor. That witness
+                    // is real, the lifecycle owns it, and expiry does not
+                    // entitle anybody to a second one for the same phase.
+                    Err(CompanionError::Expired) if pending.receipt.is_none() => {
+                        reissuing_expired_anchor = true;
+                    }
                     Err(CompanionError::Expired) => {
                         return Err(AgentWalletError::RecoveryRequired);
                     }
                     Err(_) => return Err(AgentWalletError::RollbackDetected),
                 }
+            } else {
+                return Err(AgentWalletError::RollbackWitnessRequired);
             }
-            return Err(AgentWalletError::RollbackWitnessRequired);
         }
 
         let node = verified_agent_node(
@@ -259,13 +361,21 @@ impl AgentWalletManager {
             receipt: None,
         });
         state.updated_at = now;
-        let proposal_event = match operation_phase {
-            RollbackOperationPhase::SignedPreBroadcast => {
-                AgentJournalEventKind::RollbackWitnessProposed
+        let proposal_event = if reissuing_expired_anchor {
+            AgentJournalEventKind::RollbackWitnessAnchorReissued
+        } else {
+            match operation_phase {
+                RollbackOperationPhase::SignedPreBroadcast => {
+                    AgentJournalEventKind::RollbackWitnessProposed
+                }
+                RollbackOperationPhase::Submitted => {
+                    AgentJournalEventKind::PostSubmitWitnessProposed
+                }
+                RollbackOperationPhase::ReconciledFinal => {
+                    AgentJournalEventKind::FinalWitnessProposed
+                }
+                _ => return Err(AgentWalletError::InvalidOperationState),
             }
-            RollbackOperationPhase::Submitted => AgentJournalEventKind::PostSubmitWitnessProposed,
-            RollbackOperationPhase::ReconciledFinal => AgentJournalEventKind::FinalWitnessProposed,
-            _ => return Err(AgentWalletError::InvalidOperationState),
         };
         self.persist_event(
             &mut state,
@@ -277,6 +387,256 @@ impl AgentWalletManager {
             now,
         )?;
         Ok(proposal)
+    }
+
+    /// The stranded payment the desktop may offer a recovery control for, if
+    /// there is one, and exactly which controls would succeed right now.
+    ///
+    /// The predicates are the ones `abandon_stranded_witness_operation`,
+    /// `release_dead_witness_anchor`, `pending_rollback_anchor` and
+    /// `prepare_witness_rotation` enforce, evaluated here rather than restated,
+    /// so the desktop never offers a control that is then refused and never
+    /// hides the only one that still works.
+    ///
+    /// It answers for EVERY phase that awaits a mobile witness, not only the
+    /// pre-broadcast one. Post-submit is where the owner needs this most - the
+    /// money has already moved and the wallet will take no further payment - and
+    /// it was exactly where the desktop showed nothing at all.
+    pub fn stranded_witness_recovery(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Option<StrandedWitnessRecovery>> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        // The same admission `pending_rollback_anchor` uses, so the desktop
+        // reports every payment a phone could still be asked to witness and no
+        // payment it could not.
+        let Some(operation) = state
+            .operations
+            .values()
+            .find(|operation| operation.status().awaits_mobile_witness())
+        else {
+            return Ok(None);
+        };
+        let status = operation.status();
+        let view = operation.view();
+        let operation_id = view.operation_id.to_string();
+        let pending = state
+            .rollback_witness
+            .as_ref()
+            .and_then(|witness| witness.pending.as_ref())
+            .filter(|pending| pending.operation_id == operation_id);
+        let outstanding_receipt = pending.is_some_and(|pending| pending.receipt.is_some());
+        let anchor_expires_at = pending.map(|pending| pending.proposal.anchor.expires_at);
+        // Not `is_none_or`: an anchor that no longer exists and an anchor that
+        // is dead are the same thing to the owner - nothing is outstanding that
+        // could still turn into a witness.
+        let nothing_outstanding =
+            !outstanding_receipt && anchor_expires_at.is_none_or(|expires_at| expires_at <= now);
+        Ok(Some(StrandedWitnessRecovery {
+            operation_id,
+            agent_id: view.agent_id.to_string(),
+            asset: view.asset,
+            amount_units: view.amount_units,
+            total_debit_units: view.total_debit_units,
+            recipient: view.recipient,
+            status,
+            // Everything except the pre-broadcast phase is past the node.
+            submitted: status != OperationStatus::SignedAwaitingWitness,
+            transaction_id: view.tx_hash,
+            anchor_issued: pending.is_some(),
+            anchor_expires_at,
+            // A live anchor is re-served as-is and a dead one is replaced, so
+            // asking the phone again is worth offering in both cases. Only a
+            // receipt already sitting against the pending anchor takes the
+            // payment out of this path.
+            retryable: !outstanding_receipt,
+            // `abandon_stranded_witness_operation` refuses anything past
+            // `SignedAwaitingWitness`, and must: it marks the operation
+            // `Cancelled` and hands the reservation back.
+            abandonable: nothing_outstanding && status == OperationStatus::SignedAwaitingWitness,
+            anchor_releasable: pending.is_some() && nothing_outstanding,
+            phone_replacement_unblocked: witness_dead_end(&state).is_some(),
+        }))
+    }
+
+    /// Drops an anchor that expired unwitnessed out of the single pending slot,
+    /// leaving the payment exactly where it stands.
+    ///
+    /// WHAT IT COSTS: nothing. Reaching the preconditions is the proof that the
+    /// anchor is already worthless - `SignedWitnessReceipt::verify` re-verifies
+    /// the anchor, so a receipt for a dead one is refused no matter who signed
+    /// it or when it arrives.
+    ///
+    /// WHAT IT DOES NOT DO: it does not touch the operation. Status, `tx_hash`
+    /// and reservation are returned unchanged, and the returned view is the
+    /// proof of that. It marks nothing witnessed, submits nothing, cancels
+    /// nothing, and it does not advance `last_anchor_sequence` or
+    /// `last_anchor_hash` - so the very next anchor still sits at the same chain
+    /// position, and the payment still needs a real phone signature over a real
+    /// anchor to move one step.
+    ///
+    /// WHY IT IS SEPARATE FROM RE-ISSUE: re-issue is the recovery whenever the
+    /// phone can still take the replacement, and it is what the desktop and the
+    /// phone should try first, in every phase. This is for the case re-issue
+    /// cannot reach - a phone that durably accepted the dead anchor and has
+    /// therefore consumed that chain position - where the cure is a new witness
+    /// epoch and `prepare_witness_rotation` requires an empty pending slot.
+    pub fn release_dead_witness_anchor(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &OperationId,
+        now: u64,
+    ) -> AgentWalletResult<PaymentOperationView> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        if state.network_mode != "testnet" {
+            return Err(AgentWalletError::NodeNetworkMismatch);
+        }
+        if !state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .status()
+            .awaits_mobile_witness()
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        let witness = state
+            .rollback_witness
+            .as_ref()
+            .ok_or(AgentWalletError::RollbackWitnessRequired)?;
+        witness.validate(wallet_id)?;
+        let pending = witness
+            .pending
+            .as_ref()
+            .ok_or(AgentWalletError::WitnessRecoveryNotAvailable)?;
+        // The slot belongs to some other operation. Dropping it here would leave
+        // that one with nothing to resolve it, which is the trap this whole
+        // family of commands exists to remove.
+        if pending.operation_id != operation_id.as_str() {
+            return Err(AgentWalletError::RollbackWitnessRequired);
+        }
+        // Refused while anything is still outstanding that could become a
+        // witness - a live anchor, or a receipt already recorded against this
+        // one - so it can never be used to race a phone that is signing.
+        if pending.receipt.is_some() || pending.proposal.anchor.expires_at > now {
+            return Err(AgentWalletError::WitnessRecoveryNotAvailable);
+        }
+        let mobile_device_id = witness.mobile_device_id.as_str().to_owned();
+        state
+            .rollback_witness
+            .as_mut()
+            .ok_or(AgentWalletError::RollbackWitnessRequired)?
+            .pending = None;
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            AgentJournalEventKind::RollbackWitnessAnchorReleased,
+            Some(operation_id.as_str().as_bytes()),
+            Some(mobile_device_id.as_bytes()),
+            now,
+        )?;
+        Ok(state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .view())
+    }
+
+    /// Abandons a signed payment that no phone can witness any more.
+    ///
+    /// WHAT IT COSTS: that payment is given up. The agent has to ask again. The
+    /// reserved funds come straight back, because a `SignedAwaitingWitness`
+    /// payment provably never reached the node - `mark_witnessed`, which needs a
+    /// real receipt, is the only route from there to a broadcast.
+    ///
+    /// WHAT IT DOES NOT DO: it does not mark anything witnessed, it does not
+    /// submit, and it does not advance `last_anchor_sequence` or
+    /// `last_anchor_hash`. Advancing them would claim the phone accepted the
+    /// dead anchor, which the desktop cannot know; if the phone did not, the
+    /// desktop would silently run one step ahead of it and the next payment
+    /// would be refused by the phone instead.
+    ///
+    /// It is refused while anything is still outstanding that could become a
+    /// witness - a live anchor, or a receipt already recorded against the
+    /// pending one - so it can never be used to race a phone that is signing.
+    pub fn abandon_stranded_witness_operation(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &OperationId,
+        now: u64,
+    ) -> AgentWalletResult<PaymentOperationView> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        if state.network_mode != "testnet" {
+            return Err(AgentWalletError::NodeNetworkMismatch);
+        }
+        if state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .status()
+            != OperationStatus::SignedAwaitingWitness
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        let mut clears_pending = false;
+        if let Some(witness) = state.rollback_witness.as_ref() {
+            witness.validate(wallet_id)?;
+            if let Some(pending) = &witness.pending {
+                // The pending slot belongs to some other operation. Abandoning
+                // this one would leave that anchor behind with nothing to
+                // resolve it, which is the trap this command exists to remove.
+                if pending.operation_id != operation_id.as_str() {
+                    return Err(AgentWalletError::RollbackWitnessRequired);
+                }
+                if pending.receipt.is_some() || pending.proposal.anchor.expires_at > now {
+                    return Err(AgentWalletError::WitnessRecoveryNotAvailable);
+                }
+                clears_pending = true;
+            }
+        }
+        let mobile_device_id = state
+            .rollback_witness
+            .as_ref()
+            .map(|witness| witness.mobile_device_id.as_str().to_owned());
+        if clears_pending {
+            state
+                .rollback_witness
+                .as_mut()
+                .ok_or(AgentWalletError::RollbackWitnessRequired)?
+                .pending = None;
+        }
+        state
+            .operations
+            .get_mut(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .abandon_awaiting_witness()?;
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            AgentJournalEventKind::RollbackWitnessAbandoned,
+            Some(operation_id.as_str().as_bytes()),
+            mobile_device_id.as_deref().map(str::as_bytes),
+            now,
+        )?;
+        Ok(state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .view())
     }
 
     pub async fn apply_mobile_witness_and_broadcast(

@@ -118,7 +118,10 @@ describe("panel-local pairing failures", () => {
   it("renders the failure inside the finish step, next to the button", () => {
     const finish = stepSource(
       "3. Finish on this desktop",
-      "5. Confirm locally on this desktop",
+      // The manual fallback path runs 1, 2, then this. It was numbered 5,
+      // because the automatic path has two steps the fallback never renders,
+      // so an owner on that path went hunting for two steps that do not exist.
+      "3. Confirm locally on this desktop",
     );
     // The exact button the owner presses after the phone says Done.
     expect(finish).toContain("Yes, the codes match");

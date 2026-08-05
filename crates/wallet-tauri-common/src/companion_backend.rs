@@ -443,6 +443,7 @@ fn filter_snapshot_for_permissions(
         status,
         mut agents,
         mut approvals,
+        activity,
         ..
     } = payload
     else {
@@ -461,8 +462,88 @@ fn filter_snapshot_for_permissions(
         agents,
         policies: Vec::new(),
         approvals,
-        activity: Vec::new(),
+        activity: witness_pending_disclosure(activity, permissions),
     })
+}
+
+/// The wallet's activity list is never sent to a phone. The single exception is
+/// the one operation that is waiting on that phone's own rollback witness.
+///
+/// Without this the phone cannot discover an operation it did not itself
+/// approve: `RecoverPendingWitness` takes an operation id and nothing else on
+/// the wire carries one. So a desktop-approved payment signs, lands in
+/// `SignedAwaitingWitness` and strands, because no phone is ever told which id
+/// to ask for.
+///
+/// The disclosure is deliberately the smallest thing that closes that gap:
+///
+/// * gated on `WitnessRollbackAnchor`, the permission that already authorizes
+///   the strictly stronger act of producing the anchor. A phone that never
+///   received it - every non-pilot pairing - keeps getting an empty list, byte
+///   for byte as before.
+/// * restricted to `WITNESS_PENDING_OPERATION_STATUS_NAMES`, which is exactly
+///   the set `pending_rollback_anchor` will act on. Committed, failed,
+///   cancelled, rejected and every pre-signing operation stay private, so this
+///   is never wallet history.
+/// * at most one entry. Two operations cannot legitimately await witness at
+///   once: `create_payment_intent` refuses while any operation sits in the
+///   witness lifecycle, and `pending_rollback_anchor` refuses under the same
+///   condition. If a second one is somehow present, neither could be witnessed
+///   anyway, so this discloses nothing rather than an id the phone cannot use.
+/// * redacted down to the fields the witness flow actually consumes. The
+///   vehicle has to be an `ActivitySummary`, because changing the wire shape is
+///   a protocol change, and `validate_for_wallet` rejects an empty
+///   `description` or a zero `occurred_at`. So those two are overwritten with
+///   constants rather than carried: `description` is `AgentOperationView::reason`,
+///   the agent's free-text reason for the payment, which is the most sensitive
+///   string in the record and which nothing on the phone reads; `occurred_at`
+///   is rendered only by the recent-activity list, which filters this entry out
+///   by id. What survives is what the confirmation screen shows the owner and
+///   what `RecoverPendingWitness` needs: the id, the status, the amount, the
+///   asset and the recipient.
+///
+/// `policies` is still blanked unconditionally, for every device.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn witness_pending_disclosure(
+    activity: Vec<hpay_companion_protocol::ActivitySummary>,
+    permissions: &BTreeSet<DevicePermission>,
+) -> Vec<hpay_companion_protocol::ActivitySummary> {
+    if !permissions.contains(&DevicePermission::WitnessRollbackAnchor) {
+        return Vec::new();
+    }
+    let mut pending: Vec<_> = activity
+        .into_iter()
+        .filter(|item| {
+            agent_wallet_core::WITNESS_PENDING_OPERATION_STATUS_NAMES
+                .contains(&item.status.as_str())
+        })
+        .collect();
+    if pending.len() == 1 {
+        for item in &mut pending {
+            item.description = WITNESS_PENDING_REDACTED_DESCRIPTION.to_owned();
+            item.occurred_at = WITNESS_PENDING_REDACTED_OCCURRED_AT;
+        }
+        pending
+    } else {
+        Vec::new()
+    }
+}
+
+/// Placeholders for the two `ActivitySummary` fields the witness disclosure has
+/// no use for and cannot omit. Both are only as non-empty/non-zero as
+/// `CompanionPayload::validate_for_wallet` and the phone's own
+/// `validateActivity` demand.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const WITNESS_PENDING_REDACTED_DESCRIPTION: &str = "Awaiting your rollback witness";
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const WITNESS_PENDING_REDACTED_OCCURRED_AT: u64 = 1;
+
+#[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+fn witness_pending_disclosure(
+    _activity: Vec<hpay_companion_protocol::ActivitySummary>,
+    _permissions: &BTreeSet<DevicePermission>,
+) -> Vec<hpay_companion_protocol::ActivitySummary> {
+    Vec::new()
 }
 fn validate_inbound(
     connection: &CompanionConnection,
@@ -663,6 +744,229 @@ mod tests {
         assert!(policies.is_empty());
         assert!(activity.is_empty());
     }
+    fn activity(activity_id: &str, status: &str) -> hpay_companion_protocol::ActivitySummary {
+        hpay_companion_protocol::ActivitySummary {
+            activity_id: activity_id.to_owned(),
+            description: "Private reason".to_owned(),
+            asset: "HAC".to_owned(),
+            recipient: "1PrivateRecipient".to_owned(),
+            amount_units: 5_000_000_000,
+            occurred_at: 100,
+            status: status.to_owned(),
+        }
+    }
+
+    fn snapshot_with_activity(
+        activity: Vec<hpay_companion_protocol::ActivitySummary>,
+    ) -> CompanionPayload {
+        use hpay_companion_protocol::{
+            AgentAuthorizationState, AgentPolicySummary, AgentSummary, CompanionStatus,
+        };
+
+        CompanionPayload::StatusSnapshot {
+            status: CompanionStatus {
+                agent_wallet_id: "wallet_one".to_owned(),
+                address: "1Agent".to_owned(),
+                available_units: Some(1),
+                node_status: "verified".to_owned(),
+                reserved_units: 0,
+                spent_today_units: 0,
+                spent_month_units: 0,
+                paused: false,
+                policy_epoch: 1,
+            },
+            agents: vec![AgentSummary {
+                agent_id: "agent_one".to_owned(),
+                display_name: "Agent one".to_owned(),
+                authorization: AgentAuthorizationState::Authorized,
+            }],
+            policies: vec![AgentPolicySummary {
+                agent_id: "agent_one".to_owned(),
+                max_per_payment_units: 1,
+                max_daily_units: 1,
+                max_pending_operations: 1,
+                approval_mode: "desktop_manual".to_owned(),
+                permissions: vec!["create_payment_intent".to_owned()],
+                allowed_recipients: vec!["1PrivateRecipient".to_owned()],
+                blocked_recipients: Vec::new(),
+                policy_epoch: 1,
+            }],
+            approvals: Vec::new(),
+            activity,
+        }
+    }
+
+    fn filtered_activity(
+        payload: CompanionPayload,
+        permissions: &BTreeSet<DevicePermission>,
+    ) -> Vec<hpay_companion_protocol::ActivitySummary> {
+        let CompanionPayload::StatusSnapshot {
+            policies, activity, ..
+        } = filter_snapshot_for_permissions(payload, permissions).unwrap()
+        else {
+            panic!("expected status snapshot");
+        };
+        assert!(
+            policies.is_empty(),
+            "agent policies stay private on every device"
+        );
+        activity
+    }
+
+    /// A phone that never received `WitnessRollbackAnchor` - every non-pilot
+    /// pairing - must see exactly the bytes it saw before witness discovery
+    /// existed. Not "an empty activity list", but the identical encoded message.
+    #[test]
+    fn a_phone_without_the_witness_permission_sees_byte_identical_snapshot_bytes() {
+        let payload = snapshot_with_activity(vec![
+            activity("operation_awaiting_witness", "signed_awaiting_witness"),
+            activity("operation_committed", "committed"),
+        ]);
+        // Every permission a paired device can hold except the witness one.
+        let without_witness = BTreeSet::from([
+            DevicePermission::ViewAgentWalletStatus,
+            DevicePermission::ViewPendingApprovals,
+            DevicePermission::ViewAgents,
+            DevicePermission::ApprovePayment,
+            DevicePermission::RejectPayment,
+            DevicePermission::EmergencyStop,
+            DevicePermission::RevokeAgent,
+            DevicePermission::RevokeMobileDevice,
+            DevicePermission::LowerSpendingLimits,
+        ]);
+        assert!(!without_witness.contains(&DevicePermission::WitnessRollbackAnchor));
+
+        let filtered = filter_snapshot_for_permissions(payload, &without_witness).unwrap();
+        // The pre-change behaviour, restated independently: agents survive,
+        // policies and activity are blanked outright.
+        let expected = {
+            let CompanionPayload::StatusSnapshot { status, agents, .. } =
+                snapshot_with_activity(Vec::new())
+            else {
+                panic!("expected status snapshot");
+            };
+            CompanionPayload::StatusSnapshot {
+                status,
+                agents,
+                policies: Vec::new(),
+                approvals: Vec::new(),
+                activity: Vec::new(),
+            }
+        };
+        assert_eq!(filtered, expected);
+
+        let actual_bytes = build_response(&connection(), &inbound(), filtered, 120)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let expected_bytes = build_response(&connection(), &inbound(), expected, 120)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        assert_eq!(actual_bytes, expected_bytes);
+    }
+
+    /// A witness phone learns the id of the one operation waiting on its own
+    /// signature, and nothing else. Not the rest of the activity list, not the
+    /// policies, not an operation in any status it could not witness.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    #[test]
+    fn a_witness_phone_sees_only_the_operation_awaiting_its_own_witness() {
+        let with_witness = BTreeSet::from([
+            DevicePermission::ViewAgentWalletStatus,
+            DevicePermission::WitnessRollbackAnchor,
+        ]);
+
+        for status in agent_wallet_core::WITNESS_PENDING_OPERATION_STATUS_NAMES {
+            let payload = snapshot_with_activity(vec![
+                activity("operation_committed", "committed"),
+                activity("operation_awaiting_witness", status),
+                activity("operation_cancelled", "cancelled"),
+                activity("operation_rejected", "rejected"),
+                activity("operation_approval_requested", "approval_requested"),
+                activity("operation_signed", "signed"),
+            ]);
+            let disclosed = filtered_activity(payload, &with_witness);
+            assert_eq!(disclosed.len(), 1, "{status} must disclose exactly one id");
+            assert_eq!(disclosed[0].activity_id, "operation_awaiting_witness");
+            assert_eq!(disclosed[0].status, status);
+        }
+
+        // Nothing pending: byte-identical to a phone with no witness authority.
+        let quiet = snapshot_with_activity(vec![
+            activity("operation_committed", "committed"),
+            activity("operation_witnessed", "witnessed_awaiting_broadcast"),
+            activity("operation_broadcast", "broadcast_submitted"),
+            activity("operation_reconciliation", "reconciliation_required"),
+            activity("operation_recovery", "recovery_required"),
+        ]);
+        assert!(filtered_activity(quiet, &with_witness).is_empty());
+
+        // Two operations cannot legitimately await witness at once, and neither
+        // could be witnessed if they did. Fail closed rather than hand over an
+        // id the phone cannot act on.
+        let ambiguous = snapshot_with_activity(vec![
+            activity("operation_one", "signed_awaiting_witness"),
+            activity("operation_two", "broadcast_uncertain"),
+        ]);
+        assert!(filtered_activity(ambiguous, &with_witness).is_empty());
+    }
+
+    /// The disclosure carries the witness flow's inputs and nothing else.
+    ///
+    /// `ActivitySummary` is the only vehicle available without a protocol
+    /// change, and it has two fields the flow never reads. `description` is the
+    /// agent's free-text reason for the payment - the single most revealing
+    /// string in an operation record - and `occurred_at` is history the witness
+    /// card never shows. Neither may be empty or zero on the wire, so both are
+    /// overwritten with constants instead of forwarded. If a future edit drops
+    /// the redaction, the phone starts receiving the payment reason and this
+    /// test fails.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    #[test]
+    fn the_disclosed_entry_carries_no_payment_reason_and_no_history_timestamp() {
+        let with_witness = BTreeSet::from([
+            DevicePermission::ViewAgentWalletStatus,
+            DevicePermission::WitnessRollbackAnchor,
+        ]);
+        let private = activity("operation_awaiting_witness", "signed_awaiting_witness");
+        let payload = snapshot_with_activity(vec![private.clone()]);
+
+        let disclosed = filtered_activity(payload, &with_witness);
+        assert_eq!(disclosed.len(), 1);
+        let disclosed = &disclosed[0];
+
+        // Carried, because the owner reads them or the recovery needs them.
+        assert_eq!(disclosed.activity_id, private.activity_id);
+        assert_eq!(disclosed.status, private.status);
+        assert_eq!(disclosed.amount_units, private.amount_units);
+        assert_eq!(disclosed.recipient, private.recipient);
+        assert_eq!(disclosed.asset, private.asset);
+
+        // Withheld.
+        assert_ne!(
+            disclosed.description, private.description,
+            "the agent's stated reason for the payment must never reach a phone"
+        );
+        assert_eq!(disclosed.description, WITNESS_PENDING_REDACTED_DESCRIPTION);
+        assert_ne!(disclosed.occurred_at, private.occurred_at);
+        assert_eq!(disclosed.occurred_at, WITNESS_PENDING_REDACTED_OCCURRED_AT);
+
+        // The redaction must still be a legal snapshot on the wire, and still
+        // pass the phone's own `validateActivity` preconditions.
+        assert!(!disclosed.description.is_empty());
+        assert_ne!(disclosed.occurred_at, 0);
+        build_response(
+            &connection(),
+            &inbound(),
+            snapshot_with_activity(vec![disclosed.clone()]),
+            120,
+        )
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    }
+
     #[test]
     fn oversized_valid_snapshot_is_deterministically_bounded_for_encrypted_wire() {
         use hpay_companion_protocol::{AgentAuthorizationState, AgentSummary, CompanionStatus};

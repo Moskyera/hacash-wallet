@@ -8,9 +8,61 @@ import {
   type MobilePairingOffer,
   type SignedRotationCandidateAcceptance,
   type SignedRotationPairingTicket,
+  type WitnessRotationControls,
   type WitnessRotationRecord,
 } from "./api";
 import { parseAck, parseRequest } from "./companionPairing";
+import { companionPhoneAppName } from "./companionWaitingView";
+
+/** The exact name of the phone app, shared with the pairing copy. */
+const COMPANION_PHONE_APP_NAME = companionPhoneAppName;
+
+/**
+ * The exact label of the phone button that advances a witness rotation.
+ *
+ * It must stay identical to the button rendered in
+ * apps/mobile/src/agent/CompanionSecurity.tsx. This panel used to say "Continue
+ * witness rotation", which is not a label that exists anywhere on the phone,
+ * and the panel that carries the real button is headed "Approval phone
+ * rotation". companionUi.test.ts pins the two together.
+ */
+const COMPANION_PHONE_ROTATION_ACTION = "Check and continue rotation";
+
+/** The exact words the owner types to re-target a stranded rotation. */
+export const ROTATION_RETARGET_CONFIRMATION = "USE A DIFFERENT PHONE";
+
+/** The label of the only control that leaves `awaiting_completion_anchor`. */
+export const ROTATION_RETARGET_ACTION = "Use a different replacement phone";
+
+/**
+ * What the re-target costs, said before the press and never behind a
+ * `<details>`.
+ *
+ * `retarget_witness_rotation`
+ * (crates/agent-wallet-core/src/service/companion/rotation.rs) discards the
+ * abandoned candidate's baseline receipt and its registration, and never rolls
+ * the witness epoch back, so the epoch that handset was admitted at is burned.
+ * Nothing else is discarded: no funds, no anchor chain, no journal, and the old
+ * phone stays revoked either way.
+ */
+export const ROTATION_RETARGET_WARNING =
+  "This cannot be undone. The replacement phone you already paired is discarded: it is never registered on this wallet, and the witness epoch it was admitted at is used up, so that exact handset can never serve this wallet again even if it comes back. Nothing else is lost. No money moves, no payment is signed, your balance, history and limits are untouched, and the old phone stays revoked exactly as it is now. You then pair a different replacement phone from the beginning.";
+
+/**
+ * The same escape, at a phase where the replacement phone never got as far as
+ * signing a baseline.
+ *
+ * `retarget_preconditions`
+ * (crates/agent-wallet-core/src/service/companion/rotation.rs) also offers the
+ * re-target at `rotation_ticket_issued` and `candidate_paired_restricted` once
+ * the old phone is already revoked, because the cancel is refused there for good
+ * and the pairing ticket cannot be re-issued. At those phases no baseline was
+ * ever accepted and no witness epoch was consumed, so the expensive warning
+ * above would be false. Overstating the cost is not harmless: it would talk an
+ * owner out of the only control they have.
+ */
+export const ROTATION_RETARGET_PAIRING_WARNING =
+  "This cannot be undone. The half-finished pairing with that replacement phone is discarded and you start the candidate pairing again from the beginning. Nothing else is lost: no witness epoch was used up, so you may pair the same phone again if it comes back. No money moves, no payment is signed, your balance, history and limits are untouched, and the old phone stays revoked exactly as it is now.";
 
 type Props = {
   overview: AgentWalletOverview;
@@ -47,12 +99,42 @@ export function WitnessRotationPanel({
   const [candidateAck, setCandidateAck] = useState<CandidateAck | null>(null);
   const [typedCode, setTypedCode] = useState("");
   const [localError, setLocalError] = useState("");
+  const [controls, setControls] = useState<WitnessRotationControls>({
+    cancellable: false,
+    retargetable: false,
+  });
+  const [retargetText, setRetargetText] = useState("");
+  const [controlsUnknown, setControlsUnknown] = useState(false);
+  const [controlsReloadKey, setControlsReloadKey] = useState(0);
 
   useEffect(() => {
     void agentWalletApi.witnessRotationStatus(overview.wallet_id)
       .then(setRecord)
       .catch(() => setRecord(null));
   }, [overview.wallet_id, overview.witness_rotation_phase]);
+
+  // The core owns both predicates. Asking it means a control is never offered
+  // in a state where it would be refused, and never withheld in one where it is
+  // the only way out. Guessing from the phase is not enough: a re-targeted
+  // rotation sits in awaiting_candidate_pairing with the old phone already
+  // revoked, where the cancel is refused.
+  //
+  // A failed answer is fail-closed - no control is offered - but it must not be
+  // silent. Every control on this panel is now gated on this one call, so a
+  // hiccup would otherwise leave the owner looking at a rotation with no button
+  // and no reason given, which is the exact failure this panel exists to end.
+  useEffect(() => {
+    setRetargetText("");
+    void agentWalletApi.witnessRotationControls(overview.wallet_id)
+      .then((next) => {
+        setControls(next);
+        setControlsUnknown(false);
+      })
+      .catch(() => {
+        setControls({ cancellable: false, retargetable: false });
+        setControlsUnknown(true);
+      });
+  }, [overview.wallet_id, overview.witness_rotation_phase, controlsReloadKey]);
 
   const expected = mode === "normal" ? "ROTATE WITNESS" : "LOST PHONE RECOVERY";
   const phase = overview.witness_rotation_phase;
@@ -105,6 +187,25 @@ export function WitnessRotationPanel({
     setLocalError("");
     await onRefreshOverview();
     onInfo("Witness rotation cancelled before authority transition. The old phone remains active.");
+  }
+
+  async function retargetRotation() {
+    if (!record || retargetText !== ROTATION_RETARGET_CONFIRMATION) return;
+    const next = await agentWalletApi.retargetWitnessRotation(
+      overview.wallet_id,
+      record.rotation_id,
+      `rotation_${crypto.randomUUID()}`,
+      `rotation_candidate_${crypto.randomUUID().replace(/-/g, "")}`,
+    );
+    setRecord(next);
+    setOffer(null);
+    setCandidateConfirmation(null);
+    setCandidateAck(null);
+    setTypedCode("");
+    setRetargetText("");
+    setLocalError("");
+    await onRefreshOverview();
+    onInfo("The unusable replacement phone was discarded. Pair a different replacement phone from the candidate QR step.");
   }
 
   async function completeCandidatePairing() {
@@ -172,7 +273,12 @@ export function WitnessRotationPanel({
       ) : null}
 
       {phase === "awaiting_old_witness_authorization" ? (
-        <div className="agent-safe-note">Open the old phone, connect, and authorize this exact rotation.</div>
+        <div className="agent-safe-note">
+          Open {COMPANION_PHONE_APP_NAME} on the old phone, connect it to this
+          desktop, then open the Security tab and choose{" "}
+          {COMPANION_PHONE_ROTATION_ACTION} in Approval phone rotation. It asks
+          for your fingerprint and authorizes this exact rotation.
+        </div>
       ) : null}
 
       {phase === "awaiting_candidate_pairing" && !offer ? (
@@ -253,16 +359,96 @@ export function WitnessRotationPanel({
 
       {phase === "candidate_paired_restricted" || phase === "awaiting_completion_anchor" ? (
         <div className="agent-safe-note">
-          The replacement phone is restricted to this rotation. On that phone choose
-          Continue witness rotation. It cannot approve payments or view wallet activity.
+          The replacement phone is restricted to this rotation. It cannot approve
+          payments or view wallet activity. On that phone open{" "}
+          {COMPANION_PHONE_APP_NAME}, go to the Security tab and choose{" "}
+          {COMPANION_PHONE_ROTATION_ACTION} in Approval phone rotation.
         </div>
       ) : null}
-      {rotationActive && [
-        "awaiting_old_witness_authorization",
-        "awaiting_candidate_pairing",
-        "rotation_ticket_issued",
-        "candidate_paired_restricted",
-      ].includes(phase ?? "") ? (
+      {/* Past CandidatePairedRestricted the backend refuses a cancel
+          (crates/agent-wallet-core/src/service/companion/rotation.rs), and the
+          start form is hidden because a rotation is active, so this phase had a
+          phase label and nothing else. It cannot be closed by copy: this states
+          plainly what the desktop can and cannot do from here. */}
+      {phase === "awaiting_completion_anchor" ? (
+        <div className="agent-warning" role="alert">
+          This rotation can no longer be cancelled from this desktop. It is
+          normally finished on the replacement phone with{" "}
+          {COMPANION_PHONE_ROTATION_ACTION}. Until it finishes, every agent
+          payment request on this wallet is refused and the agent is told the
+          wallet needs manual recovery. Do not revoke anything: revoking is
+          permanent and removes the phone that can still finish this.
+        </div>
+      ) : null}
+      {/* Fail-closed, but never silently. Both controls below are gated on one
+          call to the core; if that call did not answer, the panel must say so
+          rather than simply show nothing, which is indistinguishable from
+          "there is no way out of this state". */}
+      {rotationActive && controlsUnknown ? (
+        <div className="agent-warning" role="alert">
+          This desktop could not check which rotation controls are available
+          right now, so none are shown. Nothing has changed and nothing is lost.
+          Make sure the wallet is unlocked and try again.{" "}
+          <button
+            type="button"
+            className="agent-secondary-action"
+            disabled={busy}
+            onClick={() => setControlsReloadKey((value) => value + 1)}
+          >
+            Check again
+          </button>
+        </div>
+      ) : null}
+      {/* Until this control existed, an owner whose replacement phone was lost,
+          broken or wiped at exactly this point had nothing at all: the cancel
+          is refused twice over
+          (crates/agent-wallet-core/src/service/companion/rotation.rs), the
+          start form is hidden while a rotation is active, and every agent
+          payment stays refused. The wallet was stopped for good. The escape
+          costs the unusable candidate; that cost is stated in full, in the open,
+          before the first press. */}
+      {controls.retargetable ? (
+        <div className="agent-companion-step">
+          <h3>If the replacement phone is gone</h3>
+          <p>
+            If that handset is lost, broken, wiped or simply will not connect,
+            this is the only way to move on. It points this same rotation at a
+            different replacement phone.
+          </p>
+          {/* Fail-loud, but not falsely loud. Past the authority transition a
+              real baseline and a real witness epoch are discarded; at the
+              pairing phases nothing was ever admitted, and claiming otherwise
+              would scare an owner off the only control they have. */}
+          <div className="agent-warning" role="alert">
+            {phase === "awaiting_completion_anchor"
+              ? ROTATION_RETARGET_WARNING
+              : ROTATION_RETARGET_PAIRING_WARNING}
+          </div>
+          <label className="agent-field">
+            Type {ROTATION_RETARGET_CONFIRMATION}
+            <input
+              value={retargetText}
+              onChange={(event) => setRetargetText(event.target.value)}
+              disabled={busy}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <button
+            type="button"
+            className="agent-danger-action"
+            disabled={busy || !record || retargetText !== ROTATION_RETARGET_CONFIRMATION}
+            onClick={() => void run(retargetRotation)}
+          >
+            {ROTATION_RETARGET_ACTION}
+          </button>
+        </div>
+      ) : null}
+      {/* Gated on the core's own answer rather than on the phase. A re-targeted
+          rotation is back in awaiting_candidate_pairing, but its old phone is
+          already revoked, so cancel_witness_rotation refuses it - offering the
+          button there would be a control that does nothing. */}
+      {rotationActive && controls.cancellable ? (
         <button type="button" className="agent-secondary-action" disabled={busy || !record} onClick={() => void run(cancelRotation)}>
           Cancel before authority transition
         </button>

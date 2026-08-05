@@ -36,6 +36,18 @@ pub enum AgentWalletError {
     IdempotencyConflict,
     #[error("approval is required")]
     ApprovalRequired,
+    // The narrow remainder of the old blanket "this desktop cannot approve".
+    // Approving signs the transaction and then stops for the paired phone's
+    // rollback witness, and only a phone holding the witness permission can
+    // supply it. Approving with no such phone would sign a real transaction
+    // into a status nothing could move, so this refuses first.
+    //
+    // Shown verbatim in the desktop UI, so it names the one control that
+    // resolves it and states plainly that nothing was signed.
+    #[error(
+        "This payment cannot be approved yet, because no paired phone can witness it. Approving signs the transaction and then waits for a paired phone to confirm it, and no phone that can do that is available. Witnessing stays bound to the one phone that was set up for it, so a phone you paired afterwards does not take that role on its own. Use Pair a phone, or Replace the paired phone, on the Security page. Nothing was signed, nothing was spent, and this payment is still waiting for a decision."
+    )]
+    WitnessPhoneRequiredForApproval,
     #[error("approval expired")]
     ApprovalExpired,
     #[error("approval was rejected")]
@@ -216,6 +228,10 @@ pub enum AgentWalletError {
     NodeCapabilityMismatch,
     #[error("mobile rollback witness receipt is required before broadcast")]
     RollbackWitnessRequired,
+    #[error(
+        "this payment can still be witnessed by the paired phone, so it cannot be abandoned yet"
+    )]
+    WitnessRecoveryNotAvailable,
     #[error("Agent Wallet rollback or witness chain mismatch detected")]
     RollbackDetected,
     #[error("Agent Wallet block 1 fingerprint is invalid")]

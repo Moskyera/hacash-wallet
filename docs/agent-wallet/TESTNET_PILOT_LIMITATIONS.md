@@ -20,7 +20,118 @@ The current implementation is suitable only for a controlled, low-value, disposa
 | HIP-20 | Disabled | No HIP-20/native-asset Agent Wallet send. |
 | L2/Fast Pay | Unsupported in Agent Wallet Pilot | Personal Wallet L2 remains separate and unchanged. |
 | Autonomous payments | Unsupported | Every decision requires explicit trusted-device action. |
+| Completing a payment approval | Implemented, desktop-approved and phone-witnessed | The owner approves on the desktop; the payment reaches the network only after the paired phone witnesses it. See "Completing a payment approval" below. |
 | Agent wallet fee | Zero | Only the network fee is included. |
+
+## Completing a payment approval
+
+An agent proposes a payment, the owner reviews the exact transaction on the
+desktop and approves it, and the paired phone witnesses it. That path is
+implemented and executed end to end in
+`crates/agent-wallet-core/src/service/companion/tests/desktop_witness_flow.rs`:
+a real agent intent, a real node-built unsigned body, a real desktop approval, a
+real signature by the wallet's own signer, discovery through the least-privilege
+witness disclosure, a real rollback anchor, a real witness receipt, and exactly
+one submission.
+
+This replaces the previous limitation, in which the desktop refused every
+approval. That refusal was a fail-closed stub: completing an approval signs into
+`SignedAwaitingWitness`, and at the time the phone signed a witness receipt only
+for an operation it had approved itself and was never told a desktop-approved
+operation existed. Both halves are closed - the phone can witness an operation
+it did not approve, and the snapshot discloses at most one witness-pending
+operation id to a phone holding `WitnessRollbackAnchor`.
+
+What still constrains it, and is enforced rather than documented:
+
+- **A payment reaches the network only with a real witness.** No change here.
+  `resume_payment` refuses a `SignedAwaitingWitness` operation, and
+  `apply_mobile_witness_and_broadcast` requires a signature from the phone the
+  anchor names, over that exact anchor. Pinned by
+  `a_desktop_approved_payment_still_reaches_no_node_without_a_real_phone_witness`.
+- **A desktop approval needs a phone that can witness, before it signs.**
+  `approve_desktop_and_broadcast` refuses with
+  `WitnessPhoneRequiredForApproval` when no registered, unrevoked device holds
+  `WitnessRollbackAnchor`. Without that check a desktop approval on an unpaired
+  wallet would sign into a status no sweep can expire, holding its reservation
+  and refusing every later payment an anchor. The refusal happens before
+  anything is written and names the control that resolves it. Pinned by
+  `a_desktop_approval_with_no_phone_that_can_witness_is_refused_unsigned`.
+- **It must be the phone the anchor is bound to, not just any paired phone.**
+  `rollback_witness.mobile_device_id` is pinned to the first phone that ever
+  fetched an anchor and is moved only by `complete_witness_rotation`, so an
+  ordinary revoke-and-re-pair leaves a registry containing an active witness
+  phone that `pending_rollback_anchor` will still refuse with
+  `RollbackDetected`. The prerequisite therefore asks about that exact device.
+  Pinned by
+  `a_phone_paired_after_the_witness_was_bound_does_not_unlock_the_approval` and
+  `a_revoked_phone_does_not_satisfy_the_witness_prerequisite`.
+- **The approval mode still decides which device may approve.**
+  `ApprovalMode::DesktopManual` is the only mode this desktop writes, and under
+  it the desktop approves and the phone is refused
+  (`apply_mobile_approval_and_broadcast` admits only the mobile modes). A
+  mobile mode moves that authority to the phone. Pinned by
+  `the_shipping_desktop_manual_policy_is_approved_by_the_desktop_and_not_the_phone`
+  and `a_mobile_approval_mode_is_what_lets_the_phone_decide_the_same_payment`.
+- **A wrong approval still gets its own reason.** A throwaway probe clone
+  validates the commitment before the witness-phone refusal is reached, so a
+  malformed, expired, mismatched or wrong-epoch approval is refused with its own
+  error and writes nothing.
+
+The desktop reflects this: the Approve control is rendered again, the notice
+beside it says that approving signs and then stops for the phone rather than
+paying anyone, and the message after a successful press is derived from the
+status the wallet returned - `signed_awaiting_witness` reads as "nothing has
+been sent to the network yet", never as "submitted".
+
+### Known unrecovered state: an anchor that expires before its receipt arrives
+
+**This is a real, reachable, currently unrecoverable state on the path above.**
+It is not caused by the desktop approval and is not new - the phone-approved
+path reaches the same place - but the desktop approval makes it routine, so it
+is written down rather than left to be discovered.
+
+A rollback anchor lives for five minutes (`ANCHOR_LIFETIME_SECS`). Once
+`pending_rollback_anchor` has issued one, the desktop holds it in
+`rollback_witness.pending`, and nothing retires it: only
+`complete_witness_rotation` ever clears that slot. If the phone's reply does not
+reach the desktop inside those five minutes - a slow LAN reconnect is enough,
+and the owner may have confirmed and signed well within the window - then, all
+executed:
+
+| Attempt | Result |
+| --- | --- |
+| Deliver the genuine receipt | `RollbackDetected` (the anchor is expired) |
+| Fetch a fresh anchor | `RecoveryRequired` |
+| `resume_payment` | `RollbackWitnessRequired` |
+| `reject_payment` | `InvalidOperationState` |
+| `confirm_broadcast` | `ApprovalCommitmentMismatch` |
+| `prepare_witness_rotation` | `RecoveryRequired` (a signed operation exists) |
+| A new `create_payment_intent` | `RecoveryRequired` |
+| Restart the desktop | unchanged |
+
+The operation stays in `SignedAwaitingWitness` holding its reservation, no
+submission ever happens, and the Agent Wallet cannot make another payment. The
+desktop additionally refuses to pair a phone while
+`unresolved_signed_operations > 0`, so that route is closed too.
+
+Nothing is lost to an attacker and nothing is spent - the failure is
+fail-closed - but the wallet's agent-payment feature is permanently disabled
+with no in-app recovery. **Do not enable the Approve control for anyone but a
+disposable pilot wallet until this has a way out.** The missing piece is an
+owner-driven way to abandon a signed-but-unwitnessed operation, or a way to
+reissue an anchor whose receipt never arrived; both need the phone's own
+`MobileWitnessState` sequence to be reconciled, so neither is a local change.
+
+### Known unrecovered state: a revoked witness phone
+
+`prepare_witness_rotation` requires the OLD phone to still be a registered,
+unrevoked `WitnessRollbackAnchor` device. Revoking the lost phone first and
+pairing a replacement the ordinary way therefore makes the rotation itself
+impossible, and the anchor pin can never move. Every later desktop approval is
+refused with `WitnessPhoneRequiredForApproval` - fail-closed, nothing signed,
+reservations released - but the wallet cannot make agent payments again.
+Replace a phone with **Replace the paired phone** before revoking the old one.
 
 ## Node limitations
 

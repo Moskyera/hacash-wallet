@@ -262,10 +262,11 @@ fn android_signer_copies_match_and_allow_only_typed_pilot_authority() {
             "Android signer exposes {forbidden}"
         );
     }
+    // Everything that can end in money moving, or in a rollback witness
+    // receipt, stays behind the pilot feature.
     for purpose in [
         "ApprovalDecision",
         "WitnessReceipt",
-        "WitnessRotationAuthorization",
         "RotationCandidateAcceptance",
         "WitnessRotationBaselineReceipt",
     ] {
@@ -273,6 +274,19 @@ fn android_signer_copies_match_and_allow_only_typed_pilot_authority() {
             "DeviceSignaturePurpose::{purpose}ifcfg!(feature=\"agent-wallet-testnet-pilot\")=>"
         )));
     }
+    // WitnessRotationAuthorization is deliberately not gated. It authorizes this
+    // handset's own replacement, moves no money and signs no transaction, and
+    // withholding it left a read-only build that had been marked as needing a
+    // controlled rotation with no way to run one - a permanent dead end.
+    assert!(
+        compact_rust.contains("DeviceSignaturePurpose::WitnessRotationAuthorization=>"),
+        "the old-phone rotation authorization must stay available in every build"
+    );
+    assert!(
+        !compact_rust.contains(
+            "DeviceSignaturePurpose::WitnessRotationAuthorizationifcfg!(feature=\"agent-wallet-testnet-pilot\")=>"
+        ),
+    );
     assert!(rust.contains("| DeviceSignaturePurpose::AdminCommand"));
     assert!(rust.contains("return Err(CompanionError::PermissionDenied)"));
 }

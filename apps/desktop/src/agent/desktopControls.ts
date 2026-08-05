@@ -57,6 +57,24 @@ export const DESKTOP_CONTROLS = {
   lock_and_switch_wallet: "Lock and choose another Agent Wallet",
   open_security: "Open Security",
   open_overview_to_pair_agent: "Go to Overview to pair an agent",
+  /**
+   * Gives up a signed payment that no phone can confirm any more. It releases
+   * the reservation and sends nothing: the core accepts it only for a payment
+   * that provably never reached the node.
+   */
+  give_up_stranded_payment: "Give up this payment",
+  /**
+   * Drops a confirmation window that ran out unanswered. It moves no money and
+   * leaves the payment exactly as it is - same amount, same recipient, same
+   * transaction id - and is the step that frees the wallet to offer
+   * `replace_the_paired_phone`. It is not a give-up and is never named as one.
+   */
+  clear_expired_confirmation_window: "Clear the expired confirmation window",
+  /**
+   * The disclosure that holds the witness rotation wizard on the Security page.
+   * It is named by the stranded-payment copy, which has to point somewhere real.
+   */
+  replace_the_paired_phone: "Replace the paired phone",
   review_exact_transaction: "Review exact transaction",
   approve_exact_transaction: "Approve exact transaction",
   reject_payment: "Reject",

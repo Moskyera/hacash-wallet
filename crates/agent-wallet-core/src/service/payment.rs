@@ -339,7 +339,46 @@ impl AgentWalletManager {
         ) {
             return Err(AgentWalletError::AgentPermissionDenied);
         }
-        if cfg!(feature = "agent-wallet-testnet-pilot") {
+        // Under the Testnet Pilot this used to refuse EVERY approval that
+        // reached this line, however valid. The reason was downstream, not here:
+        // completing a desktop approval signs the transaction into
+        // OperationStatus::SignedAwaitingWitness, and at the time nothing could
+        // move it. The phone signed a witness receipt only for an operation it
+        // had approved itself, and it was never told a desktop-approved
+        // operation existed, so the payment stranded in a status no sweep can
+        // expire, holding its reservation, blocking every later payment from
+        // obtaining a rollback anchor.
+        //
+        // Both halves of that are now closed, and the whole path is executed end
+        // to end - agent intent, desktop approval, real signing, discovery,
+        // anchor, receipt, one submission - in
+        // service/companion/tests/desktop_witness_flow.rs. If that test is ever
+        // deleted or weakened, this call has lost the evidence it stands on.
+        //
+        // ONE PART OF THE OLD REFUSAL SURVIVES, NARROWED TO WHAT STILL JUSTIFIES
+        // IT. Under the pilot a completed approval signs into
+        // SignedAwaitingWitness, and only a registered phone holding
+        // `WitnessRollbackAnchor` can move it from there: that permission is
+        // what `pending_rollback_anchor` requires, and it is the same permission
+        // the witness disclosure is gated on. With no such phone the payment
+        // would sign into a status that no sweep can expire, that holds its
+        // reservation, and that refuses every later payment an anchor - the
+        // exact stranding the blanket refusal existed to prevent, still
+        // reachable while the owner has not paired a phone yet.
+        //
+        // It is not a device-trust rule and it is not a build rule: pair a
+        // witness phone and this same approval goes through.
+        //
+        // The throwaway probe clone is kept, and it is kept for the same reason
+        // it was written: so that a malformed, expired, mismatched or
+        // wrong-epoch approval still returns its own specific error instead of
+        // being absorbed by the refusal below, and so that the refusal is
+        // reached only by an approval that was otherwise valid. It mutates
+        // nothing - `state` is untouched, no journal event is written, the
+        // clone is dropped - which is why the error can promise that nothing
+        // was signed and that the payment is still awaiting a decision.
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        {
             let mut probe = state
                 .operations
                 .get(operation_id.as_str())
@@ -351,8 +390,32 @@ impl AgentWalletManager {
                 state.policy_epoch,
                 now,
             )?;
-            return Err(AgentWalletError::ApprovalRequired);
+            // "Some phone could witness" is the right question only until a
+            // rollback witness record exists. From then on `rollback_witness`
+            // pins one `mobile_device_id`, and `pending_rollback_anchor`
+            // refuses every other device with `RollbackDetected`. An ordinary
+            // revoke-and-re-pair leaves that pin on the revoked phone - only
+            // `complete_witness_rotation` moves it - so asking the registry
+            // alone would sign a payment that the newly paired phone can never
+            // witness, and `SignedAwaitingWitness` has no exit: no sweep
+            // expires it, `prepare_witness_rotation` refuses while it exists,
+            // and no further intent can be created. So ask about the exact
+            // device that would have to produce the anchor.
+            let can_witness = match state.rollback_witness.as_ref() {
+                Some(witness) => state.companion_security.as_ref().is_some_and(|companion| {
+                    companion.is_active_witness_device(&witness.mobile_device_id)
+                }),
+                None => state.companion_security.as_ref().is_some_and(
+                    super::companion::CompanionSecurityState::has_active_witness_device,
+                ),
+            };
+            if !can_witness {
+                return Err(AgentWalletError::WitnessPhoneRequiredForApproval);
+            }
         }
+        // `record_approval` validates before it mutates, and the journal event
+        // that makes any of it durable is written after that, so every refusal
+        // below this line also leaves the payment exactly where it was.
         let operation = state
             .operations
             .get_mut(operation_id.as_str())
@@ -873,8 +936,20 @@ pub(super) fn validate_policy_for_request(
     if total_debit > policy.max_per_payment_units {
         return Err(AgentWalletError::PaymentLimitExceeded);
     }
-    if policy.blocked_recipients.contains(&request.recipient)
-        || !policy.allowed_recipients.contains(&request.recipient)
+    // The blocklist is absolute and is checked on its own. No policy flag and no
+    // owner approval can admit a blocked recipient.
+    if policy.blocked_recipients.contains(&request.recipient) {
+        return Err(AgentWalletError::RecipientNotAllowed);
+    }
+    // The allowlist keeps its meaning: a recipient on it is one the owner has
+    // already vetted. A recipient off it is refused here unless the owner has
+    // deliberately turned on `allow_unlisted_recipient_with_approval` for this
+    // agent, in which case the agent may only propose the payment. It still has
+    // to pass every check below, and it is still admitted only by the exact
+    // owner approval ceremony, which nothing here bypasses. Being proposed and
+    // approved never adds the recipient to `allowed_recipients`.
+    if !policy.allowed_recipients.contains(&request.recipient)
+        && !policy.allow_unlisted_recipient_with_approval
     {
         return Err(AgentWalletError::RecipientNotAllowed);
     }

@@ -144,6 +144,7 @@ commands.allow = [
   "agent_wallet_companion_create_identity",
   "agent_wallet_companion_decide_payment",
   "agent_wallet_companion_disconnect",
+  "agent_wallet_companion_discard_consent",
   "agent_wallet_companion_identity_status",
   "agent_wallet_companion_lifecycle",
   "agent_wallet_companion_pairing_cancel",
@@ -159,4 +160,5 @@ commands.allow = [
   "agent_wallet_companion_sync",
   "agent_wallet_companion_rotation_step",
   "agent_wallet_companion_witness_anchor",
+  "agent_wallet_companion_witness_pending",
 ]

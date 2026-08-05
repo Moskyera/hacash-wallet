@@ -19,7 +19,7 @@ use tauri::Webview;
 use super::AgentCompanionMobileState;
 use super::commands::require_agent_companion_webview;
 #[cfg(target_os = "android")]
-use super::storage::MobilePendingApproval;
+use super::storage::{MobilePendingApproval, MobilePendingWitness};
 #[cfg(target_os = "android")]
 use super::unix_now;
 
@@ -49,6 +49,18 @@ pub struct CompanionPilotDecisionView {
     detail: String,
 }
 
+/// The exact operation the owner confirmed on the phone, in the words the phone
+/// showed them. Every field comes from the one disclosed pending-witness entry;
+/// nothing here is chosen by the webview.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompanionPendingWitnessRequest {
+    operation_id: String,
+    amount_units: String,
+    recipient: String,
+    status: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompanionWitnessView {
@@ -63,6 +75,98 @@ pub struct CompanionRotationView {
     rotation_id: String,
     phase: WitnessRotationPhase,
     detail: String,
+}
+
+/// Refuses unless this phone already holds a durable record authorizing it to
+/// witness this exact operation.
+///
+/// There are exactly two such records, and never both for different operations:
+///
+/// * `pending_approval` - the owner approved this payment on this handset. That
+///   path is unchanged, field for field, including the comparison against the
+///   approval's own network binding.
+/// * `pending_witness` - the owner approved this payment on HPAY Desktop and
+///   then confirmed here, on this phone, the exact amount and recipient they
+///   were shown. There is no approval on this handset to compare a binding
+///   against, and comparing the anchor against a binding the same desktop
+///   supplied in the same exchange would prove nothing anyway. The network
+///   fields are measured instead against the durable `MobileWitnessState` pins,
+///   which this phone owns and the desktop cannot move.
+///
+/// An anchor that matches neither record is refused. This is the check that
+/// keeps the rollback witness a deliberate act rather than an automatic
+/// co-signature, so it has no "missing input" branch that lets it pass.
+#[cfg(any(target_os = "android", test))]
+fn require_authorized_witness_binding(
+    current: &super::storage::MobileCompanionDurableState,
+    anchor: &hpay_companion_protocol::RollbackAnchor,
+) -> Result<(), String> {
+    let operation_id = anchor
+        .last_operation_id
+        .as_deref()
+        .ok_or_else(|| "Rollback anchor names no operation to witness".to_owned())?;
+    let approval = current
+        .pending_approval
+        .as_ref()
+        .filter(|pending| pending.decision.operation_id == operation_id);
+    let confirmation = current
+        .pending_witness
+        .as_ref()
+        .filter(|pending| pending.operation_id == operation_id);
+    match (approval, confirmation) {
+        (Some(pending), _) => {
+            let approval_binding = pending
+                .decision
+                .network_binding
+                .as_ref()
+                .ok_or_else(|| "Pending pilot approval has no network binding".to_owned())?;
+            if anchor.policy_epoch != pending.decision.policy_epoch
+                || anchor.network_id != approval_binding.network_id
+                || anchor.genesis_identifier != approval_binding.genesis_identifier
+                || anchor.node_profile_id != approval_binding.node_profile_id
+                || anchor.transaction_format_version != approval_binding.transaction_format_version
+            {
+                return Err(
+                    "Rollback anchor does not match the approved network binding".to_owned(),
+                );
+            }
+            Ok(())
+        }
+        (None, Some(pending)) => {
+            pending.validate()?;
+            // A leftover approval naming some other operation would mean two
+            // live payments on one phone, which cannot legitimately happen.
+            if current.pending_approval.is_some() {
+                return Err("Another pilot approval is still pending on this phone".to_owned());
+            }
+            Ok(())
+        }
+        (None, None) => Err(
+            "No exact pilot approval or witness confirmation is pending for this anchor".to_owned(),
+        ),
+    }
+}
+
+/// Whether an acknowledgement the desktop returned for a witness receipt ends
+/// this phone's part in the operation, and so retires the consent record that
+/// authorized it.
+///
+/// Every accepted acknowledgement does, and the `detail` is deliberately not
+/// read. It used to be, and only one exact string cleared, so a receipt the
+/// desktop accepted into `ReconciliationRequired` - a success, reported to the
+/// owner as a success - left the confirmation behind for ever: the operation
+/// leaves `awaits_mobile_witness`, so the desktop stops offering it, the witness
+/// card disappears, and the one control that could reach the clear goes with it.
+/// Any future acknowledgement string the desktop learns to send is covered here
+/// by construction rather than by remembering to add it.
+///
+/// This retires an intent to sign, never a signature. The signed evidence is
+/// `MobileWitnessState`, which nothing on this path touches, and a rejected
+/// acknowledgement retires nothing at all.
+#[cfg(any(target_os = "android", test))]
+fn witness_ack_retires_consent(accepted: bool, detail: &str) -> bool {
+    let _ = detail;
+    accepted
 }
 
 fn require_pilot_enabled() -> Result<(), String> {
@@ -432,24 +536,7 @@ impl AgentCompanionMobileState {
             .verify(&current.registry, now)
             .map_err(|error| error.to_string())?;
         let anchor = &proposal.anchor;
-        let pending = current
-            .pending_approval
-            .as_ref()
-            .ok_or_else(|| "No exact pilot approval is pending for this witness".to_owned())?;
-        let approval_binding = pending
-            .decision
-            .network_binding
-            .as_ref()
-            .ok_or_else(|| "Pending pilot approval has no network binding".to_owned())?;
-        if anchor.last_operation_id.as_deref() != Some(pending.decision.operation_id.as_str())
-            || anchor.policy_epoch != pending.decision.policy_epoch
-            || anchor.network_id != approval_binding.network_id
-            || anchor.genesis_identifier != approval_binding.genesis_identifier
-            || anchor.node_profile_id != approval_binding.node_profile_id
-            || anchor.transaction_format_version != approval_binding.transaction_format_version
-        {
-            return Err("Rollback anchor does not match the approved network binding".to_owned());
-        }
+        require_authorized_witness_binding(&current, anchor)?;
         if anchor.agent_wallet_id != current.agent_wallet_id
             || anchor.desktop_device_id != current.desktop_device_id
             || anchor.mobile_device_id != current.mobile_device_id
@@ -496,21 +583,131 @@ impl AgentCompanionMobileState {
             .map_err(|error| error.to_string())
     }
 
-    async fn clear_pending_approval(&self, operation_id: &str) -> Result<(), String> {
+    /// Records the owner's consent, on this phone, to witness one exact
+    /// operation that was approved on the desktop.
+    ///
+    /// This runs before anything is fetched, accepted or signed, and it is the
+    /// only thing that lets `sign_pilot_witness` proceed without a
+    /// `pending_approval`. The amount and recipient are the ones the screen
+    /// actually showed, so what is durable is what the owner read.
+    async fn confirm_pending_witness(
+        &self,
+        operation_id: &str,
+        amount_units: &str,
+        recipient: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        let now = unix_now()?;
         let mut slot = self.shared.state.lock().await;
         let current = slot
             .as_ref()
-            .ok_or_else(|| "Pair this phone before completing an approval".to_owned())?
+            .ok_or_else(|| "Pair this phone before witnessing a payment".to_owned())?
             .clone();
-        let pending = current
-            .pending_approval
-            .as_ref()
-            .ok_or_else(|| "No pilot approval is pending".to_owned())?;
-        if pending.decision.operation_id != operation_id {
-            return Err("Pilot approval completion scope mismatch".to_owned());
+        current.validate_at(now)?;
+        // Deliberately no `requires_controlled_rotation` gate here. A refused
+        // reset durably writes a blocking rotation phase, so gating on it would
+        // wedge the owner: confirm, hit a network failure, try the reset, and
+        // the retry that would have finished the payment is refused forever.
+        // Nothing is lost by leaving it out - a rotation changes the witness
+        // epoch, and `accept_anchor` refuses any anchor whose witness epoch does
+        // not match this phone's durable state, so a rotated phone cannot
+        // witness for the old one no matter what is confirmed here.
+        if current.pending_approval.is_some() {
+            return Err(
+                "Finish the payment already waiting for your approval before witnessing another"
+                    .to_owned(),
+            );
+        }
+        let confirmation = MobilePendingWitness {
+            state_version: "1".to_owned(),
+            operation_id: operation_id.to_owned(),
+            amount_units: amount_units.to_owned(),
+            recipient: recipient.to_owned(),
+            status: status.to_owned(),
+            confirmed_at: now.to_string(),
+        };
+        confirmation.validate()?;
+        if let Some(existing) = &current.pending_witness {
+            // A retry after a crash or a lost response resumes the same
+            // payment. Anything else is refused rather than overwritten: the
+            // owner consented to one operation, not to whichever arrives next.
+            if existing.operation_id != confirmation.operation_id
+                || existing.amount_units != confirmation.amount_units
+                || existing.recipient != confirmation.recipient
+            {
+                return Err(
+                    "A different payment is already waiting for your witness on this phone"
+                        .to_owned(),
+                );
+            }
+            return Ok(());
         }
         let mut next = current;
-        next.pending_approval = None;
+        next.pending_witness = Some(confirmation);
+        self.shared.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(())
+    }
+
+    async fn clear_pending_witness(&self, operation_id: &str) -> Result<(), String> {
+        let mut slot = self.shared.state.lock().await;
+        let mut next = slot
+            .as_ref()
+            .ok_or_else(|| "Pair this phone before completing a witness".to_owned())?
+            .clone();
+        // The clearing rule, including the rotation-marker rewind, lives once in
+        // the storage layer so the approval and the confirmation cannot drift
+        // into two different lifecycles again.
+        next.clear_pending_witness_for(operation_id)?;
+        self.shared.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(())
+    }
+
+    /// Retires whichever durable consent record named this now-finished
+    /// operation.
+    ///
+    /// A desktop-approved payment has no `pending_approval` to clear, and
+    /// calling the approval-only version for one used to be an error at the very
+    /// end of a fully successful witness lifecycle.
+    ///
+    /// Finding nothing to clear is success, not failure. This runs after the
+    /// desktop has already accepted the receipt, so returning an error here
+    /// would report a payment that actually worked as a failure - and would do
+    /// it precisely on the retry paths where the record was already retired.
+    async fn clear_completed_operation(&self, operation_id: &str) -> Result<(), String> {
+        let (has_approval, has_confirmation) = {
+            let slot = self.shared.state.lock().await;
+            let current = slot
+                .as_ref()
+                .ok_or_else(|| "Pair this phone before completing a payment".to_owned())?;
+            (
+                current
+                    .pending_approval
+                    .as_ref()
+                    .is_some_and(|pending| pending.decision.operation_id == operation_id),
+                current
+                    .pending_witness
+                    .as_ref()
+                    .is_some_and(|pending| pending.operation_id == operation_id),
+            )
+        };
+        if has_approval {
+            self.clear_pending_approval(operation_id).await?;
+        }
+        if has_confirmation {
+            self.clear_pending_witness(operation_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn clear_pending_approval(&self, operation_id: &str) -> Result<(), String> {
+        let mut slot = self.shared.state.lock().await;
+        let mut next = slot
+            .as_ref()
+            .ok_or_else(|| "Pair this phone before completing an approval".to_owned())?
+            .clone();
+        next.clear_pending_approval_for(operation_id)?;
         self.shared.persist_locked(&next)?;
         *slot = Some(next);
         Ok(())
@@ -573,8 +770,18 @@ impl AgentCompanionMobileState {
                     if anchor_id != proposal.anchor.anchor_id || !accepted {
                         return Err("Desktop rejected the rollback witness receipt".to_owned());
                     }
-                    if detail == "final_witness_accepted_committed" {
-                        self.clear_pending_approval(&operation_id).await?;
+                    // An accepted acknowledgement ends this phone's part in the
+                    // operation, whatever the desktop then does with it. Only
+                    // `final_witness_accepted_committed` used to clear, so a
+                    // receipt that was accepted into `ReconciliationRequired`
+                    // left the confirmation behind - on a success path, with the
+                    // screen reporting success, and with the operation no longer
+                    // offered for witness so no control could ever reach the
+                    // clear again. Nothing is lost by clearing here: if
+                    // reconciliation later needs a final witness, the desktop
+                    // offers the operation again and the owner confirms again.
+                    if witness_ack_retires_consent(accepted, &detail) {
+                        self.clear_completed_operation(&operation_id).await?;
                     }
                     return Ok(CompanionWitnessView {
                         anchor_id,
@@ -602,6 +809,9 @@ pub async fn agent_wallet_companion_decide_payment(
     require_pilot_enabled()?;
     #[cfg(target_os = "android")]
     {
+        // Held for the whole flow so the automatic sweep cannot retire the
+        // consent record this flow is in the middle of using.
+        let _flow = state.consent_flow.lock().await;
         let operation_id = request.commitment.operation_id.clone();
         let approved = request.decision == ApprovalDecision::Approve;
         let prepared = state.sign_pilot_decision(&app, request).await?;
@@ -677,6 +887,54 @@ pub async fn agent_wallet_companion_decide_payment(
     }
 }
 
+/// Witnesses one operation the owner approved on HPAY Desktop.
+///
+/// The phone does not receive the wallet's activity list. It receives, under the
+/// `WitnessRollbackAnchor` permission it already holds, the id of the single
+/// operation that is stranded waiting for its signature, plus the amount and
+/// recipient needed to render a confirmation the owner can actually read. The
+/// anchor itself still arrives only through `RecoverPendingWitness`, still
+/// carries a real desktop signature, and is still checked against this phone's
+/// durable witness state before anything is signed.
+#[tauri::command]
+pub async fn agent_wallet_companion_witness_pending(
+    webview: Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentCompanionMobileState>,
+    request: CompanionPendingWitnessRequest,
+) -> Result<CompanionWitnessView, String> {
+    require_agent_companion_webview(&webview)?;
+    require_pilot_enabled()?;
+    #[cfg(target_os = "android")]
+    {
+        let _flow = state.consent_flow.lock().await;
+        // Durable owner consent first, before a single byte is fetched.
+        state
+            .confirm_pending_witness(
+                &request.operation_id,
+                &request.amount_units,
+                &request.recipient,
+                &request.status,
+            )
+            .await?;
+        let proposal = state
+            .recover_pending_proposal(app.clone(), &request.operation_id)
+            .await?;
+        state.send_witness(app, proposal).await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let CompanionPendingWitnessRequest {
+            operation_id,
+            amount_units,
+            recipient,
+            status,
+        } = request;
+        let _ = (app, state, operation_id, amount_units, recipient, status);
+        Err("Rollback witnessing is available only on Android".to_owned())
+    }
+}
+
 #[tauri::command]
 pub async fn agent_wallet_companion_witness_anchor(
     webview: Webview,
@@ -688,6 +946,7 @@ pub async fn agent_wallet_companion_witness_anchor(
     require_pilot_enabled()?;
     #[cfg(target_os = "android")]
     {
+        let _flow = state.consent_flow.lock().await;
         state.send_witness(app, proposal).await
     }
     #[cfg(not(target_os = "android"))]
@@ -697,6 +956,16 @@ pub async fn agent_wallet_companion_witness_anchor(
     }
 }
 
+/// Advances a controlled witness rotation from this phone.
+///
+/// This used to be gated wholesale on the pilot feature, which meant a handset
+/// carrying a rotation marker in a read-only build had no control at all: the
+/// reset was refused, the rotation panel was hidden, and the command refused
+/// too. The old-phone half - poll the desktop, then sign an authorization for
+/// this handset's own replacement - is now available in every build, because it
+/// authorizes nothing, spends nothing and only ever gives authority away. The
+/// replacement phone's half, which ends in a witness receipt over a rollback
+/// anchor, stays pilot-only and is refused branch by branch below.
 #[tauri::command]
 pub async fn agent_wallet_companion_rotation_step(
     webview: Webview,
@@ -704,7 +973,6 @@ pub async fn agent_wallet_companion_rotation_step(
     state: tauri::State<'_, AgentCompanionMobileState>,
 ) -> Result<CompanionRotationView, String> {
     require_agent_companion_webview(&webview)?;
-    require_pilot_enabled()?;
     #[cfg(target_os = "android")]
     {
         let _rotation = state.rotation.lock().await;
@@ -762,6 +1030,8 @@ pub async fn agent_wallet_companion_rotation_step(
                         detail,
                     })
                 } else if current.mobile_device_id == record.new_mobile_device_id {
+                    // The replacement phone's half ends in a witness receipt.
+                    require_pilot_enabled()?;
                     let signed = state.sign_rotation_baseline(&app, &record).await?;
                     let response = state
                         .exchange_with_reconnect(
@@ -782,6 +1052,8 @@ pub async fn agent_wallet_companion_rotation_step(
                 }
             }
             CompanionPayload::RollbackAnchorProposal(proposal) => {
+                // Signing the completion anchor is a rollback witness receipt.
+                require_pilot_enabled()?;
                 state.finish_rotation_anchor(app, proposal).await
             }
             CompanionPayload::AdminAck {
@@ -837,5 +1109,214 @@ mod tests {
     #[test]
     fn pilot_fee_is_network_only_and_has_no_wallet_fee() {
         assert_eq!(AGENT_NETWORK_FEE_UNITS, 1_000);
+    }
+
+    /// The headline stranding path.
+    ///
+    /// These are the two acknowledgements
+    /// `crates/wallet-tauri-common/src/companion_backend.rs` returns with
+    /// `accepted: true` for an ordinary payment witness. Only the committed one
+    /// used to retire the confirmation, so a receipt the desktop accepted into
+    /// `ReconciliationRequired` stranded the phone on a success path.
+    #[test]
+    fn every_accepted_witness_acknowledgement_retires_the_confirmation() {
+        for detail in [
+            "final_witness_accepted_committed",
+            "submitted_witness_accepted_reconciliation_required",
+        ] {
+            assert!(
+                witness_ack_retires_consent(true, detail),
+                "an accepted acknowledgement must end this phone's part: {detail}"
+            );
+        }
+        // A string the desktop has not learned to send yet must not strand a
+        // phone either, so the detail is not read at all.
+        assert!(witness_ack_retires_consent(true, "some_future_terminal_detail"));
+        // A refusal retires nothing: the operation may still need this phone.
+        assert!(!witness_ack_retires_consent(
+            false,
+            "final_witness_accepted_committed"
+        ));
+    }
+
+    mod witness_binding {
+        use hpay_companion_protocol::{
+            DeviceId, DeviceRegistry, LanEndpoint, ReplayGuard, RollbackAnchor,
+            RollbackOperationPhase, WitnessRotationPhase,
+        };
+
+        use super::super::require_authorized_witness_binding;
+        use crate::agent_companion::STATE_VERSION;
+        use crate::agent_companion::storage::{MobileCompanionDurableState, MobilePendingWitness};
+
+        const GENESIS: &str = "11b008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff";
+        const NODE_PROFILE: &str =
+            "22b008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff";
+
+        /// Only the two durable consent records matter to the function under
+        /// test; every other field is inert scaffolding it never reads.
+        fn paired_state() -> MobileCompanionDurableState {
+            MobileCompanionDurableState {
+                state_version: STATE_VERSION,
+                agent_wallet_id: "wallet_one".to_owned(),
+                desktop_device_id: DeviceId::parse("desktop_one").unwrap(),
+                mobile_device_id: DeviceId::parse("mobile_one").unwrap(),
+                endpoints: vec![LanEndpoint::parse("hpay-lan://192.168.1.8:42492").unwrap()],
+                registry: DeviceRegistry::new(),
+                replay: ReplayGuard::new().snapshot(1_000).unwrap(),
+                response_sequence: 0,
+                approval_sequence: 0,
+                pending_pairing_ack: None,
+                pending_approval: None,
+                pending_witness: None,
+                discarded_consents: Vec::new(),
+                discarded_consents_dropped: 0,
+                witness: None,
+                rotation_phase: WitnessRotationPhase::Stable,
+                pending_rotation_authorization: None,
+                pending_rotation_baseline: None,
+                rotation_ticket: None,
+                rotation_candidate_acceptance: None,
+            }
+        }
+
+        fn confirmation(operation_id: &str) -> MobilePendingWitness {
+            MobilePendingWitness {
+                state_version: "1".to_owned(),
+                operation_id: operation_id.to_owned(),
+                amount_units: "50000000".to_owned(),
+                recipient: "1NewDeveloper".to_owned(),
+                status: "signed_awaiting_witness".to_owned(),
+                confirmed_at: "1000".to_owned(),
+            }
+        }
+
+        fn anchor(operation_id: &str) -> RollbackAnchor {
+            RollbackAnchor {
+                anchor_version: 1,
+                anchor_id: "anchor_one".to_owned(),
+                agent_wallet_id: "wallet_one".to_owned(),
+                desktop_device_id: DeviceId::parse("desktop_one").unwrap(),
+                mobile_device_id: DeviceId::parse("mobile_one").unwrap(),
+                desktop_authorization_epoch: 1,
+                mobile_authorization_epoch: 1,
+                network_id: "testnet".to_owned(),
+                genesis_identifier: GENESIS.to_owned(),
+                node_profile_id: NODE_PROFILE.to_owned(),
+                transaction_format_version: 2,
+                signer_epoch: 1,
+                journal_epoch: 1,
+                witness_epoch: 1,
+                anchor_sequence: 1,
+                previous_anchor_hash: "0".repeat(64),
+                journal_sequence: 7,
+                journal_head_hash: "33".repeat(32),
+                materialized_state_commitment: "44".repeat(32),
+                last_operation_id: Some(operation_id.to_owned()),
+                operation_phase: RollbackOperationPhase::SignedAwaitingWitness,
+                transaction_state: None,
+                policy_epoch: 1,
+                capability_epoch: 1,
+                created_at: 999,
+                expires_at: 1_060,
+            }
+        }
+
+        /// The whole point of the change: a payment the owner approved on the
+        /// desktop leaves no approval on this phone, and it can still be
+        /// witnessed - but only because the owner confirmed it here first.
+        #[test]
+        fn a_payment_this_phone_never_approved_can_be_witnessed_after_confirmation() {
+            let mut state = paired_state();
+            assert!(state.pending_approval.is_none());
+
+            // Before the owner confirms anything, there is nothing to witness.
+            assert_eq!(
+                require_authorized_witness_binding(&state, &anchor("operation_one")),
+                Err(
+                    "No exact pilot approval or witness confirmation is pending for this anchor"
+                        .to_owned()
+                )
+            );
+
+            state.pending_witness = Some(confirmation("operation_one"));
+            require_authorized_witness_binding(&state, &anchor("operation_one")).unwrap();
+        }
+
+        /// The confirmation binds one operation, not "whatever arrives next".
+        #[test]
+        fn a_confirmation_never_authorizes_a_different_operation() {
+            let mut state = paired_state();
+            state.pending_witness = Some(confirmation("operation_one"));
+            assert!(require_authorized_witness_binding(&state, &anchor("operation_two")).is_err());
+
+            let mut anonymous = anchor("operation_one");
+            anonymous.last_operation_id = None;
+            assert_eq!(
+                require_authorized_witness_binding(&state, &anonymous),
+                Err("Rollback anchor names no operation to witness".to_owned())
+            );
+        }
+
+        /// Discarding a confirmation can only ever make witnessing harder.
+        ///
+        /// This is the guarantee that makes every exit in this change safe: the
+        /// consent record is an admission gate, never evidence. Once it is
+        /// gone, the exact anchor that was admissible a moment ago is refused,
+        /// so nothing unwitnessed can be made to look witnessed by clearing.
+        #[test]
+        fn a_discarded_confirmation_authorizes_no_anchor_at_all() {
+            let mut state = paired_state();
+            state.pending_witness = Some(confirmation("operation_one"));
+            require_authorized_witness_binding(&state, &anchor("operation_one")).unwrap();
+
+            let discarded = state
+                .owner_discard_consent("operation_one", 2_000)
+                .expect("the owner may discard the payment this phone is holding");
+            assert_eq!(discarded.operation_id, "operation_one");
+            assert_eq!(
+                require_authorized_witness_binding(&state, &anchor("operation_one")),
+                Err(
+                    "No exact pilot approval or witness confirmation is pending for this anchor"
+                        .to_owned()
+                )
+            );
+            // The receipt the discard left behind is not a second consent
+            // record: it authorizes nothing, and the anchor stays refused.
+            assert_eq!(state.discarded_consents.len(), 1);
+            assert!(state.pending_witness.is_none());
+            assert!(state.pending_approval.is_none());
+        }
+
+        /// A record the phone would not have written itself is refused rather
+        /// than trusted, so a corrupted or hand-edited state cannot smuggle a
+        /// consent through.
+        #[test]
+        fn a_malformed_confirmation_authorizes_nothing() {
+            for broken in [
+                MobilePendingWitness {
+                    status: "committed".to_owned(),
+                    ..confirmation("operation_one")
+                },
+                MobilePendingWitness {
+                    amount_units: "0".to_owned(),
+                    ..confirmation("operation_one")
+                },
+                MobilePendingWitness {
+                    recipient: String::new(),
+                    ..confirmation("operation_one")
+                },
+                MobilePendingWitness {
+                    state_version: "2".to_owned(),
+                    ..confirmation("operation_one")
+                },
+            ] {
+                let mut state = paired_state();
+                state.pending_witness = Some(broken);
+                assert!(
+                    require_authorized_witness_binding(&state, &anchor("operation_one")).is_err()
+                );
+            }
+        }
     }
 }

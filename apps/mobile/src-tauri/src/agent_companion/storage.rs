@@ -120,6 +120,217 @@ impl MobilePendingApproval {
     }
 }
 
+/// The owner's consent, on this handset, to witness one exact operation they
+/// did not approve here.
+///
+/// A payment the owner approved on HPAY Desktop leaves no `MobilePendingApproval`
+/// on the phone, so the binding `sign_pilot_witness` used to require simply is
+/// not there. Deleting the requirement would turn the witness into an automatic
+/// co-signature, which is the one thing the rollback witness must never be. This
+/// record replaces it: it is written durably, before anything is fetched or
+/// signed, and it names the operation together with the exact amount and
+/// recipient the owner was shown when they pressed confirm. An anchor is then
+/// bound to this, so a tap carries information rather than an opaque id, and a
+/// crash between the tap and the signature resumes the same payment instead of
+/// silently witnessing a different one.
+///
+/// It carries no signature and no network binding, and it is never sent
+/// anywhere. The anchor's network fields are checked against the phone's own
+/// durable `MobileWitnessState` pins instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MobilePendingWitness {
+    pub(super) state_version: String,
+    pub(super) operation_id: String,
+    pub(super) amount_units: String,
+    pub(super) recipient: String,
+    pub(super) status: String,
+    pub(super) confirmed_at: String,
+}
+
+impl MobilePendingWitness {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        let amount_units = parse_decimal_u64(&self.amount_units)?;
+        let confirmed_at = parse_decimal_u64(&self.confirmed_at)?;
+        if self.state_version != "1"
+            || self.operation_id.is_empty()
+            || self.operation_id.len() > 128
+            || amount_units == 0
+            || self.recipient.is_empty()
+            || self.recipient.len() > 128
+            || confirmed_at == 0
+            || !hpay_companion_protocol::WITNESS_PENDING_ACTIVITY_STATUSES
+                .contains(&self.status.as_str())
+        {
+            return Err("Pending witness confirmation is invalid".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// How long a consent record survives after the paired desktop has stopped
+/// listing the operation it names as awaiting this phone's rollback witness.
+///
+/// The desktop's disclosure is a snapshot, and there are short windows inside a
+/// healthy flow where an operation legitimately leaves it - between the receipt
+/// being accepted and the broadcast landing, for instance. The grace is the
+/// anchor lifetime, which is longer than any of those windows, so a record is
+/// only ever retired once the desktop has been consistently silent about it.
+#[cfg(any(target_os = "android", test))]
+const CONSENT_DESKTOP_SILENCE_GRACE_SECS: u64 = 5 * 60;
+
+/// The age past which a consent record is retired with no desktop statement at
+/// all.
+///
+/// A phone that can never reach its desktop again - revoked, or the desktop
+/// gone - would otherwise hold its record for ever, and that record blocks the
+/// reset, blocks pairing and blocks every other payment. Retiring it ends only
+/// this phone's local intent to sign; it cancels nothing, un-signs nothing, and
+/// the owner can confirm again the moment the desktop offers the operation.
+#[cfg(any(target_os = "android", test))]
+const CONSENT_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+pub(super) const DISCARDED_WITNESS_CONFIRMATION: &str = "witness_confirmation";
+pub(super) const DISCARDED_PILOT_APPROVAL: &str = "pilot_approval";
+
+#[cfg(any(target_os = "android", test))]
+pub(super) const DISCARD_DESKTOP_NO_LONGER_AWAITING: &str =
+    "desktop_no_longer_awaits_this_phone";
+#[cfg(any(target_os = "android", test))]
+pub(super) const DISCARD_AGED_OUT: &str = "aged_out_on_this_phone";
+#[cfg(any(target_os = "android", test))]
+pub(super) const DISCARD_OWNER: &str = "owner_discarded";
+
+const DISCARD_REASONS: [&str; 3] = [
+    "desktop_no_longer_awaits_this_phone",
+    "aged_out_on_this_phone",
+    "owner_discarded",
+];
+
+/// How many discard receipts this phone keeps.
+///
+/// The history has to be bounded - an unbounded list on a handset is its own
+/// defect, and this one is written by paths the owner does not drive - but it
+/// must not be bounded at one, which is what it used to be. A single slot is
+/// last-write-wins: discard the confirmation for one payment, hold and discard
+/// another, and the first receipt is gone with nothing said. Losing the
+/// evidence is the exact thing the record exists to prevent.
+///
+/// Thirty-two is far beyond any plausible run of discards: a phone holds at
+/// most one consent record at a time, and each receipt needs a separate
+/// confirm-then-retire cycle to exist at all. At the documented 512-byte field
+/// caps the whole history is under 40 KB against a 1 MiB state budget, so a
+/// full history can never be the reason a discard fails to persist - which
+/// matters, because a discard that cannot persist is refused, and a refused
+/// discard is the stranding this whole area exists to end.
+pub(super) const MAX_DISCARDED_CONSENTS: usize = 32;
+
+/// The receipt for a consent record this phone stopped holding.
+///
+/// Clearing a consent record must never be silent. This is not evidence of a
+/// signature and it is not a witness: the signed evidence lives in
+/// [`MobileWitnessState`], which no discard ever touches. This says only that
+/// the phone's local intent to sign one exact operation ended, when, and why -
+/// enough for the owner to recognise the payment and go and look at it on the
+/// desktop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MobileDiscardedConsent {
+    pub(super) state_version: String,
+    pub(super) kind: String,
+    pub(super) operation_id: String,
+    pub(super) amount_units: String,
+    pub(super) recipient: String,
+    pub(super) confirmed_at: String,
+    pub(super) discarded_at: String,
+    pub(super) reason: String,
+}
+
+impl MobileDiscardedConsent {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        parse_decimal_u64(&self.amount_units)?;
+        parse_decimal_u64(&self.confirmed_at)?;
+        parse_decimal_u64(&self.discarded_at)?;
+        if self.state_version != "1"
+            || !matches!(
+                self.kind.as_str(),
+                DISCARDED_WITNESS_CONFIRMATION | DISCARDED_PILOT_APPROVAL
+            )
+            || self.operation_id.is_empty()
+            // Deliberately looser than the 128 a witness confirmation allows.
+            // A receipt is built from whichever record was retired, and a
+            // pilot approval's own shape check bounds neither field, so a
+            // tighter cap here would refuse the discard and wedge the phone on
+            // exactly the record it needs to let go of.
+            || self.operation_id.len() > 512
+            || self.recipient.is_empty()
+            || self.recipient.len() > 512
+            || !DISCARD_REASONS.contains(&self.reason.as_str())
+        {
+            return Err("Discarded consent record is invalid".to_owned());
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    fn from_witness(pending: &MobilePendingWitness, reason: &str, now: u64) -> Self {
+        Self {
+            state_version: "1".to_owned(),
+            kind: DISCARDED_WITNESS_CONFIRMATION.to_owned(),
+            operation_id: pending.operation_id.clone(),
+            amount_units: pending.amount_units.clone(),
+            recipient: pending.recipient.clone(),
+            confirmed_at: pending.confirmed_at.clone(),
+            discarded_at: now.to_string(),
+            reason: reason.to_owned(),
+        }
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    fn from_approval(pending: &MobilePendingApproval, reason: &str, now: u64) -> Self {
+        Self {
+            state_version: "1".to_owned(),
+            kind: DISCARDED_PILOT_APPROVAL.to_owned(),
+            operation_id: pending.decision.operation_id.clone(),
+            amount_units: pending.decision.amount_units.to_string(),
+            recipient: pending.decision.recipient.clone(),
+            confirmed_at: pending.decision.issued_at.to_string(),
+            discarded_at: now.to_string(),
+            reason: reason.to_owned(),
+        }
+    }
+}
+
+/// Appends one receipt to the bounded history, counting anything the cap
+/// pushes out.
+///
+/// The oldest receipts go first, and the count of what went is kept and shown.
+/// Two directions were rejected. Dropping the oldest silently is the same
+/// class of defect as the single slot: evidence disappears and nothing says
+/// so. Refusing the discard once the history is full is worse still - the
+/// discard is the owner's last exit from a held consent record, so a full log
+/// would wedge the phone on exactly the record it needs to let go of, which is
+/// the stranding this area exists to end. Keeping the newest and counting the
+/// rest loses no exit and hides nothing: the count is durable, and the screen
+/// says how many receipts it no longer shows and where to look them up.
+#[cfg(any(target_os = "android", test))]
+fn push_discard_bounded(
+    history: &mut Vec<MobileDiscardedConsent>,
+    dropped: &mut u64,
+    discard: MobileDiscardedConsent,
+) {
+    history.push(discard);
+    trim_discard_history(history, dropped);
+}
+
+fn trim_discard_history(history: &mut Vec<MobileDiscardedConsent>, dropped: &mut u64) {
+    if history.len() > MAX_DISCARDED_CONSENTS {
+        let excess = history.len() - MAX_DISCARDED_CONSENTS;
+        history.drain(..excess);
+        *dropped = dropped.saturating_add(excess as u64);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct MobileCompanionDurableState {
     pub(super) state_version: u64,
@@ -133,6 +344,21 @@ pub(super) struct MobileCompanionDurableState {
     pub(super) approval_sequence: u64,
     pub(super) pending_pairing_ack: Option<EncryptedCompanionFrame>,
     pub(super) pending_approval: Option<MobilePendingApproval>,
+    pub(super) pending_witness: Option<MobilePendingWitness>,
+    /// Every consent record this phone stopped holding, oldest first, capped
+    /// at [`MAX_DISCARDED_CONSENTS`].
+    ///
+    /// Phone-local like everything else here, and kept so that a discard is
+    /// never silent. Append-only: a later discard never overwrites an earlier
+    /// receipt, which is what a single slot did. It authorizes nothing and is
+    /// never consulted by `require_authorized_witness_binding`.
+    pub(super) discarded_consents: Vec<MobileDiscardedConsent>,
+    /// How many receipts the cap has pushed out of that history.
+    ///
+    /// Non-zero only once [`MAX_DISCARDED_CONSENTS`] receipts are held, and
+    /// surfaced on the phone verbatim, so the owner is told that older
+    /// receipts existed rather than left to assume the list is complete.
+    pub(super) discarded_consents_dropped: u64,
     pub(super) witness: Option<MobileWitnessState>,
     pub(super) rotation_phase: WitnessRotationPhase,
     pub(super) pending_rotation_authorization: Option<SignedWitnessRotationAuthorization>,
@@ -203,6 +429,36 @@ impl MobileCompanionDurableState {
                     "Pending pilot approval scope does not match companion state".to_owned(),
                 );
             }
+        }
+        if let Some(pending) = &self.pending_witness {
+            pending.validate()?;
+            // At most one operation can ever be waiting on this phone, so a
+            // consent record for one operation cannot coexist with a signed
+            // approval for another. Fail closed rather than pick.
+            if self
+                .pending_approval
+                .as_ref()
+                .is_some_and(|approval| approval.decision.operation_id != pending.operation_id)
+            {
+                return Err(
+                    "Pending witness confirmation and pending approval name different operations"
+                        .to_owned(),
+                );
+            }
+        }
+        // A history longer than the cap, or a dropped count claiming the cap
+        // was reached while the history is not full, is a state no path here
+        // can write: `push_discard_bounded` is the only writer and it counts
+        // exactly what it drains. Refusing is the same fail-closed direction
+        // the receipt's own reason check already takes.
+        if self.discarded_consents.len() > MAX_DISCARDED_CONSENTS
+            || (self.discarded_consents_dropped > 0
+                && self.discarded_consents.len() != MAX_DISCARDED_CONSENTS)
+        {
+            return Err("Discarded consent history is invalid".to_owned());
+        }
+        for discarded in &self.discarded_consents {
+            discarded.validate()?;
         }
         if let Some(witness) = &self.witness {
             witness.validate().map_err(|error| error.to_string())?;
@@ -287,9 +543,25 @@ impl MobileCompanionDurableState {
         )
     }
 
-    fn rotation_blocking_phase(&self) -> Option<WitnessRotationPhase> {
+    /// The phase `reset_before_witness_rotation` would durably write, and refuse
+    /// with, if the reset were attempted right now.
+    ///
+    /// This is deliberately wider than [`Self::requires_controlled_rotation`]:
+    /// it also fires on a pending pilot approval and on any witness record,
+    /// while `rotation_phase` is still `Stable`. Until it was surfaced, the
+    /// phone offered a reset that could only refuse, and the refusal itself
+    /// permanently replaced the reset section. The screen must be able to see
+    /// the predicate the storage layer actually enforces.
+    pub(super) fn rotation_blocking_phase(&self) -> Option<WitnessRotationPhase> {
         if self.pending_approval.is_some() {
             return Some(WitnessRotationPhase::BlockedByPendingApproval);
+        }
+        // A confirmed-but-unfinished witness is an unresolved signed operation
+        // by construction: the desktop only offers one for an operation that is
+        // already signed. Wiping it here would drop the owner's consent record
+        // while the payment it names is still live.
+        if self.pending_witness.is_some() {
+            return Some(WitnessRotationPhase::BlockedByUnresolvedSignedOperation);
         }
         self.witness.as_ref().map(|witness| {
             if witness
@@ -309,6 +581,238 @@ impl MobileCompanionDurableState {
             }
         })
     }
+
+    /// Rewinds the marker a refused reset wrote, once its cause is gone.
+    ///
+    /// `reset_before_witness_rotation` durably writes its refusal phase, and
+    /// nothing used to write it back. A cleared approval therefore left the
+    /// phone permanently claiming a controlled rotation was required with no
+    /// rotation to run, and a cleared witness confirmation left the same lie
+    /// behind `BlockedByUnresolvedSignedOperation`. Only those two refusal
+    /// markers are ever rewritten, and only to whatever the reset would refuse
+    /// with now - `Stable` when it would not refuse at all. Every other phase,
+    /// including `Completed`, stands untouched.
+    #[cfg(any(target_os = "android", test))]
+    fn rewind_reset_refusal_marker(&mut self) {
+        if matches!(
+            self.rotation_phase,
+            WitnessRotationPhase::BlockedByPendingApproval
+                | WitnessRotationPhase::BlockedByUnresolvedSignedOperation
+        ) {
+            self.rotation_phase = self
+                .rotation_blocking_phase()
+                .unwrap_or(WitnessRotationPhase::Stable);
+        }
+    }
+
+    /// Forgets the pilot approval naming this exact operation.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn clear_pending_approval_for(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        let pending = self
+            .pending_approval
+            .as_ref()
+            .ok_or_else(|| "No pilot approval is pending".to_owned())?;
+        if pending.decision.operation_id != operation_id {
+            return Err("Pilot approval completion scope mismatch".to_owned());
+        }
+        self.pending_approval = None;
+        self.rewind_reset_refusal_marker();
+        Ok(())
+    }
+
+    /// Forgets the witness confirmation naming this exact operation.
+    ///
+    /// This ends the phone's local intent to sign and nothing else. It never
+    /// advances, completes or fakes a witness: the signed evidence is
+    /// [`MobileWitnessState`], which this does not touch, so an operation with
+    /// no receipt stays exactly as unwitnessed as it was.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn clear_pending_witness_for(&mut self, operation_id: &str) -> Result<(), String> {
+        let pending = self
+            .pending_witness
+            .as_ref()
+            .ok_or_else(|| "No witness confirmation is pending".to_owned())?;
+        if pending.operation_id != operation_id {
+            return Err("Pilot witness completion scope mismatch".to_owned());
+        }
+        self.pending_witness = None;
+        self.rewind_reset_refusal_marker();
+        Ok(())
+    }
+
+    /// The consent record, if any, that is provably obsolete right now.
+    ///
+    /// Two things can prove it, and nothing else may:
+    ///
+    /// * `desktop_awaiting` - the operation ids an authenticated status
+    ///   snapshot from the paired desktop listed as awaiting this phone's
+    ///   rollback witness. A record naming an operation that is not in that
+    ///   list, after the grace period, is one the desktop will not accept a
+    ///   receipt for. `None` means no statement was available and proves
+    ///   nothing.
+    /// * age - a record older than [`CONSENT_MAX_AGE_SECS`], which is the only
+    ///   exit for a phone whose desktop is gone for good.
+    ///
+    /// A transport error proves nothing and must never reach here: a flaky or
+    /// hostile desktop could otherwise erase the owner's consent for a live
+    /// payment by simply refusing to answer.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn obsolete_consent(
+        &self,
+        desktop_awaiting: Option<&[String]>,
+        now: u64,
+    ) -> Option<MobileDiscardedConsent> {
+        fn retired(
+            operation_id: &str,
+            recorded_at: u64,
+            desktop_awaiting: Option<&[String]>,
+            now: u64,
+        ) -> Option<&'static str> {
+            // A desktop that is still asking for this witness outranks every
+            // other signal, and it is checked first. Age used to be checked
+            // first, so a reconciliation that legitimately ran past
+            // `CONSENT_MAX_AGE_SECS` had the owner's consent retired out from
+            // under a witness card that was still on screen - and so did any
+            // phone whose clock jumped forward a day. Retaining is always the
+            // safe direction: a record the desktop still offers is a record the
+            // owner still has a working button for.
+            let awaiting = desktop_awaiting;
+            if awaiting.is_some_and(|awaiting| awaiting.iter().any(|id| id == operation_id)) {
+                return None;
+            }
+            if now > recorded_at.saturating_add(CONSENT_MAX_AGE_SECS) {
+                return Some(DISCARD_AGED_OUT);
+            }
+            awaiting?;
+            (now > recorded_at.saturating_add(CONSENT_DESKTOP_SILENCE_GRACE_SECS))
+                .then_some(DISCARD_DESKTOP_NO_LONGER_AWAITING)
+        }
+
+        if let Some(pending) = &self.pending_witness {
+            let confirmed_at = parse_decimal_u64(&pending.confirmed_at).unwrap_or(0);
+            if let Some(reason) = retired(
+                &pending.operation_id,
+                confirmed_at,
+                desktop_awaiting,
+                now,
+            ) {
+                return Some(MobileDiscardedConsent::from_witness(pending, reason, now));
+            }
+        }
+        if let Some(pending) = &self.pending_approval
+            && let Some(reason) = retired(
+                &pending.decision.operation_id,
+                pending.decision.issued_at,
+                desktop_awaiting,
+                now,
+            )
+        {
+            return Some(MobileDiscardedConsent::from_approval(pending, reason, now));
+        }
+        None
+    }
+
+    /// Applies a discard produced by [`Self::obsolete_consent`] or by the
+    /// owner, and appends a receipt for it.
+    ///
+    /// The receipt is validated before the record is cleared, so a receipt that
+    /// could not be written refuses the discard rather than clearing silently.
+    /// That direction is the recoverable one: a refused discard can be tried
+    /// again, a discard with no receipt cannot be undone. Every field of a
+    /// receipt is guaranteed by the source record's own validation, so this can
+    /// only fire on a state that would already have failed to load.
+    ///
+    /// The receipt is appended, never substituted. The history used to be one
+    /// slot, so a second discard erased the first with nothing said - see
+    /// [`MAX_DISCARDED_CONSENTS`] for what bounds it now and what happens when
+    /// that bound is reached.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn apply_consent_discard(
+        &mut self,
+        discard: MobileDiscardedConsent,
+    ) -> Result<(), String> {
+        discard.validate()?;
+        match discard.kind.as_str() {
+            DISCARDED_WITNESS_CONFIRMATION => {
+                self.clear_pending_witness_for(&discard.operation_id)?;
+            }
+            DISCARDED_PILOT_APPROVAL => {
+                self.clear_pending_approval_for(&discard.operation_id)?;
+            }
+            _ => return Err("Discarded consent record is invalid".to_owned()),
+        }
+        push_discard_bounded(
+            &mut self.discarded_consents,
+            &mut self.discarded_consents_dropped,
+            discard,
+        );
+        Ok(())
+    }
+
+    /// The owner's own discard of one exact operation they named.
+    ///
+    /// The only exit that cannot be derived from desktop state, so it is
+    /// deliberately the owner's act. The operation id has to match what this
+    /// phone is holding, so the screen must show the payment before the press
+    /// rather than after it.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn owner_discard_consent(
+        &mut self,
+        operation_id: &str,
+        now: u64,
+    ) -> Result<MobileDiscardedConsent, String> {
+        let discard = if self
+            .pending_witness
+            .as_ref()
+            .is_some_and(|pending| pending.operation_id == operation_id)
+        {
+            MobileDiscardedConsent::from_witness(
+                self.pending_witness.as_ref().expect("checked above"),
+                DISCARD_OWNER,
+                now,
+            )
+        } else if self
+            .pending_approval
+            .as_ref()
+            .is_some_and(|pending| pending.decision.operation_id == operation_id)
+        {
+            MobileDiscardedConsent::from_approval(
+                self.pending_approval.as_ref().expect("checked above"),
+                DISCARD_OWNER,
+                now,
+            )
+        } else {
+            return Err(
+                "This phone is not holding a confirmation for that payment".to_owned(),
+            );
+        };
+        self.apply_consent_discard(discard.clone())?;
+        Ok(discard)
+    }
+}
+
+/// Why the pairing-only reset is refusing, in the words of the actual blocker.
+///
+/// The single old sentence named a controlled desktop/mobile witness rotation
+/// whatever the cause. When the cause was a held consent record that was worse
+/// than unhelpful: the owner ran the rotation, the rotation completed, and the
+/// reset refused again - because a held record blocks it regardless of any
+/// rotation phase. A rotation is only the answer when witness state is the
+/// blocker, and only then is it named.
+fn reset_refusal_message(state: &MobileCompanionDurableState) -> String {
+    if state.pending_witness.is_some() {
+        return "Companion reset is blocked because this phone is still holding your confirmation to witness one payment. Finish that payment, or discard the confirmation on this screen, and try again. Running a witness rotation does not clear it."
+            .to_owned();
+    }
+    if state.pending_approval.is_some() {
+        return "Companion reset is blocked because this phone is still holding one pilot approval. Finish that payment, or discard the approval on this screen, and try again. Running a witness rotation does not clear it."
+            .to_owned();
+    }
+    "Companion reset is blocked after pilot approval or witness initialization; controlled desktop/mobile witness rotation is required"
+        .to_owned()
 }
 
 fn is_signature(value: &str) -> bool {
@@ -349,6 +853,21 @@ struct DurableStateDocument {
     pending_pairing_ack: Option<EncryptedCompanionFrame>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_approval: Option<MobilePendingApproval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_witness: Option<MobilePendingWitness>,
+    /// The single receipt the previous build wrote, read and never written.
+    ///
+    /// The document is `deny_unknown_fields`, and a state file that fails to
+    /// decode disables the whole companion - including every consent exit -
+    /// so the old key has to stay readable. A phone updating into the bounded
+    /// history folds its one receipt in as the oldest entry and writes the
+    /// list from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    discarded_consent: Option<MobileDiscardedConsent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    discarded_consents: Vec<MobileDiscardedConsent>,
+    #[serde(default = "decimal_zero", skip_serializing_if = "is_decimal_zero")]
+    discarded_consents_dropped: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     witness: Option<MobileWitnessState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -429,6 +948,11 @@ impl From<&MobileCompanionDurableState> for DurableStateDocument {
             approval_sequence: state.approval_sequence.to_string(),
             pending_pairing_ack: state.pending_pairing_ack.clone(),
             pending_approval: state.pending_approval.clone(),
+            pending_witness: state.pending_witness.clone(),
+            // Never written again: the history below replaces it.
+            discarded_consent: None,
+            discarded_consents: state.discarded_consents.clone(),
+            discarded_consents_dropped: state.discarded_consents_dropped.to_string(),
             witness: state.witness.clone(),
             rotation_phase: Some(state.rotation_phase),
             pending_rotation_authorization: state.pending_rotation_authorization.clone(),
@@ -446,6 +970,17 @@ impl TryFrom<DurableStateDocument> for MobileCompanionDurableState {
         let rotation_phase = document
             .rotation_phase
             .unwrap_or(WitnessRotationPhase::Stable);
+        // The one receipt an older build wrote is the oldest thing this phone
+        // knows, so it goes first. No build ever writes both keys; if a hand
+        // edited file carries both, the pair is still kept in that order
+        // rather than one of them being dropped on the floor.
+        let mut discarded_consents_dropped = parse_decimal_u64(&document.discarded_consents_dropped)?;
+        let mut discarded_consents: Vec<MobileDiscardedConsent> = document
+            .discarded_consent
+            .into_iter()
+            .chain(document.discarded_consents)
+            .collect();
+        trim_discard_history(&mut discarded_consents, &mut discarded_consents_dropped);
         Ok(Self {
             state_version: parse_decimal_u64(&document.state_version)?,
             agent_wallet_id: document.agent_wallet_id,
@@ -487,6 +1022,9 @@ impl TryFrom<DurableStateDocument> for MobileCompanionDurableState {
             approval_sequence: parse_decimal_u64(&document.approval_sequence)?,
             pending_pairing_ack: document.pending_pairing_ack,
             pending_approval: document.pending_approval,
+            pending_witness: document.pending_witness,
+            discarded_consents,
+            discarded_consents_dropped,
             witness: document.witness,
             rotation_phase,
             pending_rotation_authorization: document.pending_rotation_authorization,
@@ -499,6 +1037,12 @@ impl TryFrom<DurableStateDocument> for MobileCompanionDurableState {
 
 fn decimal_zero() -> String {
     "0".to_owned()
+}
+
+/// Keeps a zero counter out of the document, so a phone that has discarded
+/// nothing writes exactly the bytes it wrote before this history existed.
+fn is_decimal_zero(value: &str) -> bool {
+    value == "0"
 }
 
 fn parse_decimal_u64(value: &str) -> Result<u64, String> {
@@ -619,11 +1163,57 @@ impl SharedCompanionState {
         Ok(())
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", test))]
     pub(super) fn persist_locked(&self, state: &MobileCompanionDurableState) -> Result<(), String> {
         self.require_available()?;
         state.validate_at(unix_now()?)?;
         self.store.replace(Some(&encode_state(state)?))
+    }
+
+    /// Retires a consent record the desktop, or time, has proved obsolete.
+    ///
+    /// Returns the receipt when something was discarded. Callers pass the
+    /// desktop's own statement, never a transport error - see
+    /// [`MobileCompanionDurableState::obsolete_consent`].
+    #[cfg(any(target_os = "android", test))]
+    pub(super) async fn sweep_obsolete_consent(
+        &self,
+        desktop_awaiting: Option<&[String]>,
+        now: u64,
+    ) -> Result<Option<MobileDiscardedConsent>, String> {
+        self.require_available()?;
+        let mut slot = self.state.lock().await;
+        let Some(current) = slot.as_ref() else {
+            return Ok(None);
+        };
+        let Some(discard) = current.obsolete_consent(desktop_awaiting, now) else {
+            return Ok(None);
+        };
+        let mut next = current.clone();
+        next.apply_consent_discard(discard.clone())?;
+        self.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(Some(discard))
+    }
+
+    /// The owner's explicit discard of the exact operation they were shown.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) async fn discard_consent_by_owner(
+        &self,
+        operation_id: &str,
+        now: u64,
+    ) -> Result<MobileDiscardedConsent, String> {
+        self.require_available()?;
+        let mut slot = self.state.lock().await;
+        let current = slot
+            .as_ref()
+            .ok_or_else(|| "This phone is not paired, so it holds no confirmation".to_owned())?
+            .clone();
+        let mut next = current;
+        let discard = next.owner_discard_consent(operation_id, now)?;
+        self.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(discard)
     }
 
     pub(super) async fn reset_before_witness_rotation(&self) -> Result<(), String> {
@@ -631,13 +1221,69 @@ impl SharedCompanionState {
         if let Some(current) = slot.as_ref()
             && let Some(phase) = current.rotation_blocking_phase()
         {
-            let mut next = current.clone();
-            next.rotation_phase = phase;
-            let bytes = encode_state(&next)?;
-            self.store.replace(Some(&bytes))?;
-            *slot = Some(next);
+            let message = reset_refusal_message(current);
+            // A refusal must not downgrade a terminal phase. Overwriting
+            // `Completed` with a blocking marker told an owner who had just
+            // finished a controlled rotation to go and run it again, for ever.
+            if current.rotation_phase != WitnessRotationPhase::Completed
+                && current.rotation_phase != phase
+            {
+                let mut next = current.clone();
+                next.rotation_phase = phase;
+                // The marker is a diagnostic, never a reason to write durable
+                // state the loader would reject. A restricted rotation
+                // candidate constrains its own phase, and this write did not
+                // respect that: the refusal wrote a phase `validate_at`
+                // forbids, which disabled the whole companion on the next
+                // launch and - because every consent exit persists through
+                // `persist_locked`, which validates - killed the owner discard
+                // and the automatic sweep that this same refusal message tells
+                // the owner to use. A marker that will not fit is simply not
+                // written; the refusal itself is unchanged.
+                if next.validate_at(unix_now()?).is_ok() {
+                    let bytes = encode_state(&next)?;
+                    self.store.replace(Some(&bytes))?;
+                    *slot = Some(next);
+                }
+            }
+            return Err(message);
+        }
+        self.store.replace(None)?;
+        *slot = None;
+        *self
+            .initialization_error
+            .write()
+            .map_err(|_| "Agent companion initialization state is unavailable".to_owned())? = None;
+        Ok(())
+    }
+
+    /// Clears a pairing whose Android identity this phone no longer holds.
+    ///
+    /// This is the only reset that runs while a pilot approval or witness record
+    /// exists, and it is safe for one reason: the durable witness state is bound
+    /// to `mobile_device_id`, which is derived from the companion public key. If
+    /// that key is gone - deleted, or invalidated in hardware by a new biometric
+    /// enrolment - this phone can never sign a witness receipt as that device
+    /// again, so the anti-rollback high-water mark it is holding can never be
+    /// presented to anyone and protects nothing. Erasing it destroys no
+    /// guarantee.
+    ///
+    /// The invariant is checked here, against the durable state itself, and the
+    /// caller must pass the identity it actually read from the Keystore. A live
+    /// identity that still matches is refused: that phone must use the ordinary
+    /// pairing-only reset, or the controlled rotation, exactly as before.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) async fn reset_orphaned_pairing(
+        &self,
+        live_device_id: Option<&DeviceId>,
+    ) -> Result<(), String> {
+        let mut slot = self.state.lock().await;
+        let Some(current) = slot.as_ref() else {
+            return Err("This phone is not paired, so there is nothing to retire".to_owned());
+        };
+        if live_device_id == Some(&current.mobile_device_id) {
             return Err(
-                "Companion reset is blocked after pilot approval or witness initialization; controlled desktop/mobile witness rotation is required"
+                "This phone still holds the exact secure identity this pairing is bound to, so its witness state still counts"
                     .to_owned(),
             );
         }
@@ -737,6 +1383,9 @@ mod tests {
             approval_sequence: 0,
             pending_pairing_ack: None,
             pending_approval: None,
+            pending_witness: None,
+            discarded_consents: Vec::new(),
+            discarded_consents_dropped: 0,
             witness: None,
             rotation_phase: WitnessRotationPhase::Stable,
             pending_rotation_authorization: None,
@@ -940,6 +1589,936 @@ mod tests {
         assert_ne!(
             store.bytes.lock().unwrap().as_deref(),
             Some(encoded.as_slice())
+        );
+    }
+
+    fn witness_bearing_state(now: u64) -> MobileCompanionDurableState {
+        let mut state = state_fixture(now);
+        state.witness = Some(
+            MobileWitnessState::new(
+                state.agent_wallet_id.clone(),
+                state.desktop_device_id.clone(),
+                state.mobile_device_id.clone(),
+                "testnet".to_owned(),
+                "11".repeat(32),
+                1,
+                1,
+                1,
+            )
+            .unwrap(),
+        );
+        state
+    }
+
+    /// Dead end 4: a revoked phone that also holds witness state.
+    ///
+    /// Its only documented route back is a new companion identity, and that
+    /// route needs the stale pairing cleared first. The pairing-only reset
+    /// refuses forever once witness state exists, so the handset was stuck with
+    /// an instruction the code refused. Once the key the pairing is bound to is
+    /// gone, the witness state cannot be presented to anyone, and retiring it
+    /// destroys nothing.
+    #[tokio::test]
+    async fn pairing_bound_to_a_lost_identity_can_be_retired_when_the_pairing_only_reset_refuses() {
+        let now = unix_now().unwrap();
+        let state = witness_bearing_state(now);
+        let paired_device = state.mobile_device_id.clone();
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        // The instruction the recovery guide used to give, and what it does.
+        assert!(
+            shared
+                .reset_before_witness_rotation()
+                .await
+                .unwrap_err()
+                .contains("controlled desktop/mobile witness rotation")
+        );
+        assert!(shared.current().await.unwrap().is_some());
+
+        // No usable companion key on this phone any more: the pairing is
+        // orphaned and can be retired.
+        shared.reset_orphaned_pairing(None).await.unwrap();
+        assert!(shared.current().await.unwrap().is_none());
+        assert!(store.bytes.lock().unwrap().is_none());
+        let _ = paired_device;
+    }
+
+    /// The same escape, on a phone that replaced its companion key rather than
+    /// losing it.
+    #[tokio::test]
+    async fn pairing_bound_to_a_replaced_identity_can_be_retired() {
+        let now = unix_now().unwrap();
+        let store = Arc::new(MemoryStore::with_bytes(
+            encode_state(&witness_bearing_state(now)).unwrap(),
+        ));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+        let replacement = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+        shared
+            .reset_orphaned_pairing(Some(replacement.device_id()))
+            .await
+            .unwrap();
+        assert!(shared.current().await.unwrap().is_none());
+    }
+
+    /// A phone that still holds the exact key its pairing is bound to keeps
+    /// every existing refusal. Its high-water mark is still enforceable, so
+    /// erasing it would be a real rollback hole.
+    #[tokio::test]
+    async fn a_live_matching_identity_is_never_allowed_to_retire_its_own_witness_state() {
+        let now = unix_now().unwrap();
+        let state = witness_bearing_state(now);
+        let live = state.mobile_device_id.clone();
+        let encoded = encode_state(&state).unwrap();
+        let store = Arc::new(MemoryStore::with_bytes(encoded.clone()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+        let error = shared
+            .reset_orphaned_pairing(Some(&live))
+            .await
+            .unwrap_err();
+        assert!(error.contains("still holds the exact secure identity"));
+        assert_eq!(
+            shared.current().await.unwrap().unwrap().mobile_device_id,
+            live
+        );
+        assert_eq!(
+            store.bytes.lock().unwrap().as_deref(),
+            Some(encoded.as_slice()),
+            "a refused retire must not write anything at all"
+        );
+    }
+
+    /// An owner who changed nothing sees exactly what they saw before.
+    ///
+    /// A phone with no pilot approval and no witness record still runs the
+    /// ordinary pairing-only reset, still reports no blocking phase, and the
+    /// new retire path is refused for it because its identity still matches.
+    #[tokio::test]
+    async fn an_unchanged_phone_keeps_the_ordinary_pairing_only_reset() {
+        let now = unix_now().unwrap();
+        let state = state_fixture(now);
+        let live = state.mobile_device_id.clone();
+        assert_eq!(state.rotation_blocking_phase(), None);
+        assert!(!state.requires_controlled_rotation());
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+        assert!(shared.reset_orphaned_pairing(Some(&live)).await.is_err());
+        assert!(shared.current().await.unwrap().is_some());
+        shared.reset_before_witness_rotation().await.unwrap();
+        assert!(shared.current().await.unwrap().is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // Consent records that cannot be cleared.
+    //
+    // A phone holding one of these can neither reset, nor pair, nor approve or
+    // witness any other payment. Everything below is executed against the real
+    // storage layer, in the exact state each stranding path leaves behind.
+    // ---------------------------------------------------------------------
+
+    fn witness_confirmation(operation_id: &str, confirmed_at: u64) -> MobilePendingWitness {
+        MobilePendingWitness {
+            state_version: "1".to_owned(),
+            operation_id: operation_id.to_owned(),
+            amount_units: "50000000".to_owned(),
+            recipient: "1NewDeveloper".to_owned(),
+            status: "signed_awaiting_witness".to_owned(),
+            confirmed_at: confirmed_at.to_string(),
+        }
+    }
+
+    fn pilot_approval(
+        state: &MobileCompanionDurableState,
+        operation_id: &str,
+        issued_at: u64,
+    ) -> MobilePendingApproval {
+        use hpay_companion_protocol::{
+            ApprovalCommitment, ApprovalDecision, ApprovalNetworkBinding,
+        };
+
+        let commitment = ApprovalCommitment {
+            approval_version: 3,
+            approval_id: "approval_one".to_owned(),
+            operation_id: operation_id.to_owned(),
+            agent_wallet_id: state.agent_wallet_id.clone(),
+            agent_id: "agent_one".to_owned(),
+            desktop_device_id: state.desktop_device_id.clone(),
+            transaction_commitment: "ab".repeat(32),
+            amount_units: 50_000_000,
+            fee_units: 1_000,
+            wallet_fee_units: 0,
+            total_debit_units: 50_001_000,
+            recipient: "1NewDeveloper".to_owned(),
+            policy_epoch: 1,
+            challenge_nonce: "cd".repeat(16),
+            issued_at,
+            expires_at: issued_at + 60,
+            network_binding: Some(ApprovalNetworkBinding {
+                network_id: "testnet".to_owned(),
+                chain_id: 1,
+                genesis_identifier: "11".repeat(32),
+                node_profile_id: "22".repeat(32),
+                transaction_format_version: 2,
+            }),
+        };
+        MobilePendingApproval {
+            state_version: "1".to_owned(),
+            commitment_hash: commitment.canonical_sha256_hex().unwrap(),
+            decision: MobileApprovalDecision::from_commitment(
+                &commitment,
+                ApprovalDecision::Approve,
+                state.mobile_device_id.clone(),
+                1,
+                state.approval_sequence,
+                issued_at,
+            ),
+        }
+    }
+
+    /// The exact state the headline stranding path leaves behind: the owner
+    /// confirmed, the receipt was accepted, the desktop stopped offering the
+    /// operation, and the refused reset durably marked the phone.
+    fn stranded_confirmation_state(now: u64) -> MobileCompanionDurableState {
+        let mut state = state_fixture(now);
+        state.pending_witness = Some(witness_confirmation("operation_one", now));
+        state.rotation_phase = WitnessRotationPhase::BlockedByUnresolvedSignedOperation;
+        state
+    }
+
+    /// A confirmation the desktop is still offering is never swept, however old
+    /// it is. The owner has a live payment and a working button.
+    #[test]
+    fn a_confirmation_the_desktop_still_offers_is_never_swept() {
+        let now = 1_000;
+        let state = stranded_confirmation_state(now);
+        let awaiting = vec!["operation_one".to_owned()];
+        for at in [now, now + 10_000, now + CONSENT_MAX_AGE_SECS] {
+            assert_eq!(state.obsolete_consent(Some(&awaiting), at), None);
+        }
+    }
+
+    /// A desktop that did not answer has said nothing. A hostile or flaky one
+    /// must not be able to erase the owner's consent for a live payment by
+    /// simply refusing to reply.
+    #[test]
+    fn a_desktop_that_said_nothing_sweeps_nothing() {
+        let now = 1_000;
+        let state = stranded_confirmation_state(now);
+        assert_eq!(state.obsolete_consent(None, now + CONSENT_MAX_AGE_SECS), None);
+        // Nor does a statement that arrived inside the grace window: an
+        // operation legitimately leaves the offered set for a moment in the
+        // middle of a healthy flow.
+        assert_eq!(
+            state.obsolete_consent(Some(&[]), now + CONSENT_DESKTOP_SILENCE_GRACE_SECS),
+            None
+        );
+    }
+
+    /// Stranding paths 2, 4, 9, 11 and 12, end to end.
+    ///
+    /// The phone is holding a confirmation for an operation the desktop no
+    /// longer offers - cancelled, expired, committed elsewhere, or accepted
+    /// into reconciliation. Before this change nothing could clear it: the
+    /// reset refused and re-marked the phone, pairing refused because the phone
+    /// was already paired, and the witness card that owned the only clear had
+    /// disappeared with the operation. The next authenticated sync now retires
+    /// it, the marker the refusal wrote is rewound, and the ordinary
+    /// pairing-only reset works again.
+    #[tokio::test]
+    async fn a_confirmation_the_desktop_stopped_offering_is_swept_and_unblocks_the_phone() {
+        let now = unix_now().unwrap();
+        let confirmed_at = now - CONSENT_DESKTOP_SILENCE_GRACE_SECS - 1;
+        let mut state = stranded_confirmation_state(now);
+        state.pending_witness = Some(witness_confirmation("operation_one", confirmed_at));
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        // Every way out is closed while the record is held.
+        assert!(
+            shared
+                .reset_before_witness_rotation()
+                .await
+                .unwrap_err()
+                .contains("holding your confirmation")
+        );
+        assert!(
+            shared
+                .reset_orphaned_pairing(Some(&state.mobile_device_id))
+                .await
+                .unwrap_err()
+                .contains("still holds the exact secure identity")
+        );
+
+        // The desktop's own authenticated snapshot lists nothing awaiting this
+        // phone's witness.
+        let discarded = shared
+            .sweep_obsolete_consent(Some(&[]), now)
+            .await
+            .unwrap()
+            .expect("a confirmation the desktop no longer offers is retired");
+        assert_eq!(discarded.reason, DISCARD_DESKTOP_NO_LONGER_AWAITING);
+        assert_eq!(discarded.operation_id, "operation_one");
+        // The receipt names the payment in the words the owner was shown.
+        assert_eq!(discarded.amount_units, "50000000");
+        assert_eq!(discarded.recipient, "1NewDeveloper");
+        assert_eq!(discarded.confirmed_at, confirmed_at.to_string());
+
+        let after = shared.current().await.unwrap().unwrap();
+        assert!(after.pending_witness.is_none());
+        assert_eq!(after.discarded_consents, vec![discarded.clone()]);
+        // The marker the refused reset wrote does not outlive its cause.
+        assert_eq!(after.rotation_phase, WitnessRotationPhase::Stable);
+        assert_eq!(after.rotation_blocking_phase(), None);
+        assert!(!after.requires_controlled_rotation());
+
+        // And the reset the phone was being refused now runs.
+        shared.reset_before_witness_rotation().await.unwrap();
+        assert!(shared.current().await.unwrap().is_none());
+        assert!(store.bytes.lock().unwrap().is_none());
+    }
+
+    /// Stranding path 10: the desktop revoked this phone, or is gone for good.
+    ///
+    /// No statement will ever arrive, so age is the only proof left. It ends
+    /// this phone's intent to sign and nothing else.
+    #[tokio::test]
+    async fn a_phone_whose_desktop_will_never_answer_again_gets_out_on_age_alone() {
+        let now = unix_now().unwrap();
+        let mut state = stranded_confirmation_state(now);
+        state.pending_witness = Some(witness_confirmation(
+            "operation_one",
+            now - CONSENT_MAX_AGE_SECS - 1,
+        ));
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        let discarded = shared
+            .sweep_obsolete_consent(None, now)
+            .await
+            .unwrap()
+            .expect("a record older than its maximum age is retired with no desktop at all");
+        assert_eq!(discarded.reason, DISCARD_AGED_OUT);
+        let after = shared.current().await.unwrap().unwrap();
+        assert!(after.pending_witness.is_none());
+        assert_eq!(after.rotation_phase, WitnessRotationPhase::Stable);
+        shared.reset_before_witness_rotation().await.unwrap();
+    }
+
+    /// Stranding path 3: the owner presses the escape, and it names exactly the
+    /// payment they were shown.
+    #[tokio::test]
+    async fn the_owner_can_discard_only_the_exact_payment_this_phone_is_holding() {
+        let now = unix_now().unwrap();
+        let state = stranded_confirmation_state(now);
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        assert!(
+            shared
+                .discard_consent_by_owner("operation_two", now)
+                .await
+                .unwrap_err()
+                .contains("not holding a confirmation for that payment")
+        );
+        assert!(shared.current().await.unwrap().unwrap().pending_witness.is_some());
+
+        let discarded = shared
+            .discard_consent_by_owner("operation_one", now)
+            .await
+            .unwrap();
+        assert_eq!(discarded.reason, DISCARD_OWNER);
+        assert_eq!(discarded.kind, DISCARDED_WITNESS_CONFIRMATION);
+        let after = shared.current().await.unwrap().unwrap();
+        assert!(after.pending_witness.is_none());
+        assert_eq!(after.discarded_consents, vec![discarded]);
+        // A second press has nothing left to discard and says so, rather than
+        // silently succeeding.
+        assert!(
+            shared
+                .discard_consent_by_owner("operation_one", now)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Holds a witness confirmation on a live shared state, exactly the way
+    /// `confirm_pending_witness` does: lock, set the record, persist through
+    /// the validating write.
+    async fn hold_confirmation(
+        shared: &SharedCompanionState,
+        operation_id: &str,
+        confirmed_at: u64,
+    ) {
+        let mut slot = shared.state.lock().await;
+        let mut next = slot.as_ref().expect("paired").clone();
+        next.pending_witness = Some(witness_confirmation(operation_id, confirmed_at));
+        shared.persist_locked(&next).unwrap();
+        *slot = Some(next);
+    }
+
+    /// The defect, executed: a second discard used to erase the first receipt.
+    ///
+    /// `discarded_consent` was one slot, last-write-wins. Discard the
+    /// confirmation for one payment, then hold and discard another, and the
+    /// first receipt was simply gone - no counter, no notice, nothing on the
+    /// screen. Losing that evidence is precisely what the record exists to
+    /// prevent, and the owner had no way to know a payment they had stopped
+    /// holding was ever there. Both receipts now survive, in the order they
+    /// happened, across a restart, and neither discard touches the signed
+    /// witness evidence.
+    #[tokio::test]
+    async fn a_second_discard_never_erases_the_first_receipt() {
+        let now = unix_now().unwrap();
+        let state = witness_bearing_state(now);
+        let signed_evidence = state.witness.clone().unwrap();
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        hold_confirmation(&shared, "operation_one", now).await;
+        let first = shared
+            .discard_consent_by_owner("operation_one", now + 1)
+            .await
+            .unwrap();
+
+        hold_confirmation(&shared, "operation_two", now + 2).await;
+        let second = shared
+            .discard_consent_by_owner("operation_two", now + 3)
+            .await
+            .unwrap();
+
+        let after = shared.current().await.unwrap().unwrap();
+        assert_eq!(
+            after.discarded_consents,
+            vec![first.clone(), second.clone()],
+            "the receipt for the first discard must survive the second one"
+        );
+        assert_eq!(after.discarded_consents_dropped, 0);
+        // Nothing was traded for the extra receipt: no consent record is left
+        // holding, and the signed anti-rollback evidence is byte-identical.
+        assert!(after.pending_witness.is_none());
+        assert!(after.pending_approval.is_none());
+        assert_eq!(after.witness.as_ref(), Some(&signed_evidence));
+
+        // And both are still there after the app is closed and reopened, which
+        // is the only way an owner would ever come looking for the older one.
+        let reopened = SharedCompanionState::open(store as Arc<dyn CompanionStateStore>);
+        let restored = reopened.current().await.unwrap().unwrap();
+        assert_eq!(restored.discarded_consents, vec![first, second]);
+        assert_eq!(restored.witness, Some(signed_evidence));
+    }
+
+    /// The cap is bounded and says what it dropped.
+    ///
+    /// A history that grows for ever on a handset is its own defect, so it is
+    /// capped - but dropping the oldest silently would be the same class of
+    /// defect as the single slot, and refusing the discard once the log is
+    /// full would wedge the phone on the record it needs to let go of. So the
+    /// newest are kept, the overflow is counted durably, and the count is what
+    /// the screen reports.
+    #[tokio::test]
+    async fn the_history_stops_at_its_cap_and_counts_exactly_what_it_dropped() {
+        let now = unix_now().unwrap();
+        let state = state_fixture(now);
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        let overflow = 3;
+        let total = MAX_DISCARDED_CONSENTS + overflow;
+        for index in 0..total {
+            let operation_id = format!("operation_{index}");
+            hold_confirmation(&shared, &operation_id, now).await;
+            // Every discard succeeds, including the ones past the cap: the
+            // owner's last exit is never refused because the log is full.
+            shared
+                .discard_consent_by_owner(&operation_id, now + 1)
+                .await
+                .unwrap();
+        }
+
+        let after = shared.current().await.unwrap().unwrap();
+        assert_eq!(after.discarded_consents.len(), MAX_DISCARDED_CONSENTS);
+        assert_eq!(after.discarded_consents_dropped, overflow as u64);
+        // The newest are the ones kept, and the oldest survivor is exactly the
+        // one after the last dropped receipt.
+        assert_eq!(
+            after.discarded_consents.first().unwrap().operation_id,
+            format!("operation_{overflow}")
+        );
+        assert_eq!(
+            after.discarded_consents.last().unwrap().operation_id,
+            format!("operation_{}", total - 1)
+        );
+        // Nothing that was dropped is silently missing: the count of it is
+        // durable, and survives a restart alongside the receipts themselves.
+        let reopened = SharedCompanionState::open(store as Arc<dyn CompanionStateStore>);
+        let restored = reopened.current().await.unwrap().unwrap();
+        assert_eq!(restored.discarded_consents, after.discarded_consents);
+        assert_eq!(restored.discarded_consents_dropped, overflow as u64);
+
+        // A history longer than the cap, or a count claiming an overflow the
+        // history does not show, is refused rather than loaded.
+        let mut forged = restored.clone();
+        forged
+            .discarded_consents
+            .push(forged.discarded_consents[0].clone());
+        assert!(forged.validate_at(now).is_err());
+        let mut miscounted = restored;
+        miscounted.discarded_consents.pop();
+        assert!(miscounted.validate_at(now).is_err());
+    }
+
+    /// A phone updating from the single-slot build keeps its one receipt.
+    ///
+    /// The durable document is `deny_unknown_fields` and a state file that
+    /// fails to decode disables the whole companion, consent exits included,
+    /// so the old key stays readable. It is folded in as the oldest entry and
+    /// never written again.
+    #[test]
+    fn the_single_receipt_an_older_build_wrote_is_read_and_migrated() {
+        let now = 1_000;
+        let mut state = stranded_confirmation_state(now);
+        state.owner_discard_consent("operation_one", now + 5).unwrap();
+        let legacy_receipt = state.discarded_consents[0].clone();
+
+        // Exactly what the previous build put on disk: one `discarded_consent`
+        // object, and no history key at all.
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&encode_state(&state).unwrap()).unwrap();
+        let object = document.as_object_mut().unwrap();
+        object.remove("discarded_consents");
+        object.insert(
+            "discarded_consent".to_owned(),
+            serde_json::to_value(&legacy_receipt).unwrap(),
+        );
+        let legacy_bytes = serde_json::to_vec(&document).unwrap();
+
+        let restored = decode_state(&legacy_bytes, now).unwrap();
+        assert_eq!(restored.discarded_consents, vec![legacy_receipt.clone()]);
+        assert_eq!(restored.discarded_consents_dropped, 0);
+
+        // Written back as history, with the old key retired.
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&encode_state(&restored).unwrap()).unwrap();
+        assert!(rewritten.get("discarded_consent").is_none());
+        assert_eq!(
+            rewritten.get("discarded_consents").unwrap(),
+            &serde_json::json!([legacy_receipt])
+        );
+    }
+
+    /// Discarding is not witnessing.
+    ///
+    /// The anti-rollback evidence this phone holds is `MobileWitnessState`. No
+    /// discard, automatic or owner-driven, may advance its sequence, change its
+    /// hash or invent a transaction state - otherwise "clear the record" would
+    /// become a way to make an unwitnessed payment look witnessed.
+    #[tokio::test]
+    async fn discarding_a_consent_record_never_touches_the_signed_witness_evidence() {
+        let now = unix_now().unwrap();
+        let mut state = witness_bearing_state(now);
+        state.pending_witness = Some(witness_confirmation("operation_one", now));
+        let before = state.witness.clone().unwrap();
+        assert_eq!(before.last_anchor_sequence, 0);
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        shared
+            .discard_consent_by_owner("operation_one", now)
+            .await
+            .unwrap();
+        let after = shared.current().await.unwrap().unwrap();
+        assert_eq!(after.witness.as_ref(), Some(&before));
+        // And the phone is still exactly as blocked from resetting as any
+        // witness-bearing phone: the discard bought no rollback authority.
+        assert_eq!(
+            after.rotation_blocking_phase(),
+            Some(WitnessRotationPhase::RotationRequired)
+        );
+        assert!(
+            shared
+                .reset_before_witness_rotation()
+                .await
+                .unwrap_err()
+                .contains("controlled desktop/mobile witness rotation")
+        );
+    }
+
+    /// Stranding path 6, executed: a held confirmation refuses every other
+    /// payment this phone could approve, at the persist step rather than at the
+    /// approval itself.
+    #[test]
+    fn a_held_confirmation_blocks_every_other_payment_until_it_is_discarded() {
+        let now = 1_000;
+        let mut state = stranded_confirmation_state(now);
+        state.approval_sequence = 1;
+        state.pending_approval = Some(pilot_approval(&state, "operation_two", now));
+        assert!(
+            state
+                .validate_at(now)
+                .unwrap_err()
+                .contains("name different operations")
+        );
+
+        state.owner_discard_consent("operation_one", now).unwrap();
+        state.validate_at(now).unwrap();
+    }
+
+    /// The approval and the confirmation are one lifecycle, not two.
+    ///
+    /// A lost rejection acknowledgement, or an approval whose operation the
+    /// desktop finished by another route, used to leave a `pending_approval`
+    /// with no clear on any path at all.
+    #[tokio::test]
+    async fn an_approval_the_desktop_no_longer_offers_is_swept_the_same_way() {
+        let now = unix_now().unwrap();
+        let issued_at = now - CONSENT_DESKTOP_SILENCE_GRACE_SECS - 1;
+        let mut state = state_fixture(now);
+        state.approval_sequence = 1;
+        state.pending_approval = Some(pilot_approval(&state, "operation_one", issued_at));
+        state.rotation_phase = WitnessRotationPhase::BlockedByPendingApproval;
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        let discarded = shared
+            .sweep_obsolete_consent(Some(&[]), now)
+            .await
+            .unwrap()
+            .expect("an approval the desktop no longer offers is retired");
+        assert_eq!(discarded.kind, DISCARDED_PILOT_APPROVAL);
+        assert_eq!(discarded.operation_id, "operation_one");
+        assert_eq!(discarded.recipient, "1NewDeveloper");
+
+        let after = shared.current().await.unwrap().unwrap();
+        assert!(after.pending_approval.is_none());
+        assert_eq!(after.rotation_phase, WitnessRotationPhase::Stable);
+        // The monotonic approval sequence is never rewound by a discard.
+        assert_eq!(after.approval_sequence, 1);
+        shared.reset_before_witness_rotation().await.unwrap();
+    }
+
+    /// Dead end 5, executed.
+    ///
+    /// The refusal used to name a controlled rotation whatever was blocking it,
+    /// and then durably write a blocking phase over `Completed`. An owner who
+    /// had just finished a rotation was told to run it again, for ever, and the
+    /// refusal itself flipped `requires_controlled_rotation` back to true.
+    #[tokio::test]
+    async fn a_refused_reset_never_downgrades_a_completed_rotation_or_misnames_the_blocker() {
+        let now = unix_now().unwrap();
+        let mut state = stranded_confirmation_state(now);
+        state.rotation_phase = WitnessRotationPhase::Completed;
+        assert!(!state.requires_controlled_rotation());
+        let encoded = encode_state(&state).unwrap();
+        let store = Arc::new(MemoryStore::with_bytes(encoded.clone()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        let error = shared.reset_before_witness_rotation().await.unwrap_err();
+        assert!(
+            error.contains("holding your confirmation"),
+            "the refusal must name the blocker that is actually holding the reset: {error}"
+        );
+        assert!(
+            !error.contains("witness rotation is required"),
+            "a held confirmation is not a rotation problem: {error}"
+        );
+        let after = shared.current().await.unwrap().unwrap();
+        assert_eq!(after.rotation_phase, WitnessRotationPhase::Completed);
+        assert!(!after.requires_controlled_rotation());
+        assert_eq!(
+            store.bytes.lock().unwrap().as_deref(),
+            Some(encoded.as_slice()),
+            "a refusal must never downgrade a terminal rotation phase"
+        );
+    }
+
+    /// A witness-bearing phone with nothing held keeps the old wording, because
+    /// for it a controlled rotation really is the answer.
+    #[tokio::test]
+    async fn a_witness_bearing_phone_still_gets_the_rotation_refusal_it_always_got() {
+        let now = unix_now().unwrap();
+        let store = Arc::new(MemoryStore::with_bytes(
+            encode_state(&witness_bearing_state(now)).unwrap(),
+        ));
+        let shared = SharedCompanionState::open(store);
+        assert!(
+            shared
+                .reset_before_witness_rotation()
+                .await
+                .unwrap_err()
+                .contains("controlled desktop/mobile witness rotation is required")
+        );
+    }
+
+    /// An owner who changes nothing sees nothing new.
+    ///
+    /// No consent record, no sweep, no discard receipt, and a durable document
+    /// that is byte-identical to the one the previous build wrote - so a phone
+    /// updating into this change reads its own state unchanged, and a phone
+    /// with no consent record never starts writing a new key.
+    #[tokio::test]
+    async fn an_unchanged_phone_gains_no_new_state_and_is_never_swept() {
+        let now = unix_now().unwrap();
+        let state = state_fixture(now);
+        assert_eq!(state.obsolete_consent(Some(&[]), now + CONSENT_MAX_AGE_SECS), None);
+        assert_eq!(state.obsolete_consent(None, now + CONSENT_MAX_AGE_SECS), None);
+
+        let encoded = encode_state(&state).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        for key in [
+            "discarded_consent",
+            "discarded_consents",
+            "discarded_consents_dropped",
+        ] {
+            assert!(
+                document.get(key).is_none(),
+                "a phone holding nothing must not start writing a new durable key: {key}"
+            );
+        }
+        assert_eq!(decode_state(&encoded, now).unwrap(), state);
+
+        let store = Arc::new(MemoryStore::with_bytes(encoded.clone()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+        assert_eq!(shared.sweep_obsolete_consent(Some(&[]), now).await.unwrap(), None);
+        assert_eq!(
+            store.bytes.lock().unwrap().as_deref(),
+            Some(encoded.as_slice()),
+            "a sweep that retires nothing must not write anything at all"
+        );
+        shared.reset_before_witness_rotation().await.unwrap();
+    }
+
+    /// The discard receipt survives a restart, so the owner can still find out
+    /// what happened after closing the app.
+    #[test]
+    fn a_discard_receipt_is_durable_and_validated_on_the_way_back_in() {
+        let now = 1_000;
+        let mut state = stranded_confirmation_state(now);
+        state.owner_discard_consent("operation_one", now + 5).unwrap();
+        let restored = decode_state(&encode_state(&state).unwrap(), now).unwrap();
+        assert_eq!(restored.discarded_consents, state.discarded_consents);
+
+        let mut forged = state;
+        forged.discarded_consents[0].reason = "witnessed".to_owned();
+        assert!(
+            forged.validate_at(now).is_err(),
+            "a receipt naming a reason this phone never writes is refused"
+        );
+    }
+
+    /// Dead end 2: the storage layer refuses on a wider predicate than the one
+    /// the phone screen could see, and the refusal is not a no-op. The screen
+    /// now reads the predicate that is actually enforced.
+    #[test]
+    fn reset_blocking_phase_is_visible_before_a_pending_approval_moves_the_rotation_phase() {
+        let now = unix_now().unwrap();
+        let clean = state_fixture(now);
+        assert!(!clean.requires_controlled_rotation());
+        assert_eq!(clean.rotation_blocking_phase(), None);
+
+        let witnessing = witness_bearing_state(now);
+        assert!(
+            !witnessing.requires_controlled_rotation(),
+            "the phase the screen used to read is still stable here"
+        );
+        assert_eq!(
+            witnessing.rotation_blocking_phase(),
+            Some(WitnessRotationPhase::RotationRequired),
+            "but the reset would refuse, and durably rewrite the phase"
+        );
+    }
+
+    /// A desktop that is still asking for this witness outranks age.
+    ///
+    /// The age exit exists for a phone no desktop will ever answer again. It
+    /// used to be evaluated first, so it also fired on a phone whose desktop
+    /// had just said, in an authenticated snapshot, that it is still waiting -
+    /// retiring live consent under a witness card that was still on screen, and
+    /// doing the same to any phone whose clock jumped forward a day.
+    #[test]
+    fn a_desktop_still_asking_for_this_witness_outranks_age() {
+        let now = 1_000_000;
+        let state = stranded_confirmation_state(now);
+        let awaiting = vec!["operation_one".to_owned()];
+        for at in [
+            now,
+            now + CONSENT_DESKTOP_SILENCE_GRACE_SECS + 1,
+            now + CONSENT_MAX_AGE_SECS + 1,
+            now + CONSENT_MAX_AGE_SECS * 30,
+        ] {
+            assert_eq!(
+                state.obsolete_consent(Some(&awaiting), at),
+                None,
+                "a confirmation the desktop is still asking for is never retired"
+            );
+        }
+        // The exit for a phone with no desktop at all is untouched.
+        assert!(
+            state
+                .obsolete_consent(None, now + CONSENT_MAX_AGE_SECS + 1)
+                .is_some_and(|discard| discard.reason == DISCARD_AGED_OUT)
+        );
+        // And so is the exit for a desktop that answered without it.
+        assert!(
+            state
+                .obsolete_consent(Some(&[]), now + CONSENT_MAX_AGE_SECS + 1)
+                .is_some()
+        );
+    }
+
+    /// A restricted rotation candidate: signed ticket plus signed acceptance,
+    /// the exact state `finalize_rotation_pairing` installs, holding one
+    /// witness confirmation.
+    async fn rotation_candidate_state(now: u64) -> MobileCompanionDurableState {
+        use hpay_companion_protocol::{
+            PlatformDeviceSigner, RotationCandidateAcceptance, RotationPairingTicket,
+            SignedRotationCandidateAcceptance, SignedRotationPairingTicket,
+        };
+
+        let desktop = SoftwareDeviceIdentity::generate(DeviceRole::Desktop);
+        let old_mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+        let candidate = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+        let mut registry = DeviceRegistry::new();
+        for record in [
+            desktop
+                .public_record("wallet_one", BTreeSet::new(), now - 1)
+                .unwrap(),
+            candidate
+                .public_record(
+                    "wallet_one",
+                    BTreeSet::from([DevicePermission::ViewAgentWalletStatus]),
+                    now - 1,
+                )
+                .unwrap(),
+        ] {
+            registry.register(record).unwrap();
+        }
+        let ticket = RotationPairingTicket {
+            ticket_version: 1,
+            ticket_id: "ticket_one".to_owned(),
+            pairing_id: "pairing_one".to_owned(),
+            rotation_id: "rotation_one".to_owned(),
+            agent_wallet_id: "wallet_one".to_owned(),
+            desktop_device_id: desktop.device_id().clone(),
+            old_mobile_device_id: old_mobile.device_id().clone(),
+            expected_candidate_device_id: candidate.device_id().clone(),
+            expected_candidate_identity_fingerprint: PlatformDeviceSigner::identity(&candidate)
+                .fingerprint()
+                .unwrap(),
+            network_id: "testnet".to_owned(),
+            genesis_identifier: "11".repeat(32),
+            current_witness_epoch: 1,
+            next_witness_epoch: 2,
+            current_mobile_authorization_epoch: 1,
+            next_mobile_authorization_epoch: 2,
+            latest_anchor_sequence: 0,
+            latest_anchor_hash: "0".repeat(64),
+            journal_sequence: 1,
+            journal_head_hash: "22".repeat(32),
+            policy_epoch: 1,
+            old_mobile_authorization_commitment: None,
+            single_use_nonce: "33".repeat(32),
+            issued_at: now - 1,
+            expires_at: now + 200,
+        };
+        let signed_ticket = SignedRotationPairingTicket::sign(ticket.clone(), &desktop)
+            .await
+            .unwrap();
+        let acceptance = RotationCandidateAcceptance::for_ticket(&ticket, now).unwrap();
+        let signed_acceptance = SignedRotationCandidateAcceptance::sign(acceptance, &candidate)
+            .await
+            .unwrap();
+
+        let state = MobileCompanionDurableState {
+            state_version: STATE_VERSION,
+            agent_wallet_id: "wallet_one".to_owned(),
+            desktop_device_id: desktop.device_id().clone(),
+            mobile_device_id: candidate.device_id().clone(),
+            endpoints: vec![LanEndpoint::parse("hpay-lan://192.168.1.8:42492").unwrap()],
+            registry,
+            replay: ReplayGuard::new().snapshot(now).unwrap(),
+            response_sequence: 0,
+            approval_sequence: 0,
+            pending_pairing_ack: None,
+            pending_approval: None,
+            pending_witness: Some(witness_confirmation("operation_one", now)),
+            discarded_consents: Vec::new(),
+            discarded_consents_dropped: 0,
+            witness: None,
+            rotation_phase: WitnessRotationPhase::CandidatePairedRestricted,
+            pending_rotation_authorization: None,
+            pending_rotation_baseline: None,
+            rotation_ticket: Some(signed_ticket),
+            rotation_candidate_acceptance: Some(signed_acceptance),
+        };
+        state
+            .validate_at(now)
+            .expect("a restricted candidate may hold one witness confirmation");
+        state
+    }
+
+    /// The refused reset must not destroy the exits it points the owner at.
+    ///
+    /// A restricted rotation candidate constrains its own `rotation_phase`. The
+    /// refusal used to write its blocking marker there regardless, producing
+    /// durable state the loader rejects: the companion was disabled on the next
+    /// launch, and every consent exit - the owner's discard and the automatic
+    /// sweep alike - failed on the same validation, because both persist
+    /// through `persist_locked`. The refusal message tells the owner to discard
+    /// the confirmation on this screen; pressing reset first must not be what
+    /// takes that away.
+    #[tokio::test]
+    async fn a_refused_reset_never_writes_state_the_loader_would_reject() {
+        let now = unix_now().unwrap();
+        let state = rotation_candidate_state(now).await;
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+
+        let refusal = shared.reset_before_witness_rotation().await.unwrap_err();
+        assert!(refusal.contains("holding your confirmation"));
+
+        // The phone still loads.
+        let bytes = store.bytes.lock().unwrap().clone().unwrap();
+        decode_state(&bytes, unix_now().unwrap())
+            .expect("a refused reset left durable state the loader rejects");
+        assert_eq!(
+            shared.current().await.unwrap().unwrap().rotation_phase,
+            WitnessRotationPhase::CandidatePairedRestricted,
+            "a marker that will not fit is not written at all"
+        );
+
+        // And the automatic exit still works, after the reset has been tried.
+        assert!(
+            shared
+                .sweep_obsolete_consent(Some(&[]), now + CONSENT_MAX_AGE_SECS + 1)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let restored =
+            SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+        assert!(restored.current().await.unwrap().is_some());
+    }
+
+    /// The owner's discard survives a refused reset on the same phone.
+    #[tokio::test]
+    async fn the_owner_discard_survives_a_refused_reset_on_a_rotation_candidate() {
+        let now = unix_now().unwrap();
+        let state = rotation_candidate_state(now).await;
+        let store = Arc::new(MemoryStore::with_bytes(encode_state(&state).unwrap()));
+        let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
+        let _ = shared.reset_before_witness_rotation().await.unwrap_err();
+        let discarded = shared
+            .discard_consent_by_owner("operation_one", now)
+            .await
+            .expect("the exit the refusal names must still exist after the refusal");
+        assert_eq!(discarded.reason, DISCARD_OWNER);
+        let after = shared.current().await.unwrap().unwrap();
+        assert!(after.pending_witness.is_none());
+        // The rotation this phone is a candidate for is untouched.
+        assert!(after.rotation_ticket.is_some());
+        assert_eq!(
+            after.rotation_phase,
+            WitnessRotationPhase::CandidatePairedRestricted
         );
     }
 }

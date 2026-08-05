@@ -159,10 +159,13 @@ async fn a_paired_phone_reconnects_against_its_own_durable_replay_guard() {
     // The phone's guard, persisted and restored exactly as the handset does it.
     let mut phone_replay = ReplayGuard::new();
     let mut accepted_sequences = Vec::new();
-    for (index, (start_at, respond_at, accept_at)) in
-        [(104_u64, 105_u64, 106_u64), (107, 108, 109), (110, 111, 112)]
-            .into_iter()
-            .enumerate()
+    for (index, (start_at, respond_at, accept_at)) in [
+        (104_u64, 105_u64, 106_u64),
+        (107, 108, 109),
+        (110, 111, 112),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let attempt = manager
             .start_companion_desktop_session(&wallet_id, mobile.device_id(), start_at, 60)

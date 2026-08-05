@@ -17,12 +17,20 @@ use crate::service::{
 use crate::types::{AgentId, WalletScope};
 
 mod decisions;
+mod desktop_approval;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod desktop_witness_flow;
 mod fixtures;
 mod lifecycle;
 mod pairing;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod pilot_node;
 mod registry;
 mod session;
 mod snapshot;
 mod transport;
+mod unlisted_recipient;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod witness;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod witness_phase_expiry;

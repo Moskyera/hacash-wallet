@@ -5,6 +5,11 @@ import {
   isDesktopControlLabel,
 } from "./desktopControls";
 import {
+  CLEAR_STOP_CANCELS_PENDING_REQUESTS,
+  PHONE_CONNECTION_REFUSED_WHILE_STOPPED,
+  PHONE_LISTENER_FAILED_ROUTE,
+  STRIP_PRESSABLE_CONTROLS,
+  aboveTheFoldBlocks,
   nodeAlertState,
   overviewAlerts,
   overviewBlockOrder,
@@ -34,6 +39,7 @@ const PHONE_STATES: PhoneLinkState[] = [
   "unknown",
   "on",
   "off",
+  "failed",
   "pairing",
   "other_wallet",
 ];
@@ -334,6 +340,7 @@ describe("derivations the panels share", () => {
         statusLoaded: true,
         belongsToAnotherWallet: true,
         enabled: false,
+        listenerFailed: false,
         pairingActive: false,
       }),
     ).toBe("other_wallet");
@@ -345,6 +352,7 @@ describe("derivations the panels share", () => {
         statusLoaded: true,
         belongsToAnotherWallet: false,
         enabled: true,
+        listenerFailed: false,
         pairingActive: true,
       }),
     ).toBe("pairing");
@@ -356,14 +364,155 @@ describe("derivations the panels share", () => {
         statusLoaded: false,
         belongsToAnotherWallet: false,
         enabled: false,
+        listenerFailed: false,
         pairingActive: false,
       }),
     ).toBe("unknown");
+  });
+
+  // agent_wallet_companion_status reports "enabled": true for every phase,
+  // including the one where the slot is held and its server is dead. Reading
+  // enabled alone made Overview report a healthy phone connection while every
+  // phone was being refused, and dropped the phone row from the alert strip.
+  it("never reports a dead listener as an on connection", () => {
+    expect(
+      phoneLinkState({
+        statusLoaded: true,
+        belongsToAnotherWallet: false,
+        enabled: true,
+        listenerFailed: true,
+        pairingActive: false,
+      }),
+    ).toBe("failed");
   });
 
   it("treats stale balance data as a node problem", () => {
     expect(nodeAlertState({ nodeStatus: "verified", stale: true })).toBe("stale");
     expect(nodeAlertState({ nodeStatus: "offline", stale: false })).toBe("offline");
     expect(nodeAlertState({ nodeStatus: "verified", stale: false })).toBe("verified");
+  });
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* Closures pinned by the condition that makes them true                       */
+/* -------------------------------------------------------------------------- */
+
+describe("a dead phone listener is reported, and only its way out is named", () => {
+  const failed = healthy({ phone: "failed" });
+
+  it("raises a phone row instead of reporting nothing at all", () => {
+    // phoneAlert returned [] for "on", and a failed listener read as "on", so
+    // Overview showed no phone problem while every phone was refused.
+    const row = overviewAlerts(failed).find((alert) => alert.id === "phone");
+    expect(row).toBeDefined();
+    expect(row?.tone).toBe("warning");
+    expect(row?.status).toContain("failed");
+  });
+
+  it("names the two presses that work, in the order that works", () => {
+    const row = overviewAlerts(failed).find((alert) => alert.id === "phone");
+    expect(row?.detail).toBe(PHONE_LISTENER_FAILED_ROUTE);
+    const off = row!.detail.indexOf(DESKTOP_CONTROLS.turn_off_phone_connection);
+    const on = row!.detail.indexOf(DESKTOP_CONTROLS.turn_on_phone_connection);
+    expect(off).toBeGreaterThanOrEqual(0);
+    expect(on).toBeGreaterThan(off);
+  });
+
+  it("offers the one press that can succeed, and never the one that cannot", () => {
+    // Start is refused while the dead slot is held, so the strip must press
+    // the control that releases it rather than the one that would throw.
+    const row = overviewAlerts(failed).find((alert) => alert.id === "phone");
+    expect(row?.action?.control).toBe("turn_off_phone_connection");
+    expect(row?.action?.label).toBe(
+      DESKTOP_CONTROLS.turn_off_phone_connection,
+    );
+    expect(STRIP_PRESSABLE_CONTROLS).toContain("turn_off_phone_connection");
+  });
+
+  it("hoists the panel that owns both presses onto the first screen", () => {
+    const order = overviewBlockOrder({
+      paymentsSuspended: false,
+      phone: "failed",
+      connector: "running",
+    });
+    expect(aboveTheFoldBlocks(order)).toContain("phone");
+  });
+});
+
+describe("clearing the emergency stop says what it destroys", () => {
+  it("carries the cancellation warning on the row that recommends it", () => {
+    // enable_agent_payments_locally cancels every pending pre-signing operation
+    // on the wallet, scope None. The strip recommends this control as the
+    // primary action while describing it as changing nothing but a flag.
+    const row = overviewAlerts(
+      healthy({ paymentsSuspended: true, pairingBlocked: true }),
+    ).find((alert) => alert.id === "payments");
+    expect(row?.action?.control).toBe("enable_payments_locally");
+    expect(row?.primary).toBe(true);
+    expect(row?.detail).toContain(CLEAR_STOP_CANCELS_PENDING_REQUESTS);
+  });
+
+  it("drops both the action and the claim when the control is refused", () => {
+    const row = overviewAlerts(
+      healthy({
+        paymentsSuspended: true,
+        clearStopBlocked: true,
+        clearStopReason: "An unresolved signed operation must be recovered.",
+        pairingBlocked: true,
+      }),
+    ).find((alert) => alert.id === "payments");
+    expect(row?.action).toBeNull();
+    expect(row?.detail).not.toContain(CLEAR_STOP_CANCELS_PENDING_REQUESTS);
+  });
+});
+
+describe("turning the phone connection on while the stop is engaged", () => {
+  const suspended = healthy({
+    phone: "off",
+    hasAuthorizedPhone: true,
+    phoneAddressReady: true,
+    paymentsSuspended: true,
+    pairingBlocked: true,
+  });
+
+  it("still offers the control, because the listener really does start", () => {
+    // agent_wallet_companion_start is not gated on the stop. Disabling the
+    // button would be a new refusal, which this pass must not add.
+    const row = overviewAlerts(suspended).find((alert) => alert.id === "phone");
+    expect(row?.action?.control).toBe("turn_on_phone_connection");
+  });
+
+  it("stops claiming a phone can then reach this desktop", () => {
+    // issue_connectivity_permit fails closed while payments are suspended, so
+    // every session the phone opens is refused. The detail asserted otherwise.
+    const row = overviewAlerts(suspended).find((alert) => alert.id === "phone");
+    expect(row?.detail).toContain(PHONE_CONNECTION_REFUSED_WHILE_STOPPED);
+    expect(row?.detail).toContain(DESKTOP_CONTROLS.enable_payments_locally);
+
+    const running = overviewAlerts(
+      healthy({ phone: "off", hasAuthorizedPhone: true, phoneAddressReady: true }),
+    ).find((alert) => alert.id === "phone");
+    expect(running?.detail).not.toContain(PHONE_CONNECTION_REFUSED_WHILE_STOPPED);
+  });
+});
+
+describe("a pinned capability failure is not a wrong chain", () => {
+  it("gives it its own line", () => {
+    const capability = overviewAlerts(healthy({ node: "capability_mismatch" })).find(
+      (alert) => alert.id === "node",
+    );
+    const network = overviewAlerts(healthy({ node: "network_mismatch" })).find(
+      (alert) => alert.id === "node",
+    );
+    expect(capability?.status).not.toBe(network?.status);
+    expect(capability?.detail).not.toBe(network?.detail);
+    // The retired claim: capability_mismatch is a pinned-capability-contract
+    // failure, not a chain identity failure.
+    expect(capability?.status).not.toContain("not this wallet's chain");
+    expect(capability?.detail).toContain("This is not a wrong chain");
+    // Neither names Refresh: re-asking the same node fails the same way.
+    expect(capability?.action).toBeNull();
+    expect(network?.action).toBeNull();
   });
 });

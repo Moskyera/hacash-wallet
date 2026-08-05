@@ -10,12 +10,15 @@ import {
 } from "@hacash/wallet-ui";
 import { describe, expect, it } from "vitest";
 import {
+  WITNESS_PENDING_ACTIVITY_STATUSES,
   authenticatedSnapshot,
   authorizedAgentForApproval,
+  pendingWitnessOperation,
   companionSessionExpiryMilliseconds,
   formatCompanionNodeStatus,
   formatHacUnits,
   formatTotalDebit,
+  recipientStanding,
   validateCompanionStatusSnapshot,
   validateFreshPairingOffer,
   validatePairingCompletion,
@@ -29,10 +32,20 @@ import {
 import {
   COMPANION_REVOKED_ALTERNATIVE,
   COMPANION_REVOKED_PERMANENCE,
+  COMPANION_RETIRE_PAIRING_ACTION,
+  COMPANION_REVOKED_ORDER_MATTERS,
   COMPANION_REVOKED_RECOVERY_STEPS,
   COMPANION_REVOKED_RESET_DOES_NOT_HELP,
   COMPANION_REVOKED_ROUTE,
 } from "./companionRevokedRecovery";
+import {
+  COMPANION_DISCARD_CONSENT_EFFECTS,
+  COMPANION_DISCARD_CONSENT_PHRASE,
+  discardedConsentNotice,
+  discardedConsentOverflowNotice,
+  heldConsentExplanation,
+  heldConsentFacts,
+} from "./companionHeldConsent";
 import {
   COMPANION_CONNECT_ACTION,
   COMPANION_CREATE_IDENTITY_ACTION,
@@ -54,6 +67,7 @@ import {
   type CompanionPairingStateInput,
 } from "./companionStatus";
 import {
+  COMPANION_CONNECTION_SECTION_TITLE,
   COMPANION_PLATFORM_UNSUPPORTED_BODY,
   COMPANION_PLATFORM_UNSUPPORTED_ROUTE,
   COMPANION_PRIMARY_ACTION_LABELS,
@@ -63,6 +77,16 @@ import {
   type CompanionPrimaryActionInput,
 } from "./companionLayout";
 import { shouldRenderAgentCompanionRoot } from "./companionWindow";
+import {
+  COMPANION_ROTATION_PHASES,
+  MAX_COMPANION_DISCARDED_CONSENTS,
+} from "./types";
+import { snapshotBlockedOnlyByExpiredApproval } from "./companionView";
+import { scanRefusal } from "./AgentCompanionApp";
+import {
+  COMPANION_CONFIRM_WITNESS_ACTION,
+  connectRoute,
+} from "./CompanionReadOnlyPages";
 import type {
   CompanionPairingCompletionView,
   CompanionPairingStartView,
@@ -135,7 +159,12 @@ function storedState(
     pilotEnabled: false,
     controlledRotationRequired: false,
     rotationPhase: null,
+    resetBlockingPhase: null,
+    pairingIdentity: "matches",
     hardwareIdentityRetainedOnReset: true,
+    pendingConsent: null,
+    discardedConsents: [],
+    discardedConsentsDropped: "0",
     ...overrides,
   };
 }
@@ -673,7 +702,9 @@ describe("mobile Agent Wallet companion boundary", () => {
         "agent_wallet_companion_disconnect",
         "agent_wallet_companion_lifecycle",
         "agent_wallet_companion_reset",
+        "agent_wallet_companion_discard_consent",
         "agent_wallet_companion_decide_payment",
+        "agent_wallet_companion_witness_pending",
         "agent_wallet_companion_rotation_step",
       ]),
     );
@@ -746,7 +777,9 @@ describe("mobile Agent Wallet companion boundary", () => {
     const pages = read("agent/CompanionReadOnlyPages.tsx");
     const css = read("agent/agent-wallet.css");
 
-    expect(app).toContain("{companion.stored?.configured ? (");
+    // The connection block is built once, for every tab, and placed by
+    // companionBlockOrder rather than by the tab that happens to be open.
+    expect(app).toContain("const connectionBlock = companion.stored?.configured ? (");
     expect(app).not.toContain('companion.stored?.configured && page === "overview" ? (\n          <CompanionConnectionPanel');
     expect(app).toContain("agent-nav-badge");
     expect(app).toContain('onOpenActivity={() => setPage("activity")}');
@@ -764,10 +797,52 @@ describe("mobile Agent Wallet companion boundary", () => {
     expect(pages).toContain('value={approval.recipient}');
     expect(pages).toContain('value={requestingAgent.agentId}');
     expect(pages).toContain("authorizedAgentForApproval(approval, snapshot)");
+    // The review says outright when the address is one the desktop owner has
+    // never vetted, and prints it in full rather than shortened.
+    expect(pages).toContain("recipientStanding(approval, snapshot)");
+    expect(pages).toContain(
+      "New recipient. This address is not on this agent's allowlist.",
+    );
+    expect(pages).toContain('<code className="agent-exact-address">{approval.recipient}</code>');
+    expect(css).toContain(".agent-exact-address");
     expect(pages).toContain("Emergency stop is currently available from HPAY Desktop");
     expect(pages).not.toContain('aria-label="Desktop-only approvals"');
     expect(css).toContain(".agent-nav-badge");
     expect(css).toContain(".agent-approval-review");
+  });
+
+  it("names an approval recipient that is not on the requesting agent's allowlist", () => {
+    const snapshot = validateCompanionStatusSnapshot(
+      nativeSnapshot(),
+      session(),
+      storedState(),
+      NOW_MILLISECONDS,
+    );
+    expect(snapshot.policies[0].allowedRecipients).toEqual(["1Recipient"]);
+    expect(recipientStanding(snapshot.pendingApprovals[0], snapshot)).toBe(
+      "allowlisted",
+    );
+
+    const unlisted = validateCompanionStatusSnapshot(
+      nativeSnapshot({
+        approvals: [approval({ recipient: "1NewDeveloper" })],
+      }),
+      session(),
+      storedState(),
+      NOW_MILLISECONDS,
+    );
+    expect(recipientStanding(unlisted.pendingApprovals[0], unlisted)).toBe(
+      "not_on_allowlist",
+    );
+
+    // A snapshot with no policy for the requesting agent must never read as
+    // vetted. It reads as unchecked.
+    expect(
+      recipientStanding(unlisted.pendingApprovals[0], {
+        ...unlisted,
+        policies: [],
+      }),
+    ).toBe("unverified");
   });
 
   it("keeps the pilot status permanent, accurate and free of mojibake", () => {
@@ -783,7 +858,7 @@ describe("mobile Agent Wallet companion boundary", () => {
     expect(app).toContain('label="HPAY wallet fee" value="None"');
     expect(security).toContain("No generic wallet sends, arbitrary signing or admin commands");
     expect(security).toContain("controlled desktop");
-    expect(security).toContain("stored.controlledRotationRequired");
+    expect(security).toContain("stored?.controlledRotationRequired");
     expect(security).toContain("Controlled witness rotation required");
     expect(security).toContain("Check and continue rotation");
     expect(security).toContain('label="Rotation phase"');
@@ -804,18 +879,14 @@ describe("AI Agent Wallet comprehension", () => {
     // page rendered below the fold and switching tabs scrolled back to the top,
     // so Agents, Rules and Activity looked like dead buttons.
     //
-    // The rule is now a pure function, checked exhaustively in "a chosen tab
-    // leads with its own content" below. Here we only pin that the shell uses
-    // it rather than deciding the order inline again.
-    expect(app).toContain("const leadWithPage = companionPageLeadsWithOwnContent({");
-    expect(app).toContain("companionPageLeadsWithOwnContent,");
-
-    const leadFirst = app.indexOf("{leadWithPage ? pageContent : null}");
-    const connectionPanel = app.indexOf("<CompanionConnectionPanel");
-    const leadLast = app.indexOf("{leadWithPage ? null : pageContent}");
-    expect(leadFirst).toBeGreaterThanOrEqual(0);
-    expect(connectionPanel).toBeGreaterThan(leadFirst);
-    expect(leadLast).toBeGreaterThan(connectionPanel);
+    // The rule is now a pure function over every block, checked exhaustively
+    // in "the control a state depends on is on the first screen" below. Here
+    // we only pin that the shell uses it rather than deciding order inline.
+    expect(app).toContain("const blockOrder = companionBlockOrder(layout);");
+    expect(app).toContain("companionBlockOrder,");
+    expect(app).toContain("{blockOrder.map((id) => renderBlock(id))}");
+    // Every block has exactly one rendering position, chosen by the order.
+    expect(app.match(/\{blockOrder\.map/g)).toHaveLength(1);
 
     // The page blocks must exist once, in pageContent, and not also inline.
     expect(app.match(/page === "agents"/g)).toHaveLength(1);
@@ -827,20 +898,35 @@ describe("AI Agent Wallet comprehension", () => {
     const pages = read("agent/CompanionReadOnlyPages.tsx");
     const backend = readWorkspace("crates/wallet-tauri-common/src/companion_backend.rs");
 
-    // The desktop blanks both lists for every paired device regardless of the
-    // permission set. If that ever changes, this copy becomes wrong and these
+    // Spending policies are blanked for every paired device, unconditionally.
+    // Activity has exactly one exception, and this pins its shape: it is gated
+    // on the rollback-witness permission, restricted to the statuses the
+    // desktop will actually hand an anchor for, and capped at a single entry.
+    // If any of that changes, the copy below becomes wrong and these
     // assertions are the reminder to rewrite it.
     const filter = backend.slice(
       backend.indexOf("fn filter_snapshot_for_permissions"),
       backend.indexOf("fn validate_inbound"),
     );
     expect(filter).toContain("policies: Vec::new()");
-    expect(filter).toContain("activity: Vec::new()");
+    expect(filter).toContain(
+      "activity: witness_pending_disclosure(activity, permissions)",
+    );
+    expect(filter).toContain(
+      "if !permissions.contains(&DevicePermission::WitnessRollbackAnchor) {",
+    );
+    expect(filter).toContain(
+      "agent_wallet_core::WITNESS_PENDING_OPERATION_STATUS_NAMES",
+    );
+    expect(filter).toContain("if pending.len() == 1 {");
 
     expect(pages).toContain("Spending rules stay on the desktop");
     expect(pages).toContain("Spending limits are never sent to a phone");
     expect(pages).toContain("Payment history is never sent to a phone");
     expect(pages).toContain("It does not mean no payment was made.");
+    // The one payment that is disclosed has its own section, and the empty
+    // history note now says so rather than claiming nothing is ever shown.
+    expect(pages).toContain("except for the single payment waiting on this phone's own witness");
 
     // An empty list previously read as "nothing happened here".
     expect(pages).not.toContain("No activity is included in the current authenticated snapshot.");
@@ -1724,14 +1810,22 @@ describe("a chosen tab leads with its own content", () => {
     expect(app).toContain("What is an AI Agent Wallet?");
     expect(app).not.toContain('<section className="agent-companion-notice"');
 
-    // Order: the chosen tab, then the shared connection block, then the tab
-    // again for the states where it has nothing to lead with.
-    const leadFirst = app.indexOf("{leadWithPage ? pageContent : null}");
-    const connection = app.indexOf("<CompanionConnectionPanel");
-    const leadLast = app.indexOf("{leadWithPage ? null : pageContent}");
-    expect(leadFirst).toBeGreaterThan(0);
-    expect(connection).toBeGreaterThan(leadFirst);
-    expect(leadLast).toBeGreaterThan(connection);
+    // Order is decided by companionBlockOrder and rendered in one place, so
+    // no block can acquire a second position in the tree.
+    expect(app).toContain("{blockOrder.map((id) => renderBlock(id))}");
+    for (const block of [
+      "statusStripBlock",
+      "onboardingBlock",
+      "pairingBlock",
+      "pendingPairingStepBlock",
+      "connectionBlock",
+      "pageContent",
+    ]) {
+      expect(
+        app.match(new RegExp(`\\{${block}\\}`, "g")),
+        `${block} is rendered in more than one position`,
+      ).toHaveLength(1);
+    }
   });
 
   it("leads the Activity tab with the decision, not with the empty-by-design list", () => {
@@ -1825,24 +1919,35 @@ describe("no instruction names a control that does not exist", () => {
   it("stops sending a locked or unsupported phone to Create mobile identity", () => {
     const panel = withoutComments(read("agent/CompanionPairingPanel.tsx"));
     const blocked = panel.slice(
-      panel.indexOf("if (!identity?.ready) {"),
+      panel.indexOf("if (!identity) {"),
       panel.indexOf("if (!pairing) {"),
     );
+
+    // An identity status that could not be read at all is its own branch. The
+    // Security tab renders only the recheck control in that state, so naming
+    // Create mobile identity there named a button that is not on the screen.
+    const unknown = blocked.slice(
+      0,
+      blocked.indexOf("if (!identity.ready) {"),
+    );
+    expect(unknown).toContain("COMPANION_RECHECK_IDENTITY_ACTION");
+    expect(unknown).not.toContain("COMPANION_CREATE_IDENTITY_ACTION");
+    expect(unknown).not.toContain("COMPANION_SCAN_QR_ACTION");
 
     // Create mobile identity is only rendered while the identity does not
     // exist, so naming it for a phone whose key exists but will not open, or
     // for a handset that cannot hold one at all, named a control that was not
     // on the screen. Each branch now names only what that state can reach.
     const unsupported = blocked.slice(
-      blocked.indexOf("if (identity && !identity.platformSupported)"),
-      blocked.indexOf("if (identity?.configured)"),
+      blocked.indexOf("if (!identity.platformSupported)"),
+      blocked.indexOf("if (identity.configured)"),
     );
     expect(unsupported).toContain("COMPANION_PLATFORM_UNSUPPORTED_TITLE");
     expect(unsupported).not.toContain("COMPANION_CREATE_IDENTITY_ACTION");
     expect(unsupported).not.toContain("COMPANION_SCAN_QR_ACTION");
 
     const locked = blocked.slice(
-      blocked.indexOf("if (identity?.configured)"),
+      blocked.indexOf("if (identity.configured)"),
       blocked.lastIndexOf("return ("),
     );
     expect(locked).toContain("COMPANION_RECHECK_IDENTITY_ACTION");
@@ -1871,19 +1976,32 @@ describe("no instruction names a control that does not exist", () => {
     }
   });
 
-  it("names the phone half of a controlled rotation only where that half exists", () => {
+  it("names the phone half of a controlled rotation, and that half now exists in every build", () => {
     const security = withoutComments(read("agent/CompanionSecurity.tsx"));
-    // The rotation panel is a pilot-build feature; the blocker that tells the
-    // owner to rotate is not. In any other build the instruction named a
-    // control the owner could not find.
+    // The blocker names Check and continue rotation. That control used to exist
+    // only in a pilot build, so a read-only handset was told to use a control
+    // it did not have, could not reset, and was stuck for good. The panel is
+    // now rendered whenever the reset is blocked, in any build.
     expect(security).toContain("Controlled witness rotation required");
     const blocker = security.slice(
       security.indexOf("Controlled witness rotation required"),
       security.indexOf(") : !resetConfirm ? ("),
     );
-    expect(blocker).toContain("stored.pilotEnabled");
     expect(blocker).toContain("Check and continue rotation");
-    expect(blocker).toMatch(/no rotation control on the phone/i);
+    expect(blocker).not.toMatch(/no rotation control on the phone/i);
+    expect(security).toContain("(stored.pilotEnabled || resetBlocked)");
+    // And the native command it calls is no longer refused outright in a
+    // read-only build: only the replacement phone's half still is.
+    const pilot = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/pilot.rs",
+    );
+    const step = pilot.slice(
+      pilot.indexOf("pub async fn agent_wallet_companion_rotation_step"),
+    );
+    expect(step).not.toContain(
+      "require_agent_companion_webview(&webview)?;\n    require_pilot_enabled()?;",
+    );
+    expect(step).toContain("require_pilot_enabled()?;");
   });
 
   it("points a stopped wallet at the desktop control that clears it", () => {
@@ -2191,5 +2309,1051 @@ describe("the revocation reference stops shouting at healthy phones", () => {
         `${other} was mistaken for a desktop refusal`,
       ).toBe("paired_not_connected");
     }
+  });
+});
+
+
+/* -------------------------------------------------------------------------- */
+/* Closures pinned by the condition that makes them true                       */
+/* -------------------------------------------------------------------------- */
+
+/** Every phase name the Rust enum serialises to, read from the source. */
+function rustRotationPhases(): string[] {
+  const source = readWorkspace("crates/companion-protocol/src/rotation.rs");
+  const body = source.split("pub enum WitnessRotationPhase {")[1].split("}")[0];
+  return body
+    .split("\n")
+    .map((line) => line.trim().replace(/,$/, ""))
+    .filter((line) => /^[A-Z][A-Za-z]*$/.test(line))
+    .map((variant) => variant.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase());
+}
+
+/** How deep inside <details> a given index sits. 0 means always visible. */
+function disclosureDepth(source: string, index: number): number {
+  const before = source.slice(0, index);
+  return before.split("<details").length - before.split("</details>").length;
+}
+
+describe("a rotation in progress never makes a paired phone report itself unpaired", () => {
+  it("accepts every phase the native side can actually persist", () => {
+    // The runtime whitelist listed twelve names against the protocol enum's
+    // twenty, and four of the twelve did not exist in Rust at all. A phase
+    // outside it threw from validatedStoredState, so stored AND identity both
+    // stayed null, the phone showed "Not paired with a desktop", and every
+    // escape - the connection block, the reset section, the create-identity
+    // button - is gated on one of those two.
+    const fromRust = rustRotationPhases();
+    expect(fromRust.length).toBe(20);
+    expect([...COMPANION_ROTATION_PHASES].sort()).toEqual([...fromRust].sort());
+
+    for (const phase of fromRust) {
+      const state = storedState({
+        rotationPhase: phase as NonNullable<CompanionStoredStateView["rotationPhase"]>,
+      });
+      expect(() => validatedStoredState(state), `${phase} is unreadable`).not.toThrow();
+      expect(validatedStoredState(state).configured).toBe(true);
+    }
+  });
+
+  it("covers the phases the phone writes itself, by name", () => {
+    // Written by apps/mobile/src-tauri/src/agent_companion/{pairing,pilot}.rs.
+    for (const phase of [
+      "candidate_paired_restricted",
+      "awaiting_candidate_pairing",
+      "candidate_baseline_verified",
+      "awaiting_completion_anchor",
+    ] as const) {
+      expect(COMPANION_ROTATION_PHASES).toContain(phase);
+      expect(() =>
+        validatedStoredState(storedState({ rotationPhase: phase })),
+      ).not.toThrow();
+    }
+  });
+
+  it("still refuses a phase name that is not in the protocol at all", () => {
+    expect(() =>
+      validatedStoredState(
+        storedState({
+          rotationPhase: "not_a_phase" as NonNullable<
+            CompanionStoredStateView["rotationPhase"]
+          >,
+        }),
+      ),
+    ).toThrow(/rotation phase is invalid/i);
+  });
+
+  it("reads the identity even when the stored state cannot be read", () => {
+    // useCompanionSession computed the identity and the state inside one try,
+    // identity first and state second, so a state that failed validation threw
+    // before setIdentity ran and removed the Security tab as well.
+    const hook = withoutComments(read("agent/useCompanionSession.ts"));
+    expect(hook).toContain("Promise.allSettled([");
+    expect(hook).toContain("setIdentity(validatedIdentityStatus(identityResult.value))");
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    expect(app).toContain("void Promise.allSettled([");
+  });
+
+  it("names the version mismatch instead of the desktop's revoke list", () => {
+    const text = companionFailureText(
+      new Error("The companion rotation phase is invalid."),
+    );
+    expect(text).not.toContain(COMPANION_UNCLASSIFIED_NEXT_STEP);
+    expect(text).toContain("still paired");
+    expect(text).toContain("different releases");
+  });
+});
+
+describe("a successful pairing can never wedge on a false fingerprint banner", () => {
+  it("catches the state read that runs after the pairing has succeeded", () => {
+    // The read sat outside every catch, so its rejection escaped into
+    // `void confirmPairing()`, setPairingBusy(false) never ran, and the app
+    // showed "Waiting for Android security approval" for good with no error.
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    const after = app.slice(
+      app.indexOf("ackDelivered: Boolean(pairing.rotationTicket),"),
+      app.indexOf("if (!pairing.rotationTicket) {"),
+    );
+    expect(after).toContain("try {");
+    expect(after).toContain("await companion.refreshStoredState();");
+    expect(after).toContain("} catch (reason) {");
+    expect(after).toContain("companion.setError(");
+  });
+});
+
+describe("no press on this phone lands and vanishes", () => {
+  it("names which guard refused a scanned pairing offer", () => {
+    // The scanner fires onValue once and then closes the camera, so a bare
+    // return here is the confirmed historical defect verbatim.
+    expect(
+      scanRefusal({ busy: false, configured: true, identityReady: true }),
+    ).toContain("already paired");
+    expect(
+      scanRefusal({ busy: false, configured: false, identityReady: false }),
+    ).toContain("secure identity is not ready");
+    expect(
+      scanRefusal({ busy: true, configured: false, identityReady: true }),
+    ).toContain("still finishing the last step");
+    // And it stays out of the way when the scan will be used.
+    expect(
+      scanRefusal({ busy: false, configured: false, identityReady: true }),
+    ).toBe("");
+  });
+
+  it("leaves no bare return on a control the owner can press", () => {
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    for (const guard of [
+      "if (!pairing || !pairing.automaticTransport) return;",
+      "if (!pairing) return;",
+    ]) {
+      expect(app).toContain(guard);
+    }
+    // Every busy refusal now says so.
+    expect(app.split("companion.setError(BUSY_REFUSAL);").length - 1).toBeGreaterThanOrEqual(5);
+    expect(app).not.toContain("if (busy) return;");
+    expect(app).not.toContain("|| busy) return;");
+  });
+
+  it("disables the refresh control while the heartbeat owns the read", () => {
+    // syncNow returns immediately while heartbeatInFlight is set, and that ref
+    // never reached render, so the button was enabled and the press did
+    // nothing at all - on the very control the stale-request message names.
+    const hook = withoutComments(read("agent/useCompanionSession.ts"));
+    expect(hook).toContain("const [syncInFlight, setSyncInFlight] = useState(false);");
+    expect(hook).toContain("setSyncInFlight(true);");
+    expect(hook).toContain("syncInFlight,");
+
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    expect(app).toContain("busy={busy || companion.syncInFlight}");
+    expect(app).toContain("syncBusy={busy || companion.syncInFlight}");
+    const panel = withoutComments(read("agent/CompanionPairingPanel.tsx"));
+    expect(panel).toContain("<button type=\"button\" disabled={syncBusy} onClick={onSync}>");
+  });
+});
+
+describe("the waiting banner names the step the owner is actually in", () => {
+  it("gives every call site its own reason", () => {
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    // pairingBusy is set by pairing, sending the confirmation, cancelling,
+    // deciding a payment and continuing a rotation. Only one is pairing.
+    for (const reason of [
+      "pairing",
+      "send_confirmation",
+      "cancel",
+      "decision",
+      "rotation",
+    ]) {
+      expect(app).toContain(`setPairingBusy("${reason}")`);
+      expect(app).toContain(`  ${reason}:`);
+    }
+    expect(app).toContain("{NATIVE_WAIT_TEXT[nativeWait]}");
+    expect(app).not.toContain(
+      "<p>Complete or cancel the fingerprint prompt to continue pairing.</p>",
+    );
+  });
+});
+
+describe("a status strip never names a control the state does not render", () => {
+  it("stops naming Create mobile identity when the identity cannot be read", () => {
+    // CompanionSecurity gates that button on identity?.platformSupported, so
+    // with identity null the tab renders only the recheck control.
+    const view = companionPairingStateView(
+      stateInput({ configured: false, identityKnown: false }),
+    );
+    expect(view.nextAction).not.toContain(COMPANION_CREATE_IDENTITY_ACTION);
+    expect(view.nextAction).toContain(COMPANION_RECHECK_IDENTITY_ACTION);
+  });
+
+  it("names no button at all on a handset that cannot host the identity", () => {
+    const view = companionPairingStateView(
+      stateInput({ configured: false, platformSupported: false }),
+    );
+    for (const label of [
+      COMPANION_CREATE_IDENTITY_ACTION,
+      COMPANION_SCAN_QR_ACTION,
+      COMPANION_RECHECK_IDENTITY_ACTION,
+    ]) {
+      expect(view.nextAction).not.toContain(label);
+    }
+    expect(view.nextAction).toContain("No control on this phone can change this");
+  });
+
+  it("keeps naming the create control where it really is rendered", () => {
+    const view = companionPairingStateView(stateInput({ configured: false }));
+    expect(view.nextAction).toContain(COMPANION_CREATE_IDENTITY_ACTION);
+    expect(view.nextAction).toContain(COMPANION_SCAN_QR_ACTION);
+  });
+
+  it("skips the create control once the identity already exists", () => {
+    const view = companionPairingStateView(
+      stateInput({ configured: false, identityConfigured: true }),
+    );
+    expect(view.nextAction).not.toContain(COMPANION_CREATE_IDENTITY_ACTION);
+    expect(view.nextAction).toContain(COMPANION_SCAN_QR_ACTION);
+  });
+
+  it("does not name the scanner while the identity is locked", () => {
+    // CompanionPairingPanel gates the scanner on identity.ready, not on
+    // identity.configured. With the identity created but locked it renders
+    // "This phone's secure identity is locked" and no scanner at all, so
+    // naming Scan desktop QR here is a button that is not on the screen.
+    const view = companionPairingStateView(
+      stateInput({
+        configured: false,
+        identityConfigured: true,
+        identityReady: false,
+      }),
+    );
+    expect(view.nextAction).not.toContain(COMPANION_SCAN_QR_ACTION);
+    expect(view.nextAction).toContain(COMPANION_RECHECK_IDENTITY_ACTION);
+  });
+
+  it("still names the create control first when nothing is ready yet", () => {
+    const view = companionPairingStateView(
+      stateInput({
+        configured: false,
+        identityConfigured: false,
+        identityReady: false,
+      }),
+    );
+    expect(view.nextAction).toContain(COMPANION_CREATE_IDENTITY_ACTION);
+    expect(view.nextAction).toContain(COMPANION_SCAN_QR_ACTION);
+  });
+
+  it("feeds the strip the facts the Security tab is gated on", () => {
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    expect(app).toContain("identityKnown: companion.identity !== null,");
+    expect(app).toContain(
+      "platformSupported: companion.identity?.platformSupported !== false,",
+    );
+    // The scanner is gated on ready, so the strip has to be told about ready.
+    expect(app).toContain("identityReady: companion.identity?.ready,");
+  });
+
+  it("gives the unreadable identity its own pairing screen", () => {
+    const panel = withoutComments(read("agent/CompanionPairingPanel.tsx"));
+    const branch = panel.slice(
+      panel.indexOf("if (!identity) {"),
+      panel.indexOf("if (!identity.ready) {"),
+    );
+    expect(branch).toContain("COMPANION_RECHECK_IDENTITY_ACTION");
+    expect(branch).not.toContain("COMPANION_CREATE_IDENTITY_ACTION");
+    expect(branch).not.toContain("COMPANION_SCAN_QR_ACTION");
+  });
+});
+
+describe("an expired request is not reported as a failing connection", () => {
+  it("tells the two causes of a missing trusted snapshot apart", () => {
+    // authenticatedSnapshot nulls the WHOLE snapshot if any single approval
+    // fails, and a timer re-renders at exactly that instant, so everything
+    // vanished at once while the header still said connected.
+    const native = nativeSnapshot({
+      approvals: [approval({ expires_at: "1090" })],
+    });
+    const expiredSnapshot = validateCompanionStatusSnapshot(
+      native,
+      session(),
+      storedState(),
+      1_050 * 1_000,
+    );
+    expect(
+      authenticatedSnapshot(expiredSnapshot, NOW_MILLISECONDS),
+    ).toBeNull();
+    expect(
+      snapshotBlockedOnlyByExpiredApproval(expiredSnapshot, NOW_MILLISECONDS),
+    ).toBe(true);
+
+    // A healthy snapshot is neither null nor blamed on an expiry.
+    const healthy = validateCompanionStatusSnapshot(
+      nativeSnapshot(),
+      session(),
+      storedState(),
+      NOW_MILLISECONDS,
+    );
+    expect(authenticatedSnapshot(healthy, NOW_MILLISECONDS)).not.toBeNull();
+    expect(
+      snapshotBlockedOnlyByExpiredApproval(healthy, NOW_MILLISECONDS),
+    ).toBe(false);
+    expect(snapshotBlockedOnlyByExpiredApproval(null)).toBe(false);
+  });
+
+  it("says what happened and that the next refresh clears it", () => {
+    const expired = companionPairingStateView(
+      stateInput({ hasSession: true, approvalExpiredThisTick: true }),
+    );
+    const checking = companionPairingStateView(stateInput({ hasSession: true }));
+    expect(expired.label).not.toBe(checking.label);
+    expect(expired.pill).not.toBe(checking.pill);
+    expect(expired.label).toContain("ran out of time");
+    expect(expired.detail).toContain("nothing is wrong with it");
+    // The state used to offer nothing at all for up to eight seconds.
+    expect(checking.nextAction).toBe("");
+    expect(expired.nextAction).toContain(COMPANION_REFRESH_ACTION);
+  });
+});
+
+describe("a read-only build says so instead of raising a verification alarm", () => {
+  it("branches on the build before claiming anything failed a check", () => {
+    // canReview requires snapshot.pilotEnabled, which is false by construction
+    // in a read-only build, so the verification sentence fired for every
+    // request and read as an alarm about that exact one.
+    const pages = withoutComments(read("agent/CompanionReadOnlyPages.tsx"));
+    const index = pages.indexOf(") : !snapshot.pilotEnabled ? (");
+    expect(index).toBeGreaterThan(0);
+    expect(
+      pages.indexOf("Approval is disabled because the request"),
+    ).toBeGreaterThan(index);
+    expect(flatten(pages)).toContain(
+      "This build is read-only. Approve and Reject are on HPAY Desktop",
+    );
+  });
+
+  it("says the same thing when the decision itself is refused", () => {
+    const app = flatten(withoutComments(read("agent/AgentCompanionApp.tsx")));
+    expect(app).toContain("snapshot && !snapshot.pilotEnabled");
+    expect(app).toContain("This build of the phone app is read-only");
+  });
+});
+
+describe("the read-only tabs point at a control that is on the screen", () => {
+  it("stops naming a connect button once the connection is open", () => {
+    // With a live session the connection block renders its connected form,
+    // which has no connect control at all.
+    expect(connectRoute(false)).toContain("connect button");
+    expect(connectRoute(true)).not.toContain("connect button");
+    expect(connectRoute(true)).toContain(COMPANION_REFRESH_ACTION);
+    expect(connectRoute(true)).toContain(COMPANION_CONNECTION_SECTION_TITLE);
+  });
+
+  it("opens the block that owns that control while the data is missing", () => {
+    // It was inside a <details> that is collapsed by default, which is the
+    // same defect as not rendering it.
+    const panel = withoutComments(read("agent/CompanionPairingPanel.tsx"));
+    expect(panel).toContain('<details className="agent-disclosure" open={!hasTrustedSnapshot}>');
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    expect(app).toContain("hasTrustedSnapshot={companion.trustedSnapshot !== null}");
+  });
+
+  it("renders Activity's own refresh in the state that names it", () => {
+    // The `if (!snapshot)` early return used to swallow the tab's own button.
+    const pages = withoutComments(read("agent/CompanionReadOnlyPages.tsx"));
+    const unavailable = pages.slice(
+      pages.indexOf('title="Activity unavailable"'),
+      pages.indexOf('title="Activity unavailable"') + 400,
+    );
+    expect(unavailable).toContain("action={onRefresh ? COMPANION_REFRESH_ACTION : undefined}");
+    expect(unavailable).toContain("onAction={onRefresh}");
+  });
+});
+
+describe("every reachable native refusal names its own cause", () => {
+  const cases: Array<[string, string[], string[]]> = [
+    [
+      "A Class 3 biometric must be enrolled before creating the Agent companion identity",
+      ["fingerprint or face unlock", "Android Settings"],
+      ["Authorized mobile devices"],
+    ],
+    [
+      "Agent companion identity is temporarily unavailable; no key was replaced",
+      ["left exactly as it was", COMPANION_RECHECK_IDENTITY_ACTION],
+      ["Authorized mobile devices"],
+    ],
+    [
+      "Companion reset is blocked after pilot approval or witness initialization; controlled desktop/mobile witness rotation is required",
+      ["the pairing was not deleted", "cannot be run again"],
+      ["Authorized mobile devices"],
+    ],
+    [
+      "The approval summary contains missing or unknown fields.",
+      ["different releases", "update the older one"],
+      ["Authorized mobile devices"],
+    ],
+  ];
+
+  it.each(cases)("rewrites %s", (raw, expected, forbidden) => {
+    const text = companionFailureText(new Error(raw));
+    // The unclassified tail sent every one of these to the desktop's revoke
+    // list, which is the wrong cause and the wrong screen for all of them.
+    expect(text).not.toContain(COMPANION_UNCLASSIFIED_NEXT_STEP);
+    expect(text).not.toBe(`${raw} ${COMPANION_UNCLASSIFIED_NEXT_STEP}`);
+    for (const needle of expected) expect(text).toContain(needle);
+    for (const needle of forbidden) expect(text).not.toContain(needle);
+  });
+
+  it("keeps the tail for a cause that genuinely is not classified", () => {
+    expect(companionFailureText(new Error("something entirely new"))).toContain(
+      COMPANION_UNCLASSIFIED_NEXT_STEP,
+    );
+  });
+});
+
+describe("a reset that may lock the phone instead warns before the press", () => {
+  it("puts both outcomes in the confirm block, above the button", () => {
+    // reset_before_witness_rotation refuses whenever a pending approval or any
+    // witness record exists, and durably rewrites the rotation phase before
+    // returning the refusal, so the press permanently removes the section.
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    const warning = security.indexOf("It may do something else instead");
+    const button = security.lastIndexOf("{COMPANION_RESET_PAIRING_ACTION}");
+    expect(warning).toBeGreaterThan(0);
+    expect(warning).toBeLessThan(button);
+    expect(disclosureDepth(security, warning)).toBe(0);
+    expect(flatten(security)).toContain(
+      "this section is then replaced for good by Controlled witness rotation required",
+    );
+  });
+
+  it("no longer offers the reset at all when the native side would refuse it", () => {
+    // Dead end 2. controlledRotationRequired only reads rotation_phase, but
+    // reset_before_witness_rotation refuses on the wider
+    // rotation_blocking_phase(), which also covers a pending pilot approval and
+    // any witness record. The phone could not see those two facts, so it
+    // offered a button that could only refuse - and the refusal permanently
+    // replaced the section.
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    expect(security).toContain("stored?.resetBlockingPhase");
+    // The blocked branch now splits on what is actually holding the reset: a
+    // held consent record is not a rotation matter, and the rotation copy is
+    // still exactly what a witness-bearing phone gets.
+    expect(security).toContain("{resetBlocked && heldConsent ? (");
+    expect(security).toContain(") : resetBlocked ? (");
+    const commands = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/commands.rs",
+    );
+    expect(commands).toContain("reset_blocking_phase");
+    expect(commands).toContain("rotation_blocking_phase()");
+    // And the marker no longer outlives its own cause.
+    const pilot = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/pilot.rs",
+    );
+    expect(pilot).toContain("next.clear_pending_approval_for(operation_id)?");
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    const rewind = storage.slice(
+      storage.indexOf("fn rewind_reset_refusal_marker"),
+    );
+    expect(rewind).toContain("WitnessRotationPhase::BlockedByPendingApproval");
+    // The same rewind now covers the witness marker, so the approval and the
+    // confirmation cannot drift into two different lifecycles again.
+    expect(rewind).toContain(
+      "WitnessRotationPhase::BlockedByUnresolvedSignedOperation",
+    );
+    expect(rewind).toContain("WitnessRotationPhase::Stable");
+  });
+});
+
+describe("a phone whose secure identity is gone can retire its pairing", () => {
+  it("offers the escape only when the pairing is orphaned, under its own words", () => {
+    // Dead end 4. The pairing-only reset is refused forever once witness state
+    // exists, so a revoked phone following the recovery guide was finished.
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    expect(security).toContain('stored?.pairingIdentity === "replaced"');
+    expect(security).toContain('stored?.pairingIdentity === "absent"');
+    expect(security).toContain("{pairingOrphaned ? (");
+    expect(security).toContain("COMPANION_RETIRE_PAIRING_ACTION");
+    // Distinct words from the ordinary reset, so one can never be pressed for
+    // the other.
+    expect(security).toContain("RETIRE THIS PAIRING");
+    expect(security).toContain('retireText !== "RETIRE THIS PAIRING"');
+    // The cost is stated before the press and is not behind a disclosure.
+    const warning = security.indexOf("together with the record of which wallet");
+    expect(warning).toBeGreaterThan(0);
+    expect(disclosureDepth(security, warning)).toBe(0);
+    expect(flatten(security)).toContain(
+      "together with the record of which wallet states it has already witnessed",
+    );
+  });
+
+  it("is refused by the native side whenever the paired key is still live", () => {
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    const retire = storage.slice(
+      storage.indexOf("pub(super) async fn reset_orphaned_pairing"),
+    );
+    // The invariant is checked against the durable state, not taken from the UI.
+    expect(retire).toContain(
+      "live_device_id == Some(&current.mobile_device_id)",
+    );
+    const commands = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/commands.rs",
+    );
+    // The Keystore is re-read in the command, and a failed read is an error
+    // rather than a licence to erase.
+    expect(commands).toContain("live_companion_device_id(app).await?");
+    expect(commands).toContain("Err(_) => PairingIdentityState::Unknown");
+    expect(commands).toContain("ORPHANED_RESET_CONFIRMATION");
+  });
+
+  it("gives the recovery guide an order the code actually accepts", () => {
+    // The guide used to say: run the pairing-only reset, then replace the
+    // identity. The first of those is refused for exactly the phone the guide
+    // is written for, and being refused permanently replaces the reset section.
+    const steps = COMPANION_REVOKED_RECOVERY_STEPS;
+    const biometric = steps.findIndex((step) =>
+      /enrol a new fingerprint/i.test(step.action),
+    );
+    const retire = steps.findIndex((step) =>
+      step.action.includes(COMPANION_RETIRE_PAIRING_ACTION),
+    );
+    expect(biometric).toBeGreaterThanOrEqual(0);
+    expect(retire).toBeGreaterThan(biometric);
+    expect(
+      steps.some((step) =>
+        new RegExp(`Run ${COMPANION_RESET_PAIRING_ACTION}`, "i").test(
+          step.action,
+        ),
+      ),
+      "the guide must not instruct a reset the code refuses",
+    ).toBe(false);
+    expect(COMPANION_REVOKED_ORDER_MATTERS).toMatch(/in order/i);
+    expect(COMPANION_REVOKED_ORDER_MATTERS).toMatch(/refused/i);
+  });
+});
+
+describe("the rotation acknowledgement QR is not offered as a step to hide", () => {
+  it("warns that it cannot be shown again, and relabels the button", () => {
+    // It is the only delivery path for step 4 of the desktop flow, is held in
+    // React state alone, and the pairing block stops rendering once the
+    // durable state is installed - so dismissing it destroys the only copy.
+    const panel = withoutComments(read("agent/CompanionPairingPanel.tsx"));
+    const rotation = panel.slice(
+      panel.indexOf("hpay_rotation_candidate_ack_v1"),
+      panel.indexOf("</section>", panel.indexOf("hpay_rotation_candidate_ack_v1")),
+    );
+    expect(flatten(rotation)).toContain("This QR code cannot be shown again");
+    expect(rotation).toContain('automaticPairing ? "" : "agent-danger-action"');
+    expect(rotation).toContain('"Discard this rotation QR permanently"');
+    expect(disclosureDepth(panel, panel.indexOf("This QR code cannot be shown again"))).toBe(0);
+  });
+});
+
+describe("the phone rotation control the desktop quotes really exists", () => {
+  it("renders the exact label WitnessRotationPanel names", () => {
+    const desktop = readWorkspace(
+      "apps/desktop/src/agent/WitnessRotationPanel.tsx",
+    );
+    const label = desktop
+      .split('const COMPANION_PHONE_ROTATION_ACTION = "')[1]
+      .split('"')[0];
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    expect(security).toContain(`>\n            ${label}\n          </button>`);
+    // And the section heading the desktop sends the owner to.
+    expect(security).toContain("<h2>Approval phone rotation</h2>");
+    // The retired instruction may never come back.
+    expect(withoutComments(desktop)).not.toContain("Continue witness rotation");
+  });
+});
+
+describe("a payment approved on the desktop, witnessed on the phone", () => {
+  function withActivity(
+    entries: Array<Record<string, string>>,
+  ) {
+    const state = validatedStoredState(storedState());
+    const active = validatedSession(session(), state, NOW_MILLISECONDS);
+    return validateCompanionStatusSnapshot(
+      nativeSnapshot({ activity: entries as never }),
+      active,
+      state,
+      NOW_MILLISECONDS,
+    );
+  }
+
+  function entry(overrides: Record<string, string> = {}) {
+    return {
+      activity_id: "operation_awaiting_witness",
+      description: "AI inference",
+      asset: "HAC",
+      recipient: "1NewDeveloper",
+      amount_units: "50000000",
+      occurred_at: "1090",
+      status: "signed_awaiting_witness",
+      ...overrides,
+    };
+  }
+
+  it("finds the one payment that cannot proceed without this phone", () => {
+    for (const status of WITNESS_PENDING_ACTIVITY_STATUSES) {
+      const snapshot = withActivity([entry({ status })]);
+      const waiting = pendingWitnessOperation(snapshot);
+      expect(waiting?.activityId).toBe("operation_awaiting_witness");
+      expect(waiting?.status).toBe(status);
+      expect(waiting?.amountUnits).toBe("50000000");
+      expect(waiting?.recipient).toBe("1NewDeveloper");
+    }
+  });
+
+  it("offers nothing for a status this phone could not witness anyway", () => {
+    for (const status of [
+      "committed",
+      "cancelled",
+      "rejected",
+      "failed",
+      "approval_requested",
+      "signed",
+      "witnessed_awaiting_broadcast",
+      "broadcast_submitted",
+      "reconciliation_required",
+      "recovery_required",
+    ]) {
+      expect(pendingWitnessOperation(withActivity([entry({ status })]))).toBeNull();
+    }
+    expect(pendingWitnessOperation(withActivity([]))).toBeNull();
+    expect(pendingWitnessOperation(null)).toBeNull();
+  });
+
+  it("fails closed rather than pick when two payments claim to be waiting", () => {
+    const snapshot = withActivity([
+      entry(),
+      entry({
+        activity_id: "operation_two",
+        status: "broadcast_uncertain",
+        recipient: "1Other",
+      }),
+    ]);
+    expect(pendingWitnessOperation(snapshot)).toBeNull();
+  });
+
+  it("names the second act as a witness, never as a second approval", () => {
+    const pages = read("agent/CompanionReadOnlyPages.tsx");
+    const app = read("agent/AgentCompanionApp.tsx");
+    const api = read("agent/api.ts");
+
+    // The owner is shown the amount and recipient they are consenting to, not
+    // an opaque operation id.
+    expect(pages).toContain("Waiting for your witness");
+    expect(pages).toContain("Already approved on HPAY Desktop");
+    expect(pages).toContain("formatHacUnits(awaitingWitness.amountUnits)");
+    expect(pages).toContain("shortValue(awaitingWitness.recipient)");
+    expect(pages).toContain(
+      "This is not a second approval and it cannot change the amount or",
+    );
+    expect(COMPANION_CONFIRM_WITNESS_ACTION).toBe("Confirm and sign witness");
+    expect(COMPANION_CONFIRM_WITNESS_ACTION).not.toMatch(/approve/i);
+
+    // A read-only build renders no signing control at all.
+    expect(pages).toContain("onWitness && snapshot.pilotEnabled");
+
+    // The webview cannot name a payment of its own: the handler re-derives the
+    // waiting operation from the current snapshot and refuses on any drift.
+    expect(app).toContain("const current = pendingWitnessOperation(snapshot);");
+    expect(app).toContain("current.activityId !== operation.activityId");
+    expect(app).toContain("current.amountUnits !== operation.amountUnits");
+    expect(app).toContain("current.recipient !== operation.recipient");
+    expect(api).toContain('"agent_wallet_companion_witness_pending"');
+  });
+
+  it("keeps a real witness signature between approval and broadcast", () => {
+    const pilot = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/pilot.rs",
+    );
+    const witness = readWorkspace("crates/companion-protocol/src/witness.rs");
+    const payment = readWorkspace(
+      "crates/agent-wallet-core/src/service/payment.rs",
+    );
+
+    // The desktop-approved path is a second branch beside the pending approval,
+    // never a removal of the requirement.
+    expect(pilot).toContain("(None, Some(pending)) => {");
+    expect(pilot).toContain(
+      "No exact pilot approval or witness confirmation is pending for this anchor",
+    );
+    // Consent is durable before anything is fetched or signed.
+    expect(pilot).toContain(
+      "// Durable owner consent first, before a single byte is fetched.",
+    );
+    expect(pilot).toContain("confirmation.validate()?;");
+    expect(pilot).toContain("self.shared.persist_locked(&next)?;");
+
+    // The anchor is still a desktop signature this phone verifies, and the
+    // network fields are still bound - now to the phone's own durable pins.
+    expect(witness).toContain("let anchor_hash = proposal.verify(registry, now)?;");
+    expect(witness).toContain(".is_some_and(|pinned| pinned != anchor.node_profile_id)");
+    expect(witness).toContain(
+      ".is_some_and(|pinned| pinned != anchor.transaction_format_version)",
+    );
+    expect(witness).toContain(".is_some_and(|pinned| anchor.policy_epoch < pinned)");
+
+    // Broadcast still requires the witness receipt.
+    expect(payment).toContain("WitnessedAwaitingBroadcast");
+  });
+});
+
+describe("a phone can let go of a payment it is holding", () => {
+  const heldRecord = {
+    kind: "witness_confirmation" as const,
+    operationId: "operation_one",
+    amountUnits: "50000000",
+    recipient: "1NewDeveloper",
+    recordedAtUnix: "1000",
+  };
+  const discardedRecord = {
+    ...heldRecord,
+    discardedAtUnix: "2000",
+    reason: "desktop_no_longer_awaits_this_phone",
+  };
+
+  /**
+   * The headline stranding path, from the screen's side.
+   *
+   * A confirmation the desktop stopped offering blocked the reset, blocked
+   * pairing and blocked every other payment - and the only screen that could
+   * reach it, the witness card, had disappeared with the operation. The
+   * security screen now shows what is held.
+   */
+  it("names the exact payment it is holding before offering any way out", () => {
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    expect(security).toContain("stored?.pendingConsent ?? null");
+    expect(security).toContain("heldConsentFacts(heldConsent)");
+    expect(security).toContain("heldConsentExplanation(heldConsent)");
+    const facts = heldConsentFacts(heldRecord);
+    expect(facts.map((fact) => fact.label)).toEqual([
+      "Amount",
+      "To",
+      "Payment",
+      "Held since",
+    ]);
+    expect(facts[0].value).toBe(formatHacUnits("50000000"));
+    expect(facts[1].value).toBe("1NewDeveloper");
+    expect(facts[2].value).toBe("operation_one");
+    // And it says why the phone is stuck, and that syncing is the better route
+    // whenever the desktop is still there.
+    const explanation = heldConsentExplanation(heldRecord);
+    expect(explanation).toContain("cannot be reset");
+    expect(explanation).toContain("cannot approve or witness any other payment");
+    expect(explanation).toContain("connect and sync instead");
+  });
+
+  /**
+   * What it costs is stated before the press, and the one thing it must never
+   * be mistaken for is stated outright.
+   */
+  it("states what discarding does and does not do before the confirmation", () => {
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    const effects = security.indexOf("COMPANION_DISCARD_CONSENT_EFFECTS");
+    const confirm = security.indexOf(
+      "discardText !== COMPANION_DISCARD_CONSENT_PHRASE",
+    );
+    expect(effects).toBeGreaterThan(-1);
+    expect(effects).toBeLessThan(confirm);
+    const stated = COMPANION_DISCARD_CONSENT_EFFECTS.join(" ");
+    expect(stated).toContain("does not cancel the payment");
+    expect(stated).toContain("does not un-sign anything");
+    expect(stated).toContain("does not mark the payment as witnessed");
+    expect(stated).toContain("deletes no pairing");
+  });
+
+  /** Three acts, three sentences. None can ever be pressed for another. */
+  it("uses its own words, distinct from both resets", () => {
+    expect(COMPANION_DISCARD_CONSENT_PHRASE).toBe("DISCARD THIS CONFIRMATION");
+    expect(COMPANION_DISCARD_CONSENT_PHRASE).not.toBe("RESET COMPANION");
+    expect(COMPANION_DISCARD_CONSENT_PHRASE).not.toBe(
+      COMPANION_RETIRE_PAIRING_ACTION,
+    );
+    expect(COMPANION_DISCARD_CONSENT_PHRASE).not.toBe("RETIRE THIS PAIRING");
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    expect(security).toContain(
+      "discardText !== COMPANION_DISCARD_CONSENT_PHRASE",
+    );
+    const app = withoutComments(read("agent/AgentCompanionApp.tsx"));
+    expect(app).toContain("discardText !== COMPANION_DISCARD_CONSENT_PHRASE");
+    // The press can only ever discard the payment the screen showed: the id
+    // comes from the native record, never from the button.
+    expect(app).toContain("companion.stored?.pendingConsent");
+    expect(app).toContain(".discardHeldConsent(held.operationId)");
+  });
+
+  /**
+   * Dead end 5, from the screen's side: a held record is not a rotation
+   * problem, and telling the owner to run one is what made it permanent.
+   */
+  it("does not send an owner holding a confirmation into a rotation", () => {
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    const heldBranch = security.indexOf("{resetBlocked && heldConsent ? (");
+    const rotationBranch = security.indexOf(") : resetBlocked ? (");
+    expect(heldBranch).toBeGreaterThan(-1);
+    expect(rotationBranch).toBeGreaterThan(heldBranch);
+    // The rotation copy still exists, for the phone it is actually true of.
+    expect(security).toContain("Controlled witness rotation required");
+    // And the native refusal names the real blocker rather than a rotation.
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    expect(storage).toContain("fn reset_refusal_message");
+    expect(storage).toContain("holding your confirmation");
+    expect(storage).toContain("Running a witness rotation does not clear it.");
+    // A refusal must not overwrite a rotation the owner already finished.
+    expect(storage).toContain(
+      "if current.rotation_phase != WitnessRotationPhase::Completed",
+    );
+  });
+
+  /** A discard is never silent, and never claims the payment succeeded. */
+  it("shows a receipt afterwards that claims nothing about the payment", () => {
+    const notice = discardedConsentNotice(discardedRecord);
+    expect(notice.body).toContain("no longer waiting on this phone");
+    expect(notice.body).toContain(
+      "does not tell you whether the payment went through",
+    );
+    expect(notice.facts.map((fact) => fact.label)).toEqual([
+      "Amount",
+      "To",
+      "Payment",
+      "Stopped holding",
+    ]);
+    expect(
+      discardedConsentNotice({
+        ...discardedRecord,
+        reason: "aged_out_on_this_phone",
+      }).body,
+    ).toContain("No desktop confirmed anything about this payment for a day");
+    expect(
+      discardedConsentNotice({ ...discardedRecord, reason: "owner_discarded" })
+        .body,
+    ).toContain("You discarded this on this phone");
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    // Every receipt is rendered, not only the newest one.
+    expect(security).toContain("stored?.discardedConsents ?? []");
+    expect(security).toContain("{discardedConsents.length > 0 ? (");
+    expect(security).toContain("discardedConsents.map((record, index) => {");
+    expect(security).toContain("discardedConsentNotice(record)");
+  });
+
+  /**
+   * The defect this history exists to fix, from the screen's side.
+   *
+   * `discardedConsent` was one slot, last-write-wins: discard the confirmation
+   * for one payment, then hold and discard another, and the first receipt was
+   * gone with nothing said. Evidence loss is the whole thing the receipt is
+   * for. Both receipts now reach the screen, newest first, and both are
+   * rendered rather than the last one alone.
+   */
+  it("keeps every receipt when a second payment is discarded after the first", () => {
+    const first = discardedRecord;
+    const second = {
+      ...discardedRecord,
+      operationId: "operation_two",
+      discardedAtUnix: "3000",
+      reason: "owner_discarded",
+    };
+    // Newest first, the order the native side reports.
+    const state = validatedStoredState(
+      storedState({ discardedConsents: [second, first] }),
+    );
+    expect(state.discardedConsents).toHaveLength(2);
+    const notices = state.discardedConsents.map(discardedConsentNotice);
+    expect(notices.map((notice) => notice.facts[2]?.value)).toEqual([
+      "operation_two",
+      "operation_one",
+    ]);
+    // The older receipt is still readable in full, not just counted.
+    expect(notices[1]?.body).toContain("no longer waiting on this phone");
+    // Nothing was dropped, so the phone says nothing about a cap.
+    expect(discardedConsentOverflowNotice(state.discardedConsentsDropped)).toBeNull();
+  });
+
+  /**
+   * Bounded, and never silently so.
+   *
+   * The history is capped, because an unbounded list on a handset is its own
+   * defect. Dropping the oldest without a word would be the same defect as the
+   * single slot, so the count is carried across the boundary and stated on the
+   * screen in the owner's words.
+   */
+  it("says how many receipts the cap dropped instead of quietly losing them", () => {
+    const full = Array.from(
+      { length: MAX_COMPANION_DISCARDED_CONSENTS },
+      (_unused, index) => ({
+        ...discardedRecord,
+        operationId: `operation_${index}`,
+      }),
+    );
+    const state = validatedStoredState(
+      storedState({ discardedConsents: full, discardedConsentsDropped: "4" }),
+    );
+    const overflow = discardedConsentOverflowNotice(
+      state.discardedConsentsDropped,
+    );
+    expect(overflow).toContain("4 older receipts");
+    expect(overflow).toContain(`last ${MAX_COMPANION_DISCARDED_CONSENTS}`);
+    expect(overflow).toContain("HPAY Desktop");
+    expect(discardedConsentOverflowNotice("1")).toContain("1 older receipt is");
+    // The screen renders it, rather than the count living only in the state.
+    const security = withoutComments(read("agent/CompanionSecurity.tsx"));
+    expect(security).toContain("discardedConsentOverflowNotice(");
+    expect(security).toContain("{discardOverflow ? (");
+
+    // A history longer than the native cap, or a drop count on a history that
+    // is not full, is a state the phone could not have written.
+    expect(() =>
+      validatedStoredState(
+        storedState({ discardedConsents: [...full, discardedRecord] }),
+      ),
+    ).toThrow();
+    expect(() =>
+      validatedStoredState(
+        storedState({
+          discardedConsents: [discardedRecord],
+          discardedConsentsDropped: "1",
+        }),
+      ),
+    ).toThrow();
+
+    // And the native side caps it at the same number this screen assumes.
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    expect(storage).toContain(
+      `pub(super) const MAX_DISCARDED_CONSENTS: usize = ${MAX_COMPANION_DISCARDED_CONSENTS};`,
+    );
+    expect(storage).toContain("fn push_discard_bounded(");
+  });
+
+  /**
+   * Most of the escape is not a button at all.
+   *
+   * The desktop's own authenticated snapshot says which operations are still
+   * waiting on this phone, and a record naming anything else is retired on the
+   * next sync. A transport failure states nothing and retires nothing.
+   */
+  it("clears itself from the desktop's own statement rather than from a press", () => {
+    const commands = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/commands.rs",
+    );
+    expect(commands).toContain("witness_pending_operation_ids(&view.activity)");
+    expect(commands).toContain("state.sweep_obsolete_consent(Some(&awaiting))");
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    expect(storage).toContain("fn obsolete_consent");
+    expect(storage).toContain("CONSENT_DESKTOP_SILENCE_GRACE_SECS");
+    expect(storage).toContain("CONSENT_MAX_AGE_SECS");
+    // The sweep never runs over a flow that is using the record.
+    const mod = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/mod.rs",
+    );
+    expect(mod).toContain("self.consent_flow.try_lock()");
+    const pilot = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/pilot.rs",
+    );
+    expect(pilot).toContain("let _flow = state.consent_flow.lock().await;");
+    // And the headline path: any accepted acknowledgement retires the record,
+    // not only the committed one.
+    expect(pilot).toContain(
+      "fn witness_ack_retires_consent(accepted: bool, detail: &str)",
+    );
+    expect(pilot).toContain(
+      "if witness_ack_retires_consent(accepted, &detail) {",
+    );
+  });
+
+  /** Consent records cross the native boundary, so they are checked like it. */
+  it("refuses a malformed consent record rather than rendering a blank one", () => {
+    validatedStoredState(
+      storedState({
+        pendingConsent: heldRecord,
+        discardedConsents: [discardedRecord],
+      }),
+    );
+    for (const brokenHistory of [
+      [{ ...discardedRecord, reason: "" }],
+      [{ ...discardedRecord, discardedAtUnix: "later" }],
+      [{ ...discardedRecord, extra: "field" }],
+      [null],
+      discardedRecord as never,
+    ]) {
+      expect(() =>
+        validatedStoredState(
+          storedState({ discardedConsents: brokenHistory as never }),
+        ),
+      ).toThrow();
+    }
+    for (const broken of [
+      { ...heldRecord, kind: "something_else" },
+      { ...heldRecord, amountUnits: "not a number" },
+      { ...heldRecord, recipient: "" },
+      { ...heldRecord, operationId: "" },
+      { ...heldRecord, extra: "field" },
+    ]) {
+      expect(() =>
+        validatedStoredState(storedState({ pendingConsent: broken as never })),
+      ).toThrow();
+    }
+    // A phone with no pairing holds no payment and has discarded none.
+    expect(() =>
+      validatedStoredState(
+        storedState({
+          configured: false,
+          connected: false,
+          agentWalletId: null,
+          desktopDeviceId: null,
+          mobileDeviceId: null,
+          endpoints: [],
+          responseSequence: null,
+          pairingIdentity: "not_paired",
+          pendingConsent: heldRecord,
+        }),
+      ),
+    ).toThrow();
+  });
+
+  /** An owner holding nothing sees none of this. */
+  it("shows nothing at all to a phone that is holding nothing", () => {
+    const clean = validatedStoredState(storedState());
+    expect(clean.pendingConsent).toBeNull();
+    expect(clean.discardedConsents).toEqual([]);
+    expect(clean.discardedConsentsDropped).toBe("0");
+    // No history, so no heading, no cap sentence and no receipt card.
+    expect(discardedConsentOverflowNotice(clean.discardedConsentsDropped)).toBeNull();
+    // And a phone that never discarded anything writes no new durable key.
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    expect(storage).toContain(
+      'skip_serializing_if = "is_decimal_zero"',
+    );
+    expect(storage).toContain(
+      '#[serde(default, skip_serializing_if = "Vec::is_empty")]\n    discarded_consents: Vec<MobileDiscardedConsent>,',
+    );
   });
 });

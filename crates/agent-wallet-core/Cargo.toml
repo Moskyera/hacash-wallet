@@ -42,3 +42,9 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 axum.workspace = true
 hpay-companion-protocol = { path = "../companion-protocol", features = ["dev-software-identity"] }
+# Test-only. The pilot end-to-end test needs a node mock that answers
+# /create/transaction with a real consensus Type 2 body, because the signer
+# decodes and re-verifies whatever the node returns before it will sign it.
+# Never a runtime dependency: the crate itself must not construct transactions.
+field = { path = "../../../hacash-fullnodedev/field" }
+basis = { path = "../../../hacash-fullnodedev/basis" }

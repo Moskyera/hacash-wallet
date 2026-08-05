@@ -3,10 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const COMMAND_PREFIXES: [&str; 4] = ["wallet_", "quantum_", "messenger_", "agent_wallet_"];
-const AGENT_COMPANION_COMMANDS: [&str; 19] = [
+const AGENT_COMPANION_COMMANDS: [&str; 21] = [
     "agent_wallet_companion_connect",
     "agent_wallet_companion_create_identity",
     "agent_wallet_companion_decide_payment",
+    // Ends this phone's intent to sign one exact payment it is holding. It
+    // deletes no pairing, no identity and no witness memory, and it can only
+    // ever make witnessing harder: it removes the record that admits an anchor.
+    "agent_wallet_companion_discard_consent",
     "agent_wallet_companion_disconnect",
     "agent_wallet_companion_identity_status",
     "agent_wallet_companion_lifecycle",
@@ -21,6 +25,7 @@ const AGENT_COMPANION_COMMANDS: [&str; 19] = [
     "agent_wallet_companion_state",
     "agent_wallet_companion_sync",
     "agent_wallet_companion_witness_anchor",
+    "agent_wallet_companion_witness_pending",
     "agent_wallet_rotation_candidate_pairing_confirm",
     "agent_wallet_rotation_candidate_pairing_start",
 ];

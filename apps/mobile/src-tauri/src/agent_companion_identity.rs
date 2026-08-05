@@ -172,9 +172,12 @@ async fn sign_native<R: Runtime>(
         DeviceSignaturePurpose::WitnessReceipt if cfg!(feature = "agent-wallet-testnet-pilot") => {
             "signWitnessReceipt"
         }
-        DeviceSignaturePurpose::WitnessRotationAuthorization
-            if cfg!(feature = "agent-wallet-testnet-pilot") =>
-        {
+        // Authorizing this handset's own replacement is not an approval and not
+        // a payment witness: it moves no money, signs no transaction, and only
+        // ever hands authority away from this phone. It stays available in a
+        // read-only build so a handset marked as needing a controlled rotation
+        // can actually complete one, instead of being stuck for good.
+        DeviceSignaturePurpose::WitnessRotationAuthorization => {
             "signWitnessRotationAuthorization"
         }
         DeviceSignaturePurpose::RotationCandidateAcceptance
@@ -191,7 +194,6 @@ async fn sign_native<R: Runtime>(
         | DeviceSignaturePurpose::AdminCommand
         | DeviceSignaturePurpose::RollbackAnchor
         | DeviceSignaturePurpose::WitnessReceipt
-        | DeviceSignaturePurpose::WitnessRotationAuthorization
         | DeviceSignaturePurpose::RotationPairingTicket
         | DeviceSignaturePurpose::RotationCandidateAcceptance
         | DeviceSignaturePurpose::WitnessRotationBaselineReceipt

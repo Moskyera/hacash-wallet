@@ -1,182 +1,18 @@
 #![cfg(feature = "agent-wallet-testnet-pilot")]
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::Ordering;
 
-use axum::{
-    Json, Router,
-    routing::{get, post},
-};
 use hpay_companion_protocol::{
-    ApprovalNetworkBinding, DevicePermission, DeviceRole, SignedWitnessReceipt, WitnessReceipt,
+    ApprovalNetworkBinding, DeviceRole, SignedWitnessReceipt, WitnessReceipt,
 };
-use serde_json::{Value, json};
-use tokio::sync::RwLock;
+use serde_json::json;
 
 use super::fixtures::*;
+use super::pilot_node::*;
 use super::*;
 use crate::node_binding::verified_agent_node;
 
-const TX_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-
-struct MockPilotNode {
-    url: String,
-    capabilities: Arc<RwLock<Value>>,
-    submit_count: Arc<AtomicUsize>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for MockPilotNode {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-impl MockPilotNode {
-    async fn set_capabilities(&self, capabilities: Value) {
-        *self.capabilities.write().await = capabilities;
-    }
-}
-
-fn official_capabilities() -> Value {
-    let instance_id = hacash_wallet_core::network_instance_id(
-        hacash_wallet_core::HPAY_LOCAL_PILOT_NETWORK_KIND,
-        hacash_wallet_core::HPAY_LOCAL_PILOT_CHAIN_ID,
-        false,
-        TESTNET_ANCHOR,
-        hacash_wallet_core::HPAY_LOCAL_PILOT_PROFILE_ID,
-        2,
-    );
-    json!({
-        "ret": 0,
-        "api_version": 1,
-        "node": { "name": "hacash-fullnode", "version": "1.0.10", "build_time": "test" },
-        "chain": { "id": 7, "height": 10, "next_height": 11, "mainnet": false },
-        "network": {
-            "kind": hacash_wallet_core::HPAY_LOCAL_PILOT_NETWORK_KIND,
-            "node_profile_id": hacash_wallet_core::HPAY_LOCAL_PILOT_PROFILE_ID,
-            "block_1_available": true,
-            "block_1_hash": TESTNET_ANCHOR,
-            "instance_id": instance_id,
-            "funding_confirmed": true,
-            "transaction_ready": true,
-            "current_height": 10,
-            "transaction_format_version": 2
-        },
-        "istanbul": { "activation_height": 1, "evaluation_height": 11, "active": true },
-        "transactions": { "registered": [2, 3], "enabled": [2, 3] },
-        "actions": { "registered": [1], "enabled": [1] },
-        "features": {
-            "action_guard": false, "tx_blob": false, "ast": false, "tex": false,
-            "native_assets": false, "hip20": false, "hip20_primitives": false,
-            "hvm": false, "p2sh": false, "account_abstraction": false,
-            "intent": false, "contract_state_leasing": false,
-            "ir_decompilation": false, "req_sign_list": false,
-            "type4_mainnet": false, "exact_unsigned_simulation": false
-        },
-        "api": {
-            "balance_query": true,
-            "transaction_submit": true,
-            "transaction_query": true,
-            "reconciliation_by_tx_hash": true
-        },
-        "limits": {
-            "max_tx_size": 1024, "max_tx_actions": 8, "max_type3_signers": 2,
-            "gas_max_byte": 1,
-            "gas_max": protocol::context::decode_gas_budget(1),
-            "ast_depth": 1
-        }
-    })
-}
-
-async fn spawn_pilot_node() -> MockPilotNode {
-    let capabilities = Arc::new(RwLock::new(official_capabilities()));
-    let submit_count = Arc::new(AtomicUsize::new(0));
-    let capability_state = capabilities.clone();
-    let submit_state = submit_count.clone();
-    let app = Router::new()
-        .route(
-            "/query/block/intro",
-            get(|| async {
-                Json(json!({
-                    "ret": 0,
-                    "height": 1,
-                    "hash": TESTNET_ANCHOR
-                }))
-            }),
-        )
-        .route(
-            "/query/capabilities",
-            get(move || {
-                let capability_state = capability_state.clone();
-                async move { Json(capability_state.read().await.clone()) }
-            }),
-        )
-        .route(
-            "/submit/transaction",
-            post(move || {
-                let submit_state = submit_state.clone();
-                async move {
-                    submit_state.fetch_add(1, Ordering::SeqCst);
-                    Json(json!({ "ret": 0 }))
-                }
-            }),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    MockPilotNode {
-        url,
-        capabilities,
-        submit_count,
-        task,
-    }
-}
-
-fn create_manager_for_node(
-    node_url: &str,
-    now: u64,
-) -> (tempfile::TempDir, AgentWalletManager, AgentWalletId) {
-    let root = tempfile::tempdir().unwrap();
-    let mut manager = AgentWalletManager::open(root.path()).unwrap();
-    let created = manager
-        .create_wallet(
-            CreateAgentWallet {
-                passphrase: PASSPHRASE.to_owned(),
-                network_mode: "testnet".to_owned(),
-                node_url: node_url.to_owned(),
-                block_one_fingerprint: Some(TESTNET_ANCHOR.to_owned()),
-            },
-            now,
-        )
-        .unwrap();
-    manager
-        .unlock(&created.wallet_id, PASSPHRASE, now + 1)
-        .unwrap();
-    manager
-        .enable_agent_payments_locally(&created.wallet_id, now + 2)
-        .unwrap();
-    (root, manager, created.wallet_id)
-}
-
-fn register_witness_mobile(
-    manager: &mut AgentWalletManager,
-    wallet_id: &AgentWalletId,
-    mobile: &SoftwareDeviceIdentity,
-    now: u64,
-) {
-    let permissions = BTreeSet::from([DevicePermission::WitnessRollbackAnchor]);
-    let record = mobile
-        .public_record(wallet_id.as_str(), permissions, now)
-        .unwrap();
-    manager
-        .register_verified_companion_device(wallet_id, record, now)
-        .unwrap();
-}
+pub(super) const TX_HASH: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 async fn prepare_signed_operation(
     manager: &mut AgentWalletManager,
@@ -225,16 +61,6 @@ async fn prepare_signed_operation(
         )
         .unwrap();
     operation_id
-}
-
-async fn signed_receipt(
-    proposal: &hpay_companion_protocol::SignedRollbackAnchor,
-    mobile: &SoftwareDeviceIdentity,
-    now: u64,
-) -> SignedWitnessReceipt {
-    let anchor_hash = proposal.anchor.canonical_sha256_hex().unwrap();
-    let receipt = WitnessReceipt::for_anchor(&proposal.anchor, anchor_hash, now).unwrap();
-    SignedWitnessReceipt::sign(receipt, mobile).await.unwrap()
 }
 
 async fn prepared_witness_flow(
@@ -302,6 +128,99 @@ fn write_unvalidated_current_state(
         )
         .unwrap();
 }
+/// Nothing added for the dead-end escapes may make a broadcast reachable
+/// without a real signature from the paired phone over the exact anchor.
+///
+/// This is the invariant every escape in this change is measured against, so it
+/// is asserted directly rather than inferred: a receipt from another device, a
+/// receipt over a different anchor, and a receipt whose hash has been edited are
+/// all refused, the operation stays `SignedAwaitingWitness`, and the node is
+/// never asked to submit anything until the genuine receipt arrives.
+#[tokio::test]
+async fn broadcast_still_requires_a_real_witness_signature_over_the_exact_anchor() {
+    let (_root, mut manager, wallet_id, mobile, operation_id, proposal, receipt, node) =
+        prepared_witness_flow(2_600).await;
+    let submits = node.submit_count.clone();
+    assert_eq!(submits.load(Ordering::SeqCst), 0);
+
+    // A different registered phone cannot even produce a receipt for this
+    // anchor: the receipt is scoped to the device the anchor names.
+    let impostor = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    register_witness_mobile(&mut manager, &wallet_id, &impostor, 2_601);
+    let anchor_hash = proposal.anchor.canonical_sha256_hex().unwrap();
+    let honest = WitnessReceipt::for_anchor(&proposal.anchor, anchor_hash.clone(), 2_602).unwrap();
+    assert!(
+        SignedWitnessReceipt::sign(honest.clone(), &impostor)
+            .await
+            .is_err(),
+        "only the phone the anchor names may witness it"
+    );
+    // Nor by re-scoping the receipt to itself and signing that honestly.
+    let mut rescoped = honest;
+    rescoped.mobile_device_id = impostor.device_id().clone();
+    assert!(
+        manager
+            .apply_mobile_witness_and_broadcast(
+                &wallet_id,
+                SignedWitnessReceipt::sign(rescoped, &impostor)
+                    .await
+                    .unwrap(),
+                2_602,
+            )
+            .await
+            .is_err()
+    );
+
+    // The right phone, but the hash it attests to is edited after signing.
+    let mut tampered = receipt.clone();
+    tampered.receipt.anchor_hash = "22".repeat(32);
+    assert!(
+        manager
+            .apply_mobile_witness_and_broadcast(&wallet_id, tampered, 2_603)
+            .await
+            .is_err()
+    );
+
+    // The right phone, signing honestly, but over an anchor for a rotation
+    // rather than this operation.
+    let mut wrong_anchor = receipt.clone();
+    wrong_anchor.receipt.anchor_id = "anchor_not_this_one".to_owned();
+    assert!(
+        manager
+            .apply_mobile_witness_and_broadcast(&wallet_id, wrong_anchor, 2_604)
+            .await
+            .is_err()
+    );
+
+    assert_eq!(
+        manager
+            .list_operations_admin(&wallet_id, 2_605)
+            .unwrap()
+            .into_iter()
+            .find(|view| view.operation_id == operation_id)
+            .unwrap()
+            .status,
+        OperationStatus::SignedAwaitingWitness,
+        "a refused witness must leave the operation exactly where it was"
+    );
+    assert_eq!(
+        submits.load(Ordering::SeqCst),
+        0,
+        "nothing may reach the node without a genuine witness"
+    );
+
+    let submitted = manager
+        .apply_mobile_witness_and_broadcast(&wallet_id, receipt, 2_606)
+        .await
+        .unwrap();
+    assert_eq!(
+        submitted.status,
+        OperationStatus::SubmittedAwaitingFinalWitness
+    );
+    assert_eq!(submits.load(Ordering::SeqCst), 1);
+    let _ = mobile;
+}
+
 #[tokio::test]
 async fn malformed_authenticated_checkpoint_is_rejected_on_load() {
     let (_root, mut manager, wallet_id, _mobile, _operation_id, _proposal, _receipt, _node) =
@@ -459,21 +378,42 @@ async fn final_witness_releases_reservation_and_allows_a_second_operation() {
     assert_eq!(node.submit_count.load(Ordering::SeqCst), 1);
 }
 
+/// This test used to assert `RecoveryRequired`, and that assertion was the
+/// codified form of the trap: an anchor that expired before its receipt arrived
+/// left the pending slot occupied forever, and with it the payment, every future
+/// agent payment, every witness rotation and the reservation.
+///
+/// The expiry itself is protective and is untouched. What is asserted now is
+/// that it is recoverable: the dead anchor is replaced at the same chain
+/// position, and the receipt signed over the dead one is still worthless.
 #[tokio::test]
-async fn expired_pending_proposal_requires_recovery() {
-    let (_root, mut manager, wallet_id, mobile, operation_id, proposal, _receipt, _node) =
+async fn an_expired_pending_proposal_is_replaced_at_the_same_chain_position() {
+    let (_root, mut manager, wallet_id, mobile, operation_id, proposal, receipt, node) =
         prepared_witness_flow(600).await;
+    let dead_at = proposal.anchor.expires_at;
+    let replacement = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), dead_at)
+        .await
+        .unwrap();
+
+    assert_ne!(replacement.anchor.anchor_id, proposal.anchor.anchor_id);
+    assert!(replacement.anchor.expires_at > dead_at);
+    assert_eq!(
+        replacement.anchor.anchor_sequence,
+        proposal.anchor.anchor_sequence
+    );
+    assert_eq!(
+        replacement.anchor.previous_anchor_hash,
+        proposal.anchor.previous_anchor_hash
+    );
     assert_eq!(
         manager
-            .pending_rollback_anchor(
-                &wallet_id,
-                &operation_id,
-                mobile.device_id(),
-                proposal.anchor.expires_at,
-            )
+            .apply_mobile_witness_and_broadcast(&wallet_id, receipt, dead_at + 1)
             .await,
-        Err(AgentWalletError::RecoveryRequired)
+        Err(AgentWalletError::RollbackDetected),
+        "a receipt over the replaced anchor is not a witness for the replacement"
     );
+    assert_eq!(node.submit_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -545,7 +485,7 @@ async fn complete_prepared_operation(
     );
 }
 
-async fn pair_unregistered_rotation_candidate(
+pub(super) async fn pair_unregistered_rotation_candidate(
     manager: &mut AgentWalletManager,
     wallet_id: &AgentWalletId,
     rotation_id: &str,
@@ -914,6 +854,328 @@ async fn cancellation_is_blocked_after_baseline_authority_transition() {
     );
 }
 
+/// Dead end 1: `AwaitingCompletionAnchor` with the replacement phone gone.
+///
+/// Before the re-target this state had no exit at all. `cancel_witness_rotation`
+/// refuses twice over, the desktop hides the start form while a rotation is
+/// active, and `create_payment_intent` refuses every agent write meanwhile, so
+/// the wallet is stopped for good on a phone that will never come back.
+#[tokio::test]
+async fn stranded_completion_anchor_can_be_retargeted_to_another_replacement_phone() {
+    use hpay_companion_protocol::{
+        SignedWitnessRotationAuthorization, SignedWitnessRotationBaselineReceipt,
+        WitnessRotationBaselineReceipt, WitnessRotationMode, WitnessRotationPhase,
+        WitnessRotationReason,
+    };
+
+    let (_root, mut manager, wallet_id, old_mobile, operation_id, _proposal, first_receipt, _node) =
+        prepared_witness_flow(2_400).await;
+    complete_prepared_operation(
+        &mut manager,
+        &wallet_id,
+        &old_mobile,
+        &operation_id,
+        first_receipt,
+        2_406,
+    )
+    .await;
+    let lost_candidate = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let record = manager
+        .prepare_witness_rotation(
+            &wallet_id,
+            "rotation_stranded".to_owned(),
+            lost_candidate.device_id(),
+            WitnessRotationMode::Normal,
+            WitnessRotationReason::ReplacePhone,
+            2_421,
+        )
+        .await
+        .unwrap();
+    manager
+        .authorize_witness_rotation(
+            &wallet_id,
+            SignedWitnessRotationAuthorization::sign(record.clone(), &old_mobile)
+                .await
+                .unwrap(),
+            2_422,
+        )
+        .unwrap();
+    let controls = manager
+        .witness_rotation_controls(&wallet_id, 2_422)
+        .unwrap();
+    assert!(
+        controls.cancellable && !controls.retargetable,
+        "a rotation that can still be cancelled must not offer the re-target"
+    );
+    pair_unregistered_rotation_candidate(
+        &mut manager,
+        &wallet_id,
+        &record.rotation_id,
+        &lost_candidate,
+        2_423,
+    )
+    .await;
+    let controls = manager
+        .witness_rotation_controls(&wallet_id, 2_423)
+        .unwrap();
+    assert!(
+        controls.cancellable && !controls.retargetable,
+        "CandidatePairedRestricted still has cancel, so it is not stranded"
+    );
+    let abandoned_baseline = SignedWitnessRotationBaselineReceipt::sign(
+        WitnessRotationBaselineReceipt::for_rotation(
+            &record,
+            record.canonical_sha256_hex().unwrap(),
+            2_428,
+        )
+        .unwrap(),
+        &lost_candidate,
+    )
+    .await
+    .unwrap();
+    manager
+        .accept_witness_rotation_baseline(&wallet_id, abandoned_baseline.clone(), 2_428)
+        .unwrap();
+
+    // The exact dead end: past the authority transition there is no cancel and
+    // no other desktop control.
+    assert_eq!(
+        manager.cancel_witness_rotation(&wallet_id, &record.rotation_id, 2_429),
+        Err(AgentWalletError::InvalidOperationState)
+    );
+    let controls = manager
+        .witness_rotation_controls(&wallet_id, 2_429)
+        .unwrap();
+    assert!(
+        !controls.cancellable && controls.retargetable,
+        "the stranded phase has no cancel and is exactly where the re-target is offered"
+    );
+
+    let replacement = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let retargeted = manager
+        .retarget_witness_rotation(
+            &wallet_id,
+            &record.rotation_id,
+            "rotation_stranded_retarget".to_owned(),
+            replacement.device_id(),
+            2_430,
+        )
+        .unwrap();
+    assert_eq!(
+        manager
+            .retarget_witness_rotation(
+                &wallet_id,
+                &record.rotation_id,
+                "rotation_stranded_retarget".to_owned(),
+                replacement.device_id(),
+                2_431,
+            )
+            .unwrap(),
+        retargeted,
+        "an exact re-target retry is idempotent"
+    );
+    assert_eq!(
+        manager
+            .overview(&wallet_id, 2_431)
+            .await
+            .unwrap()
+            .witness_rotation_phase,
+        Some(WitnessRotationPhase::AwaitingCandidatePairing)
+    );
+    // The epoch is never rolled back, so the abandoned candidate's epoch is
+    // burned rather than reusable.
+    assert_eq!(retargeted.old_witness_epoch, record.new_witness_epoch);
+    assert_eq!(
+        retargeted.new_witness_epoch,
+        record.new_witness_epoch.checked_add(1).unwrap()
+    );
+    assert_eq!(retargeted.old_mobile_device_id, *old_mobile.device_id());
+    assert!(
+        manager
+            .list_companion_devices(&wallet_id, 2_431)
+            .unwrap()
+            .iter()
+            .find(|device| device.device_id == *old_mobile.device_id())
+            .unwrap()
+            .is_revoked(),
+        "the re-target never un-revokes the old phone"
+    );
+    assert!(
+        manager
+            .list_companion_devices(&wallet_id, 2_431)
+            .unwrap()
+            .iter()
+            .all(|device| device.device_id != *lost_candidate.device_id()),
+        "the abandoned candidate is discarded and never registered"
+    );
+    assert_eq!(
+        manager.accept_witness_rotation_baseline(&wallet_id, abandoned_baseline.clone(), 2_432),
+        Err(AgentWalletError::InvalidOperationState),
+        "the abandoned candidate's baseline is refused while a new candidate is being paired"
+    );
+
+    // The replacement finishes the rotation exactly as any candidate would: a
+    // real baseline receipt and a real witness receipt over the exact anchor.
+    pair_unregistered_rotation_candidate(
+        &mut manager,
+        &wallet_id,
+        &retargeted.rotation_id,
+        &replacement,
+        2_433,
+    )
+    .await;
+    assert_eq!(
+        manager.accept_witness_rotation_baseline(&wallet_id, abandoned_baseline, 2_434),
+        Err(AgentWalletError::RotationBaselineReceiptInvalid),
+        "the abandoned candidate's baseline can never be replayed onto the new attempt"
+    );
+    let baseline = SignedWitnessRotationBaselineReceipt::sign(
+        WitnessRotationBaselineReceipt::for_rotation(
+            &retargeted,
+            retargeted.canonical_sha256_hex().unwrap(),
+            2_438,
+        )
+        .unwrap(),
+        &replacement,
+    )
+    .await
+    .unwrap();
+    manager
+        .accept_witness_rotation_baseline(&wallet_id, baseline, 2_438)
+        .unwrap();
+    let completion = manager
+        .pending_witness_rotation_completion_anchor(&wallet_id, &retargeted.rotation_id, 2_439)
+        .await
+        .unwrap();
+    assert_eq!(completion.anchor.mobile_device_id, *replacement.device_id());
+    assert_eq!(
+        completion.anchor.witness_epoch,
+        retargeted.new_witness_epoch
+    );
+    let completion_receipt = signed_receipt(&completion, &replacement, 2_440).await;
+    manager
+        .complete_witness_rotation(&wallet_id, completion_receipt, 2_440)
+        .unwrap();
+    assert_eq!(
+        manager
+            .overview(&wallet_id, 2_441)
+            .await
+            .unwrap()
+            .witness_rotation_phase,
+        Some(WitnessRotationPhase::Completed)
+    );
+    // The wallet is usable again: a further rotation can be prepared, which is
+    // only reachable from a phase that permits agent writes.
+    let fourth = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let next = manager
+        .prepare_witness_rotation(
+            &wallet_id,
+            "rotation_after_retarget".to_owned(),
+            fourth.device_id(),
+            WitnessRotationMode::Normal,
+            WitnessRotationReason::ReplacePhone,
+            2_442,
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.old_mobile_device_id, *replacement.device_id());
+    assert_eq!(next.old_witness_epoch, retargeted.new_witness_epoch);
+}
+
+/// A completion receipt already exists, so nothing is stranded and the escape
+/// that discards a candidate must not be offered.
+#[tokio::test]
+async fn completed_rotation_is_never_retargetable() {
+    use hpay_companion_protocol::{
+        SignedWitnessRotationAuthorization, SignedWitnessRotationBaselineReceipt,
+        WitnessRotationBaselineReceipt, WitnessRotationMode, WitnessRotationReason,
+    };
+
+    let (_root, mut manager, wallet_id, old_mobile, operation_id, _proposal, first_receipt, _node) =
+        prepared_witness_flow(2_500).await;
+    complete_prepared_operation(
+        &mut manager,
+        &wallet_id,
+        &old_mobile,
+        &operation_id,
+        first_receipt,
+        2_506,
+    )
+    .await;
+    let candidate = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let record = manager
+        .prepare_witness_rotation(
+            &wallet_id,
+            "rotation_completed_no_retarget".to_owned(),
+            candidate.device_id(),
+            WitnessRotationMode::Normal,
+            WitnessRotationReason::ReplacePhone,
+            2_521,
+        )
+        .await
+        .unwrap();
+    manager
+        .authorize_witness_rotation(
+            &wallet_id,
+            SignedWitnessRotationAuthorization::sign(record.clone(), &old_mobile)
+                .await
+                .unwrap(),
+            2_522,
+        )
+        .unwrap();
+    pair_unregistered_rotation_candidate(
+        &mut manager,
+        &wallet_id,
+        &record.rotation_id,
+        &candidate,
+        2_523,
+    )
+    .await;
+    manager
+        .accept_witness_rotation_baseline(
+            &wallet_id,
+            SignedWitnessRotationBaselineReceipt::sign(
+                WitnessRotationBaselineReceipt::for_rotation(
+                    &record,
+                    record.canonical_sha256_hex().unwrap(),
+                    2_528,
+                )
+                .unwrap(),
+                &candidate,
+            )
+            .await
+            .unwrap(),
+            2_528,
+        )
+        .unwrap();
+    let completion = manager
+        .pending_witness_rotation_completion_anchor(&wallet_id, &record.rotation_id, 2_529)
+        .await
+        .unwrap();
+    manager
+        .complete_witness_rotation(
+            &wallet_id,
+            signed_receipt(&completion, &candidate, 2_530).await,
+            2_530,
+        )
+        .unwrap();
+    let controls = manager
+        .witness_rotation_controls(&wallet_id, 2_531)
+        .unwrap();
+    assert!(!controls.cancellable && !controls.retargetable);
+    let other = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    assert_eq!(
+        manager.retarget_witness_rotation(
+            &wallet_id,
+            &record.rotation_id,
+            "rotation_completed_retarget_attempt".to_owned(),
+            other.device_id(),
+            2_531,
+        ),
+        Err(AgentWalletError::InvalidOperationState)
+    );
+}
+
 #[tokio::test]
 async fn restart_after_durable_baseline_completes_old_device_revocation_once() {
     use hpay_companion_protocol::{
@@ -1261,4 +1523,262 @@ async fn lost_phone_rotation_requires_clean_state_live_node_and_new_baseline() {
             .unwrap()
             .is_revoked()
     );
+}
+
+/// The escape must not create a second dead end one step past the first.
+///
+/// `retarget_witness_rotation` leaves the rotation in AwaitingCandidatePairing
+/// with the old phone already revoked, so `cancel_witness_rotation` refuses at
+/// every later phase. Once a candidate is bound the pairing ticket cannot be
+/// re-issued either (`require_rotation_candidate_pairing` refuses while a
+/// candidate is present), so if the second replacement handset fails at the
+/// pairing step - a lapsed five-minute ticket is enough - the owner used to have
+/// no control at all. The re-target is offered again there, and it is a real
+/// exit: this drives the rotation to a genuine completion afterwards.
+#[tokio::test]
+async fn a_retargeted_rotation_that_fails_at_the_pairing_step_still_has_a_way_out() {
+    use hpay_companion_protocol::{
+        LanEndpoint, MobilePairingAttempt, SignedWitnessRotationAuthorization,
+        SignedWitnessRotationBaselineReceipt, WitnessRotationBaselineReceipt, WitnessRotationMode,
+        WitnessRotationPhase, WitnessRotationReason,
+    };
+
+    let (_root, mut manager, wallet_id, old_mobile, operation_id, _proposal, first_receipt, _node) =
+        prepared_witness_flow(5_400).await;
+    complete_prepared_operation(
+        &mut manager,
+        &wallet_id,
+        &old_mobile,
+        &operation_id,
+        first_receipt,
+        5_406,
+    )
+    .await;
+    let lost_candidate = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let record = manager
+        .prepare_witness_rotation(
+            &wallet_id,
+            "rotation_second_strand".to_owned(),
+            lost_candidate.device_id(),
+            WitnessRotationMode::Normal,
+            WitnessRotationReason::ReplacePhone,
+            5_421,
+        )
+        .await
+        .unwrap();
+    manager
+        .authorize_witness_rotation(
+            &wallet_id,
+            SignedWitnessRotationAuthorization::sign(record.clone(), &old_mobile)
+                .await
+                .unwrap(),
+            5_422,
+        )
+        .unwrap();
+    pair_unregistered_rotation_candidate(
+        &mut manager,
+        &wallet_id,
+        &record.rotation_id,
+        &lost_candidate,
+        5_423,
+    )
+    .await;
+    manager
+        .accept_witness_rotation_baseline(
+            &wallet_id,
+            SignedWitnessRotationBaselineReceipt::sign(
+                WitnessRotationBaselineReceipt::for_rotation(
+                    &record,
+                    record.canonical_sha256_hex().unwrap(),
+                    5_428,
+                )
+                .unwrap(),
+                &lost_candidate,
+            )
+            .await
+            .unwrap(),
+            5_428,
+        )
+        .unwrap();
+
+    let second = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let retargeted = manager
+        .retarget_witness_rotation(
+            &wallet_id,
+            &record.rotation_id,
+            "rotation_second_strand_retarget".to_owned(),
+            second.device_id(),
+            5_430,
+        )
+        .unwrap();
+
+    // The owner starts pairing the second replacement phone. Issuing the ticket
+    // is enough to bind a candidate; nothing after it has to succeed.
+    let mut desktop_attempt = manager
+        .start_rotation_candidate_pairing(
+            &wallet_id,
+            &retargeted.rotation_id,
+            vec![LanEndpoint::parse("hpay-lan://192.168.1.9:42492").unwrap()],
+            5_433,
+            240,
+        )
+        .unwrap();
+    let mobile_attempt =
+        MobilePairingAttempt::start(desktop_attempt.offer().clone(), &second, 5_434)
+            .await
+            .unwrap();
+    let request = mobile_attempt.request().clone();
+    manager
+        .accept_rotation_candidate_pairing_request(&wallet_id, &mut desktop_attempt, request, 5_435)
+        .await
+        .unwrap();
+    drop(mobile_attempt);
+    drop(desktop_attempt);
+
+    // That phone is now gone, and its ticket has lapsed.
+    assert_eq!(
+        manager
+            .overview(&wallet_id, 5_900)
+            .await
+            .unwrap()
+            .witness_rotation_phase,
+        Some(WitnessRotationPhase::RotationTicketIssued)
+    );
+    assert_eq!(
+        manager.cancel_witness_rotation(&wallet_id, &retargeted.rotation_id, 5_901),
+        Err(AgentWalletError::RecoveryRequired),
+        "the old phone is already revoked, so the cancel is refused for good"
+    );
+    assert_eq!(
+        manager.require_rotation_candidate_pairing(&wallet_id, &retargeted.rotation_id, 5_902),
+        Err(AgentWalletError::InvalidOperationState),
+        "and the pairing ticket cannot be re-issued while a candidate is bound"
+    );
+    let controls = manager
+        .witness_rotation_controls(&wallet_id, 5_903)
+        .unwrap();
+    assert!(
+        !controls.cancellable && controls.retargetable,
+        "so the re-target must be offered here, or the escape has built a second dead end"
+    );
+
+    // And it is a real exit, not just a live button: the third handset signs a
+    // real baseline and a real completion receipt over the exact anchor.
+    let third = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let again = manager
+        .retarget_witness_rotation(
+            &wallet_id,
+            &retargeted.rotation_id,
+            "rotation_second_strand_retarget_two".to_owned(),
+            third.device_id(),
+            5_904,
+        )
+        .unwrap();
+    // No witness epoch is consumed by a handset that never signed a baseline.
+    assert_eq!(again.old_witness_epoch, retargeted.old_witness_epoch);
+    assert_eq!(again.new_witness_epoch, retargeted.new_witness_epoch);
+    assert_eq!(again.old_mobile_device_id, *old_mobile.device_id());
+    pair_unregistered_rotation_candidate(
+        &mut manager,
+        &wallet_id,
+        &again.rotation_id,
+        &third,
+        5_905,
+    )
+    .await;
+    manager
+        .accept_witness_rotation_baseline(
+            &wallet_id,
+            SignedWitnessRotationBaselineReceipt::sign(
+                WitnessRotationBaselineReceipt::for_rotation(
+                    &again,
+                    again.canonical_sha256_hex().unwrap(),
+                    5_912,
+                )
+                .unwrap(),
+                &third,
+            )
+            .await
+            .unwrap(),
+            5_912,
+        )
+        .unwrap();
+    let completion = manager
+        .pending_witness_rotation_completion_anchor(&wallet_id, &again.rotation_id, 5_913)
+        .await
+        .unwrap();
+    assert_eq!(completion.anchor.mobile_device_id, *third.device_id());
+    let completion_receipt = signed_receipt(&completion, &third, 5_914).await;
+    manager
+        .complete_witness_rotation(&wallet_id, completion_receipt, 5_914)
+        .unwrap();
+    assert_eq!(
+        manager
+            .overview(&wallet_id, 5_915)
+            .await
+            .unwrap()
+            .witness_rotation_phase,
+        Some(WitnessRotationPhase::Completed)
+    );
+}
+
+/// A rotation whose old phone is still active keeps the ordinary cancel and is
+/// never offered the destructive escape. This is the "changed nothing, sees
+/// nothing new" case for the phases the re-target now also covers.
+#[tokio::test]
+async fn a_healthy_rotation_is_never_offered_the_retarget_at_the_pairing_phases() {
+    use hpay_companion_protocol::{
+        SignedWitnessRotationAuthorization, WitnessRotationMode, WitnessRotationReason,
+    };
+
+    let (_root, mut manager, wallet_id, old_mobile, operation_id, _proposal, first_receipt, _node) =
+        prepared_witness_flow(6_400).await;
+    complete_prepared_operation(
+        &mut manager,
+        &wallet_id,
+        &old_mobile,
+        &operation_id,
+        first_receipt,
+        6_406,
+    )
+    .await;
+    let candidate = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let record = manager
+        .prepare_witness_rotation(
+            &wallet_id,
+            "rotation_healthy".to_owned(),
+            candidate.device_id(),
+            WitnessRotationMode::Normal,
+            WitnessRotationReason::ReplacePhone,
+            6_421,
+        )
+        .await
+        .unwrap();
+    manager
+        .authorize_witness_rotation(
+            &wallet_id,
+            SignedWitnessRotationAuthorization::sign(record.clone(), &old_mobile)
+                .await
+                .unwrap(),
+            6_422,
+        )
+        .unwrap();
+    pair_unregistered_rotation_candidate(
+        &mut manager,
+        &wallet_id,
+        &record.rotation_id,
+        &candidate,
+        6_423,
+    )
+    .await;
+    let controls = manager
+        .witness_rotation_controls(&wallet_id, 6_430)
+        .unwrap();
+    assert!(
+        controls.cancellable && !controls.retargetable,
+        "the old phone is still active, so the ordinary cancel is the way out"
+    );
+    manager
+        .cancel_witness_rotation(&wallet_id, &record.rotation_id, 6_431)
+        .unwrap();
 }

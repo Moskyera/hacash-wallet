@@ -238,6 +238,13 @@ export type AgentPolicy = {
   max_pending_operations: number;
   allowed_recipients: string[];
   blocked_recipients: string[];
+  /**
+   * Owner-only, per-agent, default false. When true the agent may propose a
+   * payment to a recipient that is not on `allowed_recipients`; that payment
+   * still requires the same exact manual approval, and approving it never adds
+   * the recipient to `allowed_recipients`. `blocked_recipients` is unaffected.
+   */
+  allow_unlisted_recipient_with_approval: boolean;
   approval_mode: ApprovalMode;
   policy_epoch: number;
 };
@@ -283,6 +290,49 @@ export type OperationStatus =
   | "cancelled"
   | "recovery_required";
 
+/**
+ * A payment that is waiting on the paired phone, and which recovery controls
+ * the core would actually accept on it right now.
+ *
+ * `abandonable` and `retryable` are the core's own enforcement predicates, not
+ * a guess made here, so the desktop can never offer a control that is then
+ * refused. Nothing in this shape ever means "witnessed": a payment that reaches
+ * it is one no phone has signed for.
+ */
+export type StrandedWitness = {
+  operation_id: string;
+  agent_id: string;
+  asset: string;
+  amount_units: string;
+  total_debit_units: string;
+  recipient: string;
+  /**
+   * Four statuses reach this shape, and only `signed_awaiting_witness` is
+   * pre-broadcast. Nothing rendered from this may describe the other three the
+   * way it describes that one.
+   */
+  status:
+    | "signed_awaiting_witness"
+    | "submitted_awaiting_final_witness"
+    | "broadcast_uncertain"
+    | "reconciled_awaiting_final_witness";
+  /** The transaction is already on the network. The money moved. */
+  submitted: boolean;
+  /**
+   * The id of the signed transaction. It exists from signing onward, so it is
+   * NOT the answer to "did the money move" - `submitted` is.
+   */
+  transaction_id: string | null;
+  anchor_issued: boolean;
+  anchor_expires_at: number | null;
+  retryable: boolean;
+  abandonable: boolean;
+  /** `releaseDeadWitnessAnchor` would succeed right now. */
+  anchor_releasable: boolean;
+  /** Replacing the paired phone is available and would keep the payment. */
+  phone_replacement_unblocked: boolean;
+};
+
 export type PaymentOperation = {
   operation_id: string;
   agent_wallet_id: string;
@@ -323,6 +373,21 @@ export type ApprovalCommitment = {
   challenge_nonce: string;
   issued_at: string;
   expires_at: string;
+  /**
+   * Present exactly when `approval_version` is "3", which is what a Testnet
+   * Pilot build issues. Rust binds the two together (`ApprovalCommitment
+   * ::validate` in crates/companion-protocol/src/approval.rs admits only
+   * (2, None) and (3, Some)), and the whole object is sent back verbatim on
+   * approval, so this must be declared rather than silently carried: a
+   * commitment that loses it no longer matches the stored one.
+   */
+  network_binding?: {
+    network_id: string;
+    chain_id: number;
+    genesis_identifier: string;
+    node_profile_id: string;
+    transaction_format_version: number;
+  } | null;
 };
 
 export type AgentPilotDiagnosticsPreview = {
@@ -364,6 +429,18 @@ export type WitnessRotationRecord = {
   rotation_reason: "replace_phone" | "lost_phone" | "compromised_device";
   created_at: string;
   expires_at: string;
+};
+
+/**
+ * Which rotation escapes the core would accept right now.
+ *
+ * Answered by `witness_rotation_controls`
+ * (crates/agent-wallet-core/src/service/companion/rotation.rs), which uses the
+ * same predicates the mutating calls enforce.
+ */
+export type WitnessRotationControls = {
+  cancellable: boolean;
+  retargetable: boolean;
 };
 
 export type SignedRotationPairingTicket = {
@@ -424,6 +501,39 @@ export const agentWalletApi = {
     mode,
     reason,
   }),
+  /**
+   * The payment waiting on the phone, or null when there is none.
+   *
+   * A read. It signs nothing, submits nothing and changes no state.
+   */
+  strandedWitness: (walletId: string) =>
+    invoke<StrandedWitness | null>("agent_wallet_stranded_witness", {
+      walletId,
+    }),
+  /**
+   * Gives up a signed payment that no phone can witness any more.
+   *
+   * The reservation comes back and nothing reaches the network: the core
+   * accepts this only for `signed_awaiting_witness`, which provably never was
+   * submitted. The panel says what it costs before the press.
+   */
+  abandonStrandedWitness: (walletId: string, operationId: string) =>
+    invoke<PaymentOperation>("agent_wallet_abandon_stranded_witness", {
+      walletId,
+      operationId,
+    }),
+  /**
+   * Drops an anchor that expired unwitnessed out of the single pending slot.
+   *
+   * It moves no money, marks nothing witnessed and leaves the payment exactly
+   * where it stands - status, transaction id and reservation unchanged. It is
+   * the step that frees the slot so the paired phone can be replaced.
+   */
+  releaseDeadWitnessAnchor: (walletId: string, operationId: string) =>
+    invoke<PaymentOperation>("agent_wallet_release_dead_witness_anchor", {
+      walletId,
+      operationId,
+    }),
   witnessRotationStatus: (walletId: string) =>
     invoke<WitnessRotationRecord | null>("agent_wallet_witness_rotation_status", {
       walletId,
@@ -433,6 +543,33 @@ export const agentWalletApi = {
       walletId,
       rotationId,
     }),
+  /**
+   * Which rotation escapes the core would actually accept right now.
+   *
+   * The desktop asks rather than guessing from the phase, so a cancel is never
+   * offered on a re-targeted rotation whose old phone is already revoked, and
+   * the re-target is never hidden when it is the only way out.
+   */
+  witnessRotationControls: (walletId: string) =>
+    invoke<WitnessRotationControls>("agent_wallet_witness_rotation_controls", {
+      walletId,
+    }),
+  /**
+   * Points a stranded rotation at a different replacement phone. Discards the
+   * unusable candidate's baseline and burns its witness epoch; the panel says
+   * so before the press.
+   */
+  retargetWitnessRotation: (
+    walletId: string,
+    rotationId: string,
+    newRotationId: string,
+    newCandidateSlotId: string,
+  ) => invoke<WitnessRotationRecord>("agent_wallet_witness_rotation_retarget", {
+    walletId,
+    rotationId,
+    newRotationId,
+    newCandidateSlotId,
+  }),
   startRotationCandidatePairing: (
     walletId: string,
     rotationId: string,
