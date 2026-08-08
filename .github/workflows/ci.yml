@@ -85,8 +85,32 @@ jobs:
 
       - name: Test Rust workspace with the supported Linux feature set
         run: |
-          cargo test --workspace --all-targets --all-features --exclude hacash-wallet --locked -- --test-threads=1
+          cargo test --workspace --all-targets --all-features --exclude hacash-wallet --exclude agent-wallet-core --locked -- --test-threads=1
           cargo test -p hacash-wallet --all-targets --locked -- --test-threads=1
+
+  rust-agent-wallet:
+    name: Agent Wallet security and recovery tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Checkout pinned fullnodedev
+        shell: pwsh
+        run: ./scripts/checkout-fullnode.ps1
+
+      - name: Activate pinned Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: agent-wallet-security-tests
+
+      - name: Test the Agent Wallet security and recovery boundary
+        run: cargo test -p agent-wallet-core --all-targets --all-features --locked -- --test-threads=1
 
   frontend:
     name: Frontend ${{ matrix.app }}

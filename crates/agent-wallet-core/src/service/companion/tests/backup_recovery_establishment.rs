@@ -80,6 +80,7 @@ fn copy_tree(from: &Path, to: &Path) {
             fs::copy(&path, &target).unwrap();
         }
     }
+    fs::set_permissions(to, fs::metadata(from).unwrap().permissions()).unwrap();
 }
 
 /// Everything under the storage root except the process lock, which is
