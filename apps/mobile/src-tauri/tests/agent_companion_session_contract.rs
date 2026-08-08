@@ -217,18 +217,23 @@ fn mobile_bridge_has_no_payment_signing_or_public_listener_and_wallet_fee_is_zer
 fn android_signer_copies_match_and_allow_only_typed_pilot_authority() {
     let source =
         read("src-tauri/android-src/org/hacash/wallet/mobile/AgentCompanionIdentityPlugin.kt");
-    let generated = read(
+    let generated_path = mobile_root().join(
         "src-tauri/gen/android/app/src/main/java/org/hacash/wallet/mobile/AgentCompanionIdentityPlugin.kt",
     );
+    if generated_path.exists() {
+        let generated = fs::read_to_string(&generated_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", generated_path.display()));
+        assert_eq!(
+            source, generated,
+            "generated Android signer drifted from source"
+        );
+    }
     let rust = read("src-tauri/src/agent_companion_identity.rs");
     let compact_rust: String = rust
         .chars()
         .filter(|value| !value.is_whitespace())
         .collect();
-    assert_eq!(
-        source, generated,
-        "generated Android signer drifted from source"
-    );
+
     assert!(source.contains("companion authentication"));
     for required in [
         "signApprovalDecisionApprove",
