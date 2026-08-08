@@ -258,6 +258,13 @@ async fn probe_d_vault_only() {
     .unwrap();
     let wallet_dir = fresh.path().join("wallets").join(wallet_id.as_str());
     fs::create_dir_all(&wallet_dir).unwrap();
+    fs::set_permissions(
+        &wallet_dir,
+        fs::metadata(root.path().join("wallets").join(wallet_id.as_str()))
+            .unwrap()
+            .permissions(),
+    )
+    .unwrap();
     fs::copy(
         root.path()
             .join("wallets")
