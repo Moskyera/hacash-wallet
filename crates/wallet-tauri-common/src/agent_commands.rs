@@ -250,8 +250,7 @@ pub async fn agent_wallet_stranded_witness(
             .await
             .stranded_witness_recovery(&wallet_id, unix_now()?)
             .map_err(public_error)?;
-        serde_json::to_value(stranded)
-            .map_err(|_| "stranded witness encoding failed".to_owned())
+        serde_json::to_value(stranded).map_err(|_| "stranded witness encoding failed".to_owned())
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     {
@@ -351,8 +350,7 @@ pub async fn agent_wallet_witness_rotation_controls(
             .await
             .witness_rotation_controls(&wallet_id, unix_now()?)
             .map_err(public_error)?;
-        serde_json::to_value(controls)
-            .map_err(|_| "witness rotation encoding failed".to_owned())
+        serde_json::to_value(controls).map_err(|_| "witness rotation encoding failed".to_owned())
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     {
