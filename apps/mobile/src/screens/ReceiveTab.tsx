@@ -198,6 +198,32 @@ export default function ReceiveTab({
           )}
         </section>
       )}
+      {asset === "HIP20" && (
+        <section className="receive-section">
+          <div className="info-box">
+            <strong>Receive HIP-20 native assets</strong>
+            <p>
+              Share this Hacash address and the exact asset serial. The serial, not display
+              metadata, is the canonical asset identity.
+            </p>
+          </div>
+          {address && (
+            <PaymentQrDisplay
+              address={address}
+              hideAddress={hideAddresses}
+              caption="Hacash address for HIP-20 native assets"
+            />
+          )}
+          <div className="address-box">
+            <code>{maskAddress(address, hideAddresses)}</code>
+          </div>
+          {!hideAddresses && address && (
+            <button type="button" className="primary" onClick={() => void onCopyAddress()}>
+              Copy Hacash address
+            </button>
+          )}
+        </section>
+      )}
     </div>
   );
 }

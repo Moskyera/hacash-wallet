@@ -21,6 +21,7 @@ pub const PREPARED_OPERATION_TTL: Duration = Duration::from_secs(120);
 pub enum OperationKind {
     HacL1,
     Hacd,
+    NativeAsset,
     BridgedBtc,
     ChannelOpen,
     ChannelClose,
@@ -37,6 +38,7 @@ impl OperationKind {
         match self {
             Self::HacL1 => "hac_l1",
             Self::Hacd => "hacd",
+            Self::NativeAsset => "native_asset",
             Self::BridgedBtc => "bridged_btc",
             Self::ChannelOpen => "channel_open",
             Self::ChannelClose => "channel_close",

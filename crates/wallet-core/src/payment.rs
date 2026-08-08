@@ -146,13 +146,18 @@ impl PaymentRouter {
         };
 
         let hub = L2HubClient::new(hub_url);
-        let health = hub.health().await?;
+        let health = match hub.health().await {
+            Ok(health) => health,
+            Err(_) => return Ok(None),
+        };
         if !health.ok {
             return Ok(None);
         }
         if health.version < 3
             || !health.settlement_ready
-            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+            || !crate::l2_hub::hub_fee_is_zero(&health)
+            || (self.settings.network_mode == "mainnet"
+                && !crate::l2_hub::hub_mainnet_safety_ready(&health))
         {
             // Fast Pay is fee-free and must produce a dispute-ready settlement bill.
             return Ok(None);
@@ -215,7 +220,9 @@ impl PaymentRouter {
         if !health.ok
             || health.version < 3
             || !health.settlement_ready
-            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+            || !crate::l2_hub::hub_fee_is_zero(&health)
+            || (self.settings.network_mode == "mainnet"
+                && !crate::l2_hub::hub_mainnet_safety_ready(&health))
             || (!same_channel_payee && !health.cross_channel_ready)
         {
             return Err(WalletError::L2(
@@ -223,13 +230,6 @@ impl PaymentRouter {
                     .into(),
             ));
         }
-        let req = FastPayRequest {
-            payer: from.to_owned(),
-            payee: to.to_owned(),
-            amount: amount_wire.to_owned(),
-            channel_id,
-            fee_payer: None,
-        };
         if payer_account.address() != from {
             return Err(WalletError::L2(format!(
                 "payer account {} does not match from {}",
@@ -237,10 +237,31 @@ impl PaymentRouter {
                 from
             )));
         }
-        let payer_channel = query_channel(&self.node, &req.channel_id).await?;
+        let payer_channel = query_channel(&self.node, &channel_id).await?;
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(amount_wire)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let mut safety =
+            crate::l2_safety::ClientL2Safety::open(payer_account, &hub_address, &channel_id)?;
+        let operation = safety.begin_or_resume(
+            from,
+            to,
+            amount_wire,
+            amount.as_millimeis(),
+            payer_channel.reuse_version,
+        )?;
+        let req = FastPayRequest {
+            operation_id: operation.operation_id,
+            idempotency_key: operation.idempotency_key,
+            payer: from.to_owned(),
+            payee: to.to_owned(),
+            amount: amount_wire.to_owned(),
+            channel_id,
+            fee_payer: None,
+        };
         hub.execute_and_store_bill(
             &req,
             &mut self.bills,
+            &mut safety,
             payer_account,
             &payer_channel,
             &hub_address,
@@ -252,4 +273,43 @@ impl PaymentRouter {
 fn channel_is_ready(channel: &ChannelInfo, user_address: &str) -> bool {
     channel.status == CHANNEL_STATUS_OPENING
         && (channel.user_is_left(user_address) || channel.user_is_right(user_address))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_hub_cannot_claim_mainnet_readiness_by_settlement_flag_alone() {
+        let health: crate::l2_hub::HubHealth = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "version": 4,
+            "settlement_ready": true,
+            "cross_channel_ready": true
+        }))
+        .unwrap();
+        assert!(!crate::l2_hub::hub_mainnet_safety_ready(&health));
+    }
+
+    #[tokio::test]
+    async fn unreachable_hub_is_only_a_pre_sign_l1_fallback() {
+        let payer = WalletAccount::create("payment-router-offline-hub-payer").unwrap();
+        let payee = WalletAccount::create("payment-router-offline-hub-payee").unwrap();
+        let settings = WalletSettings {
+            l2_hub_url: Some("http://127.0.0.1:1".into()),
+            channel_id_hex: Some("00112233445566778899aabbccddeeff".into()),
+            ..WalletSettings::default()
+        };
+        let router = PaymentRouter::new(
+            NodeClient::new("http://127.0.0.1:2").unwrap(),
+            settings,
+            BillStore::default(),
+        );
+
+        let plan = router
+            .try_l2_plan(&payer.address(), &payee.address(), 1.0)
+            .await
+            .unwrap();
+        assert!(plan.is_none());
+    }
 }

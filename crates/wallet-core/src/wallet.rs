@@ -152,6 +152,119 @@ pub struct SendPreview {
     pub send_options: crate::send_options::SendOptions,
 }
 
+/// The security-relevant fields the user reviewed before an unprepared Fast Pay send.
+///
+/// Decimal display values are deliberately excluded. `amount_wire` is the canonical
+/// protocol amount produced by wallet-core, so the comparison cannot be changed by
+/// renderer rounding or locale formatting.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ReviewedSendExpectation {
+    pub from: String,
+    pub to: String,
+    pub amount_wire: String,
+    pub rail: PaymentRail,
+    pub channel_id: Option<String>,
+}
+
+impl ReviewedSendExpectation {
+    fn from_preview(preview: &SendPreview) -> Self {
+        Self {
+            from: preview.from.clone(),
+            to: preview.to.clone(),
+            amount_wire: preview.amount_wire.clone(),
+            rail: preview.plan.rail,
+            channel_id: preview.plan.channel_id.clone(),
+        }
+    }
+}
+
+fn require_exact_review(
+    reviewed: &ReviewedSendExpectation,
+    preview: &SendPreview,
+) -> WalletResult<()> {
+    let actual = ReviewedSendExpectation::from_preview(preview);
+    require_exact_review_snapshot(reviewed, &actual)
+}
+
+fn require_exact_review_snapshot(
+    reviewed: &ReviewedSendExpectation,
+    actual: &ReviewedSendExpectation,
+) -> WalletResult<()> {
+    if reviewed.rail != PaymentRail::L2Fast || actual.rail != PaymentRail::L2Fast {
+        return Err(WalletError::Policy(
+            "the direct reviewed-send path is restricted to Fast Pay".into(),
+        ));
+    }
+    if reviewed != actual {
+        return Err(WalletError::Policy(
+            "payment details or Fast Pay route changed after review; review the payment again"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reviewed_send_tests {
+    use super::*;
+
+    fn fast_review() -> ReviewedSendExpectation {
+        ReviewedSendExpectation {
+            from: "1From".into(),
+            to: "1To".into(),
+            amount_wire: "12:248".into(),
+            rail: PaymentRail::L2Fast,
+            channel_id: Some("channel-1".into()),
+        }
+    }
+
+    #[test]
+    fn exact_fast_pay_review_is_accepted() {
+        let reviewed = fast_review();
+        assert!(require_exact_review_snapshot(&reviewed, &reviewed).is_ok());
+    }
+
+    #[test]
+    fn recipient_amount_wallet_and_channel_drift_fail_closed() {
+        let reviewed = fast_review();
+
+        let mut different_from = reviewed.clone();
+        different_from.from = "1OtherFrom".into();
+        let mut different_to = reviewed.clone();
+        different_to.to = "1OtherTo".into();
+        let mut different_amount = reviewed.clone();
+        different_amount.amount_wire = "13:248".into();
+        let mut different_channel = reviewed.clone();
+        different_channel.channel_id = Some("channel-2".into());
+
+        for changed in [
+            different_from,
+            different_to,
+            different_amount,
+            different_channel,
+        ] {
+            let error = require_exact_review_snapshot(&reviewed, &changed)
+                .expect_err("review drift must be rejected");
+            assert!(error.to_string().contains("changed after review"));
+        }
+    }
+
+    #[test]
+    fn direct_reviewed_path_rejects_a_rail_change() {
+        let reviewed = fast_review();
+        let mut on_chain = reviewed.clone();
+        on_chain.rail = PaymentRail::L1OnChain;
+
+        let error = require_exact_review_snapshot(&reviewed, &on_chain)
+            .expect_err("Fast Pay review must not authorize on-chain execution");
+        assert!(error.to_string().contains("restricted to Fast Pay"));
+
+        let error = require_exact_review_snapshot(&on_chain, &on_chain)
+            .expect_err("the direct path must not accept an L1 expectation");
+        assert!(error.to_string().contains("restricted to Fast Pay"));
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SendResult {
     pub rail: PaymentRail,
@@ -1381,6 +1494,19 @@ impl WalletService {
         crate::hacd_send::preview_hacd_send(&self.node, &from, to, diamond_names).await
     }
 
+    pub async fn preview_send_native_asset(
+        &mut self,
+        to: &str,
+        serial: &str,
+        amount: &str,
+    ) -> WalletResult<crate::native_asset_send::NativeAssetSendPreview> {
+        self.touch_auto_lock();
+        let from = self.require_address()?;
+        self.require_l1_recipient(to)?;
+        crate::native_asset_send::preview_native_asset_send(&self.node, &from, to, serial, amount)
+            .await
+    }
+
     pub async fn preview_send_btc(
         &mut self,
         to: &str,
@@ -1588,7 +1714,7 @@ impl WalletService {
             || health.version < 3
             || !health.settlement_ready
             || !health.cross_channel_ready
-            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+            || !crate::l2_hub::hub_fee_is_zero(&health)
         {
             return Err(WalletError::L2(
                 "Provider is not ready for safe, fee-free routed Fast Pay. No channel was opened."
@@ -1639,7 +1765,7 @@ impl WalletService {
             || health.version < 4
             || !health.settlement_ready
             || !health.cross_channel_ready
-            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+            || !crate::l2_hub::hub_fee_is_zero(&health)
         {
             return Err(WalletError::L2(
                 "Fast Pay provider does not support safe recipient confirmation".into(),
@@ -1749,7 +1875,7 @@ impl WalletService {
             || health.version < 4
             || !health.settlement_ready
             || !health.cross_channel_ready
-            || health.hub_fee_mei.unwrap_or(0.0).abs() > f64::EPSILON
+            || !crate::l2_hub::hub_fee_is_zero(&health)
         {
             return Err(WalletError::L2(
                 "Fast Pay provider is not ready for safe recipient confirmation".into(),
@@ -2607,6 +2733,27 @@ impl WalletService {
         amount_mei: f64,
         options: crate::send_options::SendOptions,
     ) -> WalletResult<SendResult> {
+        self.send_hac_inner(to, amount_mei, options, None).await
+    }
+
+    pub async fn send_hac_reviewed(
+        &mut self,
+        to: &str,
+        amount_mei: f64,
+        options: crate::send_options::SendOptions,
+        reviewed: ReviewedSendExpectation,
+    ) -> WalletResult<SendResult> {
+        self.send_hac_inner(to, amount_mei, options, Some(reviewed))
+            .await
+    }
+
+    async fn send_hac_inner(
+        &mut self,
+        to: &str,
+        amount_mei: f64,
+        options: crate::send_options::SendOptions,
+        reviewed: Option<ReviewedSendExpectation>,
+    ) -> WalletResult<SendResult> {
         self.touch_auto_lock();
         self.reject_cold_vault_key_access("online HAC and Fast Pay signing")?;
         let unlock_ctx = self.second_factor_from_session()?;
@@ -2634,6 +2781,9 @@ impl WalletService {
         self.protected_unprepared_signing_block("HAC send", policy_amount)?;
         let from = self.require_address()?;
         let preview = self.preview_send(to, amount_mei, &options).await?;
+        if let Some(reviewed) = reviewed.as_ref() {
+            require_exact_review(reviewed, &preview)?;
+        }
         let pending_key = self.begin_pending_history(preview.plan.rail, &from, to, amount_mei)?;
 
         let send_result: WalletResult<SendResult> = match preview.plan.rail {

@@ -32,6 +32,10 @@ async fn prepare_and_confirm(
     request: Value,
     payer: &Account,
 ) -> Value {
+    let mut request = request;
+    request["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
+    request["idempotency_key"] = json!(uuid::Uuid::new_v4().to_string());
+    let idempotency_key = request["idempotency_key"].as_str().unwrap().to_owned();
     let pending: Value = client
         .post(format!("{base}/v1/fast-pay"))
         .json(&request)
@@ -48,27 +52,24 @@ async fn prepare_and_confirm(
     )
     .unwrap();
     bill.chain_payment.fill_sign_by_account(payer).unwrap();
-    client
+    let response = client
         .post(format!("{base}/v1/fast-pay/{payment_id}/confirm"))
-        .json(&json!({ "bill_hex": bill.to_bill_hex() }))
+        .json(&json!({
+            "idempotency_key": idempotency_key,
+            "bill_hex": bill.to_bill_hex()
+        }))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap()
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    serde_json::from_str(&body)
+        .unwrap_or_else(|error| panic!("confirm HTTP {status}: {body:?}: {error}"))
 }
 
 #[test]
 fn hub_rejects_any_fast_pay_fee() {
-    let err = match HubState::new(
-        "fee hub",
-        "1Hub",
-        "http://127.0.0.1:8080",
-        None,
-        0.001,
-        None,
-    ) {
+    let err = match HubState::new("fee hub", "1Hub", "http://127.0.0.1:8080", None, 1, None) {
         Ok(_) => panic!("fee-charging hub must be rejected"),
         Err(err) => err,
     };
@@ -125,13 +126,14 @@ async fn hub_health_and_same_channel_fast_pay() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("hub-state.json");
     let hub = Arc::new(
-        HubState::new(
+        HubState::new_secure(
             "test hub",
             hub_address.clone(),
             node_url,
-            Some(state_path),
-            0.0,
+            state_path,
+            0,
             Some(account_secret_hex(&hub_account)),
+            &"42".repeat(32),
         )
         .unwrap(),
     );
@@ -156,7 +158,7 @@ async fn hub_health_and_same_channel_fast_pay() {
     assert_eq!(health["ok"], true);
     assert_eq!(health["hub_address"], hub_address);
     assert_eq!(health["version"], 4);
-    assert_eq!(health["hub_fee_mei"], 0.0);
+    assert_eq!(health["hub_fee_mei"], "0");
     assert_eq!(health["settlement_ready"], true);
     assert_eq!(health["cross_channel_ready"], true);
 
@@ -165,6 +167,8 @@ async fn hub_health_and_same_channel_fast_pay() {
         &client,
         &base,
         json!({
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "idempotency_key": uuid::Uuid::new_v4().to_string(),
             "payer": alice_address,
             "payee": hub_address,
             "amount": "1",
@@ -217,13 +221,14 @@ async fn hub_routes_cross_channel_after_recipient_confirmation() {
     let (node_url, node_handle) = spawn_mock_node(channels).await;
 
     let hub = Arc::new(
-        HubState::new(
+        HubState::new_secure(
             "test hub",
             hub_address.clone(),
             node_url,
-            None,
-            0.0,
+            tempdir().unwrap().keep().join("hub-state.json"),
+            0,
             Some(account_secret_hex(&hub_account)),
+            &"42".repeat(32),
         )
         .unwrap(),
     );
@@ -237,9 +242,12 @@ async fn hub_routes_cross_channel_after_recipient_confirmation() {
     let client = reqwest::Client::new();
     let base = format!("http://{hub_addr}");
 
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
     let pending: Value = client
         .post(format!("{base}/v1/fast-pay"))
         .json(&json!({
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "idempotency_key": idempotency_key,
             "payer": alice_address.clone(),
             "payee": bob_address.clone(),
             "amount": "1.5",
@@ -264,7 +272,10 @@ async fn hub_routes_cross_channel_after_recipient_confirmation() {
         .unwrap();
     let awaiting: Value = client
         .post(format!("{base}/v1/fast-pay/{payment_id}/confirm"))
-        .json(&json!({ "bill_hex": payer_bill.to_bill_hex() }))
+        .json(&json!({
+            "idempotency_key": idempotency_key,
+            "bill_hex": payer_bill.to_bill_hex()
+        }))
         .send()
         .await
         .unwrap()
@@ -296,7 +307,10 @@ async fn hub_routes_cross_channel_after_recipient_confirmation() {
         .unwrap();
     let settled: Value = client
         .post(format!("{base}/v1/fast-pay/{payment_id}/confirm"))
-        .json(&json!({ "bill_hex": recipient_bill.to_bill_hex() }))
+        .json(&json!({
+            "idempotency_key": item["idempotency_key"],
+            "bill_hex": recipient_bill.to_bill_hex()
+        }))
         .send()
         .await
         .unwrap()
@@ -355,13 +369,14 @@ async fn hub_rejects_insufficient_balance() {
     );
     let (node_url, node_handle) = spawn_mock_node(channels).await;
     let hub = Arc::new(
-        HubState::new(
+        HubState::new_secure(
             "t",
             hub_address.clone(),
             node_url,
-            None,
-            0.0,
+            tempdir().unwrap().keep().join("hub-state.json"),
+            0,
             Some(account_secret_hex(&hub_account)),
+            &"42".repeat(32),
         )
         .unwrap(),
     );
@@ -375,6 +390,8 @@ async fn hub_rejects_insufficient_balance() {
     let resp = reqwest::Client::new()
         .post(format!("http://{hub_addr}/v1/fast-pay"))
         .json(&json!({
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "idempotency_key": uuid::Uuid::new_v4().to_string(),
             "payer": alice_address,
             "payee": hub_address,
             "amount": "1",
@@ -412,13 +429,14 @@ async fn hub_rejects_payee_without_hub_channel() {
     );
     let (node_url, node_handle) = spawn_mock_node(channels).await;
     let hub = Arc::new(
-        HubState::new(
+        HubState::new_secure(
             "t",
             hub_address.clone(),
             node_url,
-            None,
-            0.0,
+            tempdir().unwrap().keep().join("hub-state.json"),
+            0,
             Some(account_secret_hex(&hub_account)),
+            &"42".repeat(32),
         )
         .unwrap(),
     );
@@ -432,6 +450,8 @@ async fn hub_rejects_payee_without_hub_channel() {
     let resp = reqwest::Client::new()
         .post(format!("http://{hub_addr}/v1/fast-pay"))
         .json(&json!({
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "idempotency_key": uuid::Uuid::new_v4().to_string(),
             "payer": alice_address,
             "payee": bob_address,
             "amount": "1",
@@ -475,13 +495,14 @@ async fn hub_ignores_legacy_fee_payer_and_remains_fee_free() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("hub-state-recipient-fee.json");
     let hub = Arc::new(
-        HubState::new(
+        HubState::new_secure(
             "test hub",
             hub_address.clone(),
             node_url,
-            Some(state_path),
-            0.0,
+            state_path,
+            0,
             Some(account_secret_hex(&hub_account)),
+            &"42".repeat(32),
         )
         .unwrap(),
     );
@@ -499,6 +520,8 @@ async fn hub_ignores_legacy_fee_payer_and_remains_fee_free() {
         &client,
         &base,
         json!({
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "idempotency_key": uuid::Uuid::new_v4().to_string(),
             "payer": alice_address,
             "payee": hub_address,
             "amount": "2",

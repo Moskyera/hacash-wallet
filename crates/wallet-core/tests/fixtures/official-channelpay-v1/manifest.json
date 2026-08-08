@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "producer": "official-hacash-channelpay-go",
+  "protocol_version": 1,
+  "channelpay_commit": "d63e4109f2f9f4471f0838536b68b240848a77ef",
+  "hacash_core_commit": "8bb265fc1a68acc0af3236354fba7386bac4d9c5",
+  "vectors": [
+    {
+      "name": "heartbeat",
+      "path": "heartbeat.bin",
+      "sha256": "dc0e9c3658a1a3ed1ec94274d8b19925c93e1abb7ddba294923ad9bde30f8cb8",
+      "format": "protocol_frame",
+      "message_type": 15
+    },
+    {
+      "name": "login",
+      "path": "login.bin",
+      "sha256": "f352285f943f8dc3aace6dd9339f52c9fe69d2b10fb5cbb6bda1431e222a5661",
+      "format": "protocol_frame",
+      "message_type": 4
+    },
+    {
+      "name": "prequery-request",
+      "path": "prequery-request.bin",
+      "sha256": "02313c4266bf520ac503180da911882c1f488652ffc86a81e9e02141ca4f5b82",
+      "format": "protocol_frame",
+      "message_type": 6
+    },
+    {
+      "name": "prove-body",
+      "path": "prove-body.bin",
+      "sha256": "ada5c5a5b227b7de9ca33b65cc56af7d0394596aca6d1011ab112d36d5146a94",
+      "format": "protocol_frame",
+      "message_type": 9
+    },
+    {
+      "name": "signature",
+      "path": "signature.bin",
+      "sha256": "dd5a126878b2ba988f755ca1cbf38865ec6dde4fd6c6d2f92963ff37d53799a4",
+      "format": "protocol_frame",
+      "message_type": 10
+    },
+    {
+      "name": "broadcast-error",
+      "path": "broadcast-error.bin",
+      "sha256": "bd39f4cd708886768e25e2705a2ffa12374764b8afeb28fc0dd00b98b3ac4021",
+      "format": "protocol_frame",
+      "message_type": 11
+    },
+    {
+      "name": "broadcast-success",
+      "path": "broadcast-success.bin",
+      "sha256": "4010f16691d3066ea562b43fc503f506e44b43c8d026cef6f80b646115407ecf",
+      "format": "protocol_frame",
+      "message_type": 12
+    },
+    {
+      "name": "reconciliation-request",
+      "path": "reconciliation-request.bin",
+      "sha256": "af74dde07360f635979e16e25af20f7571e19c7e1d61d5d4eedf4fec6cb38369",
+      "format": "protocol_frame",
+      "message_type": 13
+    },
+    {
+      "name": "reconciliation-response",
+      "path": "reconciliation-response.bin",
+      "sha256": "a81456b3af7095ef904e1c94a02784923fba7d207931073f0a8bce3ae90aa974",
+      "format": "protocol_frame",
+      "message_type": 14
+    },
+    {
+      "name": "complete-documents",
+      "path": "complete-documents.bin",
+      "sha256": "fb2ddb15a6f8cd3b662835d616c69729d65a2b546cdf1d4449cb127cdc28ef31",
+      "format": "complete_documents"
+    }
+  ]
+}

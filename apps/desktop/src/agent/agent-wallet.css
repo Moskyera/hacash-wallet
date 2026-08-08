@@ -1,0 +1,858 @@
+.agent-app,
+.agent-entry {
+  min-height: 100vh;
+  background: #000;
+  color: #f5f5f5;
+}
+
+.agent-app {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+.agent-pilot-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid #744600;
+  border-radius: 10px;
+  background: #090500;
+  color: #ffae25;
+  letter-spacing: 0.06em;
+  font-size: 12px;
+}
+
+.agent-pilot-banner span {
+  font-weight: 800;
+}
+
+.agent-pilot-banner span:last-child {
+  color: #fff;
+}
+
+.agent-sidebar {
+  min-height: 100vh;
+  padding: 24px 18px;
+  border-right: 1px solid #2a1b08;
+  background: #050505;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.agent-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.agent-brand div {
+  display: grid;
+  gap: 2px;
+}
+
+.agent-brand span,
+.agent-sidebar-foot,
+.agent-page-head p {
+  color: #9b9b9b;
+  font-size: 12px;
+}
+
+.wallet-space-switcher {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #30210b;
+  border-radius: 12px;
+  background: #080808;
+}
+
+.wallet-space-switcher button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #999;
+  font-weight: 700;
+}
+
+.wallet-space-switcher button.active {
+  background: #ff9d00;
+  color: #000;
+}
+
+.agent-sidebar nav {
+  display: grid;
+  gap: 5px;
+}
+
+.agent-sidebar nav button {
+  min-height: 42px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #aaa;
+  text-align: left;
+}
+
+.agent-sidebar nav button.active {
+  border-color: #51330a;
+  background: #171005;
+  color: #ffab20;
+}
+
+.agent-inline-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent, #f5a623);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.agent-sidebar-foot {
+  margin-top: auto;
+  display: grid;
+  gap: 8px;
+}
+
+.agent-sidebar-foot button,
+.agent-content button,
+.agent-center-card button {
+  min-height: 40px;
+  border: 1px solid #4d3109;
+  border-radius: 9px;
+  background: #15100a;
+  color: #ffad24;
+  font-weight: 700;
+}
+
+.agent-content {
+  padding: 32px;
+  overflow: auto;
+}
+
+.agent-page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+.agent-page-head h1,
+.agent-center-card h1,
+.agent-info-page h1 {
+  margin: 6px 0 8px;
+}
+
+.agent-page-head p {
+  margin: 0;
+  word-break: break-all;
+}
+
+.agent-eyebrow {
+  color: #ff9d00;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.agent-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.agent-metric,
+.agent-panel,
+.agent-center-card {
+  border: 1px solid #2d210f;
+  background: #070707;
+  box-shadow: 0 16px 50px rgb(0 0 0 / 35%);
+}
+
+.agent-metric {
+  padding: 18px;
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.agent-metric span {
+  color: #8b8b8b;
+  font-size: 12px;
+}
+
+.agent-metric strong {
+  color: #ffad24;
+  font-size: 19px;
+}
+
+.agent-panel {
+  margin-top: 16px;
+  padding: 22px;
+  border-radius: 14px;
+}
+
+.agent-panel h2 {
+  margin-top: 0;
+}
+
+.agent-panel p,
+.agent-center-card p,
+.agent-center-card li {
+  color: #aaa;
+  line-height: 1.55;
+}
+
+.agent-control-row,
+.agent-stats-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.agent-stats-row span {
+  color: #aaa;
+}
+
+.agent-stats-row strong {
+  margin-left: 6px;
+  color: #fff;
+}
+
+.agent-status {
+  padding: 7px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.agent-status.ok {
+  background: #231805;
+  color: #ffad24;
+}
+
+.agent-status.stopped {
+  background: #1d0b06;
+  color: #ff784f;
+}
+
+.agent-content button.agent-danger {
+  border-color: #8d2f13;
+  background: #210a04;
+  color: #ff805c;
+}
+
+.agent-warning,
+.agent-safe-note {
+  padding: 13px 15px;
+  border: 1px solid #55370b;
+  border-radius: 10px;
+  background: #160f04;
+  color: #ffc05a;
+}
+
+.agent-entry {
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+.agent-entry > header {
+  position: fixed;
+  inset: 20px 24px auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.agent-entry .wallet-space-switcher {
+  width: min(360px, 60vw);
+  background: #000;
+}
+
+.agent-entry .wallet-space-switcher button,
+.agent-entry .wallet-space-switcher button.active {
+  background: #000;
+}
+
+.agent-entry .wallet-space-switcher button.active {
+  background: #000;
+  border: 1px solid #ff9d00;
+  color: #ffad24;
+}
+
+.agent-entry .agent-center-card {
+  background: #000;
+}
+
+.agent-center-card {
+  width: min(620px, 92vw);
+  padding: 30px;
+  border-radius: 18px;
+}
+
+.agent-center-card label {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  color: #c8c8c8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.agent-center-card input,
+.agent-center-card select {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid #3d2b0f;
+  border-radius: 9px;
+  background: #020202;
+  color: #fff;
+}
+
+.agent-center-card .agent-primary {
+  width: 100%;
+  margin-top: 20px;
+  background: #ff9d00;
+  color: #000;
+}
+
+.agent-center-card button:disabled,
+.agent-content button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.agent-info-page {
+  max-width: 760px;
+}
+
+@media (max-width: 900px) {
+  .agent-app {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+
+  .agent-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+
+.agent-lead {
+  max-width: 780px;
+  margin: -10px 0 20px;
+  color: #aaa;
+  line-height: 1.55;
+}
+
+.agent-card-list,
+.agent-policy-layout {
+  display: grid;
+  gap: 14px;
+}
+
+.agent-record,
+.agent-operation {
+  margin-top: 0;
+}
+
+.agent-record-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-record-head h2,
+.agent-record-head p {
+  margin: 0;
+}
+
+.agent-record-head p {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.agent-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 20px 0 0;
+}
+
+.agent-detail-grid > div {
+  min-width: 0;
+}
+
+.agent-detail-grid > div.wide {
+  grid-column: 1 / -1;
+}
+
+.agent-detail-grid dt {
+  margin-bottom: 5px;
+  color: #888;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.agent-detail-grid dd {
+  margin: 0;
+  color: #f3f3f3;
+  overflow-wrap: anywhere;
+}
+
+/* The full address of a recipient under review. Never truncated, never
+   ellipsised: the owner has to be able to read every character. */
+.agent-exact-address {
+  margin: 8px 0 0;
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.agent-confirm-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+
+.agent-confirm-row .agent-warning {
+  flex: 1 1 100%;
+}
+
+.agent-field {
+  display: grid;
+  gap: 7px;
+  color: #c8c8c8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.agent-field input,
+.agent-field select,
+.agent-field textarea {
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid #3d2b0f;
+  border-radius: 9px;
+  background: #020202;
+  color: #fff;
+  font: inherit;
+}
+
+.agent-field textarea {
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.agent-form-grid,
+.agent-security-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.agent-check-list {
+  display: grid;
+  gap: 9px;
+}
+
+.agent-check-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #251a0b;
+  border-radius: 9px;
+  background: #030303;
+}
+
+.agent-check-list input {
+  margin-top: 4px;
+  accent-color: #ff9d00;
+}
+
+.agent-check-list span,
+.agent-check-list small {
+  display: grid;
+  gap: 3px;
+}
+
+.agent-check-list small {
+  color: #888;
+  font-weight: 400;
+}
+
+.agent-content button.agent-primary-action {
+  border-color: #ff9d00;
+  background: #ff9d00;
+  color: #000;
+}
+
+.agent-block-action {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+}
+
+.agent-review,
+.agent-approval-review {
+  border-color: #70470a;
+}
+
+.agent-section-title {
+  margin: 26px 0 14px;
+}
+
+.agent-empty {
+  color: #aaa;
+  text-align: center;
+}
+
+.agent-empty h2 {
+  color: #f5f5f5;
+}
+
+.agent-content .alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .agent-form-grid,
+  .agent-security-grid,
+  .agent-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.agent-mobile-companion {
+  display: grid;
+  gap: 16px;
+}
+
+.agent-companion-step {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(255, 170, 0, 0.28);
+  border-radius: 14px;
+  background: #000;
+}
+
+.agent-companion-step h3 {
+  margin: 4px 0;
+  color: #ffb000;
+}
+
+.agent-companion-qr {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: min(444px, 100%);
+  max-width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(255, 170, 0, 0.34);
+  border-radius: 14px;
+  background: #070707;
+}
+
+.agent-companion-qr img {
+  display: block;
+  width: min(420px, 100%);
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  background: #fff;
+  image-rendering: pixelated;
+}
+
+.agent-companion-scanner {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-companion-scanner .qr-reader {
+  display: none;
+  width: 100%;
+  max-width: 420px;
+  overflow: hidden;
+  border-radius: 12px;
+}
+
+.agent-companion-scanner .qr-reader.active {
+  display: block;
+}
+
+.agent-verification-code {
+  display: block;
+  width: fit-content;
+  padding: 10px 16px;
+  border: 1px solid #ffb000;
+  border-radius: 10px;
+  color: #ffb000;
+  background: #000;
+  font: 700 1.65rem/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: 0.16em;
+}
+.agent-companion-devices {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(245, 166, 35, 0.24);
+  border-radius: 14px;
+  background: #050505;
+}
+
+.agent-companion-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid #1a1a1a;
+}
+
+.agent-companion-device:first-of-type {
+  border-top: 0;
+}
+
+/* A revoked phone has to be able to explain itself in place, and the revoke
+   confirmation has to be able to state that it is permanent. Both need room to
+   wrap instead of squeezing the fingerprint out of the row. */
+.agent-companion-device {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.agent-companion-device-identity {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.agent-companion-device-action {
+  display: grid;
+  gap: 8px;
+  flex: 0 1 320px;
+}
+
+.agent-companion-revoked-note {
+  margin-top: 8px;
+}
+
+.agent-companion-revoked-note ul,
+.agent-companion-device .alert ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+/* HPAY premium Agent Wallet presentation. Security behavior remains unchanged. */
+.agent-app {
+  grid-template-columns: 230px minmax(0, 1fr);
+}
+.agent-sidebar { gap: 16px; padding: 18px 14px; border-right-color: #242424; }
+.agent-brand .wallet-logo-sm { width: 42px; height: 42px; max-width: 42px; max-height: 42px; }
+.agent-brand strong { font-size: 13px; }
+.agent-brand span { font-size: 9px; }
+.agent-sidebar .wallet-space-switcher { padding: 3px; border-color: #292929; border-radius: 9px; background: #000; }
+.agent-sidebar .wallet-space-switcher button { min-height: 34px; padding: 7px; border: 1px solid transparent; background: #000; color: #898989; font-size: 10px; }
+.agent-sidebar .wallet-space-switcher button.active { border-color: rgb(245 166 35 / 32%); background: rgb(245 166 35 / 8%); color: #ffad24; }
+.agent-sidebar nav button { display: grid; grid-template-columns: 25px minmax(0, 1fr); align-items: center; gap: 8px; min-height: 36px; padding: 7px 9px; font-size: 11px; }
+.agent-sidebar nav button.active { border-color: rgb(245 166 35 / 32%); border-left: 2px solid #ff9d00; background: linear-gradient(90deg, rgb(245 166 35 / 13%), rgb(245 166 35 / 3%)); }
+.agent-nav-mark { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid #2c2c2c; border-radius: 6px; color: #ffad24; font-size: 8px; font-weight: 850; }
+.agent-content { padding: 26px; background: radial-gradient(circle at 82% 9%, rgb(245 166 35 / 5%), transparent 27%), #000; }
+.agent-content > * { max-width: 1320px; margin-right: auto; margin-left: auto; }
+.agent-page-head { min-height: 52px; margin-bottom: 16px; }
+.agent-page-head h1 { margin: 3px 0 5px; font-size: 20px; }
+.agent-page-head > button { width: auto; margin: 0; background: #050505; }
+.agent-boundary-banner { display: flex; align-items: center; gap: 11px; margin-bottom: 14px; padding: 11px 14px; border: 1px solid rgb(245 166 35 / 34%); border-radius: 10px; background: rgb(245 166 35 / 6%); }
+.agent-boundary-icon { display: grid; width: 24px; height: 24px; flex: 0 0 24px; place-items: center; border: 1px solid #ffad24; border-radius: 50%; color: #ffad24; font-size: 11px; font-weight: 900; }
+.agent-boundary-banner p { margin: 0; color: #c4c4c4; font-size: 11px; }
+.agent-boundary-banner strong { color: #ffbd50; }
+.agent-safe-note { margin-bottom: 14px; border-color: #2a2a2a; background: #070707; color: #999; font-size: 11px; }
+.agent-metrics { gap: 10px; margin-bottom: 14px; }
+.agent-metric, .agent-panel { border-color: #242424; background: linear-gradient(145deg, #101010, #080808 74%); box-shadow: inset 0 1px 0 rgb(255 255 255 / 2%), 0 14px 40px rgb(0 0 0 / 24%); }
+.agent-metric { min-height: 100px; padding: 15px; }
+.agent-metric strong { color: #f5f5f5; font-size: 17px; font-variant-numeric: tabular-nums; }
+.agent-panel { padding: 18px; }
+.agent-panel h2 { font-size: 14px; }
+.agent-panel p { font-size: 11px; }
+.agent-status.ok { color: #73dc8d; background: rgb(88 200 120 / 9%); }
+.agent-sidebar-foot { padding-top: 10px; border-top: 1px solid #1c1c1c; }
+/* The attention strip. One line per thing that needs the owner, at most one
+   button per line, and nothing at all when the wallet is healthy. */
+.agent-alert-strip {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.agent-alert-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  border: 1px solid #55370b;
+  border-radius: 10px;
+  background: #160f04;
+  color: #ffc05a;
+  font-size: 12px;
+}
+
+.agent-alert-row.info {
+  border-color: #2a2a2a;
+  background: #070707;
+  color: #b9b9b9;
+}
+
+.agent-alert-status {
+  flex: 1 1 auto;
+  font-weight: 700;
+}
+
+.agent-alert-row > button {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.agent-alert-why,
+.agent-advanced-details {
+  color: #9b9b9b;
+  font-size: 11px;
+}
+
+.agent-alert-why > summary,
+.agent-advanced-details > summary {
+  cursor: pointer;
+  color: #ffad24;
+  font-weight: 700;
+  list-style: revert;
+}
+
+.agent-alert-why[open] {
+  flex: 1 1 100%;
+}
+
+.agent-advanced-details {
+  padding: 10px 12px;
+  border: 1px solid #242424;
+  border-radius: 10px;
+  background: #050505;
+}
+
+.agent-advanced-details > *:not(summary) {
+  margin-top: 10px;
+}
+
+.agent-detail-list > div {
+  margin-top: 8px;
+}
+
+.agent-detail-list dt {
+  color: #ffad24;
+  font-weight: 700;
+}
+
+.agent-detail-list dd {
+  margin: 3px 0 0;
+  color: #9b9b9b;
+}
+
+.agent-muted {
+  color: #8b8b8b;
+  font-size: 11px;
+}
+
+/* The phone panel leads with its control, not with its explanation. */
+.agent-companion-primary {
+  display: grid;
+  gap: 12px;
+}
+
+.agent-empty .agent-primary-action {
+  margin-top: 14px;
+}
+
+.agent-qr-transfer-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+.agent-qr-transfer-actions button {
+  width: 100%;
+}
+
+.agent-qr-file-input {
+  display: none;
+}
+
+/* THE BACKUP WARNING. It is part of the feature, not a footnote, so it is
+   styled to be read: a warning surface, one line per consequence, each with its
+   own checkbox, and a running count of what is still unread. */
+.agent-warning-block {
+  margin: 12px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid #7a3b0d;
+  border-radius: 10px;
+  background: #1a0d03;
+}
+
+.agent-warning-headline {
+  margin: 0 0 10px;
+  color: #ffb356;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.agent-warning-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-warning-list li + li {
+  margin-top: 10px;
+}
+
+.agent-warning-list label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  color: #f0d8b8;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.agent-warning-list input[type="checkbox"] {
+  margin: 3px 0 0;
+}
+
+.agent-warning-outstanding {
+  margin: 10px 0 0;
+  color: #ff9d00;
+  font-size: 12px;
+  font-weight: 700;
+}

@@ -22,7 +22,7 @@ export const sv = {
   "nav.advanced": "Avancerat",
   "nav.pay": "Betala",
   "nav.messages": "Chatt",
-  "nav.more": "Mer",
+  "nav.more": "Meny",
   "more.wallet": "Plånbok",
   "more.preferences": "Inställningar",
   "more.transactions": "Transaktionshistorik",

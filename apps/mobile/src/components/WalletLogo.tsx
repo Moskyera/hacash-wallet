@@ -1,5 +1,4 @@
-import fullLogoSrc from "../assets/hb-icon.png";
-import markLogoSrc from "../assets/mosky.png";
+import { hpayFullLogoUrl, hpayMarkLogoUrl } from "@hacash/wallet-ui";
 
 type Props = {
   size?: "sm" | "lg" | "splash";
@@ -11,9 +10,9 @@ type Props = {
 export default function WalletLogo({
   size = "lg",
   variant = "full",
-  alt = "Hacash Wallet",
+  alt = "HPAY Wallet",
 }: Props) {
-  const src = variant === "mark" ? markLogoSrc : fullLogoSrc;
+  const src = variant === "mark" ? hpayMarkLogoUrl : hpayFullLogoUrl;
   const markClass = variant === "mark" ? " wallet-logo-mark" : "";
 
   return (

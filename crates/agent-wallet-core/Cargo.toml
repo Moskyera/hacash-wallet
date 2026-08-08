@@ -1,0 +1,50 @@
+[package]
+name = "agent-wallet-core"
+version.workspace = true
+edition.workspace = true
+description = "Independent, manually approved AI Agent Wallet domain for HPAY"
+license.workspace = true
+
+[features]
+default = []
+agent-wallet-testnet-pilot = ["hpay-companion-protocol/agent-wallet-testnet-pilot"]
+
+[dependencies]
+hacash-wallet-core = { path = "../wallet-core" }
+hpay-agent-types = { path = "../agent-types" }
+hpay-agent-connector = { path = "../agent-connector" }
+hpay-companion-protocol = { path = "../companion-protocol" }
+async-trait = "0.1"
+tokio = { workspace = true, features = ["time"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+rand.workspace = true
+hex.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+p256.workspace = true
+fs2.workspace = true
+aes-gcm.workspace = true
+argon2.workspace = true
+protocol = { path = "../../../hacash-fullnodedev/protocol" }
+sys = { path = "../../../hacash-fullnodedev/sys" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+axum.workspace = true
+hpay-companion-protocol = { path = "../companion-protocol", features = ["dev-software-identity"] }
+# Test-only. The pilot end-to-end test needs a node mock that answers
+# /create/transaction with a real consensus Type 2 body, because the signer
+# decodes and re-verifies whatever the node returns before it will sign it.
+# Never a runtime dependency: the crate itself must not construct transactions.
+field = { path = "../../../hacash-fullnodedev/field" }
+basis = { path = "../../../hacash-fullnodedev/basis" }

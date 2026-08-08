@@ -1,0 +1,43 @@
+[package]
+name = "hpay-agent-connector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local-only, capability-scoped HPAY AI Agent protocol foundation"
+
+[features]
+default = []
+listener = []
+
+[dependencies]
+async-trait = "0.1"
+hex.workspace = true
+hpay-agent-types = { path = "../agent-types" }
+libc = "0.2"
+p256 = { workspace = true, features = ["pkcs8"] }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
+[[bin]]
+name = "hpay-agentctl"
+path = "src/bin/hpay-agentctl.rs"

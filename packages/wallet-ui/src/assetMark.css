@@ -1,0 +1,47 @@
+.asset-mark {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  object-fit: contain;
+}
+
+.asset-mark-sm {
+  width: 24px;
+  height: 24px;
+}
+
+.asset-mark-md {
+  width: 34px;
+  height: 34px;
+}
+
+.asset-mark-lg {
+  width: 46px;
+  height: 46px;
+}
+
+.asset-mark-hip20 {
+  position: relative;
+  color: #f7af34;
+  font-size: 0.72em;
+  font-weight: 850;
+  line-height: 1;
+  background:
+    linear-gradient(#000, #000) padding-box,
+    linear-gradient(145deg, #ffbf47, #b76d08) border-box;
+  border: 1px solid transparent;
+  clip-path: polygon(25% 6.7%, 75% 6.7%, 100% 50%, 75% 93.3%, 25% 93.3%, 0 50%);
+}
+
+.asset-mark-hip20::after {
+  position: absolute;
+  inset: 4px;
+  content: "";
+  border: 1px solid rgb(247 175 52 / 40%);
+  clip-path: inherit;
+}
+
+.asset-mark-hip20 > span {
+  position: relative;
+  z-index: 1;
+}

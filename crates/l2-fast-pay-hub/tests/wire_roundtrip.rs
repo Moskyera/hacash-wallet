@@ -1,3 +1,4 @@
+use l2_fast_pay_hub::amount::HacAmount;
 use l2_fast_pay_hub::channel_id::derive_channel_id;
 use l2_fast_pay_hub::node::{ChannelInfo, ChannelPartyBalance, ChannelSide};
 use l2_fast_pay_hub::wire::{
@@ -32,8 +33,8 @@ fn channel_pay_complete_documents_roundtrip() {
     let payer = ChannelWireInput {
         channel: sample_channel(&alice_id, "1Alice", "1Hub", "8.499"),
         channel_id_hex: alice_id,
-        left_balance_mei: 8.499,
-        right_balance_mei: 1.001,
+        left_balance_mei: HacAmount::from_millimeis(8_499),
+        right_balance_mei: HacAmount::from_millimeis(1_001),
         left_satoshi: 0,
         right_satoshi: 0,
         bill_auto_number: 1,
@@ -41,8 +42,8 @@ fn channel_pay_complete_documents_roundtrip() {
     let payee = ChannelWireInput {
         channel: sample_channel(&bob_id, "1Bob", "1Hub", "3.5"),
         channel_id_hex: bob_id,
-        left_balance_mei: 3.5,
-        right_balance_mei: 0.0,
+        left_balance_mei: HacAmount::from_millimeis(3_500),
+        right_balance_mei: HacAmount::ZERO,
         left_satoshi: 0,
         right_satoshi: 0,
         bill_auto_number: 1,
@@ -51,10 +52,10 @@ fn channel_pay_complete_documents_roundtrip() {
     let doc = build_cross_channel_bill(
         &payer,
         ChannelSide::Left,
-        1.501,
+        HacAmount::from_millimeis(1_501),
         &payee,
         ChannelSide::Left,
-        1.5,
+        HacAmount::from_millimeis(1_500),
         1_700_000_000,
     )
     .unwrap();

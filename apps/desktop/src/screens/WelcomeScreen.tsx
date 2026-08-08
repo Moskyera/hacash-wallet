@@ -69,7 +69,7 @@ export default function WelcomeScreen({
       <div className="auth-welcome">
         <div className="auth-hero">
           <WalletLogo size="lg" />
-          <h1>Your modern Hacash wallet</h1>
+          <h1>Welcome to HPAY Wallet</h1>
           <p className="muted">
             Encrypted keys on device. Fast Pay when available, otherwise on-chain.
           </p>

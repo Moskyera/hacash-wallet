@@ -2,7 +2,7 @@
 name = "hacash-wallet"
 version.workspace = true
 edition.workspace = true
-description = "Hacash Wallet. secure desktop app"
+description = "HPAY Wallet. secure desktop app for Hacash"
 
 [lib]
 name = "hacash_wallet_lib"
@@ -13,7 +13,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 hacash-wallet-core = { path = "../../../crates/wallet-core" }
-wallet-tauri-common = { path = "../../../crates/wallet-tauri-common", features = ["desktop"] }
+wallet-tauri-common = { path = "../../../crates/wallet-tauri-common", features = ["desktop", "agent-wallet-admin"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 serde.workspace = true
@@ -35,3 +35,4 @@ windows = { version = "0.58", features = [
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+agent-wallet-testnet-pilot = ["wallet-tauri-common/agent-wallet-testnet-pilot"]

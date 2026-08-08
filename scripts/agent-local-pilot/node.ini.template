@@ -1,0 +1,37 @@
+; HPAY LOCAL PILOT CHAIN
+; PRIVATE DEVELOPMENT NETWORK
+; NO MAINNET FUNDS
+; NOT HACASH PUBLIC TESTNET
+;
+; Render only through scripts/start-agent-local-pilot-node.ps1.
+
+data_dir = @@DATA_DIR@@
+
+[node]
+fast_sync = false
+not_find_nodes = true
+not_accept_nodes = true
+listen = @@P2P_PORT@@
+
+[mint]
+chain_id = 7
+network_kind = local_pilot_v1
+node_profile_id = hpay-local-pilot-chain-v1
+@@PILOT_FUNDING_LINE@@
+difficulty_adjust_blocks = 8
+difficulty_group_blocks = 4
+each_block_target_time = 455
+
+[server]
+enable = true
+listen = @@RPC_PORT@@
+bind = 127.0.0.1
+diamond_form = true
+debug_open = false
+
+[miner]
+enable = @@MINER_ENABLED@@
+reward = @@REWARD_ADDRESS@@
+
+[diamondminer]
+enable = false

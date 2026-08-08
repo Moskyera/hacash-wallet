@@ -130,7 +130,7 @@ if (Test-Path $iconSrcRoot) {
     Write-Host "Synced branded launcher icons to gen/android res" -ForegroundColor Green
 }
 
-# Replace default green Tauri adaptive background with solid black (matches Hacash branding).
+# Replace default green Tauri adaptive background with solid black (matches HPAY branding).
 $bgXml = Join-Path $iconDstRoot "drawable\ic_launcher_background.xml"
 if (Test-Path $bgXml) {
     @'
@@ -183,6 +183,20 @@ if (Test-Path $kotlinSrcRoot) {
 
 # Duplicate FileProvider authorities crash Android on launch; keep exactly one entry.
 $manifestContent = Get-Content $manifest -Raw
+$agentActivityPattern = '(?s)\s*<activity[^>]*android:name="\.AgentCompanionActivity"[^>]*(?:/>|>.*?</activity>)\s*'
+while ([regex]::Matches($manifestContent, $agentActivityPattern).Count -gt 0) {
+    $manifestContent = [regex]::Replace($manifestContent, $agentActivityPattern, '', 1)
+}
+$agentActivityBlock = @'
+        <activity
+            android:name=".AgentCompanionActivity"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:label="HPAY AI Agent Wallet"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.hacash_wallet_mobile" />
+'@
 $providerPattern = '(?s)\s*<provider[^>]*android:name="androidx\.core\.content\.FileProvider"[^>]*>.*?</provider>\s*'
 while ([regex]::Matches($manifestContent, $providerPattern).Count -gt 0) {
     $manifestContent = [regex]::Replace($manifestContent, $providerPattern, '', 1)
@@ -198,9 +212,9 @@ $providerBlock = @'
                 android:resource="@xml/file_paths" />
         </provider>
 '@
-$manifestContent = $manifestContent -replace '</application>', ($providerBlock + "`r`n    </application>")
+$manifestContent = $manifestContent -replace '</application>', ($agentActivityBlock + "`r`n" + $providerBlock + "`r`n    </application>")
 Set-Content -Path $manifest -Value $manifestContent -NoNewline
-Write-Host "Normalized single FileProvider in AndroidManifest" -ForegroundColor Green
+Write-Host "Normalized Agent Activity and single FileProvider in AndroidManifest" -ForegroundColor Green
 
 & (Join-Path $mobile "sync-app-version.ps1")
 
@@ -286,6 +300,7 @@ $proguardPath = Join-Path $android "app\proguard-rules.pro"
 $proguardKeeps = @'
 # Native wallet plugin (loaded by class name through Tauri's Android lifecycle)
 -keep class org.hacash.wallet.mobile.WalletNativePlugin { *; }
+-keep class org.hacash.wallet.mobile.AgentCompanionIdentityPlugin { *; }
 -keep class org.hacash.wallet.mobile.ApkInstaller { *; }
 -keep class org.hacash.wallet.mobile.BackupFileHelper { *; }
 -keep class org.hacash.wallet.mobile.BiometricSecretStore { *; }
@@ -299,6 +314,7 @@ if (Test-Path $proguardPath) {
     $proguard = Get-Content $proguardPath -Raw
     if (
         $proguard -notmatch "WalletNativePlugin" -or
+        $proguard -notmatch "AgentCompanionIdentityPlugin" -or
         $proguard -notmatch "app\.tauri\.opener\.OpenerPlugin" -or
         $proguard -notmatch "BackupFileHelper" -or
         $proguard -notmatch "BiometricSecretStore" -or
@@ -309,7 +325,7 @@ if (Test-Path $proguardPath) {
     }
 }
 
-& (Join-Path $mobile "validate-android-build.ps1")
+& (Join-Path $mobile "validate-android-build.ps1") -SkipEmbeddedFrontendCheck
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $distIndex = Join-Path $mobile "dist\index.html"

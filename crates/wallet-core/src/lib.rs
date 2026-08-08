@@ -7,6 +7,7 @@ pub mod bills;
 mod biometric_unlock;
 pub mod btc_send;
 pub mod channel;
+pub mod channelpay_interop;
 pub mod dapp;
 pub mod dust_whisper;
 pub mod error;
@@ -20,8 +21,12 @@ pub mod kdf;
 pub mod l1_fee;
 pub mod l2_bill;
 pub mod l2_hub;
+pub mod l2_safety;
+pub mod l2_transport;
 pub mod messenger;
 pub mod messenger_crypto;
+pub mod native_asset_metadata;
+pub mod native_asset_send;
 pub mod node;
 pub mod node_capabilities;
 pub mod node_discovery;
@@ -67,10 +72,14 @@ pub use l1_fee::L1FeeTierQuote;
 pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillSummary};
 pub use l2_hub::HubHealth;
 pub use messenger::{ChatMessage, ChatThread, MessageDirection};
+pub use native_asset_metadata::{NativeAssetMetadata, fetch_native_asset_metadata};
+pub use native_asset_send::NativeAssetSendPreview;
 pub use node::NativeAssetBalance;
 pub use node_capabilities::{
-    CapabilitySource, IstanbulStatus, NodeApiError, NodeCapabilities, NodeChain, NodeFeatures,
-    NodeIdentity, NodeLimits, RegistrySet,
+    CapabilitySource, HPAY_LOCAL_PILOT_CHAIN_ID, HPAY_LOCAL_PILOT_NETWORK_KIND,
+    HPAY_LOCAL_PILOT_PROFILE_ID, IstanbulStatus, NodeApiError, NodeCapabilities, NodeChain,
+    NodeFeatures, NodeIdentity, NodeLimits, NodeNetworkCapabilities, RegistrySet,
+    network_instance_id,
 };
 pub use prices::{PriceSource, SpotPrices, fetch_spot_prices};
 pub use privacy::{PrivacySettings, mask_address, mask_amount, mask_hash};
@@ -84,4 +93,4 @@ pub use send_options::{
 };
 pub use settings::QuantumMeta;
 pub use settings::WalletSettings;
-pub use wallet::WalletService;
+pub use wallet::{ReviewedSendExpectation, WalletService};

@@ -4,9 +4,11 @@ import BtcNetworkNotice from "../components/BtcNetworkNotice";
 import DustWhisperPayOptions from "../components/DustWhisperPayOptions";
 import HacdDiamondVisual from "../components/HacdDiamondVisual";
 import PaymentQrScanner from "../components/PaymentQrScanner";
+import NativeAssetSendPanel from "../components/NativeAssetSendPanel";
 import { useHacdSend } from "../hooks/useHacdSend";
 import { useBtcSend } from "../hooks/useBtcSend";
 import type {
+  AssetSummary,
   DustWhisperSettings,
   HubFeePayer,
   PlatformSecurityStatus,
@@ -33,6 +35,7 @@ import {
 } from "../fastPayUi";
 
 type Props = {
+  assets: AssetSummary | null;
   contacts: SavedContact[];
   sendTo: string;
   setSendTo: (v: string) => void;
@@ -50,6 +53,7 @@ type Props = {
   payScanMode: boolean;
   setPayScanMode: (v: boolean) => void;
   hideAddresses: boolean;
+  hideBalances: boolean;
   settings: WalletSettings | null;
   platformSec: PlatformSecurityStatus | null;
   /// The amount the core actually enforces, already combining the authenticated profile
@@ -75,6 +79,7 @@ type Props = {
 };
 
 export default function PayTab({
+  assets,
   contacts,
   sendTo,
   setSendTo,
@@ -90,6 +95,7 @@ export default function PayTab({
   payScanMode,
   setPayScanMode,
   hideAddresses,
+  hideBalances,
   settings,
   platformSec,
   secondFactorThresholdMei,
@@ -551,6 +557,21 @@ export default function PayTab({
             </div>
           )}
         </>
+      )}
+
+      {asset === "HIP20" && (
+        <NativeAssetSendPanel
+          active={asset === "HIP20"}
+          assets={assets?.native_assets ?? []}
+          busy={busy}
+          setBusy={setBusy}
+          settings={settings}
+          platformSec={platformSec}
+          hideBalances={hideBalances}
+          hideAddresses={hideAddresses}
+          onToast={onToast}
+          onRefresh={onRefresh}
+        />
       )}
 
       {asset === "BTC" && (

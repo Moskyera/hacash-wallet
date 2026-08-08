@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/agent-connector",
+    "crates/agent-types",
+    "crates/agent-wallet-core",
+    "crates/agent-wallet-runtime",
+    "crates/companion-protocol",
+    "crates/companion-lan-runtime",
     "crates/dust-whisper",
     "crates/l2-fast-pay-hub",
     "crates/wallet-core",
@@ -10,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
 license = "MIT"
 
@@ -39,6 +45,8 @@ secp256k1 = "0.31.1"
 tempfile = "3"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
+hmac = "0.12"
+fs2 = "0.4"
 axum = { version = "0.8", features = ["json"] }
 tower-http = { version = "0.6", features = ["trace"] }
 clap = { version = "4", features = ["derive", "env"] }

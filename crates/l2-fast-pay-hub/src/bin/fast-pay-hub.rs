@@ -32,12 +32,16 @@ struct Args {
     name: String,
 
     /// Fast Pay is fee-free. This must remain 0.
-    #[arg(long, default_value_t = 0.0)]
-    hub_fee_mei: f64,
+    #[arg(long, default_value_t = 0)]
+    hub_fee_mei: u64,
 
-    /// Optional JSON file to persist channel ledgers and payment receipts
+    /// Durable JSON state file. Required before settlement signing is enabled.
     #[arg(long)]
     state_file: Option<PathBuf>,
+
+    /// Independent 32-byte journal storage master key, hex encoded.
+    #[arg(long, env = "HACASH_HUB_JOURNAL_KEY_HEX")]
+    journal_key_hex: Option<String>,
 }
 
 #[tokio::main]
@@ -45,14 +49,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    let hub = Arc::new(HubState::new(
-        args.name,
-        args.hub_address,
-        args.node_url.clone(),
-        args.state_file,
-        args.hub_fee_mei,
-        args.hub_secret_hex,
-    )?);
+    let hub = Arc::new(match (args.state_file, args.journal_key_hex.as_deref()) {
+        (Some(state_file), Some(journal_key)) => HubState::new_secure(
+            args.name,
+            args.hub_address,
+            args.node_url.clone(),
+            state_file,
+            args.hub_fee_mei,
+            args.hub_secret_hex,
+            journal_key,
+        )?,
+        (None, Some(_)) => {
+            return Err("--state-file is required with --journal-key-hex".into());
+        }
+        (state_file, None) => HubState::new(
+            args.name,
+            args.hub_address,
+            args.node_url.clone(),
+            state_file,
+            args.hub_fee_mei,
+            args.hub_secret_hex,
+        )?,
+    });
 
     eprintln!(
         "Fast Pay hub: {}",

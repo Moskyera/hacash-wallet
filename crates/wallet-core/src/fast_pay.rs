@@ -153,7 +153,7 @@ pub struct HubDiscoveryEntry {
     pub hub_url: String,
     pub online: bool,
     pub hub_address: Option<String>,
-    pub hub_fee_mei: Option<f64>,
+    pub hub_fee_mei: Option<String>,
     pub error: Option<String>,
 }
 
@@ -201,22 +201,27 @@ async fn probe_hub_entry(id: String, fallback_name: String, hub_url: String) -> 
                 && health.version >= 3
                 && health.settlement_ready
                 && health.cross_channel_ready
-                && health.hub_fee_mei.unwrap_or(0.0).abs() <= f64::EPSILON =>
+                && crate::l2_hub::hub_fee_is_zero(&health) =>
         {
             HubDiscoveryEntry {
                 id,
                 name: health
                     .name
+                    .clone()
                     .filter(|n| !n.is_empty())
                     .unwrap_or(fallback_name),
                 hub_url,
                 online: true,
-                hub_address: health.hub_address.filter(|a| !a.is_empty()).or_else(|| {
-                    preset.and_then(|p| {
-                        (!p.hub_address.is_empty()).then(|| p.hub_address.to_string())
-                    })
-                }),
-                hub_fee_mei: health.hub_fee_mei,
+                hub_address: health
+                    .hub_address
+                    .clone()
+                    .filter(|a| !a.is_empty())
+                    .or_else(|| {
+                        preset.and_then(|p| {
+                            (!p.hub_address.is_empty()).then(|| p.hub_address.to_string())
+                        })
+                    }),
+                hub_fee_mei: crate::l2_hub::hub_fee_label(&health),
                 error: None,
             }
         }
@@ -275,7 +280,9 @@ pub async fn evaluate_fast_pay(
                     && h.version >= 3
                     && h.settlement_ready
                     && h.cross_channel_ready
-                    && h.hub_fee_mei.unwrap_or(0.0).abs() <= f64::EPSILON =>
+                    && crate::l2_hub::hub_fee_is_zero(&h)
+                    && (settings.network_mode != "mainnet"
+                        || crate::l2_hub::hub_mainnet_safety_ready(&h)) =>
             {
                 if let Ok(ch) = query_channel(node, ch_id).await
                     && channel_ready(&ch, user)

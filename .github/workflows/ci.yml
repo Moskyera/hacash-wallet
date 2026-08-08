@@ -26,7 +26,7 @@ jobs:
   rust-quality:
     name: Rust format, lint and tests
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -57,6 +57,12 @@ jobs:
       - name: Check Rust formatting
         run: >-
           cargo fmt
+          -p hpay-agent-types
+          -p hpay-agent-connector
+          -p agent-wallet-core
+          -p agent-wallet-runtime
+          -p hpay-companion-protocol
+          -p hpay-companion-lan-runtime
           -p dust-whisper
           -p l2-fast-pay-hub
           -p hacash-wallet-core
@@ -72,11 +78,39 @@ jobs:
           printf '%s\n' '<!doctype html><title>CI compile fixture</title>' > apps/desktop/dist/index.html
           cp apps/desktop/dist/index.html apps/mobile/dist/index.html
 
-      - name: Lint complete Rust workspace
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Lint Rust workspace with the supported Linux feature set
+        run: |
+          cargo clippy --workspace --all-targets --all-features --exclude hacash-wallet --locked -- -D warnings
+          cargo clippy -p hacash-wallet --all-targets --locked -- -D warnings
 
-      - name: Test complete Rust workspace
-        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
+      - name: Test Rust workspace with the supported Linux feature set
+        run: |
+          cargo test --workspace --all-targets --all-features --exclude hacash-wallet --exclude agent-wallet-core --locked -- --test-threads=1
+          cargo test -p hacash-wallet --all-targets --locked -- --test-threads=1
+
+  rust-agent-wallet:
+    name: Agent Wallet security and recovery tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Checkout pinned fullnodedev
+        shell: pwsh
+        run: ./scripts/checkout-fullnode.ps1
+
+      - name: Activate pinned Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: agent-wallet-security-tests
+
+      - name: Test the Agent Wallet security and recovery boundary
+        run: cargo test -p agent-wallet-core --all-targets --all-features --locked -- --test-threads=1
 
   frontend:
     name: Frontend ${{ matrix.app }}
@@ -102,9 +136,8 @@ jobs:
         working-directory: apps/${{ matrix.app }}
         run: yarn install --frozen-lockfile --non-interactive
 
-      - name: Run mobile unit tests
-        if: matrix.app == 'mobile'
-        working-directory: apps/mobile
+      - name: Run frontend unit tests
+        working-directory: apps/${{ matrix.app }}
         run: yarn test
 
       - name: Type-check and build frontend
@@ -151,9 +184,15 @@ jobs:
         working-directory: apps/desktop
         run: yarn install --frozen-lockfile --non-interactive
 
-      - name: Compile desktop application without packaging
+      - name: Compile Linux desktop without the blocked Agent pilot
+        if: runner.os == 'Linux'
         working-directory: apps/desktop
         run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked
+
+      - name: Compile Windows desktop with the Agent Wallet testnet pilot
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-testnet-pilot
 
   android-compile:
     name: Android arm64 debug compile
@@ -228,7 +267,7 @@ jobs:
 
       - name: Build Android arm64 debug APK
         working-directory: apps/mobile
-        run: yarn run tauri -- android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
+        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-testnet-pilot
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh

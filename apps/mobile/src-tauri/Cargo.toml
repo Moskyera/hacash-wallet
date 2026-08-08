@@ -2,7 +2,7 @@
 name = "hacash-wallet-mobile"
 version.workspace = true
 edition.workspace = true
-description = "Hacash Wallet. mobile shell (Android/iOS via Tauri 2)"
+description = "HPAY Wallet. mobile shell for Hacash (Android/iOS via Tauri 2)"
 
 [lib]
 name = "hacash_wallet_mobile_lib"
@@ -14,6 +14,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 hacash-wallet-core = { path = "../../../crates/wallet-core" }
 wallet-tauri-common = { path = "../../../crates/wallet-tauri-common" }
+hpay-companion-protocol = { path = "../../../crates/companion-protocol" }
+hpay-companion-lan-runtime = { path = "../../../crates/companion-lan-runtime" }
 tauri = { version = "2", features = ["unstable"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -23,6 +25,11 @@ zeroize.workspace = true
 tracing-subscriber = "0.3"
 tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+base64.workspace = true
+hex.workspace = true
+sha2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
@@ -35,3 +42,7 @@ tauri-plugin-biometric = "2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+agent-wallet-testnet-pilot = ["hpay-companion-protocol/agent-wallet-testnet-pilot"]
+
+[dev-dependencies]
+hpay-companion-protocol = { path = "../../../crates/companion-protocol", features = ["dev-software-identity"] }

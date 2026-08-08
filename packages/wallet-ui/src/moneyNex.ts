@@ -14,7 +14,7 @@ export function createMoneyNexInjectScript(walletVersion: string): string {
       .catch(function(error){ if (cb) cb({ err: String(error), ret: 1 }); });
   }
   window.MoneyNex = {
-    info: { name: 'Hacash Wallet', version: ${version}, icon: '' },
+    info: { name: 'HPAY Wallet', version: ${version}, icon: '' },
     wallet: function(params, cb) { call('wallet_dapp_wallet', { origin: origin }, cb); },
     connect: function(params, cb) { call('wallet_dapp_connect', { origin: origin }, cb); },
     disconnect: function(params, cb) { call('wallet_dapp_disconnect', { origin: origin }, cb); },

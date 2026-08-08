@@ -15,17 +15,72 @@ describe("Android private-screen hardening", () => {
     const activity = read(
       "src-tauri/android-src/org/hacash/wallet/mobile/MainActivity.kt",
     );
+    const agentActivity = read(
+      "src-tauri/android-src/org/hacash/wallet/mobile/AgentCompanionActivity.kt",
+    );
     const applyScript = read("apply-android-patches.ps1");
     const validator = read("validate-android-build.ps1");
 
     expect(activity).toContain("WindowManager.LayoutParams.FLAG_SECURE");
+    expect(agentActivity).toContain("WindowManager.LayoutParams.FLAG_SECURE");
+    expect(agentActivity).toContain("class AgentCompanionActivity : TauriActivity()");
     expect(applyScript).toContain('$kotlinSrcRoot = Join-Path $mobile "src-tauri\\android-src"');
     expect(applyScript).toContain("Copy-Item $_.FullName $dst -Force");
     expect(validator).toContain("$mainActivitySource");
     expect(validator).toContain("$mainActivityGenerated");
+    expect(validator).toContain("$agentActivitySource");
+    expect(validator).toContain("$agentActivityGenerated");
+    expect(validator).toContain("AndroidManifest must contain exactly one private AgentCompanionActivity");
     expect(validator).toContain("WindowManager\\.LayoutParams\\.FLAG_SECURE");
   });
 
+  it("uses the frontend skip only before Android compilation", () => {
+    const applyScript = read("apply-android-patches.ps1");
+    const buildScript = read("build-android.ps1");
+    const finishScript = read("finish-android-build.ps1");
+    const validator = read("validate-android-build.ps1");
+    const companionIdentity = read(
+      "src-tauri/android-src/org/hacash/wallet/mobile/AgentCompanionIdentityPlugin.kt",
+    );
+
+    expect(validator).toContain("param([switch]$SkipEmbeddedFrontendCheck)");
+    expect(validator).toContain(
+      "if (-not $SkipEmbeddedFrontendCheck -and (Test-Path $jniLib) -and (Test-Path $distAssets))",
+    );
+    expect(applyScript).toContain(
+      '& (Join-Path $mobile "validate-android-build.ps1") -SkipEmbeddedFrontendCheck',
+    );
+    expect(applyScript.match(/-SkipEmbeddedFrontendCheck/g)).toHaveLength(1);
+    expect(buildScript).toContain(
+      '& (Join-Path $mobile "validate-android-build.ps1")',
+    );
+    expect(buildScript).not.toContain("-SkipEmbeddedFrontendCheck");
+    expect(finishScript).not.toContain("-SkipEmbeddedFrontendCheck");
+
+    for (const domain of ["HPAY/COMPANION/ADMIN-COMMAND/V2"]) {
+      expect(validator).toContain(domain);
+      expect(companionIdentity).not.toContain(domain);
+    }
+
+    for (const domain of [
+      "HPAY/COMPANION/PAIRING-REQUEST/V1",
+      "HPAY/COMPANION/PAIRING-MOBILE-PROOF/V1",
+      "HPAY/COMPANION/SESSION-RESPONSE/V1",
+      "HPAY/COMPANION/APPROVAL-DECISION/V2",
+      "HPAY/COMPANION/WITNESS-RECEIPT/V1",
+      "HPAY/COMPANION/WITNESS-ROTATION/V1",
+      "HPAY/COMPANION/WITNESS-ROTATION-BASELINE/V1",
+    ]) {
+      expect(validator).toContain(domain);
+      expect(companionIdentity).toContain(domain);
+    }
+    expect(companionIdentity).toContain("fun signApprovalDecisionApprove(");
+    expect(companionIdentity).toContain("fun signApprovalDecisionReject(");
+    expect(companionIdentity).toContain("fun signWitnessReceipt(");
+    expect(companionIdentity).toContain("fun signWitnessRotationAuthorization(");
+    expect(companionIdentity).toContain("fun signWitnessRotationBaselineReceipt(");
+    expect(companionIdentity).not.toContain("fun signAdminCommand(");
+  });
   it("keeps biometric unlock on the released bounded-window key policy", () => {
     const store = read(
       "src-tauri/android-src/org/hacash/wallet/mobile/BiometricSecretStore.kt",
@@ -69,6 +124,7 @@ describe("Android private-screen hardening", () => {
     // with one, so it has to be derived from the authenticators actually allowed.
     expect(plugin).toContain(".withCancelButton(unlockAuthenticators())");
     expect(plugin).toContain(".withCancelButton(signingAuthenticators())");
+    expect(plugin).toContain("if (activity !== this.activity) return");
 
     // A bounded-window key cannot be bound to a CryptoObject, so the prompt runs
     // first and the cipher is created afterwards.
@@ -78,10 +134,10 @@ describe("Android private-screen hardening", () => {
     // The Rust shell must never reuse a send-authorization prompt as the unlock or
     // enrolment ceremony.
     expect(rust).not.toContain(
-      'verify_native_biometric(&app, "Unlock Hacash Wallet")',
+      'verify_native_biometric(&app, "Unlock HPAY Wallet")',
     );
     expect(rust).not.toContain(
-      'verify_native_biometric(&app, "Enable biometric unlock for Hacash Wallet")',
+      'verify_native_biometric(&app, "Enable biometric unlock for HPAY Wallet")',
     );
   });
 

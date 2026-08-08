@@ -67,14 +67,14 @@ object ApkInstaller {
         val packageManager = activity.packageManager
         val candidate = archivePackageInfo(packageManager, source)
         if (candidate.packageName != activity.packageName) {
-            throw SecurityException("Downloaded APK package does not match Hacash Wallet")
+            throw SecurityException("Downloaded APK package does not match HPAY Wallet")
         }
 
         val installed = installedPackageInfo(packageManager, activity.packageName)
         val candidateVersion = packageVersionCode(candidate)
         val installedVersion = packageVersionCode(installed)
         if (candidateVersion <= installedVersion) {
-            throw SecurityException("Downloaded APK is not a newer Hacash Wallet version")
+            throw SecurityException("Downloaded APK is not a newer HPAY Wallet version")
         }
 
         val candidateIdentity = signerIdentity(candidate)
@@ -193,7 +193,7 @@ object ApkInstaller {
                 }
                 activity.startActivity(settings)
                 throw IllegalStateException(
-                    "Allow \"Install unknown apps\" for Hacash Wallet, then tap Download & install again."
+                    "Allow \"Install unknown apps\" for HPAY Wallet, then tap Download & install again."
                 )
             }
         }
@@ -226,7 +226,7 @@ object ApkInstaller {
             activity.grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
-        val chooser = Intent.createChooser(intent, "Install Hacash Wallet update")
+        val chooser = Intent.createChooser(intent, "Install HPAY Wallet update")
         activity.startActivity(chooser)
     }
 }

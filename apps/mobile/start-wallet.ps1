@@ -1,4 +1,4 @@
-# Start Hacash Wallet Mobile - Vite + debug exe (reliable desktop preview)
+# Start HPAY Wallet Mobile - Vite + debug exe (reliable desktop preview)
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path (Join-Path $mobile "..\..")).Path
@@ -70,7 +70,7 @@ public class W { [DllImport("user32.dll")] public static extern bool SetForegrou
         [void][W]::ShowWindow($proc.MainWindowHandle, 9)
         [void][W]::SetForegroundWindow($proc.MainWindowHandle)
     }
-    Write-Host "Hacash Wallet opened (PID $($proc.Id)). Vite: OK"
+    Write-Host "HPAY Wallet opened (PID $($proc.Id)). Vite: OK"
     Write-Host "Keep the minimized 'Vite server' window running."
 } else {
     Write-Host "Wallet failed. Vite is OK at http://127.0.0.1:1421"

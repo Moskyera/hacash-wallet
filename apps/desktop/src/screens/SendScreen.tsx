@@ -3,6 +3,7 @@ import { AssetSummary, HubFeePayer, L1FeeSpeed, SendPreview, WalletStatus } from
 import type { PaymentQrPayload } from "../paymentQr";
 import BtcSendPanel from "../components/BtcSendPanel";
 import HacdSendPanel from "../components/HacdSendPanel";
+import NativeAssetSendPanel from "../components/NativeAssetSendPanel";
 import PaymentQrScanner from "../components/PaymentQrScanner";
 import { maskAddress, formatHacMei } from "../privacy";
 import {
@@ -141,9 +142,32 @@ export default function SendScreen({
         >
           BTC
         </button>
+        <button
+          type="button"
+          className={sendAsset === "HIP20" ? "selected" : ""}
+          onClick={() => {
+            setSendAsset("HIP20");
+            clearPreview();
+          }}
+        >
+          HIP-20
+        </button>
       </div>
 
-      {sendAsset === "BTC" ? (
+      {sendAsset === "HIP20" ? (
+        <NativeAssetSendPanel
+          active={active && sendAsset === "HIP20"}
+          assets={assets?.native_assets ?? []}
+          busy={busy}
+          setBusy={setBusy}
+          nativeBioAvailable={nativeBioAvailable}
+          watchOnly={!!status?.watch_only}
+          hideBalances={hideBalances}
+          hideAddresses={hideAddresses}
+          onNotify={onNotify}
+          onSent={onSent}
+        />
+      ) : sendAsset === "BTC" ? (
         <BtcSendPanel
           active={active && sendAsset === "BTC"}
           busy={busy}
@@ -205,20 +229,33 @@ export default function SendScreen({
                   ? "Fast Pay ON"
                   : "Fast Pay OFF (on-chain)"}
             </span>
-            <button type="button" className="linkish" onClick={() => onNavigate("fastpay")}>
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => {
+                clearPreview();
+                onNavigate("fastpay");
+              }}
+            >
               Change
             </button>
           </div>
           <label>Recipient address</label>
           <input
             value={sendTo}
-            onChange={(e) => setSendTo(e.target.value)}
+            onChange={(e) => {
+              clearPreview();
+              setSendTo(e.target.value);
+            }}
             placeholder="1ABC..."
           />
           <label>Amount (HAC)</label>
           <input
             value={sendAmount}
-            onChange={(e) => setSendAmount(e.target.value)}
+            onChange={(e) => {
+              clearPreview();
+              setSendAmount(e.target.value);
+            }}
             placeholder="10"
             type="number"
             min="0"

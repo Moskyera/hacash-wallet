@@ -7,15 +7,31 @@ import { useDesktopWallet } from "./hooks/useDesktopWallet";
 import { useHacSend } from "./hooks/useHacSend";
 import DappApprovalPanel from "./components/DappApprovalPanel";
 import PreparedOperationConfirm from "./components/PreparedOperationConfirm";
+import AgentWalletApp from "./agent/AgentWalletApp";
 import DesktopRouter from "./screens/DesktopRouter";
 import { NAV_GROUPS, formatCountdown, type Screen } from "./screens/types";
 import {
   fastPayChipLabel,
   fastPayNavHint,
 } from "./fastPayUi";
+import { maskAddress } from "./privacy";
 import "./quantum.css";
+const SCREEN_SUBTITLES: Partial<Record<Screen, string>> = {
+  home: "Portfolio overview",
+  send: "Review and send assets",
+  receive: "Addresses and payment requests",
+  fastpay: "Hacash L2 channel payments",
+  hacd: "Owned diamond metadata",
+  history: "Local wallet activity",
+  quantum: "Experimental lab, not for mainnet",
+  airgap: "Offline transaction signing",
+  security: "Vault and signing controls",
+  privacy: "Local privacy controls",
+  settings: "Network and wallet preferences",
+  advanced: "Node-gated protocol tools",
+};
 
-export default function App() {
+function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
   const [screen, setScreen] = useState<Screen>("welcome");
   const [privacyShield, setPrivacyShield] = useState(false);
   const { toast, showToast } = useToast();
@@ -77,6 +93,19 @@ export default function App() {
     hacSend.setPreview(null);
     void wallet.handleLock();
   };
+  const handleOpenAgent = async () => {
+    hacSend.setPreview(null);
+    try {
+      await wallet.handleLock();
+      onOpenAgent();
+    } catch (error) {
+      wallet.onError(
+        error instanceof Error
+          ? error.message
+          : "My Wallet lock could not be confirmed. Agent Wallet was not opened.",
+      );
+    }
+  };
 
   const handleValidateHip23 = async (
     params: Parameters<typeof wallet.handleValidateHip23>[0],
@@ -87,6 +116,7 @@ export default function App() {
       status: wallet.status,
       settings: wallet.settings,
       assets: wallet.assets,
+      assetTrends: wallet.assetTrends,
       fastPayDetail: wallet.fastPayDetail,
       channelInfo: wallet.channelInfo,
       hubHealth: wallet.hubHealth,
@@ -119,6 +149,7 @@ export default function App() {
       wallet.status,
       wallet.settings,
       wallet.assets,
+      wallet.assetTrends,
       wallet.fastPayDetail,
       wallet.channelInfo,
       wallet.hubHealth,
@@ -226,6 +257,9 @@ export default function App() {
   );
 
   const isAuthScreen = screen === "welcome" || screen === "unlock";
+  const screenTitle = screen === "home" ? "My Wallet" : t(`nav.${screen}`);
+  const screenSubtitle = SCREEN_SUBTITLES[screen] ?? "HPAY Wallet";
+  const nodeReady = Boolean(wallet.status && !wallet.status.locked && wallet.assets);
 
   return (
     <div className={`app${isAuthScreen ? " app-auth" : ""}`}>
@@ -237,13 +271,32 @@ export default function App() {
           </div>
         </div>
       )}
+      {isAuthScreen && (
+        <div className="auth-space-switcher wallet-space-switcher" role="group" aria-label="Wallet space">
+          <button type="button" className="active" aria-current="page">
+            My Wallet
+          </button>
+          <button type="button" onClick={() => void handleOpenAgent()}>
+            AI Agent Wallet
+          </button>
+        </div>
+      )}
       {!isAuthScreen && (
       <aside className="sidebar">
         <div className="brand">
           <WalletLogo size="sm" />
-          <div>
-            <div className="brand-sub">HAC · HACD · BTC on Hacash</div>
+          <div className="brand-copy">
+            <strong>HPAY Wallet</strong>
+            <span>Powered by Hacash</span>
           </div>
+        </div>
+        <div className="wallet-space-switcher" role="group" aria-label="Wallet space">
+          <button type="button" className="active" aria-current="page">
+            My Wallet
+          </button>
+          <button type="button" onClick={() => void handleOpenAgent()}>
+            AI Agent Wallet
+          </button>
         </div>
         {wallet.status && !wallet.status.locked && (
           <nav>
@@ -331,6 +384,36 @@ export default function App() {
       )}
 
       <main className="content">
+        {!isAuthScreen && (
+          <header className="desktop-topbar">
+            <div className="desktop-topbar-copy">
+              <h1>{screenTitle}</h1>
+              <p>{screenSubtitle}</p>
+            </div>
+            <div className="desktop-topbar-actions">
+              <span className="desktop-topbar-pill">{wallet.status?.network_mode === "testnet" ? "Testnet" : "Mainnet"}</span>
+              <span className={`desktop-topbar-pill${nodeReady ? " ready" : ""}`}>
+                {nodeReady ? "Node connected" : "Node checking"}
+              </span>
+              {wallet.status?.address ? (
+                <code className="desktop-topbar-address">
+                  {maskAddress(wallet.status.address, hideAddresses)}
+                </code>
+              ) : null}
+              {wallet.status?.address ? (
+                <button type="button" className="desktop-topbar-button" onClick={() => void wallet.handleCopyAddress()}>
+                  Copy
+                </button>
+              ) : null}
+              <button type="button" className="desktop-topbar-button" onClick={() => setScreen("privacy")}>
+                Privacy
+              </button>
+              <button type="button" className="desktop-topbar-button" onClick={handleLock}>
+                Lock
+              </button>
+            </div>
+          </header>
+        )}
         {wallet.error && <div className="alert">{wallet.error}</div>}
         {wallet.info && <div className="info-box">{wallet.info}</div>}
         {toast && (
@@ -357,4 +440,61 @@ export default function App() {
       <PreparedOperationConfirm />
     </div>
   );
+}
+
+
+type WalletSpace = "personal" | "agent";
+
+function WalletSpaceWelcome({ onSelect }: { onSelect: (space: WalletSpace) => void }) {
+  return (
+    <main className="space-welcome">
+      <section className="space-welcome-card">
+        <WalletLogo size="lg" />
+        <span className="agent-eyebrow">Independent wallet spaces</span>
+        <h1>Welcome to HPAY Wallet</h1>
+        <p>Choose the wallet space you want to open. You can enable or open the other space later.</p>
+        <div className="space-choice-grid">
+          <button type="button" onClick={() => onSelect("personal")}>
+            <strong>My Wallet</strong>
+            <span>Store, send and receive HAC, HACD and BTC.</span>
+          </button>
+          <button type="button" onClick={() => onSelect("agent")}>
+            <strong>AI Agent Wallet</strong>
+            <span>Create an independent limited wallet for approved local AI services.</span>
+          </button>
+        </div>
+        <p className="space-security-note">
+          The two spaces use different addresses, private keys, vaults and unlock sessions.
+        </p>
+      </section>
+    </main>
+  );
+}
+
+export default function App() {
+  const [walletSpace, setWalletSpace] = useState<WalletSpace | null>(() => {
+    try {
+      const saved = window.localStorage.getItem("hpay.wallet-space.v1");
+      return saved === "personal" || saved === "agent" ? saved : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const selectSpace = (space: WalletSpace) => {
+    setWalletSpace(space);
+    try {
+      window.localStorage.setItem("hpay.wallet-space.v1", space);
+    } catch {
+      // This stores only a UI preference. Wallet secrets remain in isolated Rust vaults.
+    }
+  };
+
+  if (walletSpace === null) {
+    return <WalletSpaceWelcome onSelect={selectSpace} />;
+  }
+  if (walletSpace === "agent") {
+    return <AgentWalletApp onOpenPersonal={() => selectSpace("personal")} />;
+  }
+  return <PersonalWalletApp onOpenAgent={() => selectSpace("agent")} />;
 }

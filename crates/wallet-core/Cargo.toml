@@ -2,7 +2,7 @@
 name = "hacash-wallet-core"
 version.workspace = true
 edition.workspace = true
-description = "Secure Hacash wallet core: vault, signing, L1/L2 payment routing"
+description = "Secure HPAY wallet core for Hacash: vault, signing, L1/L2 payment routing"
 
 [dependencies]
 serde.workspace = true
@@ -23,6 +23,7 @@ tracing.workspace = true
 base64.workspace = true
 sha2.workspace = true
 hkdf.workspace = true
+fs2.workspace = true
 secp256k1.workspace = true
 url.workspace = true
 p256.workspace = true

@@ -15,7 +15,7 @@ pub struct AssetSummary {
     pub btc_wallet_satoshi: u64,
     /// Bridged BTC locked in the active Fast Pay channel, in satoshi.
     pub btc_channel_satoshi: u64,
-    /// Istanbul native-asset primitive balances. Read-only in wallet v1.0.0.
+    /// Istanbul HIP-20/native-asset primitive balances.
     #[serde(default)]
     pub native_assets: Vec<NativeAssetBalance>,
 }

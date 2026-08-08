@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Hacash Wallet iOS (macOS + Xcode only)
+# Build HPAY Wallet iOS (macOS + Xcode only)
 set -euo pipefail
 cd "$(dirname "$0")"
 

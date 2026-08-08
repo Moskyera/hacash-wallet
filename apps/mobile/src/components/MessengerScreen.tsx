@@ -3,6 +3,14 @@ import { messengerApi, type ChatMessage, type ChatThread } from "../api";
 import { type SavedContact } from "../contacts";
 import { formatInvokeError } from "../formatInvokeError";
 import { maskAddress } from "../privacy";
+import {
+  failedProbe,
+  isCurrentKeyedRequest,
+  loadingProbe,
+  readyProbe,
+  type AsyncProbe,
+  type KeyedRequest,
+} from "../asyncProbe";
 
 type Props = {
   myAddress?: string | null;
@@ -28,11 +36,16 @@ export default function MessengerScreen({
 }: Props) {
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [activePeer, setActivePeer] = useState<string | null>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messageProbe, setMessageProbe] = useState<AsyncProbe<ChatMessage[]>>(
+    () => readyProbe([]),
+  );
   const [draft, setDraft] = useState("");
   const [newPeer, setNewPeer] = useState("");
   const [busy, setBusy] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const activePeerRef = useRef<string | null>(null);
+  const messageGeneration = useRef(0);
+  const messages = messageProbe.value;
 
   const refreshThreads = useCallback(async () => {
     try {
@@ -44,13 +57,57 @@ export default function MessengerScreen({
 
   const loadMessages = useCallback(
     async (peer: string) => {
+      if (activePeerRef.current !== peer) return;
+      const request: KeyedRequest<string> = {
+        key: peer,
+        generation: ++messageGeneration.current,
+      };
+      setMessageProbe(loadingProbe([]));
       try {
         const rows = await messengerApi.messages(peer);
-        setMessages(rows);
-        await messengerApi.markRead(peer);
-        await refreshThreads();
-      } catch (e) {
-        onToast(formatInvokeError(e), "error");
+        if (
+          !isCurrentKeyedRequest(
+            activePeerRef.current,
+            messageGeneration.current,
+            request,
+          )
+        ) {
+          return;
+        }
+        setMessageProbe(readyProbe(rows));
+        try {
+          await messengerApi.markRead(peer);
+          if (
+            isCurrentKeyedRequest(
+              activePeerRef.current,
+              messageGeneration.current,
+              request,
+            )
+          ) {
+            await refreshThreads();
+          }
+        } catch (error) {
+          if (
+            isCurrentKeyedRequest(
+              activePeerRef.current,
+              messageGeneration.current,
+              request,
+            )
+          ) {
+            onToast(formatInvokeError(error), "error");
+          }
+        }
+      } catch (error) {
+        if (
+          isCurrentKeyedRequest(
+            activePeerRef.current,
+            messageGeneration.current,
+            request,
+          )
+        ) {
+          setMessageProbe(failedProbe([], formatInvokeError(error)));
+          onToast(formatInvokeError(error), "error");
+        }
       }
     },
     [onToast, refreshThreads],
@@ -84,22 +141,31 @@ export default function MessengerScreen({
     if (activePeer) void loadMessages(activePeer);
   }, [activePeer, loadMessages]);
 
+  useEffect(
+    () => () => {
+      activePeerRef.current = null;
+      messageGeneration.current += 1;
+    },
+    [],
+  );
+
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
   async function handleSend() {
     if (!activePeer || !draft.trim()) return;
+    const peer = activePeer;
+    const message = draft.trim();
     if (!whisperEnabled) {
       onToast("Enable DUST Whisper and configure a relay first.", "error");
       return;
     }
     setBusy(true);
     try {
-      await messengerApi.send(activePeer, draft.trim());
-      setDraft("");
-      await loadMessages(activePeer);
-      await refreshThreads();
+      await messengerApi.send(peer, message);
+      if (activePeerRef.current === peer) setDraft("");
+      await loadMessages(peer);
       onToast("Message sent.", "success");
     } catch (e) {
       onToast(formatInvokeError(e), "error");
@@ -109,8 +175,21 @@ export default function MessengerScreen({
   }
 
   function openPeer(peer: string) {
-    setActivePeer(peer);
+    const normalized = peer.trim();
+    activePeerRef.current = normalized;
+    messageGeneration.current += 1;
+    setMessageProbe(loadingProbe([]));
+    setActivePeer(normalized);
+    setDraft("");
     setNewPeer("");
+  }
+
+  function closePeer() {
+    activePeerRef.current = null;
+    messageGeneration.current += 1;
+    setMessageProbe(readyProbe([]));
+    setDraft("");
+    setActivePeer(null);
   }
 
   if (!activePeer) {
@@ -181,7 +260,7 @@ export default function MessengerScreen({
 
   return (
     <div className="card messenger-chat">
-      <button type="button" className="ghost small" onClick={() => setActivePeer(null)}>
+      <button type="button" className="ghost small" onClick={closePeer}>
         ← Threads
       </button>
       <h2>{contactLabel(contacts, activePeer)}</h2>
@@ -192,9 +271,21 @@ export default function MessengerScreen({
         </button>
       )}
       <div className="messenger-list" ref={listRef}>
-        {messages.length === 0 ? (
+        {messageProbe.status === "loading" ? (
+          <p className="muted" aria-live="polite">Loading messages…</p>
+        ) : null}
+        {messageProbe.status === "failed" ? (
+          <div className="error-box" role="alert">
+            <p>{messageProbe.message}</p>
+            <button type="button" className="small" onClick={() => void loadMessages(activePeer)}>
+              Retry messages
+            </button>
+          </div>
+        ) : null}
+        {messageProbe.status === "ready" && messages.length === 0 ? (
           <p className="muted">No messages. say hello!</p>
-        ) : (
+        ) : null}
+        {messageProbe.status === "ready" && messages.length > 0 ? (
           messages.map((m) => (
             <div
               key={m.id}
@@ -204,7 +295,7 @@ export default function MessengerScreen({
               <span className="muted">{m.timestamp_utc.slice(11, 19)}</span>
             </div>
           ))
-        )}
+        ) : null}
       </div>
       <div className="messenger-compose">
         <input

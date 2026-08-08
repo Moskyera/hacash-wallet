@@ -1,9 +1,9 @@
-# Generate Hacash Wallet launcher icons from glossy symbol only (mosky.png - no text).
+# Generate HPAY Wallet launcher icons from the shared mark-only artwork.
 $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $icons = Join-Path $mobile "src-tauri\icons"
 $androidRoot = Join-Path $icons "android"
-$srcIcon = Join-Path $mobile "src\assets\mosky.png"
+$srcIcon = Join-Path $mobile "..\..\packages\wallet-ui\src\assets\hpay-mark.png"
 $fgOut = Join-Path $icons "android-fg.png"
 $appIcon = Join-Path $icons "app-icon.png"
 $fillRatio = 0.92
@@ -102,7 +102,7 @@ Write-Host "Wrote $appIcon" -ForegroundColor Green
 Set-Location $mobile
 yarn tauri icon "src-tauri/icons/icon-manifest.json"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-Write-Host "Tauri icon set generated (ico/icns/icon.png)." -ForegroundColor Green
+Write-Host "HPAY Tauri icon set generated (ico/icns/icon.png)." -ForegroundColor Green
 
 # Tauri CLI does not reliably refresh icons/android/mipmap-* - write glossy mipmaps explicitly.
 if (Test-Path $androidRoot) {

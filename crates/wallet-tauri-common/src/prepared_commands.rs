@@ -67,6 +67,34 @@ pub async fn wallet_execute_prepared_hacd(
 }
 
 #[tauri::command]
+pub async fn wallet_prepare_send_native_asset(
+    to: String,
+    serial: String,
+    amount: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut service = state.inner.lock().await;
+    let prepared = service
+        .prepare_send_native_asset(&to, &serial, &amount)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(prepared).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn wallet_execute_prepared_native_asset(
+    operation_id: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let mut service = state.inner.lock().await;
+    let result = service
+        .execute_prepared_native_asset(&operation_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(result).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn wallet_prepare_send_btc(
     to: String,
     satoshi: u64,

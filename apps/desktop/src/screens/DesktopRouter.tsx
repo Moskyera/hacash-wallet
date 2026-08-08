@@ -1,6 +1,7 @@
 import { useLocale } from "@hacash/wallet-ui";
 import AirgapScreen from "../AirgapScreen";
 import { AssetSummary, HubDiscoveryEntry, TxRecord, WalletSettings, WalletStatus } from "../api";
+import type { AssetTrendHistory } from "../assetTrends";
 import { HubFeePayer, L1FeeSpeed, SendPreview } from "../api";
 import { DustWhisperSettings, PrivacySettings, RelayHealthStatus } from "../api";
 import { ChannelInfo, HubHealth } from "../api";
@@ -26,6 +27,7 @@ export type DesktopData = {
   status: WalletStatus | null;
   settings: WalletSettings | null;
   assets: AssetSummary | null;
+  assetTrends: AssetTrendHistory;
   fastPayDetail: FastPayStatus | null;
   channelInfo: ChannelInfo | null;
   hubHealth: HubHealth | null | undefined;
@@ -138,6 +140,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     status,
     settings,
     assets,
+    assetTrends,
     fastPayDetail,
     channelInfo,
     hubHealth,
@@ -261,14 +264,14 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
         <HomeScreen
           status={status}
           assets={assets}
+          assetTrends={assetTrends}
+          history={txHistory}
           hideBalances={hideBalances}
           hideAddresses={hideAddresses}
           fastPayReady={fastPayReady}
           lastTx={lastTx}
           privacy={privacy}
           onNavigate={setScreen}
-          onOpenQrPay={onOpenQrPay}
-          onLock={onLock}
           onNotify={onNotify}
           clearMessages={clearMessages}
         />

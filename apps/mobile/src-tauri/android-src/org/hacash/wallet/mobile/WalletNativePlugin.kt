@@ -296,7 +296,7 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
                 callback,
               )
               val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Hacash Wallet")
+                .setTitle("HPAY Wallet")
                 .setDescription(reason)
                 .setConfirmationRequired(true)
                 .setAllowedAuthenticators(unlockAuthenticators())
@@ -348,7 +348,7 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
     val args = invoke.parseArgs(StoreBiometricArgs::class.java)
     authenticateWithCipher(
       invoke = invoke,
-      reason = "Enable biometric unlock for Hacash Wallet",
+      reason = "Enable biometric unlock for HPAY Wallet",
       onComplete = {
         // Kotlin strings cannot be wiped in place. Drop this reference on every
         // success, cancellation, and error path. Mutable byte buffers are wiped
@@ -367,7 +367,7 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
   fun biometricLoad(invoke: Invoke) {
     authenticateWithCipher(
       invoke = invoke,
-      reason = "Unlock Hacash Wallet",
+      reason = "Unlock HPAY Wallet",
       prepareCipher = { BiometricSecretStore.prepareDecryption(activity) },
       useCipher = { cipher ->
         var passphrase = BiometricSecretStore.decrypt(activity, cipher)
@@ -455,7 +455,7 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
           callback,
         )
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
-          .setTitle("Hacash Wallet")
+          .setTitle("HPAY Wallet")
           .setDescription(args.reason)
           .setConfirmationRequired(true)
           .setAllowedAuthenticators(signingAuthenticators())
@@ -569,6 +569,7 @@ class WalletNativePlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   override fun onDestroy(activity: AppCompatActivity) {
+    if (activity !== this.activity) return
     destroyed.set(true)
     synchronized(this) {
       activePrompt?.cancelAuthentication()

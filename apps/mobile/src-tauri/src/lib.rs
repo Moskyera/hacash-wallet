@@ -1,3 +1,6 @@
+mod agent_companion;
+#[cfg(target_os = "android")]
+pub mod agent_companion_identity;
 mod biometric_store;
 mod platform;
 
@@ -134,25 +137,116 @@ async fn wallet_unlock_biometric(
     svc.unlock(&passphrase).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentCompanionIdentityView {
+    platform_supported: bool,
+    configured: bool,
+    ready: bool,
+    key_security_level: String,
+    hardware_backed: bool,
+    strong_box_backed: bool,
+    authentication_enforced_by_secure_hardware: bool,
+    auth_per_use: bool,
+}
+
+impl AgentCompanionIdentityView {
+    #[cfg(target_os = "android")]
+    fn from_android(status: agent_companion_identity::AndroidCompanionIdentityStatus) -> Self {
+        let ready = status.configured
+            && status.hardware_backed
+            && status.authentication_enforced_by_secure_hardware
+            && status.auth_per_use;
+        Self {
+            platform_supported: true,
+            configured: status.configured,
+            ready,
+            key_security_level: status.key_security_level,
+            hardware_backed: status.hardware_backed,
+            strong_box_backed: status.strong_box_backed,
+            authentication_enforced_by_secure_hardware: status
+                .authentication_enforced_by_secure_hardware,
+            auth_per_use: status.auth_per_use,
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn unsupported() -> Self {
+        Self {
+            platform_supported: false,
+            configured: false,
+            ready: false,
+            key_security_level: "unavailable".to_owned(),
+            hardware_backed: false,
+            strong_box_backed: false,
+            authentication_enforced_by_secure_hardware: false,
+            auth_per_use: false,
+        }
+    }
+}
+
+#[tauri::command]
+async fn agent_wallet_companion_identity_status(
+    webview: tauri::Webview,
+    app: tauri::AppHandle,
+) -> Result<AgentCompanionIdentityView, String> {
+    agent_companion::require_agent_companion_webview(&webview)?;
+    #[cfg(target_os = "android")]
+    {
+        let status = agent_companion_identity::status(&app).await?;
+        Ok(AgentCompanionIdentityView::from_android(status))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(AgentCompanionIdentityView::unsupported())
+    }
+}
+
+#[tauri::command]
+async fn agent_wallet_companion_create_identity(
+    webview: tauri::Webview,
+    app: tauri::AppHandle,
+) -> Result<AgentCompanionIdentityView, String> {
+    agent_companion::require_agent_companion_webview(&webview)?;
+    #[cfg(target_os = "android")]
+    {
+        drop(agent_companion_identity::create(&app).await?);
+        let status = agent_companion_identity::status(&app).await?;
+        Ok(AgentCompanionIdentityView::from_android(status))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err(
+            "Mobile companion identity creation is available only on supported Android devices"
+                .to_owned(),
+        )
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .plugin(agent_companion::companion_lifecycle_plugin());
     #[cfg(target_os = "ios")]
     let builder = builder.plugin(tauri_plugin_biometric::init());
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(wallet_tauri_common::android_native::init());
+    let builder = builder
+        .plugin(wallet_tauri_common::android_native::init())
+        .plugin(agent_companion_identity::init());
     builder
         .setup(|app| {
+            let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
             // Android/iOS: dirs::data_dir() is not app-writable; use internal app storage.
             #[cfg(any(target_os = "android", target_os = "ios"))]
-            {
-                let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-                std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-                // SAFETY: called once on the main thread during app setup, before wallet I/O.
-                unsafe { std::env::set_var("HACASH_WALLET_DATA", &data_dir) };
+            // SAFETY: called once on the main thread during app setup, before wallet I/O.
+            unsafe {
+                std::env::set_var("HACASH_WALLET_DATA", &data_dir);
             }
             wallet_tauri_common::backup_commands::recover_interrupted_restore()
                 .map_err(|error| format!("backup restore recovery: {error}"))?;
@@ -172,11 +266,33 @@ pub fn run() {
                 tracing::warn!("vault cache warm skipped: {e}");
             }
             app.manage(AppState::new(svc));
+            app.manage(agent_companion::AgentCompanionMobileState::open(&data_dir));
             Ok(())
         })
         // Plain Tauri handler only. Never catch_unwind around IPC on Android.
         // JNI Rust_ipc is nounwind; unwind/abort there crashes the app (SIGABRT).
         .invoke_handler(wallet_tauri_common::wallet_invoke_handler![
+            agent_wallet_companion_identity_status,
+            agent_wallet_companion_create_identity,
+            agent_companion::commands::agent_wallet_companion_pairing_start,
+            agent_companion::commands::agent_wallet_companion_pairing_retry_request,
+            agent_companion::commands::agent_wallet_rotation_candidate_pairing_start,
+            agent_companion::commands::agent_wallet_companion_pairing_confirm,
+            agent_companion::commands::agent_wallet_companion_pairing_deliver_ack,
+            agent_companion::commands::agent_wallet_rotation_candidate_pairing_confirm,
+            agent_companion::commands::agent_wallet_companion_pairing_cancel,
+            agent_companion::commands::agent_wallet_companion_state,
+            agent_companion::commands::agent_wallet_companion_connect,
+            agent_companion::commands::agent_wallet_companion_sync,
+            agent_companion::commands::agent_wallet_companion_ping,
+            agent_companion::pilot::agent_wallet_companion_decide_payment,
+            agent_companion::pilot::agent_wallet_companion_witness_anchor,
+            agent_companion::pilot::agent_wallet_companion_witness_pending,
+            agent_companion::pilot::agent_wallet_companion_rotation_step,
+            agent_companion::commands::agent_wallet_companion_lifecycle,
+            agent_companion::commands::agent_wallet_companion_discard_consent,
+            agent_companion::commands::agent_wallet_companion_reset,
+            agent_companion::commands::agent_wallet_companion_disconnect,
             wallet_platform_security_status,
             wallet_confirm_biometric_native,
             wallet_biometric_unlock_status,

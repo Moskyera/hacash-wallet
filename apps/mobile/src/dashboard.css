@@ -1,0 +1,565 @@
+/* HPAY mobile dashboard. True black surfaces with restrained gold accents. */
+.app-header {
+  position: sticky;
+  z-index: 45;
+  top: 0;
+  padding: calc(10px + var(--safe-top)) 146px 9px 14px;
+  border-bottom: 1px solid #161616;
+  background: rgb(0 0 0 / 97%);
+  backdrop-filter: blur(18px);
+}
+
+.app-header-row {
+  min-height: 40px;
+}
+
+.mobile-header-brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.app-header .wallet-logo-mark.wallet-logo-sm {
+  width: 31px;
+  height: 31px;
+  max-width: 31px;
+  max-height: 31px;
+  object-fit: contain;
+}
+
+.app-header h1 {
+  margin: 0;
+  color: #f6f6f6;
+  font-size: 0.94rem;
+  letter-spacing: 0.08em;
+}
+
+.app-header .sub {
+  max-width: 150px;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: #777;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.56rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-header-security {
+  display: none;
+}
+
+.app-main {
+  padding: 10px 13px 24px;
+  background: #000;
+}
+
+.app-main-home {
+  height: calc(100dvh - 59px - var(--safe-top) - 58px - var(--safe-bottom));
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+  overflow: hidden;
+}
+
+.mobile-home-dashboard {
+  height: 100%;
+  overflow: hidden;
+}
+
+.wallet-spaces-root > .wallet-space-switcher {
+  position: fixed;
+  z-index: 70;
+  top: calc(11px + var(--safe-top));
+  right: max(13px, calc((100vw - 480px) / 2 + 13px));
+  left: auto;
+  display: block;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.wallet-spaces-root > .wallet-space-switcher button {
+  display: flex;
+  min-width: 118px;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid #272727;
+  border-radius: 8px;
+  background: #070707;
+  color: #d0d0d0;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.wallet-spaces-root > .wallet-space-switcher button.active {
+  border-color: rgb(245 166 35 / 34%);
+  background: #070707;
+  color: #f5f5f5;
+}
+
+.wallet-spaces-root > .wallet-space-switcher button span:last-child {
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+.wallet-space-stage,
+.wallet-space-stage .app-shell {
+  min-height: 100dvh;
+}
+
+.balance-hero {
+  margin-bottom: 10px;
+  padding: 12px 0 10px;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  box-shadow: none;
+  text-align: left;
+}
+
+.balance-total-card {
+  padding: 2px 3px 10px;
+  text-align: center;
+}
+
+.balance-portfolio-header {
+  justify-content: center;
+  margin: 0;
+}
+
+.balance-portfolio-header .label {
+  color: #8a8a8a;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: none;
+}
+
+.balance-portfolio-header .wallet-version {
+  display: none;
+}
+
+.balance-hero .pull-hint {
+  height: 12px;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: #4f4f4f;
+  font-size: 0.52rem;
+  text-align: center;
+}
+
+.balance-portfolio-total {
+  margin: 6px 0 0;
+}
+
+.balance-total-card .balance-primary {
+  justify-content: center;
+  gap: 6px;
+}
+
+.balance-primary-value {
+  color: #fafafa;
+  font-size: clamp(1.9rem, 9vw, 2.45rem);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+}
+
+.balance-primary-unit {
+  color: #b2b2b2;
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.balance-total-usd {
+  margin: 4px 0 0;
+  color: #969696;
+  font-size: 0.69rem;
+  font-weight: 500;
+}
+
+.mobile-primary-actions-slot {
+  margin: 2px 0 13px;
+  padding: 0 2px 13px;
+  border-bottom: 1px solid #171717;
+}
+
+.mobile-primary-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.quick-action {
+  min-width: 0;
+  min-height: 62px;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 3px;
+  border: 1px solid #222;
+  border-radius: 9px;
+  background: #070707;
+  color: #cfcfcf;
+  font-size: 0.62rem;
+  font-weight: 650;
+}
+
+.quick-action.primary-action {
+  border-color: rgb(245 166 35 / 34%);
+  background: linear-gradient(160deg, rgb(245 166 35 / 11%), #070707 68%);
+  color: #f2f2f2;
+}
+
+.quick-action-icon,
+.bottom-nav-icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.65;
+}
+
+.quick-action-icon {
+  width: 30px;
+  height: 30px;
+  color: var(--accent);
+}
+
+.balance-assets-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  padding: 0;
+  border-top: 0;
+}
+
+.balance-asset-card {
+  display: grid;
+  min-height: 64px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 3px 12px;
+  padding: 11px 12px;
+  border: 1px solid #242424;
+  border-radius: 10px;
+  background: #050505;
+  text-align: left;
+}
+.balance-asset-heading {
+  display: flex;
+  min-width: 0;
+  grid-column: 1;
+  grid-row: 1 / 3;
+  align-items: center;
+  gap: 9px;
+}
+
+.balance-asset-heading .asset-mark {
+  width: 32px;
+  height: 32px;
+  max-width: 32px;
+  max-height: 32px;
+  flex: 0 0 32px;
+}
+
+.balance-asset-heading .asset-mark svg {
+  width: 100%;
+  height: 100%;
+}
+
+.balance-asset-heading .symbol {
+  overflow: hidden;
+  color: #e0e0e0;
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.balance-asset-card .amount {
+  grid-column: 2;
+  grid-row: 1;
+  margin: 0;
+  color: #ededed;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.balance-asset-card .hint {
+  display: none;
+}
+
+.balance-asset-card .usd {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+  color: #787878;
+  font-size: 0.58rem;
+  font-weight: 500;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.balance-usd-note {
+  margin: 8px 4px 0;
+  color: #666;
+  font-size: 0.56rem;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.fp-banner,
+.mobile-activity-card,
+.mobile-tools-card {
+  margin-bottom: 10px;
+  border: 1px solid #202020;
+  border-radius: 11px;
+  background: #060606;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 2%);
+}
+
+.fp-banner {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.mobile-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mobile-section-heading h2 {
+  margin: 0;
+  color: #e6e6e6;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.section-title-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-title-with-icon .quick-action-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.mobile-status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #9a9a9a;
+  font-size: 0.59rem;
+}
+
+.mobile-status-dot::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #777;
+  content: "";
+}
+
+.mobile-status-dot.ready {
+  color: #6bd587;
+}
+
+.mobile-status-dot.ready::before {
+  background: #41ca67;
+  box-shadow: 0 0 7px rgb(65 202 103 / 55%);
+}
+
+.fp-banner-status {
+  gap: 5px;
+}
+
+.fp-banner-status > strong {
+  font-size: 0.69rem;
+}
+
+.fp-banner-status .muted {
+  margin: 0;
+  color: #797979;
+  font-size: 0.62rem;
+  line-height: 1.4;
+}
+
+.fp-banner-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.fp-banner-actions button.small {
+  min-height: 30px;
+  margin: 0;
+  padding: 5px 10px;
+  border-color: #282828;
+  background: #090909;
+  font-size: 0.61rem;
+}
+
+.fp-banner-actions button.primary {
+  border-color: rgb(245 166 35 / 38%);
+  color: var(--accent);
+}
+
+.mobile-activity-card,
+.mobile-tools-card {
+  padding: 12px;
+}
+
+.mobile-activity-card .mobile-section-heading,
+.mobile-tools-card .mobile-section-heading {
+  margin-bottom: 3px;
+}
+
+.mobile-activity-card .mobile-section-heading button {
+  width: auto;
+  min-height: 24px;
+  margin: 0;
+  padding: 2px 0;
+  color: var(--accent);
+  font-size: 0.58rem;
+}
+
+.mobile-activity-card .list-item-tap {
+  display: grid;
+  min-height: 50px;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  padding: 9px 0;
+  border-bottom-color: #171717;
+}
+
+.mobile-activity-card .list-item-body {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  text-align: left;
+}
+
+.mobile-activity-card .list-item-body strong {
+  color: #dedede;
+  font-size: 0.66rem;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.mobile-activity-card .list-item-body .muted {
+  overflow: hidden;
+  color: #737373;
+  font-size: 0.57rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-activity-amount {
+  color: #d8d8d8;
+  font-size: 0.59rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mobile-empty-state {
+  margin: 0;
+  padding: 18px 4px 8px;
+  color: #666;
+  font-size: 0.63rem;
+  text-align: center;
+}
+
+.mobile-tool-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.mobile-tool-grid .quick-action {
+  min-height: 60px;
+}
+
+.mobile-tool-grid .hacd-launchpad-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.bottom-nav {
+  height: calc(58px + var(--safe-bottom));
+  padding: 0 4px var(--safe-bottom);
+  border-top: 1px solid #1c1c1c;
+  background: rgb(0 0 0 / 98%);
+  backdrop-filter: blur(18px);
+}
+
+.bottom-nav-item {
+  gap: 3px;
+  min-height: 57px;
+  padding: 7px 2px 5px;
+  color: #707070;
+  font-size: 0.53rem;
+}
+
+.bottom-nav-item.active {
+  background: linear-gradient(180deg, rgb(245 166 35 / 8%), transparent 74%);
+  color: var(--accent);
+}
+
+.bottom-nav-icon {
+  width: 20px;
+  height: 20px;
+}
+
+@media (max-width: 359px) {
+  .app-header {
+    padding-right: 126px;
+  }
+
+  .wallet-spaces-root > .wallet-space-switcher button {
+    min-width: 106px;
+    font-size: 0.58rem;
+  }
+
+  .mobile-primary-actions,
+  .mobile-tool-grid {
+    gap: 5px;
+  }
+
+  .quick-action {
+    min-height: 58px;
+    font-size: 0.56rem;
+  }
+
+  .balance-primary-value {
+    font-size: 1.75rem;
+  }
+}
+
+@media (min-width: 420px) {
+  .app-main {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .balance-hero {
+    padding-top: 16px;
+  }
+}

@@ -1,4 +1,24 @@
+#[cfg(all(
+    feature = "agent-wallet-admin",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod agent_commands;
+#[cfg(all(
+    feature = "agent-wallet-admin",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod agent_runtime;
 pub mod commands;
+#[cfg(all(
+    feature = "agent-wallet-admin",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod companion_backend;
+#[cfg(all(
+    feature = "agent-wallet-admin",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod companion_runtime;
 pub mod dapp_commands;
 pub mod handlers;
 pub mod prepared_commands;
@@ -23,4 +43,9 @@ pub mod desktop_commands;
 #[cfg(feature = "desktop")]
 pub mod desktop_relay;
 
+#[cfg(all(
+    feature = "agent-wallet-admin",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub use state::AgentAppState;
 pub use state::AppState;

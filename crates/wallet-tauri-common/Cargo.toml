@@ -2,7 +2,7 @@
 name = "wallet-tauri-common"
 version.workspace = true
 edition.workspace = true
-description = "Shared Tauri IPC commands for Hacash Wallet (desktop + mobile)"
+description = "Shared Tauri IPC commands for HPAY Wallet (desktop + mobile)"
 license.workspace = true
 
 [dependencies]
@@ -24,6 +24,13 @@ base64.workspace = true
 hex.workspace = true
 rand.workspace = true
 
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+agent-wallet-core = { path = "../agent-wallet-core", optional = true }
+agent-wallet-runtime = { path = "../agent-wallet-runtime", optional = true, features = ["listener"] }
+hpay-agent-connector = { path = "../agent-connector", optional = true, default-features = false }
+hpay-companion-protocol = { path = "../companion-protocol", optional = true }
+hpay-companion-lan-runtime = { path = "../companion-lan-runtime", optional = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
@@ -31,3 +38,14 @@ tempfile = { workspace = true }
 default = []
 desktop = ["dep:dust-whisper"]
 desktop-platform = []
+agent-wallet-testnet-pilot = [
+    "agent-wallet-admin",
+    "agent-wallet-core/agent-wallet-testnet-pilot",
+    "hpay-companion-protocol/agent-wallet-testnet-pilot",
+]
+agent-wallet-admin = [    "dep:agent-wallet-core",
+    "dep:agent-wallet-runtime",
+    "dep:hpay-agent-connector",
+    "dep:hpay-companion-protocol",
+    "dep:hpay-companion-lan-runtime",
+]

@@ -3,6 +3,19 @@ export type NativeAssetBalance = {
   amount: string;
 };
 
+export type NativeAssetMetadata = {
+  serial: string;
+  ticket: string;
+  name: string;
+  decimal: number;
+  supply: string;
+  issuer: string;
+  created_height: number;
+  created_tx: string;
+  source: string;
+  display_only: true;
+};
+
 export type AssetSummary = {
   hac_mei: number;
   hacd_count: number;

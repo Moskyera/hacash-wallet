@@ -1,0 +1,15 @@
+[package]
+name = "hpay-companion-lan-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded private-LAN transport for authenticated HPAY companion sessions"
+
+[dependencies]
+hpay-companion-protocol = { path = "../companion-protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "sync", "time"] }
+
+[dev-dependencies]
+hpay-companion-protocol = { path = "../companion-protocol", features = ["dev-software-identity"] }

@@ -33,6 +33,17 @@ export type NodeCapabilities = {
     next_height: number;
     mainnet: boolean;
   };
+  network?: {
+    kind: string;
+    node_profile_id: string;
+    block_1_available: boolean;
+    block_1_hash?: string | null;
+    instance_id?: string | null;
+    funding_confirmed: boolean;
+    transaction_ready: boolean;
+    current_height: number;
+    transaction_format_version: number;
+  };
   istanbul: {
     activation_height: number;
     evaluation_height: number;

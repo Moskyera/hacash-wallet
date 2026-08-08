@@ -18,6 +18,12 @@ import {
   fastPayStatusTitle,
 } from "../fastPayUi";
 import { maskAddress } from "../privacy";
+import {
+  failedProbe,
+  loadingProbe,
+  readyProbe,
+  type AsyncProbe,
+} from "../asyncProbe";
 
 type Props = {
   fastPay: FastPayStatus | null;
@@ -48,24 +54,34 @@ export default function FastPayChannelScreen({
   onApplyHub,
   onToast,
 }: Props) {
-  const [channel, setChannel] = useState<ChannelInfo | null>(null);
+  const [channelProbe, setChannelProbe] = useState<AsyncProbe<ChannelInfo | null>>(
+    () => loadingProbe(null),
+  );
   const [userDeposit, setUserDeposit] = useState("10");
   const [hubDeposit, setHubDeposit] = useState("0");
   const [preview, setPreview] = useState<ChannelSetupPreview | null>(null);
-  const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
+  const [inboxProbe, setInboxProbe] = useState<AsyncProbe<FastPayInboxItem[]>>(
+    () => loadingProbe([]),
+  );
   const inboxRequestRef = useRef<Promise<void> | null>(null);
+  const channelRequestRef = useRef<Promise<void> | null>(null);
+  const channel = channelProbe.value;
+  const inbox = inboxProbe.value;
 
   const loadInbox = useCallback((): Promise<void> => {
     if (inboxRequestRef.current) return inboxRequestRef.current;
     const request = (async () => {
       if (fastPay?.state !== "ready") {
-        setInbox([]);
+        setInboxProbe(readyProbe([]));
         return;
       }
+      setInboxProbe((previous) => loadingProbe(previous.value));
       try {
-        setInbox(await api.fastPayInbox());
-      } catch {
-        setInbox([]);
+        setInboxProbe(readyProbe(await api.fastPayInbox()));
+      } catch (error) {
+        setInboxProbe((previous) =>
+          failedProbe(previous.value, formatInvokeError(error)),
+        );
       }
     })().finally(() => {
       if (inboxRequestRef.current === request) inboxRequestRef.current = null;
@@ -94,13 +110,22 @@ export default function FastPayChannelScreen({
     }
   }
 
-  const loadChannel = useCallback(async () => {
-    try {
-      const info = await api.channelInfo();
-      setChannel(info);
-    } catch {
-      setChannel(null);
-    }
+  const loadChannel = useCallback((): Promise<void> => {
+    if (channelRequestRef.current) return channelRequestRef.current;
+    const request = (async () => {
+      setChannelProbe((previous) => loadingProbe(previous.value));
+      try {
+        setChannelProbe(readyProbe(await api.channelInfo()));
+      } catch (error) {
+        setChannelProbe((previous) =>
+          failedProbe(previous.value, formatInvokeError(error)),
+        );
+      }
+    })().finally(() => {
+      if (channelRequestRef.current === request) channelRequestRef.current = null;
+    });
+    channelRequestRef.current = request;
+    return request;
   }, []);
 
   useEffect(() => {
@@ -245,9 +270,26 @@ export default function FastPayChannelScreen({
           <p className="muted small">
             Routed Fast Pay requests settle only after your wallet verifies and signs the recipient channel update.
           </p>
-          {inbox.length === 0 ? (
+          {inboxProbe.status === "loading" && inbox.length === 0 ? (
+            <p className="muted small">Checking for incoming payments…</p>
+          ) : null}
+          {inboxProbe.status === "failed" ? (
+            <div className="error-box" role="alert">
+              <p>Incoming payments could not be checked: {inboxProbe.message}</p>
+              <button
+                type="button"
+                className="small"
+                disabled={busy}
+                onClick={() => void loadInbox()}
+              >
+                Retry inbox
+              </button>
+            </div>
+          ) : null}
+          {inboxProbe.status === "ready" && inbox.length === 0 ? (
             <p className="muted small">No payment is waiting for your signature.</p>
-          ) : (
+          ) : null}
+          {inbox.length > 0 ? (
             inbox.map((item) => (
               <div className="preview-box" key={item.payment_id}>
                 <p><strong>{item.amount} HAC</strong></p>
@@ -264,7 +306,7 @@ export default function FastPayChannelScreen({
                 </button>
               </div>
             ))
-          )}
+          ) : null}
         </div>
       )}
 
@@ -283,6 +325,23 @@ export default function FastPayChannelScreen({
           onToast={onToast}
         />
       </div>
+
+      {channelProbe.status === "loading" && !channel ? (
+        <div className="card" aria-live="polite">
+          <h2>Channel</h2>
+          <p className="muted small">Checking channel state…</p>
+        </div>
+      ) : null}
+
+      {channelProbe.status === "failed" ? (
+        <div className="card" role="alert">
+          <h2>Channel unavailable</h2>
+          <p className="error">{channelProbe.message}</p>
+          <button type="button" disabled={busy} onClick={() => void loadChannel()}>
+            Retry channel check
+          </button>
+        </div>
+      ) : null}
 
       {channel && (
         <div className="card">
@@ -321,7 +380,7 @@ export default function FastPayChannelScreen({
         </div>
       )}
 
-      {!channel && (
+      {channelProbe.status === "ready" && !channel && (
         <div className="card">
           <h2>Setup</h2>
           <p className="muted small">

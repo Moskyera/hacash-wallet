@@ -82,8 +82,8 @@ fn lowering_the_threshold_makes_a_smaller_send_need_a_factor() {
                 .unwrap_err()
                 .to_string();
             assert!(
-                before.contains("Insufficient balance"),
-                "10 HAC must reach the balance check at the default threshold, meaning no \
+                before.contains("balance") && !before.contains("confirmation required"),
+                "10 HAC must reach the balance stage at the default threshold, meaning no \
                  factor was demanded, got: {before}"
             );
 

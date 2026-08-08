@@ -269,6 +269,21 @@ pub async fn estimate_btc_l1_fee(
     estimate_from_build(node, built, L1_DEFAULT_WIRE_BYTES, speed).await
 }
 
+pub async fn estimate_native_asset_l1_fee(
+    node: &NodeClient,
+    from: &str,
+    to: &str,
+    serial: u64,
+    amount: u64,
+    speed: L1FeeSpeed,
+) -> WalletResult<L1FeeEstimate> {
+    let probe = wire_mei_for_node(L1_PROBE_FEE_WIRE);
+    let built = node
+        .build_send_native_asset_tx(from, to, serial, amount, &probe)
+        .await;
+    estimate_from_build(node, built, L1_DEFAULT_WIRE_BYTES, speed).await
+}
+
 pub fn fallback_l1_fee(wire_bytes: usize) -> L1FeeEstimate {
     L1FeeEstimate {
         fee_mei: L1_DEFAULT_FEE_MEI,

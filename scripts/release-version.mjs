@@ -4,6 +4,12 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const LOCAL_RUST_PACKAGES = [
+  "agent-wallet-core",
+  "agent-wallet-runtime",
+  "hpay-agent-connector",
+  "hpay-agent-types",
+  "hpay-companion-lan-runtime",
+  "hpay-companion-protocol",
   "dust-whisper",
   "hacash-wallet",
   "hacash-wallet-core",

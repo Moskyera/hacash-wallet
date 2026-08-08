@@ -22,7 +22,7 @@ export const vi = {
   "nav.advanced": "Nâng cao",
   "nav.pay": "Thanh toán",
   "nav.messages": "Trò chuyện",
-  "nav.more": "Thêm",
+  "nav.more": "Menu",
   "more.wallet": "Ví",
   "more.preferences": "Tùy chọn",
   "more.transactions": "Lịch sử giao dịch",

@@ -151,7 +151,7 @@ jobs:
 
       - name: Build unsigned Android arm64 release APK
         working-directory: apps/mobile
-        run: yarn run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
+        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-testnet-pilot
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh
@@ -423,10 +423,12 @@ jobs:
           fail_on_unmatched_files: true
           files: dist-release/*
           body: |
-            ### Hacash Wallet Mobile ${{ github.ref_name }}
+            ### HPAY Mobile ${{ github.ref_name }}
 
             - Android 9 or newer
             - arm64-v8a
             - Signed APK with pinned release certificate
+            - AI Agent Wallet testnet pilot enabled
+            - No HPAY wallet fee for Agent Wallet operations
 
             A SHA-256 checksum file is included with the APK.
