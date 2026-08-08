@@ -1,4 +1,4 @@
-# Hacash Wallet
+# HPAY Wallet
 
 Modern, secure desktop wallet for Hacash with encrypted on-device keys, local signing, L1 payments, and L2 Fast Pay routing.
 
@@ -165,7 +165,7 @@ Notes:
 
 ## Community operation
 
-The legacy **Hacash Wallet** is intended for **community operation** (releases, hub operators, node runners). See [`docs/COMMUNITY-HANDOFF.md`](docs/COMMUNITY-HANDOFF.md).
+**HPAY Wallet** (formerly Hacash Wallet) is intended for **community operation** (releases, hub operators, node runners). See [`docs/COMMUNITY-HANDOFF.md`](docs/COMMUNITY-HANDOFF.md).
 
 A separate **Hacash Quantum Wallet** (PQ-first fork) is planned for later - design only for now:
 

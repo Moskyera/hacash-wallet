@@ -127,8 +127,7 @@ pub(super) fn validate_time(issued_at: u64, expires_at: u64, now: u64) -> Compan
     // reported as what it is, so that `InvalidIssuedAt` out of this function
     // means one thing only: the peer's stamp is further ahead than the budget.
     // The owner-facing text for it (LanRuntimeError) depends on that.
-    if expires_at <= issued_at
-        || expires_at.saturating_sub(issued_at) > MAX_HANDSHAKE_LIFETIME_SECS
+    if expires_at <= issued_at || expires_at.saturating_sub(issued_at) > MAX_HANDSHAKE_LIFETIME_SECS
     {
         return Err(CompanionError::MalformedMessage);
     }

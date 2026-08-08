@@ -194,8 +194,7 @@ pub(super) const DISCARDED_WITNESS_CONFIRMATION: &str = "witness_confirmation";
 pub(super) const DISCARDED_PILOT_APPROVAL: &str = "pilot_approval";
 
 #[cfg(any(target_os = "android", test))]
-pub(super) const DISCARD_DESKTOP_NO_LONGER_AWAITING: &str =
-    "desktop_no_longer_awaits_this_phone";
+pub(super) const DISCARD_DESKTOP_NO_LONGER_AWAITING: &str = "desktop_no_longer_awaits_this_phone";
 #[cfg(any(target_os = "android", test))]
 pub(super) const DISCARD_AGED_OUT: &str = "aged_out_on_this_phone";
 #[cfg(any(target_os = "android", test))]
@@ -399,8 +398,8 @@ impl MobileCompanionDurableState {
             DeviceRole::Mobile,
         )?;
         ReplayGuard::from_snapshot(self.replay.clone(), now).map_err(|error| error.to_string())?;
-        if let Some(ack) = &self.pending_pairing_ack {
-            if ack.frame_version != FRAME_VERSION
+        if let Some(ack) = &self.pending_pairing_ack
+            && (ack.frame_version != FRAME_VERSION
                 || ack.session_id.is_empty()
                 || ack.sender_device_id != self.mobile_device_id
                 || ack.recipient_device_id != self.desktop_device_id
@@ -413,10 +412,9 @@ impl MobileCompanionDurableState {
                 || !ack
                     .ciphertext_hex
                     .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit())
-            {
-                return Err("Pending mobile pairing acknowledgement is invalid".to_owned());
-            }
+                    .all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err("Pending mobile pairing acknowledgement is invalid".to_owned());
         }
         if let Some(pending) = &self.pending_approval {
             pending.validate()?;
@@ -607,10 +605,7 @@ impl MobileCompanionDurableState {
 
     /// Forgets the pilot approval naming this exact operation.
     #[cfg(any(target_os = "android", test))]
-    pub(super) fn clear_pending_approval_for(
-        &mut self,
-        operation_id: &str,
-    ) -> Result<(), String> {
+    pub(super) fn clear_pending_approval_for(&mut self, operation_id: &str) -> Result<(), String> {
         let pending = self
             .pending_approval
             .as_ref()
@@ -693,12 +688,9 @@ impl MobileCompanionDurableState {
 
         if let Some(pending) = &self.pending_witness {
             let confirmed_at = parse_decimal_u64(&pending.confirmed_at).unwrap_or(0);
-            if let Some(reason) = retired(
-                &pending.operation_id,
-                confirmed_at,
-                desktop_awaiting,
-                now,
-            ) {
+            if let Some(reason) =
+                retired(&pending.operation_id, confirmed_at, desktop_awaiting, now)
+            {
                 return Some(MobileDiscardedConsent::from_witness(pending, reason, now));
             }
         }
@@ -785,9 +777,7 @@ impl MobileCompanionDurableState {
                 now,
             )
         } else {
-            return Err(
-                "This phone is not holding a confirmation for that payment".to_owned(),
-            );
+            return Err("This phone is not holding a confirmation for that payment".to_owned());
         };
         self.apply_consent_discard(discard.clone())?;
         Ok(discard)
@@ -974,7 +964,8 @@ impl TryFrom<DurableStateDocument> for MobileCompanionDurableState {
         // knows, so it goes first. No build ever writes both keys; if a hand
         // edited file carries both, the pair is still kept in that order
         // rather than one of them being dropped on the floor.
-        let mut discarded_consents_dropped = parse_decimal_u64(&document.discarded_consents_dropped)?;
+        let mut discarded_consents_dropped =
+            parse_decimal_u64(&document.discarded_consents_dropped)?;
         let mut discarded_consents: Vec<MobileDiscardedConsent> = document
             .discarded_consent
             .into_iter()
@@ -1804,7 +1795,10 @@ mod tests {
     fn a_desktop_that_said_nothing_sweeps_nothing() {
         let now = 1_000;
         let state = stranded_confirmation_state(now);
-        assert_eq!(state.obsolete_consent(None, now + CONSENT_MAX_AGE_SECS), None);
+        assert_eq!(
+            state.obsolete_consent(None, now + CONSENT_MAX_AGE_SECS),
+            None
+        );
         // Nor does a statement that arrived inside the grace window: an
         // operation legitimately leaves the offered set for a moment in the
         // middle of a healthy flow.
@@ -1920,7 +1914,15 @@ mod tests {
                 .unwrap_err()
                 .contains("not holding a confirmation for that payment")
         );
-        assert!(shared.current().await.unwrap().unwrap().pending_witness.is_some());
+        assert!(
+            shared
+                .current()
+                .await
+                .unwrap()
+                .unwrap()
+                .pending_witness
+                .is_some()
+        );
 
         let discarded = shared
             .discard_consent_by_owner("operation_one", now)
@@ -2077,7 +2079,9 @@ mod tests {
     fn the_single_receipt_an_older_build_wrote_is_read_and_migrated() {
         let now = 1_000;
         let mut state = stranded_confirmation_state(now);
-        state.owner_discard_consent("operation_one", now + 5).unwrap();
+        state
+            .owner_discard_consent("operation_one", now + 5)
+            .unwrap();
         let legacy_receipt = state.discarded_consents[0].clone();
 
         // Exactly what the previous build put on disk: one `discarded_consent`
@@ -2259,8 +2263,14 @@ mod tests {
     async fn an_unchanged_phone_gains_no_new_state_and_is_never_swept() {
         let now = unix_now().unwrap();
         let state = state_fixture(now);
-        assert_eq!(state.obsolete_consent(Some(&[]), now + CONSENT_MAX_AGE_SECS), None);
-        assert_eq!(state.obsolete_consent(None, now + CONSENT_MAX_AGE_SECS), None);
+        assert_eq!(
+            state.obsolete_consent(Some(&[]), now + CONSENT_MAX_AGE_SECS),
+            None
+        );
+        assert_eq!(
+            state.obsolete_consent(None, now + CONSENT_MAX_AGE_SECS),
+            None
+        );
 
         let encoded = encode_state(&state).unwrap();
         let document: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -2278,7 +2288,10 @@ mod tests {
 
         let store = Arc::new(MemoryStore::with_bytes(encoded.clone()));
         let shared = SharedCompanionState::open(Arc::clone(&store) as Arc<dyn CompanionStateStore>);
-        assert_eq!(shared.sweep_obsolete_consent(Some(&[]), now).await.unwrap(), None);
+        assert_eq!(
+            shared.sweep_obsolete_consent(Some(&[]), now).await.unwrap(),
+            None
+        );
         assert_eq!(
             store.bytes.lock().unwrap().as_deref(),
             Some(encoded.as_slice()),
@@ -2293,7 +2306,9 @@ mod tests {
     fn a_discard_receipt_is_durable_and_validated_on_the_way_back_in() {
         let now = 1_000;
         let mut state = stranded_confirmation_state(now);
-        state.owner_discard_consent("operation_one", now + 5).unwrap();
+        state
+            .owner_discard_consent("operation_one", now + 5)
+            .unwrap();
         let restored = decode_state(&encode_state(&state).unwrap(), now).unwrap();
         assert_eq!(restored.discarded_consents, state.discarded_consents);
 

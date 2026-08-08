@@ -40,7 +40,9 @@ use hpay_companion_protocol::{
     WitnessSubmissionStatus,
 };
 
-use super::desktop_witness_flow::{desktop_approved_operation, pair_desktop_agent, payment_request};
+use super::desktop_witness_flow::{
+    desktop_approved_operation, pair_desktop_agent, payment_request,
+};
 use super::fixtures::*;
 use super::pilot_node::*;
 use super::*;
@@ -282,7 +284,8 @@ async fn the_broadcast_write_crash_is_reconciled_a_year_later() {
 
     let mut manager = AgentWalletManager::open(root.path()).unwrap();
     manager.unlock(&wallet_id, PASSPHRASE, much_later).unwrap();
-    let recovered = operation_view(&mut manager, &wallet_id, &operation_id, much_later + 1).unwrap();
+    let recovered =
+        operation_view(&mut manager, &wallet_id, &operation_id, much_later + 1).unwrap();
     assert_eq!(recovered.status, OperationStatus::BroadcastUncertain);
     assert_eq!(recovered.tx_hash.as_deref(), Some(tx_hash.as_str()));
     assert!(pending_slot(&manager, &wallet_id).is_none());
@@ -302,7 +305,12 @@ async fn the_broadcast_write_crash_is_reconciled_a_year_later() {
         AgentWalletError::RecoveryRequired
     );
     let post_submit = manager
-        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), much_later + 3)
+        .pending_rollback_anchor(
+            &wallet_id,
+            &operation_id,
+            mobile.device_id(),
+            much_later + 3,
+        )
         .await
         .unwrap();
     let receipt = signed_receipt(&post_submit, &mobile, much_later + 4).await;
@@ -314,7 +322,12 @@ async fn the_broadcast_write_crash_is_reconciled_a_year_later() {
         .confirm_broadcast(&wallet_id, &operation_id, &tx_hash, much_later + 6)
         .unwrap();
     let final_anchor = manager
-        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), much_later + 7)
+        .pending_rollback_anchor(
+            &wallet_id,
+            &operation_id,
+            mobile.device_id(),
+            much_later + 7,
+        )
         .await
         .unwrap();
     let receipt = signed_receipt(&final_anchor, &mobile, much_later + 8).await;
@@ -546,8 +559,12 @@ async fn crash_after_the_phone_said_yes(
     let (root, mut manager, wallet_id) = create_manager_for_node(&node.url, now);
     let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
     register_approving_witness_mobile(&mut manager, &wallet_id, &mobile, now + 3);
-    let authorization =
-        pair_desktop_agent(&mut manager, &wallet_id, ApprovalMode::MobileManual, now + 4);
+    let authorization = pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::MobileManual,
+        now + 4,
+    );
     let created = manager
         .create_payment_intent(
             &authorization,
@@ -562,7 +579,8 @@ async fn crash_after_the_phone_said_yes(
     let approval = manager
         .pending_approval(&wallet_id, &operation_id, now + 6)
         .unwrap();
-    let signed = signed_decision(&approval, ApprovalDecision::Approve, &mobile, 1, 1, now + 7).await;
+    let signed =
+        signed_decision(&approval, ApprovalDecision::Approve, &mobile, 1, 1, now + 7).await;
 
     manager.crash_after_mobile_approval_granted = true;
     assert_eq!(
@@ -782,7 +800,9 @@ async fn the_approval_resume_declines_everything_it_cannot_reason_about() {
         crash_after_the_phone_said_yes(67_000).await;
     let after_expiry = 67_500;
     let mut manager = AgentWalletManager::open(root.path()).unwrap();
-    manager.unlock(&wallet_id, PASSPHRASE, after_expiry).unwrap();
+    manager
+        .unlock(&wallet_id, PASSPHRASE, after_expiry)
+        .unwrap();
     assert!(
         manager
             .resume_interrupted_approval(&wallet_id, after_expiry + 1)
@@ -1048,8 +1068,12 @@ async fn the_three_remaining_boundaries_strand_nothing() {
     let (root, mut manager, wallet_id) = create_manager_for_node(&node.url, 72_000);
     let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
     register_witness_mobile(&mut manager, &wallet_id, &mobile, 72_003);
-    let authorization =
-        pair_desktop_agent(&mut manager, &wallet_id, ApprovalMode::DesktopManual, 72_004);
+    let authorization = pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        72_004,
+    );
     manager.crash_after_funds_reserved = true;
     assert_eq!(
         manager
@@ -1113,8 +1137,12 @@ async fn the_three_remaining_boundaries_strand_nothing() {
     let (root, mut manager, wallet_id) = create_manager_for_node(&node.url, 73_000);
     let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
     register_witness_mobile(&mut manager, &wallet_id, &mobile, 73_003);
-    let authorization =
-        pair_desktop_agent(&mut manager, &wallet_id, ApprovalMode::DesktopManual, 73_004);
+    let authorization = pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        73_004,
+    );
     let created = manager
         .create_payment_intent(
             &authorization,

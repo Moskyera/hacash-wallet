@@ -306,8 +306,17 @@ async fn the_post_submit_crash_between_the_receipt_write_and_the_archive_recover
 /// that crashed is by definition not going to be reopened inside five minutes.
 #[tokio::test]
 async fn the_post_submit_crash_recovers_when_the_anchor_died_long_before_the_owner_returned() {
-    let (root, mut manager, wallet_id, mobile, operation_id, node, authorization, post_submit, post_receipt) =
-        post_submit_anchor_and_receipt(31_000).await;
+    let (
+        root,
+        mut manager,
+        wallet_id,
+        mobile,
+        operation_id,
+        node,
+        authorization,
+        post_submit,
+        post_receipt,
+    ) = post_submit_anchor_and_receipt(31_000).await;
     let tx_hash = operation_view(&mut manager, &wallet_id, &operation_id, 31_069)
         .tx_hash
         .unwrap();
@@ -357,7 +366,12 @@ async fn the_post_submit_crash_recovers_when_the_anchor_died_long_before_the_own
         .confirm_broadcast(&wallet_id, &operation_id, &tx_hash, much_later + 3)
         .unwrap();
     let final_anchor = manager
-        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), much_later + 4)
+        .pending_rollback_anchor(
+            &wallet_id,
+            &operation_id,
+            mobile.device_id(),
+            much_later + 4,
+        )
         .await
         .unwrap();
     let receipt = signed_receipt(&final_anchor, &mobile, much_later + 5).await;
@@ -1107,7 +1121,8 @@ async fn the_crash_between_the_approval_and_the_signature_gives_the_reservation_
 async fn the_crash_inside_the_rotation_baseline_recovers_on_unlock() {
     let (root, mut manager, wallet_id, mobile, operation_id, node, _authorization) =
         desktop_approved_operation(39_000).await;
-    let mut now = settle_with_witness(&mut manager, &wallet_id, &operation_id, &mobile, 39_020).await;
+    let mut now =
+        settle_with_witness(&mut manager, &wallet_id, &operation_id, &mobile, 39_020).await;
     assert_eq!(node.submit_count.load(Ordering::SeqCst), 1);
 
     let candidate = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);

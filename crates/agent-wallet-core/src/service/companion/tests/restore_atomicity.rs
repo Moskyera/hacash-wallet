@@ -142,14 +142,10 @@ async fn every_window_in_the_restore_lands_all_four_or_none() {
             // And the write-ahead record is retired rather than left to be
             // re-run against a live wallet for ever.
             assert!(
-                !target_root
-                    .path()
-                    .join(".agent-restore-journal")
-                    .exists(),
+                !target_root.path().join(".agent-restore-journal").exists(),
                 "{point:?}: a committed restore must retire its own record"
             );
-            let again =
-                rebooted.restore_agent_wallet_backup(&backup, PASSPHRASE, ack(), at + 6);
+            let again = rebooted.restore_agent_wallet_backup(&backup, PASSPHRASE, ack(), at + 6);
             assert_eq!(
                 again.unwrap_err(),
                 AgentWalletError::AgentWalletAlreadyExists,
@@ -198,7 +194,10 @@ async fn the_pre_check_no_longer_mistakes_its_own_debris_for_a_live_wallet() {
     // never will.
     target.crash_restore_at = Some(RestoreCrashPoint::AfterVault);
     let interrupted = target.restore_agent_wallet_backup(&backup, PASSPHRASE, ack(), at);
-    assert_eq!(interrupted.unwrap_err(), AgentWalletError::PersistenceFailed);
+    assert_eq!(
+        interrupted.unwrap_err(),
+        AgentWalletError::PersistenceFailed
+    );
     let wallet_root = target_root.path().join("wallets").join(wallet_id.as_str());
     assert!(
         wallet_root.join("vault.json").exists(),
@@ -325,7 +324,10 @@ fn the_rollback_refuses_a_registered_wallet_and_spares_a_foreign_file() {
         .recover_interrupted_wallet_restore()
         .unwrap();
     assert!(foreign.exists(), "a foreign file must never be deleted");
-    assert!(wallet_root.exists(), "and its directory must survive with it");
+    assert!(
+        wallet_root.exists(),
+        "and its directory must survive with it"
+    );
     for document in [
         "vault.json",
         "journal.json",

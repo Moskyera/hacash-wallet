@@ -252,9 +252,7 @@ pub enum AgentWalletError {
     DiagnosticTooLarge,
     // A backup's four files only mean anything together. This is the refusal
     // that keeps a restore from writing three of them.
-    #[error(
-        "this backup's four files do not agree with each other, so nothing was restored"
-    )]
+    #[error("this backup's four files do not agree with each other, so nothing was restored")]
     BackupInconsistent,
     #[error("the backup warning has not been read and acknowledged in full")]
     BackupWarningNotAcknowledged,

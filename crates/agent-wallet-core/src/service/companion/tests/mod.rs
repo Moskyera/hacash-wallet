@@ -23,9 +23,9 @@ mod broadcast_crash_recovery;
 mod decisions;
 mod desktop_approval;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-mod durable_write_probe;
-#[cfg(feature = "agent-wallet-testnet-pilot")]
 mod desktop_witness_flow;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod durable_write_probe;
 mod fixtures;
 mod lifecycle;
 mod pairing;

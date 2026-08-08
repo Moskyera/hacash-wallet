@@ -618,7 +618,7 @@ impl AgentCompanionMobileState {
                 {
                     let _ = app;
                     return Err(
-                        "Retiring a companion pairing is available only on Android".to_owned(),
+                        "Retiring a companion pairing is available only on Android".to_owned()
                     );
                 }
             }
@@ -1100,7 +1100,12 @@ mod tests {
                 "{status} is still awaiting this phone"
             );
         }
-        for status in ["committed", "cancelled", "rejected", "reconciliation_required"] {
+        for status in [
+            "committed",
+            "cancelled",
+            "rejected",
+            "reconciliation_required",
+        ] {
             assert!(
                 witness_pending_operation_ids(&[activity("operation_one", status)]).is_empty(),
                 "{status} is not awaiting this phone"

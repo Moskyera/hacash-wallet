@@ -147,21 +147,17 @@ pub const AGENT_WALLET_BACKUP_WARNING: AgentWalletBackupWarning = AgentWalletBac
     headline: "This backup saves the record of what your agents have already spent. \
                Restoring it later will put that record back to how it is today, and \
                everything below follows from that. Read all four before you continue.",
-    restore_rewinds_spending:
-        "Restoring this backup rewinds the record of what has been spent. Spending limits \
+    restore_rewinds_spending: "Restoring this backup rewinds the record of what has been spent. Spending limits \
          go back to what they were at the moment you made it, and this wallet may pay \
          again for something it has already paid for. That money is really gone twice.",
-    revoked_agents_return:
-        "Restoring this backup brings back every agent that was allowed to spend when you \
+    revoked_agents_return: "Restoring this backup brings back every agent that was allowed to spend when you \
          made it. An agent you have revoked since then comes back live, with its \
          allowance reset. You have to revoke it again yourself.",
-    old_phone_must_be_replaced:
-        "After a restore your current witness phone will refuse to approve anything, for \
+    old_phone_must_be_replaced: "After a restore your current witness phone will refuse to approve anything, for \
          ever, because it can see the wallet has gone backwards. You will have to run a \
          lost-phone witness rotation onto a different handset before this wallet can pay \
          at all.",
-    the_file_is_a_working_wallet:
-        "This backup file plus its passphrase IS a working wallet that can spend your \
+    the_file_is_a_working_wallet: "This backup file plus its passphrase IS a working wallet that can spend your \
          money, at the same time as this one. Anyone who has both has your agent wallet. \
          Store it as you would store cash, and never in the same place as the passphrase.",
 };
@@ -171,21 +167,17 @@ pub const AGENT_WALLET_RESTORE_WARNING: AgentWalletBackupWarning = AgentWalletBa
     headline: "You are about to put this wallet's spending record back to how it was when \
                the backup was made. This is not a repair - it is a rewind, and it cannot be \
                undone. Read all four before you continue.",
-    restore_rewinds_spending:
-        "This rewinds the record of what has been spent. Spending limits go back to what \
+    restore_rewinds_spending: "This rewinds the record of what has been spent. Spending limits go back to what \
          they were when the backup was made, and this wallet may pay again for something \
          it has already paid for. That money is really gone twice.",
-    revoked_agents_return:
-        "Every agent that was allowed to spend when the backup was made comes back live, \
+    revoked_agents_return: "Every agent that was allowed to spend when the backup was made comes back live, \
          with its allowance reset - including any agent you have revoked since. You have \
          to revoke it again yourself.",
-    old_phone_must_be_replaced:
-        "Your current witness phone will refuse to approve anything after this, for ever, \
+    old_phone_must_be_replaced: "Your current witness phone will refuse to approve anything after this, for ever, \
          because it can see the wallet has gone backwards. You will have to run a \
          lost-phone witness rotation onto a different handset before this wallet can pay \
          at all.",
-    the_file_is_a_working_wallet:
-        "The backup file you are about to restore, plus its passphrase, is itself a \
+    the_file_is_a_working_wallet: "The backup file you are about to restore, plus its passphrase, is itself a \
          working wallet that can spend. Anyone else holding a copy can spend from this \
          wallet too. Delete spare copies once you are done.",
 };
@@ -773,10 +765,8 @@ fn check_bundle_consistency(
         return Err(AgentWalletError::BackupInconsistent);
     }
 
-    let journal = AgentJournal::open_detached(
-        WalletScope::for_agent_wallet(&wallet_id),
-        journal_key,
-    )?;
+    let journal =
+        AgentJournal::open_detached(WalletScope::for_agent_wallet(&wallet_id), journal_key)?;
     let recovery = journal.verify_bytes(bundle.journal_json.as_bytes())?;
     let commitment = state_commitment(&state)?;
     if recovery.head.sequence != state.journal_sequence
@@ -846,8 +836,9 @@ fn seal(
     let mut nonce = [0_u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut salt);
     rand::rngs::OsRng.fill_bytes(&mut nonce);
-    let plaintext =
-        Zeroizing::new(serde_json::to_vec(bundle).map_err(|_| AgentWalletError::PersistenceFailed)?);
+    let plaintext = Zeroizing::new(
+        serde_json::to_vec(bundle).map_err(|_| AgentWalletError::PersistenceFailed)?,
+    );
     let ciphertext = crate::vault::seal_backup_payload(
         passphrase,
         &salt,

@@ -28,3 +28,6 @@ test-*.txt
 # Scratch build directories used when the main target dir is unusable.
 /target-ci/
 /target-android/
+/.audit/
+/.build-backups/
+**/rebuild-run.out

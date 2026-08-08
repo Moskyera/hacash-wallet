@@ -156,8 +156,8 @@ async fn wallet_with_one_settled_payment(
 ) {
     let (root, mut manager, wallet_id, mobile, operation_id, node, authorization) =
         desktop_approved_operation(now).await;
-    let settled_at = settle_with_witness(&mut manager, &wallet_id, &operation_id, &mobile, now + 20)
-        .await;
+    let settled_at =
+        settle_with_witness(&mut manager, &wallet_id, &operation_id, &mobile, now + 20).await;
     assert_eq!(node.submit_count.load(Ordering::SeqCst), 1);
     (
         root,
@@ -223,7 +223,10 @@ async fn a_backup_restores_all_four_files_and_the_wallet_still_works() {
     assert_eq!(outcome.restored_active_agents, 1);
 
     // ---- ALL FOUR FILES ARE ON DISK IN THE NEW STORE.
-    let paths = restored.storage_root().join("wallets").join(wallet_id.as_str());
+    let paths = restored
+        .storage_root()
+        .join("wallets")
+        .join(wallet_id.as_str());
     assert!(restored.storage_root().join("registry.json").is_file());
     assert!(paths.join("vault.json").is_file());
     assert!(paths.join("journal.json").is_file());
@@ -304,7 +307,9 @@ async fn restoring_rewinds_the_spend_record_and_the_wallet_pays_again() {
     let (root, mut manager, wallet_id, mobile, node, mut authorization, mut at) =
         wallet_with_one_settled_payment(81_000).await;
     let agent_id = AgentId::parse(agent_ids(&mut manager, &wallet_id, at)[0].clone()).unwrap();
-    let mut policy = manager.agent_policy_admin(&wallet_id, &agent_id, at).unwrap();
+    let mut policy = manager
+        .agent_policy_admin(&wallet_id, &agent_id, at)
+        .unwrap();
     // Two payments of 11,000 units fit in a day. Three do not.
     policy.max_daily_units = HacUnits::new(23_000);
     manager
@@ -333,8 +338,14 @@ async fn restoring_rewinds_the_spend_record_and_the_wallet_pays_again() {
         .approve_desktop_and_broadcast(&wallet_id, approval, at + 3)
         .await
         .unwrap();
-    let after_second =
-        settle_with_witness(&mut manager, &wallet_id, &second.operation_id, &mobile, at + 4).await;
+    let after_second = settle_with_witness(
+        &mut manager,
+        &wallet_id,
+        &second.operation_id,
+        &mobile,
+        at + 4,
+    )
+    .await;
     assert_eq!(node.submit_count.load(Ordering::SeqCst), 2);
     // The unlock session is time-bounded, so the owner is at their desk again.
     manager
@@ -525,7 +536,12 @@ async fn a_revoked_agent_comes_back_and_the_old_phone_refuses_after_a_restore() 
         .await
         .unwrap();
     let anchor = restored
-        .pending_rollback_anchor(&wallet_id, &revived.operation_id, mobile.device_id(), at + 10)
+        .pending_rollback_anchor(
+            &wallet_id,
+            &revived.operation_id,
+            mobile.device_id(),
+            at + 10,
+        )
         .await
         .unwrap();
     assert!(
@@ -556,9 +572,7 @@ async fn a_revoked_agent_comes_back_and_the_old_phone_refuses_after_a_restore() 
     );
     // And it refuses for ever: a year later, and for a freshly issued anchor.
     let much_later = at + 365 * 24 * 60 * 60;
-    restored
-        .unlock(&wallet_id, PASSPHRASE, much_later)
-        .unwrap();
+    restored.unlock(&wallet_id, PASSPHRASE, much_later).unwrap();
     let later_anchor = restored
         .pending_rollback_anchor(
             &wallet_id,
@@ -776,8 +790,9 @@ async fn a_restore_refuses_an_artifact_whose_declared_wallet_or_version_is_wrong
     for (label, mutate) in [
         (
             "a newer backup format",
-            (|metadata: &mut crate::service::AgentWalletBackupMetadata| metadata.backup_version += 1)
-                as fn(&mut crate::service::AgentWalletBackupMetadata),
+            (|metadata: &mut crate::service::AgentWalletBackupMetadata| {
+                metadata.backup_version += 1
+            }) as fn(&mut crate::service::AgentWalletBackupMetadata),
         ),
         ("a foreign document kind", |metadata| {
             metadata.kind = "hpay_something_else".to_owned();
@@ -1026,7 +1041,10 @@ async fn a_restore_refuses_a_backup_whose_four_files_disagree() {
             "a refused restore never registers a wallet ({document:?})"
         );
         for wallet in [&wallet_a, &wallet_b] {
-            let dir = restored.storage_root().join("wallets").join(wallet.as_str());
+            let dir = restored
+                .storage_root()
+                .join("wallets")
+                .join(wallet.as_str());
             assert!(
                 !dir.join("wallet_state.enc.json").exists(),
                 "a refused restore never leaves a state document ({document:?})"
@@ -1227,7 +1245,10 @@ async fn neither_backup_nor_restore_runs_without_all_four_facts_acknowledged() {
             warning.old_phone_must_be_replaced,
             warning.the_file_is_a_working_wallet,
         ] {
-            assert!(line.len() > 40, "a warning line must actually say something");
+            assert!(
+                line.len() > 40,
+                "a warning line must actually say something"
+            );
         }
         assert!(warning.restore_rewinds_spending.contains("already paid"));
         assert!(warning.revoked_agents_return.contains("revoke"));
@@ -1252,7 +1273,10 @@ async fn the_backup_never_contains_key_material_a_passphrase_or_a_state_plaintex
     let (state_master, journal_key) = keys(&manager, &wallet_id);
     let state_master_hex = hex::encode(state_master);
     let journal_key_hex = hex::encode(journal_key);
-    let paths = manager.storage_root().join("wallets").join(wallet_id.as_str());
+    let paths = manager
+        .storage_root()
+        .join("wallets")
+        .join(wallet_id.as_str());
     let vault_json = std::fs::read_to_string(paths.join("vault.json")).unwrap();
 
     let backup = manager

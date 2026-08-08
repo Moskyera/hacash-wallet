@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,51 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "agent-wallet-core"
+version = "1.0.3"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "async-trait",
+ "axum",
+ "basis",
+ "chrono",
+ "field",
+ "fs2",
+ "hacash-wallet-core",
+ "hex",
+ "hkdf",
+ "hmac 0.12.1",
+ "hpay-agent-connector",
+ "hpay-agent-types",
+ "hpay-companion-protocol",
+ "libc",
+ "p256",
+ "protocol",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sys",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "agent-wallet-runtime"
+version = "1.0.3"
+dependencies = [
+ "agent-wallet-core",
+ "hpay-agent-connector",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1430,7 +1476,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "dust-whisper"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -1580,11 +1626,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -1722,6 +1767,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -2140,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "hacash-wallet-core",
  "serde",
@@ -2157,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet-core"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2170,6 +2225,7 @@ dependencies = [
  "dirs",
  "dust-whisper",
  "field",
+ "fs2",
  "hex",
  "hkdf",
  "l2-fast-pay-hub",
@@ -2199,11 +2255,16 @@ dependencies = [
 
 [[package]]
 name = "hacash-wallet-mobile"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
+ "base64 0.22.1",
  "hacash-wallet-core",
+ "hex",
+ "hpay-companion-lan-runtime",
+ "hpay-companion-protocol",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tauri",
  "tauri-build",
  "tauri-plugin-biometric",
@@ -2328,6 +2389,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "hpay-agent-connector"
+version = "1.0.3"
+dependencies = [
+ "async-trait",
+ "hex",
+ "hpay-agent-types",
+ "libc",
+ "p256",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "windows-sys 0.59.0",
+ "zeroize",
+]
+
+[[package]]
+name = "hpay-agent-types"
+version = "1.0.3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "hpay-companion-lan-runtime"
+version = "1.0.3"
+dependencies = [
+ "hpay-companion-protocol",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "hpay-companion-protocol"
+version = "1.0.3"
+dependencies = [
+ "aes-gcm",
+ "hex",
+ "hkdf",
+ "p256",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2390,6 +2508,7 @@ checksum = "818356c5132c1fede50f837ca96afbe78ff42413047f4abb886217845e1b6c8c"
 dependencies = [
  "ctutils",
  "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -2813,14 +2932,17 @@ dependencies = [
 
 [[package]]
 name = "l2-fast-pay-hub"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "axum",
  "basis",
  "clap",
  "field",
+ "fs2",
  "hex",
+ "hkdf",
+ "hmac 0.12.1",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2834,6 +2956,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]
@@ -3033,8 +3157,6 @@ dependencies = [
 name = "mint"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
- "argon2",
  "basis",
  "concat-idents",
  "field",
@@ -3043,10 +3165,12 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "protocol",
+ "sdk",
  "serde_json",
  "sys",
  "tokio",
  "x16rs",
+ "zeroize",
 ]
 
 [[package]]
@@ -3074,6 +3198,7 @@ dependencies = [
  "pkcs8 0.11.0",
  "shake",
  "signature 3.0.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -3085,6 +3210,7 @@ dependencies = [
  "ctutils",
  "hybrid-array",
  "num-traits",
+ "zeroize",
 ]
 
 [[package]]
@@ -4396,6 +4522,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "sdk"
 version = "0.1.1"
 dependencies = [
+ "aes",
  "aes-gcm",
  "argon2",
  "basis",
@@ -4408,6 +4535,7 @@ dependencies = [
  "serde_json",
  "sys",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]
@@ -5007,6 +5135,7 @@ dependencies = [
  "ripemd",
  "sha2 0.10.9",
  "sha3",
+ "zeroize",
 ]
 
 [[package]]
@@ -6062,14 +6191,19 @@ dependencies = [
 
 [[package]]
 name = "wallet-tauri-common"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "aes-gcm",
+ "agent-wallet-core",
+ "agent-wallet-runtime",
  "argon2",
  "base64 0.22.1",
  "dust-whisper",
  "hacash-wallet-core",
  "hex",
+ "hpay-agent-connector",
+ "hpay-companion-lan-runtime",
+ "hpay-companion-protocol",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",

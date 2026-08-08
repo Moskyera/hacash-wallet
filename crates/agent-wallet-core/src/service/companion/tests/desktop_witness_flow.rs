@@ -462,7 +462,7 @@ async fn a_revoked_phone_does_not_satisfy_the_witness_prerequisite() {
     let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
     register_witness_mobile(&mut manager, &wallet_id, &mobile, 4_003);
 
-    let (state_master, journal_key) = keys(&mut manager, &wallet_id);
+    let (state_master, journal_key) = keys(&manager, &wallet_id);
     let mut state = manager
         .load_verified_state(&wallet_id, &state_master, &journal_key)
         .unwrap();
@@ -584,7 +584,7 @@ async fn a_phone_paired_after_the_witness_was_bound_does_not_unlock_the_approval
 
     // The owner loses that phone, revokes it, and pairs a replacement the
     // ordinary way.
-    let (state_master, journal_key) = keys(&mut manager, &wallet_id);
+    let (state_master, journal_key) = keys(&manager, &wallet_id);
     let mut state = manager
         .load_verified_state(&wallet_id, &state_master, &journal_key)
         .unwrap();

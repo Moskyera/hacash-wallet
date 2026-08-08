@@ -500,7 +500,8 @@ if (Test-Path $companionPluginSource) {
         'HPAY/COMPANION/WITNESS-ROTATION-BASELINE/V1',
         'fun signPairingMobileProof(',
         'fun signSessionResponse(',
-        'fun signApprovalDecision(',
+        'fun signApprovalDecisionApprove(',
+        'fun signApprovalDecisionReject(',
         'fun signWitnessReceipt(',
         'hasCanonicalDomain(payload, expectedDomain)'
     )) {

@@ -437,6 +437,7 @@ pub struct AgentWalletManager {
 /// release build as it does in a test one; only the flag that arms it is
 /// test-only, so a release build cannot be made to stop at any of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum RestoreCrashPoint {
     AfterWriteAheadRecord,
     AfterWalletLayout,

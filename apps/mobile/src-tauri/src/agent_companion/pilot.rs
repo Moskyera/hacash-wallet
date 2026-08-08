@@ -1131,7 +1131,10 @@ mod tests {
         }
         // A string the desktop has not learned to send yet must not strand a
         // phone either, so the detail is not read at all.
-        assert!(witness_ack_retires_consent(true, "some_future_terminal_detail"));
+        assert!(witness_ack_retires_consent(
+            true,
+            "some_future_terminal_detail"
+        ));
         // A refusal retires nothing: the operation may still need this phone.
         assert!(!witness_ack_retires_consent(
             false,

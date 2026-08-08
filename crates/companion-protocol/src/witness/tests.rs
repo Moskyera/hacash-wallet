@@ -324,7 +324,10 @@ async fn node_profile_and_transaction_format_are_pinned_on_first_use() {
     let first = SignedRollbackAnchor::sign(anchor.clone(), &desktop)
         .await
         .unwrap();
-    let first_hash = state.accept_anchor(&first, &registry, 100).unwrap().anchor_hash;
+    let first_hash = state
+        .accept_anchor(&first, &registry, 100)
+        .unwrap()
+        .anchor_hash;
     assert_eq!(state.node_profile_id.as_deref(), Some(NODE_PROFILE));
     assert_eq!(state.transaction_format_version, Some(2));
     assert_eq!(state.last_policy_epoch, Some(1));
@@ -367,7 +370,9 @@ async fn node_profile_and_transaction_format_are_pinned_on_first_use() {
     // A policy epoch that moves backwards is a rollback.
     let mut rolled_back = state.clone();
     rolled_back.last_policy_epoch = Some(5);
-    let signed = SignedRollbackAnchor::sign(next(|_| {}), &desktop).await.unwrap();
+    let signed = SignedRollbackAnchor::sign(next(|_| {}), &desktop)
+        .await
+        .unwrap();
     assert_eq!(
         rolled_back.accept_anchor(&signed, &registry, 100),
         Err(CompanionError::RollbackDetected)
@@ -387,7 +392,9 @@ async fn node_profile_and_transaction_format_are_pinned_on_first_use() {
         .expect("a newer policy epoch must not strand a payment awaiting witness");
 
     // The unmodified continuation is still accepted.
-    let signed = SignedRollbackAnchor::sign(next(|_| {}), &desktop).await.unwrap();
+    let signed = SignedRollbackAnchor::sign(next(|_| {}), &desktop)
+        .await
+        .unwrap();
     state.accept_anchor(&signed, &registry, 100).unwrap();
     assert_eq!(state.last_anchor_sequence, 2);
 }
@@ -407,7 +414,6 @@ fn a_witness_document_without_the_pins_still_decodes() {
     assert_eq!(restored, state);
     restored.validate().unwrap();
 }
-
 
 /// A phone witnessing a payment it never approved binds every field that
 /// matters, against its own durable state rather than against anything the
@@ -452,6 +458,7 @@ async fn a_phone_that_never_approved_still_rejects_every_altered_anchor_field() 
         .accept_anchor(&signed, &registry, 100)
         .expect("the unmodified continuation must be accepted");
 
+    #[allow(clippy::type_complexity)]
     let mutations: Vec<(&str, fn(&mut RollbackAnchor))> = vec![
         ("agent_wallet_id", |anchor| {
             anchor.agent_wallet_id = "wallet_other".to_owned()
@@ -487,7 +494,10 @@ async fn a_phone_that_never_approved_still_rejects_every_altered_anchor_field() 
         // registry-bound `verify`; everything else is caught by state this
         // phone holds and the desktop cannot reach.
         assert!(
-            state.clone().accept_anchor(&signed, &registry, 100).is_err(),
+            state
+                .clone()
+                .accept_anchor(&signed, &registry, 100)
+                .is_err(),
             "a changed {name} must be refused by the phone's durable witness state"
         );
     }
@@ -497,7 +507,9 @@ async fn a_phone_that_never_approved_still_rejects_every_altered_anchor_field() 
     let mut rewritten = continuation.clone();
     rewritten.journal_sequence = 7;
     rewritten.journal_head_hash = "88".repeat(32);
-    let signed = SignedRollbackAnchor::sign(rewritten, &desktop).await.unwrap();
+    let signed = SignedRollbackAnchor::sign(rewritten, &desktop)
+        .await
+        .unwrap();
     assert_eq!(
         state.clone().accept_anchor(&signed, &registry, 100),
         Err(CompanionError::RollbackDetected)
@@ -558,7 +570,9 @@ async fn a_replacement_for_a_dead_anchor_is_accepted_and_still_fully_checked() {
         .await
         .unwrap();
     assert!(matches!(
-        state.clone().accept_anchor(&wrong_chain, &registry, expired_at),
+        state
+            .clone()
+            .accept_anchor(&wrong_chain, &registry, expired_at),
         Err(CompanionError::AnchorChainMismatch)
     ));
 
@@ -576,7 +590,9 @@ async fn a_replacement_for_a_dead_anchor_is_accepted_and_still_fully_checked() {
     ));
 
     // The genuine replacement is ordinary work, at the same chain position.
-    let fresh = SignedRollbackAnchor::sign(replacement, &desktop).await.unwrap();
+    let fresh = SignedRollbackAnchor::sign(replacement, &desktop)
+        .await
+        .unwrap();
     let receipt = state.accept_anchor(&fresh, &registry, expired_at).unwrap();
     assert_eq!(state.last_anchor_sequence, anchor.anchor_sequence);
     let fresh_hash = fresh.anchor.canonical_sha256_hex().unwrap();
@@ -623,7 +639,10 @@ async fn a_phone_that_already_consumed_the_dead_anchor_refuses_every_replacement
     let dead = SignedRollbackAnchor::sign(anchor.clone(), &desktop)
         .await
         .unwrap();
-    let dead_hash = state.accept_anchor(&dead, &registry, 100).unwrap().anchor_hash;
+    let dead_hash = state
+        .accept_anchor(&dead, &registry, 100)
+        .unwrap()
+        .anchor_hash;
     let expired_at = anchor.expires_at;
 
     // It cannot re-emit its own stored receipt for the dead anchor either.

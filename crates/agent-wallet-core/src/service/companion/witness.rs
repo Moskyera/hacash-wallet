@@ -6,7 +6,8 @@
 use hpay_companion_protocol::{
     CompanionError, DeviceId, DevicePermission, DeviceRole, RollbackAnchor, RollbackOperationPhase,
     SignedRollbackAnchor, SignedWitnessReceipt, WitnessReconciliationStatus,
-    WitnessReservationState, WitnessRotationPhase, WitnessSubmissionStatus, WitnessTransactionState,
+    WitnessReservationState, WitnessRotationPhase, WitnessSubmissionStatus,
+    WitnessTransactionState,
 };
 use serde::{Deserialize, Serialize};
 

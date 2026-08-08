@@ -1221,7 +1221,9 @@ mod reconnect_challenge_sequence_tests {
             signer: mobile,
             registry,
             durable: Mutex::new((
-                ReplayGuard::new().snapshot(now - clock_behind_secs).unwrap(),
+                ReplayGuard::new()
+                    .snapshot(now - clock_behind_secs)
+                    .unwrap(),
                 0,
             )),
             clock_behind_secs,
@@ -1320,7 +1322,10 @@ mod reconnect_challenge_sequence_tests {
         );
         let message = error.to_string();
         assert_ne!(message, "companion backend rejected the operation");
-        assert!(message.contains("already accepted a newer session challenge"), "{message}");
+        assert!(
+            message.contains("already accepted a newer session challenge"),
+            "{message}"
+        );
         assert!(message.contains("nothing needs to be reset"), "{message}");
         // It must tell the owner to try again, and it must not do so by naming a
         // control the phone does not have. Both of these labels were renamed on
@@ -1391,14 +1396,21 @@ mod reconnect_challenge_sequence_tests {
                 std::mem::discriminant(&expected),
                 "{cause:?} was not named",
             );
-            assert_ne!(named.to_string(), "companion backend rejected the operation");
+            assert_ne!(
+                named.to_string(),
+                "companion backend rejected the operation"
+            );
             assert_eq!(named.is_retryable_by_the_owner(), retryable, "{cause:?}");
         }
         // Anything without a specific meaning still keeps the protocol reason
         // rather than collapsing to the catch-all.
         let fallback = LanRuntimeError::from_challenge_refusal(CompanionError::MalformedMessage);
         assert!(matches!(fallback, LanRuntimeError::Protocol(_)));
-        assert!(fallback.to_string().contains("companion message is malformed"));
+        assert!(
+            fallback
+                .to_string()
+                .contains("companion message is malformed")
+        );
         assert!(!fallback.is_retryable_by_the_owner());
     }
 
@@ -1462,12 +1474,18 @@ mod reconnect_challenge_sequence_tests {
         // Neither may still be the old single sentence that named a clock cause
         // for both, and sent a real investigation to two correct clocks.
         for message in [&expired, &skewed] {
-            assert!(!message.contains("expired or dated in the future"), "{message}");
+            assert!(
+                !message.contains("expired or dated in the future"),
+                "{message}"
+            );
         }
         // The expiry sentence must not send anyone to their clock settings, and
         // the action it does name is one that resolves it: a new connect draws
         // a new challenge.
-        assert!(!expired.to_lowercase().contains("date and time"), "{expired}");
+        assert!(
+            !expired.to_lowercase().contains("date and time"),
+            "{expired}"
+        );
         assert!(expired.to_lowercase().contains("expired"), "{expired}");
         assert!(
             expired.to_lowercase().contains("try connecting again"),
@@ -1479,8 +1497,14 @@ mod reconnect_challenge_sequence_tests {
         assert!(!skewed.to_lowercase().contains("expired"), "{skewed}");
         // Neither may tell the owner to re-pair or reset over this.
         for message in [&expired, &skewed] {
-            assert!(!message.to_lowercase().contains("pair this phone again"), "{message}");
-            assert!(message.contains("Nothing about the pairing is wrong"), "{message}");
+            assert!(
+                !message.to_lowercase().contains("pair this phone again"),
+                "{message}"
+            );
+            assert!(
+                message.contains("Nothing about the pairing is wrong"),
+                "{message}"
+            );
         }
     }
 }

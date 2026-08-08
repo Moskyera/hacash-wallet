@@ -84,7 +84,7 @@ jobs:
 
       - name: Build unsigned Windows x64 NSIS and MSI
         working-directory: apps/desktop
-        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis,msi -- --locked
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis,msi -- --locked --features agent-wallet-testnet-pilot
 
       - name: Stage and validate exact unsigned Windows artifacts
         run: node scripts/release-artifacts.mjs stage-desktop windows dist-release
@@ -410,11 +410,14 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: DECE Hacash Wallet Desktop ${{ github.ref_name }}
+          name: DECE HPAY Desktop ${{ github.ref_name }}
           fail_on_unmatched_files: true
           files: dist-release/*
           body: |
-            ### Hacash Wallet Desktop ${{ github.ref_name }}
+            ### HPAY Desktop ${{ github.ref_name }}
+
+            The AI Agent Wallet testnet pilot is enabled on Windows only and charges no HPAY wallet fee.
+            Linux includes the complete Personal Wallet while the Agent pilot remains fail-closed.
 
             Windows x64:
             - Authenticode-signed NSIS setup executable
@@ -433,11 +436,14 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: DECE Hacash Wallet Desktop ${{ github.ref_name }}
+          name: DECE HPAY Desktop ${{ github.ref_name }}
           fail_on_unmatched_files: true
           files: dist-release/*
           body: |
-            ### Hacash Wallet Desktop ${{ github.ref_name }}
+            ### HPAY Desktop ${{ github.ref_name }}
+
+            The AI Agent Wallet testnet pilot is enabled on Windows only and charges no HPAY wallet fee.
+            Linux includes the complete Personal Wallet while the Agent pilot remains fail-closed.
 
             > **Windows signing notice:** The Windows files in this release are not
             > Authenticode signed. Windows may show an Unknown publisher or SmartScreen

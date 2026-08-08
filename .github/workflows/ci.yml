@@ -57,6 +57,12 @@ jobs:
       - name: Check Rust formatting
         run: >-
           cargo fmt
+          -p hpay-agent-types
+          -p hpay-agent-connector
+          -p agent-wallet-core
+          -p agent-wallet-runtime
+          -p hpay-companion-protocol
+          -p hpay-companion-lan-runtime
           -p dust-whisper
           -p l2-fast-pay-hub
           -p hacash-wallet-core
@@ -72,11 +78,15 @@ jobs:
           printf '%s\n' '<!doctype html><title>CI compile fixture</title>' > apps/desktop/dist/index.html
           cp apps/desktop/dist/index.html apps/mobile/dist/index.html
 
-      - name: Lint complete Rust workspace
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Lint Rust workspace with the supported Linux feature set
+        run: |
+          cargo clippy --workspace --all-targets --all-features --exclude hacash-wallet --locked -- -D warnings
+          cargo clippy -p hacash-wallet --all-targets --locked -- -D warnings
 
-      - name: Test complete Rust workspace
-        run: cargo test --workspace --all-targets --all-features --locked -- --test-threads=1
+      - name: Test Rust workspace with the supported Linux feature set
+        run: |
+          cargo test --workspace --all-targets --all-features --exclude hacash-wallet --locked -- --test-threads=1
+          cargo test -p hacash-wallet --all-targets --locked -- --test-threads=1
 
   frontend:
     name: Frontend ${{ matrix.app }}
@@ -102,9 +112,8 @@ jobs:
         working-directory: apps/${{ matrix.app }}
         run: yarn install --frozen-lockfile --non-interactive
 
-      - name: Run mobile unit tests
-        if: matrix.app == 'mobile'
-        working-directory: apps/mobile
+      - name: Run frontend unit tests
+        working-directory: apps/${{ matrix.app }}
         run: yarn test
 
       - name: Type-check and build frontend
@@ -151,9 +160,15 @@ jobs:
         working-directory: apps/desktop
         run: yarn install --frozen-lockfile --non-interactive
 
-      - name: Compile desktop application without packaging
+      - name: Compile Linux desktop without the blocked Agent pilot
+        if: runner.os == 'Linux'
         working-directory: apps/desktop
         run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked
+
+      - name: Compile Windows desktop with the Agent Wallet testnet pilot
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-testnet-pilot
 
   android-compile:
     name: Android arm64 debug compile
@@ -228,7 +243,7 @@ jobs:
 
       - name: Build Android arm64 debug APK
         working-directory: apps/mobile
-        run: yarn run tauri -- android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked
+        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-testnet-pilot
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh

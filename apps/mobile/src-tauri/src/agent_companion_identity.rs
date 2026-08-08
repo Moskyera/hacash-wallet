@@ -177,9 +177,7 @@ async fn sign_native<R: Runtime>(
         // ever hands authority away from this phone. It stays available in a
         // read-only build so a handset marked as needing a controlled rotation
         // can actually complete one, instead of being stuck for good.
-        DeviceSignaturePurpose::WitnessRotationAuthorization => {
-            "signWitnessRotationAuthorization"
-        }
+        DeviceSignaturePurpose::WitnessRotationAuthorization => "signWitnessRotationAuthorization",
         DeviceSignaturePurpose::RotationCandidateAcceptance
             if cfg!(feature = "agent-wallet-testnet-pilot") =>
         {

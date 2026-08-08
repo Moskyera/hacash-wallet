@@ -791,6 +791,7 @@ mod live_reconnect_clock_skew {
     /// a 301-second response against a 300-second cap. Reserving the whole skew
     /// budget as headroom makes every offset the protocol tolerates fit.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn the_requested_lifetime_leaves_room_for_the_whole_skew_budget() {
         assert!(
             SESSION_LIFETIME_SECS < MAX_HANDSHAKE_LIFETIME_SECS,

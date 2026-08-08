@@ -356,23 +356,21 @@ impl AgentStorage {
         if !path.exists() {
             return Ok(());
         }
-        let record = match read_json_bounded::<AgentRestoreJournal>(
-            &path,
-            MAX_RESTORE_JOURNAL_BYTES,
-        ) {
-            Ok(record)
-                if record.magic == RESTORE_JOURNAL_MAGIC
-                    && record.version == RESTORE_JOURNAL_VERSION
-                    && record.store_id == self.store_id
-                    && validate_wallet_id(&record.wallet_id).is_ok() =>
-            {
-                record
-            }
-            // A record that will not parse, or that belongs to another store,
-            // authorises nothing. The only act it could ever authorise is a
-            // deletion, so it is retired and no wallet file is touched.
-            _ => return self.remove_restore_journal(),
-        };
+        let record =
+            match read_json_bounded::<AgentRestoreJournal>(&path, MAX_RESTORE_JOURNAL_BYTES) {
+                Ok(record)
+                    if record.magic == RESTORE_JOURNAL_MAGIC
+                        && record.version == RESTORE_JOURNAL_VERSION
+                        && record.store_id == self.store_id
+                        && validate_wallet_id(&record.wallet_id).is_ok() =>
+                {
+                    record
+                }
+                // A record that will not parse, or that belongs to another store,
+                // authorises nothing. The only act it could ever authorise is a
+                // deletion, so it is retired and no wallet file is touched.
+                _ => return self.remove_restore_journal(),
+            };
         if self.load_registry()?.wallet(&record.wallet_id).is_some() {
             return self.remove_restore_journal();
         }
@@ -737,7 +735,10 @@ fn prune_wallet_directory(directory: &Path, is_wallet_root: bool) -> AgentWallet
         let metadata =
             fs::symlink_metadata(&path).map_err(|_| AgentWalletError::PersistenceFailed)?;
         let raw_name = entry.file_name();
-        let Some(name) = raw_name.to_str().filter(|_| !metadata.file_type().is_symlink()) else {
+        let Some(name) = raw_name
+            .to_str()
+            .filter(|_| !metadata.file_type().is_symlink())
+        else {
             emptied = false;
             continue;
         };
@@ -783,9 +784,7 @@ fn is_secure_write_temporary(name: &str, is_target: impl Fn(&str) -> bool) -> bo
     let Some((target, random)) = body.rsplit_once('.') else {
         return false;
     };
-    random.len() == 32
-        && random.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && is_target(target)
+    random.len() == 32 && random.bytes().all(|byte| byte.is_ascii_hexdigit()) && is_target(target)
 }
 
 fn validate_state_name(state_name: &str) -> AgentWalletResult<()> {

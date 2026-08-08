@@ -49,7 +49,11 @@ fn walk(root: &Path, prefix: &Path, out: &mut Vec<(String, u64)>) {
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        let relative = path.strip_prefix(prefix).unwrap().to_string_lossy().replace('\\', "/");
+        let relative = path
+            .strip_prefix(prefix)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         if path.is_dir() {
             out.push((format!("{relative}/"), 0));
             walk(&path, prefix, out);
@@ -109,7 +113,8 @@ async fn wallet_with_one_settled_payment(
 ) {
     let (root, mut manager, wallet_id, mobile, operation_id, node, _authorization) =
         desktop_approved_operation(now).await;
-    let after = settle_with_witness(&mut manager, &wallet_id, &operation_id, &mobile, now + 40).await;
+    let after =
+        settle_with_witness(&mut manager, &wallet_id, &operation_id, &mobile, now + 40).await;
     assert_eq!(node.submit_count.load(Ordering::SeqCst), 1);
     (root, manager, wallet_id, mobile, node, after)
 }
@@ -181,10 +186,7 @@ async fn probe_b_wallet_directory_without_registry() {
         wallet_with_one_settled_payment(71_000).await;
     drop(manager);
     let fresh = tempfile::tempdir().unwrap();
-    copy_tree(
-        &root.path().join("wallets"),
-        &fresh.path().join("wallets"),
-    );
+    copy_tree(&root.path().join("wallets"), &fresh.path().join("wallets"));
     let mut restored = AgentWalletManager::open(fresh.path()).unwrap();
     println!(
         "--- PROBE B: list_wallets = {:?}",
@@ -202,10 +204,12 @@ async fn probe_c_whole_root_copied() {
         wallet_with_one_settled_payment(72_000).await;
     let before = state_of(&manager, &wallet_id);
     let (before_seq, before_head) = (before.journal_sequence, before.journal_head_hash.clone());
-    let before_anchor = before
-        .rollback_witness
-        .as_ref()
-        .map(|witness| (witness.last_anchor_sequence, witness.last_anchor_hash.clone()));
+    let before_anchor = before.rollback_witness.as_ref().map(|witness| {
+        (
+            witness.last_anchor_sequence,
+            witness.last_anchor_hash.clone(),
+        )
+    });
     drop(manager);
 
     let fresh = tempfile::tempdir().unwrap();
@@ -221,10 +225,10 @@ async fn probe_c_whole_root_copied() {
         before_seq,
         after_state.journal_sequence,
         before_anchor,
-        after_state
-            .rollback_witness
-            .as_ref()
-            .map(|witness| (witness.last_anchor_sequence, witness.last_anchor_hash.clone()))
+        after_state.rollback_witness.as_ref().map(|witness| (
+            witness.last_anchor_sequence,
+            witness.last_anchor_hash.clone()
+        ))
     );
     assert_eq!(after_state.address, before.address);
     // The unlock itself journals, so the restored journal advances past the copy.
@@ -617,8 +621,12 @@ async fn probe_i_restored_wallet_rebaselines_onto_a_fresh_phone() {
     let (root, mut manager, wallet_id) = create_manager_for_node(&node.url, now);
     let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
     register_witness_mobile(&mut manager, &wallet_id, &mobile, now + 3);
-    let authorization =
-        pair_desktop_agent(&mut manager, &wallet_id, ApprovalMode::DesktopManual, now + 4);
+    let authorization = pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        now + 4,
+    );
 
     let mut clock = one_payment(
         &mut manager,

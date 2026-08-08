@@ -157,7 +157,10 @@ mod tests {
     #[test]
     fn exhaustion_is_refused_instead_of_wrapping() {
         let mut source = DesktopChallengeSequence::resuming_from(u64::MAX);
-        assert_eq!(source.next(0, 1_785_803_758), Err(CompanionError::SequenceReplay));
+        assert_eq!(
+            source.next(0, 1_785_803_758),
+            Err(CompanionError::SequenceReplay)
+        );
         assert_eq!(source.last_issued(), u64::MAX);
     }
 }

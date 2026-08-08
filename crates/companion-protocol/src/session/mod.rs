@@ -15,7 +15,7 @@ mod validation;
 mod tests;
 
 pub use desktop::{DesktopSessionAttempt, EstablishedSession};
-pub use sequence::DesktopChallengeSequence;
 pub use mobile::MobileSessionAttempt;
+pub use sequence::DesktopChallengeSequence;
 pub use types::{SESSION_PROTOCOL_VERSION, SessionChallenge, SessionConfirmation, SessionResponse};
 pub use validation::MAX_REQUESTED_SESSION_LIFETIME_SECS;
