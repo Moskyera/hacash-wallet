@@ -303,6 +303,9 @@ impl WalletService {
             .ok()
             .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
             .unwrap_or_else(|| settings.network_mode.clone());
+        // Keep one authoritative in-memory network. A runtime override must
+        // reach the router and every signing boundary, not only status output.
+        settings.network_mode = network_mode.clone();
         let profile = SecurityProfile::from_name(&settings.security_profile);
         let node = NodeClient::new(settings.node_url.clone())?;
         let bills = BillStore::load().unwrap_or_default();
@@ -556,6 +559,7 @@ impl WalletService {
         if std::env::var("HACASH_WALLET_NETWORK").is_err() {
             self.network_mode = settings.network_mode.clone();
         }
+        settings.network_mode = self.network_mode.clone();
         self.settings = settings;
         self.router
             .update_settings(self.node.clone(), self.settings.clone());
@@ -600,6 +604,7 @@ impl WalletService {
             .ok()
             .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
             .unwrap_or_else(|| self.settings.network_mode.clone());
+        self.settings.network_mode = self.network_mode.clone();
         self.profile = SecurityProfile::from_name(&self.settings.security_profile);
         self.router =
             PaymentRouter::new(self.node.clone(), self.settings.clone(), self.bills.clone());
@@ -1687,7 +1692,11 @@ impl WalletService {
             Some(u) => u.clone(),
             None => return Ok(None),
         };
-        Ok(Some(L2HubClient::new(hub_url).health().await?))
+        Ok(Some(
+            L2HubClient::new_for_network(hub_url, &self.settings.network_mode)
+                .health()
+                .await?,
+        ))
     }
 
     /// Discover a public CSP, persist hub settings, and open a channel when needed.
@@ -1696,7 +1705,7 @@ impl WalletService {
         deposit_mei: Option<f64>,
     ) -> WalletResult<FastPayStatus> {
         self.touch_auto_lock();
-        let deposit = deposit_mei.unwrap_or(DEFAULT_CHANNEL_DEPOSIT_MEI);
+        let mut deposit = deposit_mei.unwrap_or(DEFAULT_CHANNEL_DEPOSIT_MEI);
 
         if self.settings.l2_hub_url.is_none()
             && let Some(discovered) = discover_healthy_hub().await
@@ -1709,7 +1718,8 @@ impl WalletService {
             .l2_hub_url
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
-        let health = L2HubClient::new(hub_url).health().await?;
+        let client = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
+        let health = client.health().await?;
         if !health.ok
             || health.version < 3
             || !health.settlement_ready
@@ -1720,6 +1730,17 @@ impl WalletService {
                 "Provider is not ready for safe, fee-free routed Fast Pay. No channel was opened."
                     .into(),
             ));
+        }
+
+        if self.settings.network_mode == "mainnet" {
+            // Opening a funded channel is irreversible L1 work. Bind its
+            // exposure to the same capped mainnet-pilot decision as payments.
+            let readiness = client.require_mainnet_payment_ready(None).await?;
+            if deposit_mei.is_none() {
+                deposit = (readiness.max_channel_funding_millimeis() as f64 / 1_000.0)
+                    .min(DEFAULT_CHANNEL_DEPOSIT_MEI);
+            }
+            readiness.require_channel_funding_ready(deposit)?;
         }
 
         let hub_address = match self.settings.hub_right_address.clone() {
@@ -1759,7 +1780,7 @@ impl WalletService {
             .l2_hub_url
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
-        let client = L2HubClient::new(hub_url);
+        let client = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
         let health = client.health().await?;
         if !health.ok
             || health.version < 4
@@ -1866,7 +1887,7 @@ impl WalletService {
             .channel_id_hex
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay channel is not configured".into()))?;
-        let client = L2HubClient::new(hub_url);
+        let client = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
         let health = client.health().await?;
         let hub_address = health.hub_address.clone().ok_or_else(|| {
             WalletError::L2("Fast Pay provider did not publish its hub address".into())

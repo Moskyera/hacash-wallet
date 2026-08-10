@@ -1,0 +1,145 @@
+name: Release Fast Pay Hub
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*-hub"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-fast-pay-hub-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+
+jobs:
+  build-linux:
+    name: Build and verify Linux x64 Hub package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    outputs:
+      release-version: ${{ steps.release-version.outputs.version }}
+      package-name: ${{ steps.release-version.outputs.package-name }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify release version and tag
+        id: release-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-version.mjs check
+          version="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}-hub" ]]; then
+            echo "Hub release tag must be v${version}-hub, got ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          package="hpay-fast-pay-hub-v${version}-linux-x64"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'package-name=%s\n' "$package" >> "$GITHUB_OUTPUT"
+          printf 'PACKAGE_NAME=%s\n' "$package" >> "$GITHUB_ENV"
+
+      - name: Checkout pinned fullnodedev
+        shell: pwsh
+        run: ./scripts/checkout-fullnode.ps1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-fast-pay-hub-linux-x64
+
+      - name: Verify Hub source and installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt -p l2-fast-pay-hub -- --check
+          cargo clippy -p l2-fast-pay-hub --all-targets --all-features --locked -- -D warnings
+          cargo test -p l2-fast-pay-hub --all-targets --all-features --locked -- --test-threads=1
+          cargo test -p hacash-wallet-core --test official_hub_contract --locked -- --test-threads=1
+          bash -n scripts/hpay-fast-pay-hub/install.sh
+
+      - name: Build Hub binary
+        run: cargo build --release -p l2-fast-pay-hub --features server --bin fast-pay-hub --locked
+
+      - name: Stage exact one-click package
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="dist-release/${PACKAGE_NAME}"
+          mkdir -p "$stage"
+          install -m 0755 target/release/fast-pay-hub "$stage/fast-pay-hub"
+          install -m 0755 scripts/hpay-fast-pay-hub/install.sh "$stage/install.sh"
+          install -m 0644 scripts/hpay-fast-pay-hub/hpay-fast-pay-hub.service "$stage/hpay-fast-pay-hub.service"
+          install -m 0644 scripts/hpay-fast-pay-hub/README.md "$stage/README.md"
+          file "$stage/fast-pay-hub" | grep -F "x86-64"
+          tar -C dist-release -czf "dist-release/${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
+          rm -rf "$stage"
+          (
+            cd dist-release
+            sha256sum "${PACKAGE_NAME}.tar.gz" > "SHA256SUMS-${PACKAGE_NAME}.txt"
+          )
+          test "$(find dist-release -maxdepth 1 -type f | wc -l)" -eq 2
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fast-pay-hub-linux-x64
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish verified Fast Pay Hub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-linux
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: fast-pay-hub-linux-x64
+          path: dist-release
+
+      - name: Verify exact artifact and checksum
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ needs.build-linux.outputs.package-name }}
+        run: |
+          set -euo pipefail
+          test "$(find dist-release -maxdepth 1 -type f | wc -l)" -eq 2
+          test -f "dist-release/${PACKAGE_NAME}.tar.gz"
+          test -f "dist-release/SHA256SUMS-${PACKAGE_NAME}.txt"
+          (cd dist-release && sha256sum --check "SHA256SUMS-${PACKAGE_NAME}.txt")
+
+      - name: Attest verified Hub provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: dist-release/*
+
+      - name: Publish the verified Hub package
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DECE HPAY Fast Pay Hub ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: dist-release/*
+          body: |
+            ### HPAY Fast Pay Hub ${{ github.ref_name }}
+
+            One-click Linux x64 VPS package for the bounded HPAY Fast Pay mainnet pilot.
+
+            Requirements:
+            - synchronized HPAY-compatible Hacash full node on the same VPS
+            - dedicated low-balance Hub address
+            - HTTPS reverse proxy; never publish port 8790 directly
+
+            This pilot uses official Hacash ChannelPay bills without changing Hacash consensus. It is Hub-coordinated and must not be described as trustless or unilaterally L1-final.
+
+            Verify the SHA-256 file and GitHub build provenance before installation.

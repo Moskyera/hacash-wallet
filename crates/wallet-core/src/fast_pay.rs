@@ -273,17 +273,20 @@ pub async fn evaluate_fast_pay(
     let channel_id = settings.channel_id_hex.clone();
 
     if let (Some(url), Some(ch_id), Some(user)) = (&hub_url, &channel_id, user_address) {
-        let hub = L2HubClient::new(url.clone());
+        let hub = L2HubClient::new_for_network(url.clone(), &settings.network_mode);
         match hub.health().await {
             Ok(h)
                 if h.ok
                     && h.version >= 3
                     && h.settlement_ready
                     && h.cross_channel_ready
-                    && crate::l2_hub::hub_fee_is_zero(&h)
-                    && (settings.network_mode != "mainnet"
-                        || crate::l2_hub::hub_mainnet_safety_ready(&h)) =>
+                    && crate::l2_hub::hub_fee_is_zero(&h) =>
             {
+                if settings.network_mode == "mainnet"
+                    && hub.require_mainnet_payment_ready(None).await.is_err()
+                {
+                    return Ok(FastPayStatus::provider_incompatible());
+                }
                 if let Ok(ch) = query_channel(node, ch_id).await
                     && channel_ready(&ch, user)
                 {

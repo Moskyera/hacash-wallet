@@ -1,101 +1,148 @@
-# Hacash Fast Pay - CSP Hub Operator Guide
+# HPAY Fast Pay Hub Operator Guide
 
-For **operators** running a Channel Payment Service Provider (CSP) hub. End users only need the wallet.
+This guide is for operators running the official Hacash ChannelPay-compatible HPAY Fast Pay Hub. End users only need HPAY Wallet.
+
+## Mainnet-pilot safety model
+
+The current mainnet profile is a deliberately bounded pilot. It uses official Hacash ChannelPay bill documents and does not change Hacash consensus, but it is hub coordinated and is not trustless or unilaterally enforceable on L1. The active Hacash mainnet exposes cooperative original-funding close action 3, so an operator and user must cooperate to settle a channel on L1.
+
+The Hub fails closed unless all of the following remain true:
+
+- a compatible HPAY full node reports fresh mainnet capabilities;
+- the full node is at or above the pinned mainnet checkpoint;
+- the Hub signer, durable state and authenticated journal are configured;
+- the wallet fee is exactly zero;
+- both the payment and channel-funding amounts stay within their configured caps;
+- readiness is rechecked immediately before every Hub signature.
+
+Normal HPAY Wallet L1 sends do not depend on this Hub and keep working when Fast Pay is unavailable.
 
 ## Components
 
 | Piece | Binary | Role |
 |-------|--------|------|
-| CSP hub | `fast-pay-hub` | Wallet Hub API v4 |
-| Fullnode | `hacash.exe` | Channel + L1 state |
-| Hub wallet | Separate keypair | Signs as the hub party on each channel |
+| Fast Pay Hub | `fast-pay-hub` | Wallet Hub API v4 and short-lived mainnet readiness |
+| HPAY full node | `hacash` / `hacash.exe` | Hacash L1 plus `/query/capabilities` |
+| Hub wallet | Separate Hacash keypair | Signs only the Hub side of ChannelPay bills |
 
 ## Prerequisites
 
-1. Hacash fullnode RPC (default `http://127.0.0.1:8080`)
-2. Hub wallet funded with HAC
-3. Open user-to-hub channels. Either channel side is supported.
+1. A fully synchronized HPAY-compatible Hacash full node, normally at `http://127.0.0.1:8080`.
+2. A dedicated Hub wallet funded only with the liquidity required for the pilot.
+3. A persistent data directory on local encrypted storage.
+4. HTTPS termination in front of the Hub. Never expose the internal HTTP port directly to the internet.
+5. Open user-to-Hub channels. Either channel side is supported.
 
-## Hub wallet
+## Secrets
 
-Record two values:
+Create and store three required independent values outside the source tree, plus an optional full-node API token:
 
-- `HACASH_HUB_ADDRESS` - base58 address
-- `HACASH_HUB_SECRET_HEX` - 64-char private key hex (must match address)
+- `HACASH_HUB_ADDRESS`: Hub Hacash address.
+- `HACASH_HUB_SECRET_HEX`: 64-character private key matching the Hub address.
+- `HACASH_HUB_JOURNAL_KEY_HEX`: independent random 32-byte key encoded as 64 hex characters.
+- `HACASH_NODE_API_TOKEN`: optional token matching the full node configuration. Required when the full node protects its API with a token.
+
+Never commit these values, upload them to a GitHub repository, include them in an image, or reuse the Hub private key as the journal key. Use the operating-system secret manager or a root-owned environment file with the narrowest possible permissions.
 
 ## Build
 
 ```bash
-cargo build -p l2-fast-pay-hub --features server --bin fast-pay-hub --release
+cargo build -p l2-fast-pay-hub --features server --bin fast-pay-hub --release --locked
 ```
 
-## Run
+## One-click Linux VPS package
+
+A `vX.Y.Z-hub` tag builds `hpay-fast-pay-hub-vX.Y.Z-linux-x64.tar.gz` through `.github/workflows/release-hub.yml`. The release contains the compiled binary, installer, hardened systemd unit and operator README. Verify the published SHA-256 file and GitHub provenance, extract the archive, then run `sudo ./install.sh`.
+
+The installer verifies the local HPAY full node, creates an independent journal key, installs a dedicated service account and binds the Hub only to loopback. It refuses to overwrite an existing signer, journal key or state. HTTPS reverse-proxy setup remains an explicit operator step because it requires the operator's own domain and certificate.
+
+## Mainnet-pilot run
+
+The example caps each payment and each newly funded channel at 1 HAC (`100000000` Zhu). Use lower caps during initial deployment.
 
 ```bash
-export HACASH_HUB_ADDRESS=1YourHubAddress
-export HACASH_HUB_SECRET_HEX=your64charhex
+export HACASH_HUB_ADDRESS=1YourDedicatedHubAddress
+export HACASH_HUB_SECRET_HEX=your64characterhubprivatekey
+export HACASH_HUB_JOURNAL_KEY_HEX=yourIndependent64characterJournalKey
+export HACASH_NODE_API_TOKEN=yourFullnodeApiToken
+export HACASH_HUB_DEPLOYMENT_PROFILE=mainnet-pilot
+export HACASH_HUB_MAINNET_MAX_PAYMENT_HAC_ZHU=100000000
+export HACASH_HUB_MAINNET_MAX_CHANNEL_FUNDING_HAC_ZHU=100000000
 
 ./target/release/fast-pay-hub \
   --listen 127.0.0.1:8790 \
   --node-url http://127.0.0.1:8080 \
   --hub-fee-mei 0 \
-  --state-file ./hub-state.json
+  --state-file /var/lib/hpay-fast-pay-hub/hub-state.json
 ```
 
-Health: `curl http://127.0.0.1:8790/v1/health`
+Check both endpoints before connecting a wallet:
 
-## Production
-
-- Use `--state-file` for persistence
-- TLS reverse proxy in front of hub
-- Never commit hub secret; `chmod 600` on state + env files
-- Firewall: public 443 only; hub port internal
-
-### systemd example
-
-```ini
-[Service]
-Environment=HACASH_HUB_ADDRESS=1YourHubAddress
-Environment=HACASH_HUB_SECRET_HEX=...
-ExecStart=/opt/hacash/fast-pay-hub --listen 127.0.0.1:8790 \
-  --node-url http://127.0.0.1:8080 --state-file /var/lib/hacash-hub/state.json
-Restart=on-failure
+```bash
+curl http://127.0.0.1:8790/v1/health
+curl http://127.0.0.1:8790/v1/readiness/mainnet
 ```
 
-## API v4
+`payments_enabled` must be `true`, `wallet_fee_hac` must be `"0"`, and `blockers` must be empty. Readiness expires quickly by design; never cache it as a permanent approval.
 
-- `GET /v1/health` - discovery (returns `hub_address`)
-- `POST /v1/fast-pay` - `{ payer, payee, amount, channel_id }` → `bill_hex`
-- `GET /v1/fast-pay/{id}` - payment status
+## Production hardening
 
-- `GET /v1/fast-pay/inbox/{payee}` retrieves routed payments awaiting the recipient signature
-- `POST /v1/fast-pay/{id}/confirm` merges verified signatures and settles only when complete
+- Keep `--listen` on a private interface and publish only HTTPS port 443 through a reverse proxy with per-IP rate, connection and request-size limits.
+- Allow the Hub process to reach only its configured local full node.
+- Back up the state file, authenticated journal and checkpoint together while the service is stopped.
+- Monitor disk space, full-node synchronization, readiness blockers and clock synchronization.
+- Stop accepting payments if the journal or state cannot be durably written.
+- Start with small liquidity and caps. Raise them only after recovery drills and an independent security audit.
+- Run the Hub and miner/full node as separate processes and service accounts. Enabling the Hub must not change mining behavior.
+
+The maintained systemd policy is `scripts/hpay-fast-pay-hub/hpay-fast-pay-hub.service`. Do not keep a second hand-written unit: every hardening or path change must be made once in that canonical file and included unchanged in the release archive.
+
+## Backup and recovery
+
+Treat `/etc/hpay-fast-pay-hub` and `/var/lib/hpay-fast-pay-hub` as one inseparable backup set. The first contains signing and journal keys; the second contains state, the authenticated journal and its checkpoint.
+
+1. Stop the Hub and remove it from the reverse proxy before taking or restoring a backup.
+2. Copy both directories to encrypted offline storage while preserving owner and mode. Never upload the backup to GitHub or ordinary cloud storage.
+3. Restore only a matching pair onto a clean host while the service is stopped. Never combine state from one snapshot with keys, journal or checkpoint from another.
+4. Restore ownership (`root:hpayhub` for the environment file, `hpayhub:hpayhub` for state) and the restrictive permissions installed by the package.
+5. Start on loopback, inspect logs, then require green `/v1/health` and `/v1/readiness/mainnet` before restoring traffic.
+6. Keep the previous backup until a restart and recovery drill completes successfully.
+
+Never delete, regenerate or manually edit the journal/checkpoint to make the Hub start. A failed authenticated recovery is a safety stop that requires operator investigation.
+
+## Wallet Hub API v4
+
+- `GET /v1/health`: discovery and operational status.
+- `GET /v1/readiness/mainnet`: authoritative, short-lived mainnet-pilot gate.
+- `POST /v1/fast-pay`: creates a ChannelPay bill for `{ payer, payee, amount, channel_id }`.
+- `GET /v1/fast-pay/{id}`: payment status.
+- `GET /v1/fast-pay/inbox/{payee}`: routed payments awaiting recipient verification.
+- `POST /v1/fast-pay/{id}/confirm`: merges verified signatures and commits only when complete.
 
 ## Cross-channel settlement
 
-Routed payments require two open channels: payer-to-hub and recipient-to-hub. The hub must have enough HAC liquidity on the recipient channel. The flow is:
+Routed payments require two open channels: payer-to-Hub and recipient-to-Hub. The Hub must have enough HAC liquidity on the recipient channel.
 
-1. The hub prepares and signs both channel legs.
-2. The payer verifies the complete payment intent and signs.
+1. The Hub prepares the exact ChannelPay documents for both channel legs.
+2. The payer verifies the complete intent and signs its leg.
 3. The payment becomes `awaiting_recipient` and appears in the recipient inbox.
-4. The recipient verifies both channel legs and signs.
-5. The hub verifies every signature and atomically commits both channel ledgers.
+4. The recipient verifies both legs and signs.
+5. The Hub verifies every signature and atomically commits both channel ledgers.
 
-## Windows dev
+## Testnet/development
 
-```bat
-set HACASH_HUB_ADDRESS=1YourHubAddress
-set HACASH_HUB_SECRET_HEX=your64charhex
-scripts\START-DEV-STACK.bat
-```
+For local development, omit `HACASH_HUB_DEPLOYMENT_PROFILE` or set it to `testnet`. Mainnet Wallet clients will not accept this profile. Existing testnet Wallet Hub API v4 behavior remains available for compatibility.
 
 ## Troubleshooting
 
-| Issue | Fix |
-|-------|-----|
-| Address mismatch | Secret must match `HACASH_HUB_ADDRESS` |
-| Channel not found | Check fullnode URL + channel id |
-| Missing hub signature | Set `HACASH_HUB_SECRET_HEX` |
-| Low balance | Increase payer funds or hub liquidity on the recipient channel |
+| Issue | Resolution |
+|-------|------------|
+| Address mismatch | The Hub secret must derive exactly `HACASH_HUB_ADDRESS`. |
+| `payments_enabled=false` | Read every entry in `blockers`; verify the full node, clock, profile, caps and durable storage. |
+| Full node capability unavailable | Use the HPAY-compatible full node and enable its local capability endpoint. Public legacy nodes cannot authorize mainnet Fast Pay. |
+| Channel not found | Check the full-node URL, channel ID and both channel participants. |
+| Missing Hub signature | Verify signer configuration and fresh readiness; the Hub intentionally refuses to sign when readiness turns red. |
+| Low balance | Add only bounded Hub liquidity or reduce the requested payment. |
+| Recovery required | Stop the service and follow **Backup and recovery** above. Preserve the complete matching config/state set; never delete or reconstruct the journal. |
 
-See `crates/l2-fast-pay-hub` and `crates/wallet-core/src/l2_hub.rs`.
+Implementation references: `crates/l2-fast-pay-hub` and `crates/wallet-core/src/l2_hub.rs`.

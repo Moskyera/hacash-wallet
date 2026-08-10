@@ -54,6 +54,168 @@ pub struct HubHealth {
     pub deployment_profile: Option<String>,
 }
 
+/// Authoritative, fail-closed payment decision published by HPAY Fast Pay Hub.
+///
+/// The health route is only a liveness/capability signal. Mainnet payment
+/// authority comes exclusively from /v1/readiness/mainnet and is re-checked at
+/// the signing boundary so an earlier green preview grants no later authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubMainnetReadiness {
+    pub schema: String,
+    pub evaluated_unix: u64,
+    pub valid_until_unix: u64,
+    pub profile: String,
+    pub payments_enabled: bool,
+    pub mainnet_detected: Option<bool>,
+    pub fullnode_capabilities: Option<HubFullnodeCapabilities>,
+    pub max_payment_hac_zhu: u64,
+    pub max_channel_funding_hac_zhu: u64,
+    pub max_payment_satoshi: u64,
+    pub wallet_fee_hac: String,
+    pub trustless_finality: bool,
+    pub unilateral_l1_enforceable: bool,
+    pub settlement_model: String,
+    pub blockers: Vec<String>,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HubFullnodeCapabilities {
+    pub observed_unix: u64,
+    pub api_version: u64,
+    pub chain_id: u32,
+    pub height: u64,
+    pub next_height: u64,
+    pub mainnet: bool,
+    pub tip_timestamp_unix: u64,
+    pub tip_age_seconds: u64,
+    pub enabled_actions: Vec<u16>,
+}
+
+const MAINNET_READINESS_SCHEMA: &str = "hpay-fast-pay-mainnet-readiness/1";
+const MAINNET_PILOT_PROFILE: &str = "mainnet-pilot";
+const MAINNET_PILOT_HARD_MAX_HAC_ZHU: u64 = 100_000_000;
+const ZHU_PER_MILLIMEI: u64 = 100_000;
+const MAINNET_MIN_SAFE_HEIGHT: u64 = 765_432;
+const MAX_TIP_AGE_SECONDS: u64 = 3_600;
+const MAX_FUTURE_SKEW_SECONDS: u64 = 120;
+const MAX_READINESS_VALIDITY_SECONDS: u64 = 330;
+const REQUIRED_COOPERATIVE_CLOSE_ACTION: u16 = 3;
+
+impl HubMainnetReadiness {
+    pub fn require_payment_ready(&self, amount_wire: Option<&str>) -> WalletResult<()> {
+        if self.schema != MAINNET_READINESS_SCHEMA
+            || self.profile != MAINNET_PILOT_PROFILE
+            || !self.payments_enabled
+            || self.mainnet_detected != Some(true)
+            || !self.blockers.is_empty()
+        {
+            return Err(WalletError::L2(
+                "Fast Pay mainnet readiness is not green; payment signing is blocked".into(),
+            ));
+        }
+        let now = unix_now();
+        let validity = self
+            .valid_until_unix
+            .checked_sub(self.evaluated_unix)
+            .filter(|seconds| *seconds <= MAX_READINESS_VALIDITY_SECONDS);
+        if validity.is_none()
+            || self.evaluated_unix > now.saturating_add(MAX_FUTURE_SKEW_SECONDS)
+            || now > self.valid_until_unix
+        {
+            return Err(WalletError::L2(
+                "Fast Pay mainnet readiness snapshot is invalid, expired, or from the future"
+                    .into(),
+            ));
+        }
+        if !l2_fast_pay_hub::amount::parse_amount_mei(&self.wallet_fee_hac)
+            .is_ok_and(|amount| amount == l2_fast_pay_hub::amount::HacAmount::ZERO)
+        {
+            return Err(WalletError::L2(
+                "Fast Pay Hub did not explicitly declare a zero wallet fee".into(),
+            ));
+        }
+        if self.max_payment_hac_zhu < ZHU_PER_MILLIMEI
+            || self.max_payment_hac_zhu > MAINNET_PILOT_HARD_MAX_HAC_ZHU
+            || self.max_channel_funding_hac_zhu < ZHU_PER_MILLIMEI
+            || self.max_channel_funding_hac_zhu > MAINNET_PILOT_HARD_MAX_HAC_ZHU
+        {
+            return Err(WalletError::L2(
+                "Fast Pay mainnet payment or channel-funding cap is missing, below wallet precision, or exceeds the HPAY pilot limit"
+                    .into(),
+            ));
+        }
+        let capabilities = self.fullnode_capabilities.as_ref().ok_or_else(|| {
+            WalletError::L2("Fast Pay Hub did not publish verified fullnode capabilities".into())
+        })?;
+        let expected_next_height = capabilities.height.checked_add(1);
+        let reported_tip_age = capabilities
+            .observed_unix
+            .saturating_sub(capabilities.tip_timestamp_unix);
+        let local_tip_age = now.saturating_sub(capabilities.tip_timestamp_unix);
+        if capabilities.observed_unix != self.evaluated_unix
+            || capabilities.api_version != 1
+            || capabilities.chain_id != 0
+            || !capabilities.mainnet
+            || capabilities.height < MAINNET_MIN_SAFE_HEIGHT
+            || expected_next_height != Some(capabilities.next_height)
+            || capabilities.tip_timestamp_unix
+                > capabilities
+                    .observed_unix
+                    .saturating_add(MAX_FUTURE_SKEW_SECONDS)
+            || capabilities.tip_age_seconds != reported_tip_age
+            || capabilities.tip_age_seconds > MAX_TIP_AGE_SECONDS
+            || local_tip_age > MAX_TIP_AGE_SECONDS
+            || !capabilities
+                .enabled_actions
+                .contains(&REQUIRED_COOPERATIVE_CLOSE_ACTION)
+        {
+            return Err(WalletError::L2(
+                "Fast Pay Hub fullnode capabilities are incompatible or stale".into(),
+            ));
+        }
+        if let Some(amount_wire) = amount_wire {
+            let amount = l2_fast_pay_hub::amount::parse_amount_mei(amount_wire)
+                .map_err(|error| WalletError::L2(error.to_string()))?;
+            let amount_zhu = amount
+                .as_millimeis()
+                .checked_mul(ZHU_PER_MILLIMEI)
+                .ok_or_else(|| WalletError::L2("Fast Pay amount exceeds mainnet limits".into()))?;
+            if amount_zhu > self.max_payment_hac_zhu {
+                return Err(WalletError::L2(format!(
+                    "Fast Pay amount exceeds this Hub's mainnet pilot cap of {} zhu",
+                    self.max_payment_hac_zhu
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_channel_funding_ready(&self, amount_mei: f64) -> WalletResult<()> {
+        self.require_payment_ready(None)?;
+        let amount_wire = crate::hip23::format_mei_for_node(amount_mei);
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&amount_wire)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let amount_zhu = amount
+            .as_millimeis()
+            .checked_mul(ZHU_PER_MILLIMEI)
+            .ok_or_else(|| {
+                WalletError::L2("Fast Pay channel funding exceeds mainnet limits".into())
+            })?;
+        if amount_zhu > self.max_channel_funding_hac_zhu {
+            return Err(WalletError::L2(format!(
+                "Fast Pay channel funding exceeds this Hub's mainnet pilot cap of {} zhu",
+                self.max_channel_funding_hac_zhu
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn max_channel_funding_millimeis(&self) -> u64 {
+        self.max_channel_funding_hac_zhu / ZHU_PER_MILLIMEI
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FastPayRequest {
     pub operation_id: String,
@@ -103,16 +265,9 @@ struct ConfirmFastPayRequest<'a> {
     bill_hex: &'a str,
 }
 
-pub fn hub_mainnet_safety_ready(health: &HubHealth) -> bool {
-    health.production_mainnet_ready
-        && health.external_rollback_anchor_ready
-        && health.l1_dispute_path_ready
-        && health.official_channelpay_ready
-}
-
 pub fn hub_fee_is_zero(health: &HubHealth) -> bool {
     match health.hub_fee_mei.as_ref() {
-        None => true,
+        None => false,
         Some(serde_json::Value::String(value)) => l2_fast_pay_hub::amount::parse_amount_mei(value)
             .is_ok_and(|amount| amount == l2_fast_pay_hub::amount::HacAmount::ZERO),
         Some(serde_json::Value::Number(value)) => {
@@ -129,18 +284,30 @@ pub fn hub_fee_label(health: &HubHealth) -> Option<String> {
     })
 }
 
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 const MAX_HUB_JSON_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct L2HubClient {
     base_url: String,
     http: Result<reqwest::Client, String>,
+    mainnet: bool,
 }
 
 impl L2HubClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::new_for_network(base_url, "testnet")
+    }
+
+    pub fn new_for_network(base_url: impl Into<String>, network_mode: &str) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http: crate::http_client::shared_http_client().cloned(),
+            mainnet: network_mode == "mainnet",
         }
     }
 
@@ -159,6 +326,26 @@ impl L2HubClient {
             .await
             .map_err(|error| WalletError::L2(format!("hub unreachable: {error}")))?;
         Self::read_hub_json(response, "hub health").await
+    }
+
+    pub async fn mainnet_readiness(&self) -> WalletResult<HubMainnetReadiness> {
+        let url = format!("{}/v1/readiness/mainnet", self.base_url);
+        let response = self
+            .http()?
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| WalletError::L2(format!("hub readiness unavailable: {error}")))?;
+        Self::read_hub_json(response, "hub mainnet readiness").await
+    }
+
+    pub async fn require_mainnet_payment_ready(
+        &self,
+        amount_wire: Option<&str>,
+    ) -> WalletResult<HubMainnetReadiness> {
+        let readiness = self.mainnet_readiness().await?;
+        readiness.require_payment_ready(amount_wire)?;
+        Ok(readiness)
     }
 
     pub async fn payment_status(&self, payment_id: &str) -> WalletResult<FastPayResponse> {
@@ -275,6 +462,12 @@ impl L2HubClient {
             &trusted,
         )?;
 
+        // Re-fetch after validating the exact bill and before creating or
+        // persisting any local signature. Preview readiness grants no authority.
+        if self.mainnet {
+            self.require_mainnet_payment_ready(Some(&req.amount))
+                .await?;
+        }
         let prepared = safety.persist_before_signing(&req.operation_id, bill_hex)?;
         let signed_hex = match prepared.signed_bill_hex {
             Some(existing) => existing,
@@ -411,6 +604,12 @@ impl L2HubClient {
                 "RecoveryRequired: this Fast Pay receipt may already have reached the hub; automatic retry is disabled".into(),
             ));
         }
+        // Recipient confirmation is a signing boundary too. Re-fetch after
+        // validating and importing the exact inbox item.
+        if self.mainnet {
+            self.require_mainnet_payment_ready(Some(&item.amount))
+                .await?;
+        }
         let prepared = safety.persist_before_signing(&item.payment_id, &item.bill_hex)?;
         let signed_hex = match prepared.signed_bill_hex {
             Some(existing) => existing,
@@ -509,10 +708,45 @@ impl L2HubClient {
 
 #[cfg(test)]
 mod transport_tests {
-    use axum::Router;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use axum::routing::get;
+    use axum::{Json, Router, extract::State};
 
     use super::*;
+
+    fn readiness_json(enabled: bool, blockers: Vec<&str>, cap_zhu: u64) -> serde_json::Value {
+        let now = unix_now();
+        serde_json::json!({
+            "schema": "hpay-fast-pay-mainnet-readiness/1",
+            "evaluated_unix": now,
+            "valid_until_unix": now + 60,
+            "profile": "mainnet-pilot",
+            "payments_enabled": enabled,
+            "mainnet_detected": true,
+            "fullnode_capabilities": {
+                "observed_unix": now,
+                "api_version": 1,
+                "chain_id": 0,
+                "height": 900000,
+                "next_height": 900001,
+                "mainnet": true,
+                "tip_timestamp_unix": now,
+                "tip_age_seconds": 0,
+                "enabled_actions": [1, 2, 3]
+            },
+            "max_payment_hac_zhu": cap_zhu,
+            "max_channel_funding_hac_zhu": cap_zhu.min(MAINNET_PILOT_HARD_MAX_HAC_ZHU),
+            "max_payment_satoshi": 0,
+            "wallet_fee_hac": "0",
+            "trustless_finality": false,
+            "unilateral_l1_enforceable": false,
+            "settlement_model": "hub-coordinated ordered signatures with durable recovery",
+            "blockers": blockers,
+            "limitations": ["settled is not unilateral L1 finality"]
+        })
+    }
 
     #[test]
     fn health_fee_parser_accepts_only_exact_zero() {
@@ -537,27 +771,159 @@ mod transport_tests {
         assert!(hub_fee_is_zero(&health));
         health.hub_fee_mei = Some(serde_json::json!(0.0001));
         assert!(!hub_fee_is_zero(&health));
+        health.hub_fee_mei = None;
+        assert!(!hub_fee_is_zero(&health));
     }
 
     #[test]
-    fn mainnet_readiness_requires_every_independent_safety_gate() {
-        let mut health = HubHealth {
-            ok: true,
-            version: 4,
-            name: None,
-            hub_address: None,
-            hub_fee_mei: Some(serde_json::json!("0")),
-            settlement_ready: true,
-            cross_channel_ready: true,
-            external_rollback_anchor_ready: true,
-            l1_dispute_path_ready: true,
-            official_channelpay_ready: true,
-            production_mainnet_ready: true,
-            deployment_profile: Some("official_channelpay_production".into()),
-        };
-        assert!(hub_mainnet_safety_ready(&health));
-        health.external_rollback_anchor_ready = false;
-        assert!(!hub_mainnet_safety_ready(&health));
+    fn authoritative_readiness_fails_closed_and_enforces_the_hac_cap() {
+        let green: HubMainnetReadiness =
+            serde_json::from_value(readiness_json(true, vec![], 100_000_000)).unwrap();
+        green.require_payment_ready(Some("1")).unwrap();
+        assert_eq!(green.max_channel_funding_millimeis(), 1_000);
+        assert!(green.require_payment_ready(Some("1.001")).is_err());
+
+        let mut lower_channel_cap = green.clone();
+        lower_channel_cap.max_channel_funding_hac_zhu = 50_000_000;
+        lower_channel_cap
+            .require_payment_ready(Some("0.75"))
+            .unwrap();
+        lower_channel_cap
+            .require_channel_funding_ready(0.5)
+            .unwrap();
+        assert!(
+            lower_channel_cap
+                .require_channel_funding_ready(0.501)
+                .is_err()
+        );
+
+        let mut expired = green.clone();
+        expired.valid_until_unix = unix_now().saturating_sub(1);
+        assert!(expired.require_payment_ready(Some("0.001")).is_err());
+
+        let mut stale = green.clone();
+        let old_tip = unix_now().saturating_sub(MAX_TIP_AGE_SECONDS + 1);
+        {
+            let capabilities = stale.fullnode_capabilities.as_mut().unwrap();
+            capabilities.tip_timestamp_unix = old_tip;
+            capabilities.tip_age_seconds = capabilities.observed_unix.saturating_sub(old_tip);
+        }
+        assert!(stale.require_payment_ready(Some("0.001")).is_err());
+
+        let mut mismatched_snapshot = green.clone();
+        mismatched_snapshot
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .observed_unix -= 1;
+        assert!(
+            mismatched_snapshot
+                .require_payment_ready(Some("0.001"))
+                .is_err()
+        );
+
+        let mut nonzero_fee = green.clone();
+        nonzero_fee.wallet_fee_hac = "0.001".into();
+        assert!(nonzero_fee.require_payment_ready(Some("0.001")).is_err());
+
+        let mut invalid_height = green.clone();
+        invalid_height
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .next_height += 1;
+        assert!(invalid_height.require_payment_ready(Some("0.001")).is_err());
+
+        let mut missing_action = green.clone();
+        missing_action
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .enabled_actions = vec![1, 2];
+        assert!(missing_action.require_payment_ready(Some("0.001")).is_err());
+
+        let blocked: HubMainnetReadiness = serde_json::from_value(readiness_json(
+            false,
+            vec!["fullnode_capability_probe_failed"],
+            100_000_000,
+        ))
+        .unwrap();
+        assert!(blocked.require_payment_ready(Some("0.001")).is_err());
+
+        let unsafe_cap: HubMainnetReadiness =
+            serde_json::from_value(readiness_json(true, vec![], 100_000_001)).unwrap();
+        assert!(unsafe_cap.require_payment_ready(Some("0.001")).is_err());
+
+        let unusable_cap: HubMainnetReadiness =
+            serde_json::from_value(readiness_json(true, vec![], ZHU_PER_MILLIMEI - 1)).unwrap();
+        assert!(unusable_cap.require_payment_ready(Some("0.001")).is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_readiness_response_is_never_treated_as_green() {
+        let app = Router::new().route("/v1/readiness/mainnet", get(|| async { "not-json" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let error = L2HubClient::new(format!("http://{address}"))
+            .require_mainnet_payment_ready(Some("0.001"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid JSON"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn missing_readiness_endpoint_is_never_treated_as_green() {
+        let app = Router::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let error = L2HubClient::new(format!("http://{address}"))
+            .require_mainnet_payment_ready(Some("0.001"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("404"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn readiness_is_refetched_and_a_downgrade_blocks_later_authority() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/v1/readiness/mainnet",
+                get(|State(calls): State<Arc<AtomicUsize>>| async move {
+                    let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                    Json(if first {
+                        readiness_json(true, vec![], 100_000_000)
+                    } else {
+                        readiness_json(false, vec!["fullnode_capability_probe_failed"], 100_000_000)
+                    })
+                }),
+            )
+            .with_state(calls);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = L2HubClient::new(format!("http://{address}"));
+        client
+            .require_mainnet_payment_ready(Some("0.001"))
+            .await
+            .unwrap();
+        assert!(
+            client
+                .require_mainnet_payment_ready(Some("0.001"))
+                .await
+                .is_err()
+        );
+        server.abort();
     }
 
     #[tokio::test]

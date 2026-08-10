@@ -145,7 +145,7 @@ impl PaymentRouter {
             None => return Ok(None),
         };
 
-        let hub = L2HubClient::new(hub_url);
+        let hub = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
         let health = match hub.health().await {
             Ok(health) => health,
             Err(_) => return Ok(None),
@@ -156,11 +156,19 @@ impl PaymentRouter {
         if health.version < 3
             || !health.settlement_ready
             || !crate::l2_hub::hub_fee_is_zero(&health)
-            || (self.settings.network_mode == "mainnet"
-                && !crate::l2_hub::hub_mainnet_safety_ready(&health))
         {
             // Fast Pay is fee-free and must produce a dispute-ready settlement bill.
             return Ok(None);
+        }
+        if self.settings.network_mode == "mainnet" {
+            let amount_wire = format_mei_for_node(amount_mei);
+            if hub
+                .require_mainnet_payment_ready(Some(&amount_wire))
+                .await
+                .is_err()
+            {
+                return Ok(None);
+            }
         }
         let same_channel_payee = health.hub_address.as_deref() == Some(to);
         if !same_channel_payee && !health.cross_channel_ready {
@@ -211,7 +219,7 @@ impl PaymentRouter {
             .clone()
             .ok_or_else(|| WalletError::L2("channel not configured".into()))?;
 
-        let hub = L2HubClient::new(hub_url);
+        let hub = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
         let health = hub.health().await?;
         let hub_address = health.hub_address.clone().ok_or_else(|| {
             WalletError::L2("Fast Pay provider did not publish its hub address".into())
@@ -221,8 +229,6 @@ impl PaymentRouter {
             || health.version < 3
             || !health.settlement_ready
             || !crate::l2_hub::hub_fee_is_zero(&health)
-            || (self.settings.network_mode == "mainnet"
-                && !crate::l2_hub::hub_mainnet_safety_ready(&health))
             || (!same_channel_payee && !health.cross_channel_ready)
         {
             return Err(WalletError::L2(
@@ -236,6 +242,11 @@ impl PaymentRouter {
                 payer_account.address(),
                 from
             )));
+        }
+        if self.settings.network_mode == "mainnet" {
+            // Early user-facing failure. execute_and_store_bill repeats this
+            // check at the exact signing boundary to close preview races.
+            hub.require_mainnet_payment_ready(Some(amount_wire)).await?;
         }
         let payer_channel = query_channel(&self.node, &channel_id).await?;
         let amount = l2_fast_pay_hub::amount::parse_amount_mei(amount_wire)
@@ -278,18 +289,6 @@ fn channel_is_ready(channel: &ChannelInfo, user_address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn legacy_hub_cannot_claim_mainnet_readiness_by_settlement_flag_alone() {
-        let health: crate::l2_hub::HubHealth = serde_json::from_value(serde_json::json!({
-            "ok": true,
-            "version": 4,
-            "settlement_ready": true,
-            "cross_channel_ready": true
-        }))
-        .unwrap();
-        assert!(!crate::l2_hub::hub_mainnet_safety_ready(&health));
-    }
 
     #[tokio::test]
     async fn unreachable_hub_is_only_a_pre_sign_l1_fallback() {

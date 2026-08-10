@@ -158,6 +158,121 @@ async fn signer_without_authenticated_storage_never_advertises_ready_or_signs() 
 }
 
 #[tokio::test]
+async fn readiness_downgrade_after_persist_produces_no_hub_signature() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let payer = account("downgrade-payer");
+    let hub_account = account("downgrade-hub");
+    let payer_address = payer.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let channel_id = derive_channel_id(&payer_address, &hub_address, 1);
+    let channel = json!({
+        "ret": 0,
+        "id": channel_id,
+        "status": 0,
+        "reuse_version": 1,
+        "left": { "address": payer_address, "hacash": "10", "satoshi": 0 },
+        "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/query/channel",
+            get({
+                let channel = channel.clone();
+                move || {
+                    let channel = channel.clone();
+                    async move { Json(channel) }
+                }
+            }),
+        )
+        .route(
+            "/query/capabilities",
+            get({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        let fresh = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        Json(json!({
+                            "ret": 0,
+                            "api_version": 1,
+                            "chain": {
+                                "id": 0,
+                                "height": 900000,
+                                "next_height": 900001,
+                                "mainnet": true
+                            },
+                            "network": {
+                                "kind": "mainnet",
+                                "block_1_hash": "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+                                "instance_id": "22".repeat(32)
+                            },
+                            "sync": {
+                                "tip_timestamp_unix": now,
+                                "max_tip_age_seconds": 3600,
+                                "fresh": fresh
+                            },
+                            "actions": {
+                                "registered": [1, 2, 3],
+                                "enabled": [1, 2, 3]
+                            }
+                        }))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node_address = listener.local_addr().unwrap();
+    let node_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let directory = tempdir().unwrap();
+    let hub = HubState::new_secure_with_policy(
+        "downgrade hub",
+        hub_address.clone(),
+        format!("http://{node_address}"),
+        None,
+        directory.path().join("state.json"),
+        secret_hex(&hub_account),
+        JOURNAL_KEY,
+        "mainnet-pilot",
+        100_000_000,
+        100_000_000,
+    )
+    .unwrap();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let request = request(
+        &payer_address,
+        &hub_address,
+        &channel_id,
+        operation_id.clone(),
+        uuid::Uuid::new_v4().to_string(),
+        "1",
+    );
+    let error = hub.settle_fast_pay(&request).await.unwrap_err();
+    assert!(error.to_string().contains("stale"), "{error}");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    let persisted = hub.payment_status(&operation_id).unwrap();
+    assert_eq!(persisted.status, "persisted_before_signing");
+    let documents =
+        ChannelPayCompleteDocuments::from_bill_hex(persisted.bill_hex.as_deref().unwrap()).unwrap();
+    assert!(
+        !documents
+            .chain_payment
+            .signature_verified_for_readable(&hub_address)
+    );
+
+    node_handle.abort();
+}
+
+#[tokio::test]
 async fn retries_are_idempotent_and_channel_reservations_are_exclusive() {
     let (payer, hub, payer_address, hub_address, channel_id, node_url, node_handle) =
         fixture("idempotency").await;
@@ -272,6 +387,14 @@ async fn durable_state_failure_prevents_signature_production() {
     );
     assert!(state.settle_fast_pay(&req).await.is_err());
     assert!(!state.health().settlement_ready);
+    let readiness = state.mainnet_readiness().await;
+    assert!(!readiness.payments_enabled);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("authenticated_storage_or_recovery"))
+    );
     drop(state);
 
     let journal = AuthenticatedJournal::open(

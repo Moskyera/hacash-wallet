@@ -17,7 +17,7 @@ use crate::journal::{
 use crate::ledger::{
     apply_credit, apply_debit, channel_ledger_from_l1, next_bill_auto_number, payer_available_mei,
 };
-use crate::node::NodeClient;
+use crate::node::{NodeClient, validate_mainnet_node_url};
 use crate::operation::{
     IdempotencyRecord, ReservationStatus, request_commitment, validate_operation_identity,
 };
@@ -44,6 +44,9 @@ pub struct HubState {
     state_path: Option<PathBuf>,
     journal: Option<AuthenticatedJournal>,
     recovery_required: AtomicBool,
+    deployment_profile: String,
+    mainnet_max_payment_hac_zhu: u64,
+    mainnet_max_channel_funding_hac_zhu: u64,
     _state_lock: Option<fs::File>,
 }
 
@@ -60,10 +63,14 @@ impl HubState {
             name.into(),
             hub_address.into(),
             node_url.into(),
+            None,
             state_path,
             hub_fee_millimeis,
             hub_secret_hex,
             None,
+            "development".into(),
+            0,
+            0,
         )
     }
 
@@ -80,21 +87,58 @@ impl HubState {
             name.into(),
             hub_address.into(),
             node_url.into(),
+            None,
             Some(state_path),
             hub_fee_millimeis,
             hub_secret_hex,
             Some(journal_storage_key_hex),
+            "development".into(),
+            0,
+            0,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_secure_with_policy(
+        name: impl Into<String>,
+        hub_address: impl Into<String>,
+        node_url: impl Into<String>,
+        node_api_token: Option<&str>,
+        state_path: PathBuf,
+        hub_secret_hex: String,
+        journal_storage_key_hex: &str,
+        deployment_profile: impl Into<String>,
+        mainnet_max_payment_hac_zhu: u64,
+        mainnet_max_channel_funding_hac_zhu: u64,
+    ) -> HubResult<Self> {
+        Self::initialize(
+            name.into(),
+            hub_address.into(),
+            node_url.into(),
+            node_api_token,
+            Some(state_path),
+            0,
+            Some(hub_secret_hex),
+            Some(journal_storage_key_hex),
+            deployment_profile.into(),
+            mainnet_max_payment_hac_zhu,
+            mainnet_max_channel_funding_hac_zhu,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn initialize(
         name: String,
         hub_address: String,
         node_url: String,
+        node_api_token: Option<&str>,
         state_path: Option<PathBuf>,
         hub_fee_millimeis: u64,
         hub_secret_hex: Option<String>,
         journal_storage_key_hex: Option<&str>,
+        deployment_profile: String,
+        mainnet_max_payment_hac_zhu: u64,
+        mainnet_max_channel_funding_hac_zhu: u64,
     ) -> HubResult<Self> {
         if hub_fee_millimeis != 0 {
             return Err(HubError::State(
@@ -103,6 +147,17 @@ impl HubState {
         }
         if hub_address.trim().is_empty() {
             return Err(HubError::State("hub address is required".into()));
+        }
+        if !matches!(
+            deployment_profile.as_str(),
+            "development" | "testnet" | crate::readiness::MAINNET_PILOT_PROFILE
+        ) {
+            return Err(HubError::State(
+                "deployment profile must be development, testnet, or mainnet-pilot".into(),
+            ));
+        }
+        if deployment_profile == crate::readiness::MAINNET_PILOT_PROFILE {
+            validate_mainnet_node_url(&node_url)?;
         }
         let hub_signer = hub_secret_hex
             .as_deref()
@@ -165,25 +220,39 @@ impl HubState {
             .pending
             .values()
             .any(|pending| pending.status == ReservationStatus::RecoveryRequired);
+        if deployment_profile == crate::readiness::MAINNET_PILOT_PROFILE
+            && (hub_signer.is_none() || state_path.is_none() || journal.is_none())
+        {
+            return Err(HubError::State(
+                "mainnet-pilot requires a signer and durable authenticated storage".into(),
+            ));
+        }
         Ok(Self {
             name,
             hub_address,
-            node: NodeClient::new(node_url),
+            node: NodeClient::new(node_url)?.with_api_token(node_api_token)?,
             hub_fee_mei: HacAmount::ZERO,
             hub_signer,
             inner: RwLock::new(persisted),
             state_path,
             journal,
             recovery_required: AtomicBool::new(recovery_required),
+            deployment_profile,
+            mainnet_max_payment_hac_zhu,
+            mainnet_max_channel_funding_hac_zhu,
             _state_lock: state_lock,
         })
     }
 
-    pub fn health(&self) -> crate::api::HubHealth {
-        let settlement_ready = self.hub_signer.is_some()
+    fn settlement_ready(&self) -> bool {
+        self.hub_signer.is_some()
             && self.state_path.is_some()
             && self.journal.is_some()
-            && !self.recovery_required.load(Ordering::Acquire);
+            && !self.recovery_required.load(Ordering::Acquire)
+    }
+
+    pub fn health(&self) -> crate::api::HubHealth {
+        let settlement_ready = self.settlement_ready();
         crate::api::HubHealth {
             ok: true,
             version: crate::api::HUB_API_VERSION,
@@ -194,10 +263,27 @@ impl HubState {
             cross_channel_ready: settlement_ready,
             external_rollback_anchor_ready: false,
             l1_dispute_path_ready: false,
-            official_channelpay_ready: false,
+            official_channelpay_ready: settlement_ready,
             production_mainnet_ready: false,
-            deployment_profile: Some("legacy_wallet_hub_v4_development".into()),
+            deployment_profile: Some(self.deployment_profile.clone()),
         }
+    }
+
+    pub async fn mainnet_readiness(&self) -> crate::readiness::MainnetReadinessV1 {
+        crate::readiness::MainnetReadinessV1::evaluate(
+            &self.deployment_profile,
+            self.mainnet_max_payment_hac_zhu,
+            self.mainnet_max_channel_funding_hac_zhu,
+            self.settlement_ready(),
+            self.node.capabilities().await,
+        )
+    }
+
+    async fn require_mainnet_payment_ready(&self, amount: HacAmount) -> HubResult<()> {
+        if self.deployment_profile != crate::readiness::MAINNET_PILOT_PROFILE {
+            return Ok(());
+        }
+        self.mainnet_readiness().await.require_payment_ready(amount)
     }
 
     pub fn payment_status(&self, payment_id: &str) -> Option<FastPayResponse> {
@@ -271,9 +357,17 @@ impl HubState {
     ) -> HubResult<FastPayResponse> {
         self.ensure_settlement_ready()?;
         validate_operation_identity(request)?;
+        let amount_mei = parse_amount_mei(request.amount.trim())?;
+        if amount_mei == HacAmount::ZERO {
+            return Err(HubError::Payment("amount must be positive".into()));
+        }
+        // This is also required on crash recovery: no old persisted reservation
+        // can regain signing authority after the fullnode readiness turns red.
+        self.require_mainnet_payment_ready(amount_mei).await?;
         let request_commitment = request_commitment(request);
-        if let Some(response) =
-            self.resume_persisted_before_signing(request, &request_commitment)?
+        if let Some(response) = self
+            .resume_persisted_before_signing(request, &request_commitment)
+            .await?
         {
             return Ok(response);
         }
@@ -287,7 +381,6 @@ impl HubState {
         })?;
         let payer = request.payer.trim();
         let payee = request.payee.trim();
-        let amount_wire = request.amount.trim();
         let channel_id = request.channel_id.trim();
         if payer.is_empty() || payee.is_empty() || payer == payee {
             return Err(HubError::Payment(
@@ -298,11 +391,6 @@ impl HubState {
             return Err(HubError::Payment(
                 "the reference hub accepts customer-originated payments only".into(),
             ));
-        }
-
-        let amount_mei = parse_amount_mei(amount_wire)?;
-        if amount_mei == HacAmount::ZERO {
-            return Err(HubError::Payment("amount must be positive".into()));
         }
 
         let payer_channel = self.node.query_channel(channel_id).await?;
@@ -352,204 +440,228 @@ impl HubState {
         };
 
         let timestamp = unix_timestamp();
+        let (mut documents, payment_id, summary, pending) = {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            if let Some(response) =
+                idempotent_response_from_state(&guard, request, &request_commitment)?
+            {
+                return Ok(response);
+            }
+            if guard.pending.len() >= MAX_PENDING_SETTLEMENTS {
+                return Err(HubError::State(
+                    "too many pending settlements; retry after pending proposals expire".into(),
+                ));
+            }
+
+            let payee_channel_id = payee_channel_l1.as_ref().map(|channel| channel.id.as_str());
+            if guard.pending.values().any(|pending| {
+                if pending.status.is_terminal() {
+                    return false;
+                }
+                let pending_payee_channel = pending.payee_channel_id.as_deref();
+                pending.channel_id == channel_id
+                    || pending_payee_channel == Some(channel_id)
+                    || payee_channel_id == Some(pending.channel_id.as_str())
+                    || (payee_channel_id.is_some() && payee_channel_id == pending_payee_channel)
+            }) {
+                return Err(HubError::State(
+                "channel has an active Fast Pay reservation; reconcile it before another payment"
+                    .into(),
+            ));
+            }
+
+            let initial_payer_ledger = channel_ledger_from_l1(&payer_channel)?;
+            let base_ledger = guard
+                .channels
+                .get(channel_id)
+                .cloned()
+                .unwrap_or(initial_payer_ledger);
+            if payer_available_mei(&base_ledger, payer_side) < amount_mei {
+                return Err(HubError::Payment(format!(
+                    "insufficient channel balance: need {amount_mei} HAC"
+                )));
+            }
+            let mut next_ledger = base_ledger.clone();
+            apply_debit(&mut next_ledger, payer_side, amount_mei)?;
+            next_ledger.bill_auto_number = next_bill_auto_number(&base_ledger, &payer_channel)?;
+
+            let (route_label, payee_channel_id, payee_base_ledger, payee_next_ledger, payee_side) =
+                match &payee_route {
+                    PayeeRoute::SameChannel { side } => {
+                        apply_credit(&mut next_ledger, *side, amount_mei)?;
+                        ("same_channel", None, None, None, None)
+                    }
+                    PayeeRoute::CrossChannel { channel_id, side } => {
+                        apply_credit(&mut next_ledger, hub_side, amount_mei)?;
+                        let payee_channel = payee_channel_l1
+                            .as_ref()
+                            .ok_or_else(|| HubError::State("recipient channel missing".into()))?;
+                        let payee_hub_side =
+                            payee_channel.party_side(&self.hub_address).ok_or_else(|| {
+                                HubError::State("hub missing from recipient channel".into())
+                            })?;
+                        if payee_hub_side == *side {
+                            return Err(HubError::Payment(
+                                "recipient and hub cannot occupy the same channel side".into(),
+                            ));
+                        }
+                        let initial_payee_ledger = channel_ledger_from_l1(payee_channel)?;
+                        let base = guard
+                            .channels
+                            .get(channel_id)
+                            .cloned()
+                            .unwrap_or(initial_payee_ledger);
+                        if payer_available_mei(&base, payee_hub_side) < amount_mei {
+                            return Err(HubError::Payment(format!(
+                                "hub has insufficient recipient-channel liquidity: need {amount_mei} HAC"
+                            )));
+                        }
+                        let mut next = base.clone();
+                        apply_debit(&mut next, payee_hub_side, amount_mei)?;
+                        apply_credit(&mut next, *side, amount_mei)?;
+                        next.bill_auto_number = next_bill_auto_number(&base, payee_channel)?;
+                        (
+                            "cross_channel",
+                            Some(channel_id.clone()),
+                            Some(base),
+                            Some(next),
+                            Some(*side),
+                        )
+                    }
+                };
+
+            let payer_wire = ChannelWireInput {
+                channel: payer_channel.clone(),
+                channel_id_hex: channel_id.to_owned(),
+                left_balance_mei: next_ledger.left_balance_mei,
+                right_balance_mei: next_ledger.right_balance_mei,
+                left_satoshi: payer_channel.left.satoshi,
+                right_satoshi: payer_channel.right.satoshi,
+                bill_auto_number: next_ledger.bill_auto_number,
+            };
+
+            let documents = if route_label == "same_channel" {
+                build_same_channel_bill(&payer_wire, payer_side, amount_mei, timestamp)?
+            } else {
+                let payee_channel = payee_channel_l1
+                    .as_ref()
+                    .ok_or_else(|| HubError::State("recipient channel missing".into()))?;
+                let payee_channel_id = payee_channel_id
+                    .as_ref()
+                    .ok_or_else(|| HubError::State("recipient channel id missing".into()))?;
+                let payee_ledger = payee_next_ledger
+                    .as_ref()
+                    .ok_or_else(|| HubError::State("recipient ledger missing".into()))?;
+                let payee_wire = ChannelWireInput {
+                    channel: payee_channel.clone(),
+                    channel_id_hex: payee_channel_id.clone(),
+                    left_balance_mei: payee_ledger.left_balance_mei,
+                    right_balance_mei: payee_ledger.right_balance_mei,
+                    left_satoshi: payee_channel.left.satoshi,
+                    right_satoshi: payee_channel.right.satoshi,
+                    bill_auto_number: payee_ledger.bill_auto_number,
+                };
+                build_cross_channel_bill(
+                    &payer_wire,
+                    payer_side,
+                    amount_mei,
+                    &payee_wire,
+                    payee_side.ok_or_else(|| HubError::State("recipient side missing".into()))?,
+                    amount_mei,
+                    timestamp,
+                )?
+            };
+            let payment_id = request.operation_id.clone();
+            let unsigned_state_commitment = hex::encode(documents.chain_payment.sign_stuff_hash());
+            let summary = if route_label == "same_channel" {
+                format!("Fast Pay prepared {amount_mei} HAC to {payee} on-channel with no fee")
+            } else {
+                format!(
+                    "Fast Pay prepared {amount_mei} HAC to {payee}; waiting for recipient confirmation with no fee"
+                )
+            };
+            let unsigned_response = FastPayResponse {
+                payment_id: payment_id.clone(),
+                status: "persisted_before_signing".into(),
+                bill_hex: Some(documents.to_bill_hex()),
+                summary: Some(summary.clone()),
+            };
+            let pending = PendingSettlement {
+                created_at: timestamp,
+                operation_id: payment_id.clone(),
+                idempotency_key: request.idempotency_key.clone(),
+                request_commitment: request_commitment.clone(),
+                status: ReservationStatus::PersistedBeforeSigning,
+                unsigned_state_commitment: unsigned_state_commitment.clone(),
+                payer: payer.to_owned(),
+                payee: payee.to_owned(),
+                amount: format_amount_mei(amount_mei),
+                channel_id: channel_id.to_owned(),
+                channel_reuse_version: payer_channel.reuse_version,
+                base_ledger,
+                next_ledger,
+                payee_channel_id,
+                payee_base_ledger,
+                payee_next_ledger,
+                response: unsigned_response,
+            };
+
+            let mut next_state = guard.clone();
+            next_state.idempotency.insert(
+                request.idempotency_key.clone(),
+                IdempotencyRecord {
+                    operation_id: payment_id.clone(),
+                    request_commitment: request_commitment.clone(),
+                    created_at: timestamp,
+                },
+            );
+            next_state
+                .pending
+                .insert(payment_id.clone(), pending.clone());
+            next_state
+                .channels
+                .entry(pending.channel_id.clone())
+                .or_insert_with(|| pending.base_ledger.clone());
+            if let (Some(channel_id), Some(base)) = (
+                pending.payee_channel_id.clone(),
+                pending.payee_base_ledger.clone(),
+            ) {
+                next_state.channels.entry(channel_id).or_insert(base);
+            }
+            self.commit_transition(
+                &mut guard,
+                next_state,
+                &pending,
+                JournalPhase::StatePersistedBeforeSigning,
+            )?;
+            (documents, payment_id, summary, pending)
+        };
+
+        // The write guard's lexical scope ended above. Re-fetch the
+        // authoritative gate immediately before creating a signature.
+        self.require_mainnet_payment_ready(amount_mei).await?;
         let mut guard = self
             .inner
             .write()
             .map_err(|_| HubError::State("state lock poisoned".into()))?;
-        if let Some(response) =
-            idempotent_response_from_state(&guard, request, &request_commitment)?
-        {
-            return Ok(response);
-        }
-        if guard.pending.len() >= MAX_PENDING_SETTLEMENTS {
-            return Err(HubError::State(
-                "too many pending settlements; retry after pending proposals expire".into(),
-            ));
-        }
-
-        let payee_channel_id = payee_channel_l1.as_ref().map(|channel| channel.id.as_str());
-        if guard.pending.values().any(|pending| {
-            if pending.status.is_terminal() {
-                return false;
-            }
-            let pending_payee_channel = pending.payee_channel_id.as_deref();
-            pending.channel_id == channel_id
-                || pending_payee_channel == Some(channel_id)
-                || payee_channel_id == Some(pending.channel_id.as_str())
-                || (payee_channel_id.is_some() && payee_channel_id == pending_payee_channel)
-        }) {
-            return Err(HubError::State(
-                "channel has an active Fast Pay reservation; reconcile it before another payment"
-                    .into(),
-            ));
-        }
-
-        let initial_payer_ledger = channel_ledger_from_l1(&payer_channel)?;
-        let base_ledger = guard
-            .channels
-            .get(channel_id)
-            .cloned()
-            .unwrap_or(initial_payer_ledger);
-        if payer_available_mei(&base_ledger, payer_side) < amount_mei {
-            return Err(HubError::Payment(format!(
-                "insufficient channel balance: need {amount_mei} HAC"
-            )));
-        }
-        let mut next_ledger = base_ledger.clone();
-        apply_debit(&mut next_ledger, payer_side, amount_mei)?;
-        next_ledger.bill_auto_number = next_bill_auto_number(&base_ledger, &payer_channel)?;
-
-        let (route_label, payee_channel_id, payee_base_ledger, payee_next_ledger, payee_side) =
-            match &payee_route {
-                PayeeRoute::SameChannel { side } => {
-                    apply_credit(&mut next_ledger, *side, amount_mei)?;
-                    ("same_channel", None, None, None, None)
-                }
-                PayeeRoute::CrossChannel { channel_id, side } => {
-                    apply_credit(&mut next_ledger, hub_side, amount_mei)?;
-                    let payee_channel = payee_channel_l1
-                        .as_ref()
-                        .ok_or_else(|| HubError::State("recipient channel missing".into()))?;
-                    let payee_hub_side =
-                        payee_channel.party_side(&self.hub_address).ok_or_else(|| {
-                            HubError::State("hub missing from recipient channel".into())
-                        })?;
-                    if payee_hub_side == *side {
-                        return Err(HubError::Payment(
-                            "recipient and hub cannot occupy the same channel side".into(),
-                        ));
-                    }
-                    let initial_payee_ledger = channel_ledger_from_l1(payee_channel)?;
-                    let base = guard
-                        .channels
-                        .get(channel_id)
-                        .cloned()
-                        .unwrap_or(initial_payee_ledger);
-                    if payer_available_mei(&base, payee_hub_side) < amount_mei {
-                        return Err(HubError::Payment(format!(
-                            "hub has insufficient recipient-channel liquidity: need {amount_mei} HAC"
-                        )));
-                    }
-                    let mut next = base.clone();
-                    apply_debit(&mut next, payee_hub_side, amount_mei)?;
-                    apply_credit(&mut next, *side, amount_mei)?;
-                    next.bill_auto_number = next_bill_auto_number(&base, payee_channel)?;
-                    (
-                        "cross_channel",
-                        Some(channel_id.clone()),
-                        Some(base),
-                        Some(next),
-                        Some(*side),
-                    )
-                }
-            };
-
-        let payer_wire = ChannelWireInput {
-            channel: payer_channel.clone(),
-            channel_id_hex: channel_id.to_owned(),
-            left_balance_mei: next_ledger.left_balance_mei,
-            right_balance_mei: next_ledger.right_balance_mei,
-            left_satoshi: payer_channel.left.satoshi,
-            right_satoshi: payer_channel.right.satoshi,
-            bill_auto_number: next_ledger.bill_auto_number,
-        };
-
-        let mut documents = if route_label == "same_channel" {
-            build_same_channel_bill(&payer_wire, payer_side, amount_mei, timestamp)?
-        } else {
-            let payee_channel = payee_channel_l1
-                .as_ref()
-                .ok_or_else(|| HubError::State("recipient channel missing".into()))?;
-            let payee_channel_id = payee_channel_id
-                .as_ref()
-                .ok_or_else(|| HubError::State("recipient channel id missing".into()))?;
-            let payee_ledger = payee_next_ledger
-                .as_ref()
-                .ok_or_else(|| HubError::State("recipient ledger missing".into()))?;
-            let payee_wire = ChannelWireInput {
-                channel: payee_channel.clone(),
-                channel_id_hex: payee_channel_id.clone(),
-                left_balance_mei: payee_ledger.left_balance_mei,
-                right_balance_mei: payee_ledger.right_balance_mei,
-                left_satoshi: payee_channel.left.satoshi,
-                right_satoshi: payee_channel.right.satoshi,
-                bill_auto_number: payee_ledger.bill_auto_number,
-            };
-            build_cross_channel_bill(
-                &payer_wire,
-                payer_side,
-                amount_mei,
-                &payee_wire,
-                payee_side.ok_or_else(|| HubError::State("recipient side missing".into()))?,
-                amount_mei,
-                timestamp,
-            )?
-        };
-        let payment_id = request.operation_id.clone();
-        let unsigned_state_commitment = hex::encode(documents.chain_payment.sign_stuff_hash());
-        let summary = if route_label == "same_channel" {
-            format!("Fast Pay prepared {amount_mei} HAC to {payee} on-channel with no fee")
-        } else {
-            format!(
-                "Fast Pay prepared {amount_mei} HAC to {payee}; waiting for recipient confirmation with no fee"
-            )
-        };
-        let unsigned_response = FastPayResponse {
-            payment_id: payment_id.clone(),
-            status: "persisted_before_signing".into(),
-            bill_hex: Some(documents.to_bill_hex()),
-            summary: Some(summary.clone()),
-        };
-        let pending = PendingSettlement {
-            created_at: timestamp,
-            operation_id: payment_id.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-            request_commitment: request_commitment.clone(),
-            status: ReservationStatus::PersistedBeforeSigning,
-            unsigned_state_commitment: unsigned_state_commitment.clone(),
-            payer: payer.to_owned(),
-            payee: payee.to_owned(),
-            amount: format_amount_mei(amount_mei),
-            channel_id: channel_id.to_owned(),
-            channel_reuse_version: payer_channel.reuse_version,
-            base_ledger,
-            next_ledger,
-            payee_channel_id,
-            payee_base_ledger,
-            payee_next_ledger,
-            response: unsigned_response,
-        };
-
-        let mut next_state = guard.clone();
-        next_state.idempotency.insert(
-            request.idempotency_key.clone(),
-            IdempotencyRecord {
-                operation_id: payment_id.clone(),
-                request_commitment: request_commitment.clone(),
-                created_at: timestamp,
-            },
-        );
-        next_state
+        let current = guard
             .pending
-            .insert(payment_id.clone(), pending.clone());
-        next_state
-            .channels
-            .entry(pending.channel_id.clone())
-            .or_insert_with(|| pending.base_ledger.clone());
-        if let (Some(channel_id), Some(base)) = (
-            pending.payee_channel_id.clone(),
-            pending.payee_base_ledger.clone(),
-        ) {
-            next_state.channels.entry(channel_id).or_insert(base);
+            .get(&payment_id)
+            .ok_or_else(|| HubError::State("durable reservation disappeared".into()))?;
+        if current.status != ReservationStatus::PersistedBeforeSigning
+            || current.request_commitment != pending.request_commitment
+            || current.unsigned_state_commitment != pending.unsigned_state_commitment
+        {
+            return Err(HubError::State(
+                "RecoveryRequired: durable reservation changed before signing".into(),
+            ));
         }
-        self.commit_transition(
-            &mut guard,
-            next_state,
-            &pending,
-            JournalPhase::StatePersistedBeforeSigning,
-        )?;
 
-        // The exact reservation and unsigned sign hash are durable before signing.
+        // The exact reservation and unsigned sign hash are durable and the
+        // authoritative mainnet gate was re-fetched immediately before signing.
         signer.sign_documents(&mut documents)?;
         if !documents
             .chain_payment
@@ -830,7 +942,7 @@ impl HubState {
         Ok(())
     }
 
-    fn resume_persisted_before_signing(
+    async fn resume_persisted_before_signing(
         &self,
         request: &crate::api::FastPayRequest,
         commitment: &str,
@@ -870,6 +982,8 @@ impl HubState {
                 "RecoveryRequired: durable unsigned settlement commitment is invalid".into(),
             ));
         }
+        let amount = parse_amount_mei(&pending.amount)?;
+        self.require_mainnet_payment_ready(amount).await?;
         signer.sign_documents(&mut documents)?;
         if !documents
             .chain_payment

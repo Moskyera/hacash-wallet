@@ -67,6 +67,35 @@ async fn prepare_and_confirm(
         .unwrap_or_else(|error| panic!("confirm HTTP {status}: {body:?}: {error}"))
 }
 
+#[tokio::test]
+async fn hub_rejects_oversized_request_bodies_before_json_processing() {
+    let hub = Arc::new(
+        HubState::new(
+            "request limit hub",
+            "nonempty-test-address",
+            "http://127.0.0.1:1",
+            None,
+            0,
+            None,
+        )
+        .unwrap(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, build_router(hub)).await.unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/v1/fast-pay"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("x".repeat(l2_fast_pay_hub::server::MAX_HUB_REQUEST_BODY_BYTES + 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    server.abort();
+}
 #[test]
 fn hub_rejects_any_fast_pay_fee() {
     let err = match HubState::new("fee hub", "1Hub", "http://127.0.0.1:8080", None, 1, None) {
@@ -78,30 +107,141 @@ fn hub_rejects_any_fast_pay_fee() {
 
 async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandle<()>) {
     let store = Arc::new(RwLock::new(channels));
-    let app = Router::new().route(
-        "/query/channel",
-        get({
-            let store = store.clone();
-            move |Query(q): Query<ChannelQuery>| {
+    let app = Router::new()
+        .route(
+            "/query/channel",
+            get({
                 let store = store.clone();
-                async move {
-                    let id = q.id.unwrap_or_default();
-                    let map = store.read().await;
-                    if let Some(body) = map.get(&id) {
-                        Json(body.clone())
-                    } else {
-                        Json(json!({ "ret": 1, "err": "channel not found" }))
+                move |Query(q): Query<ChannelQuery>| {
+                    let store = store.clone();
+                    async move {
+                        let id = q.id.unwrap_or_default();
+                        let map = store.read().await;
+                        if let Some(body) = map.get(&id) {
+                            Json(body.clone())
+                        } else {
+                            Json(json!({ "ret": 1, "err": "channel not found" }))
+                        }
                     }
                 }
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/query/capabilities",
+            get(|| async {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                Json(json!({
+                    "ret": 0,
+                    "api_version": 1,
+                    "chain": {
+                        "id": 0,
+                        "height": 900000,
+                        "next_height": 900001,
+                        "mainnet": true
+                    },
+                    "network": {
+                        "kind": "mainnet",
+                        "block_1_hash": "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+                        "instance_id": "11".repeat(32)
+                    },
+                    "sync": {
+                        "tip_timestamp_unix": now,
+                        "observed_unix": now,
+                        "tip_age_seconds": 0,
+                        "max_tip_age_seconds": 3600,
+                        "fresh": true
+                    },
+                    "actions": {
+                        "registered": [1, 2, 3],
+                        "enabled": [1, 2, 3]
+                    }
+                }))
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn mainnet_pilot_readiness_gates_official_channelpay_roundtrip() {
+    let payer = test_account("mainnet-pilot-payer");
+    let hub_account = test_account("mainnet-pilot-hub");
+    let payer_address = payer.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let channel_id = derive_channel_id(&payer_address, &hub_address, 1);
+    let mut channels = HashMap::new();
+    channels.insert(
+        channel_id.clone(),
+        json!({
+            "ret": 0,
+            "id": channel_id,
+            "status": 0,
+            "reuse_version": 1,
+            "left": { "address": payer_address, "hacash": "10", "satoshi": 0 },
+            "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
+        }),
+    );
+    let (node_url, node_handle) = spawn_mock_node(channels).await;
+    let dir = tempdir().unwrap();
+    let hub = Arc::new(
+        HubState::new_secure_with_policy(
+            "mainnet pilot",
+            hub_address.clone(),
+            node_url,
+            None,
+            dir.path().join("mainnet-state.json"),
+            account_secret_hex(&hub_account),
+            &"52".repeat(32),
+            "mainnet-pilot",
+            100_000_000,
+            100_000_000,
+        )
+        .unwrap(),
+    );
+    let app = build_router(hub);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hub_addr = listener.local_addr().unwrap();
+    let hub_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let base = format!("http://{hub_addr}");
+
+    let readiness: Value = client
+        .get(format!("{base}/v1/readiness/mainnet"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(readiness["payments_enabled"], true, "{readiness}");
+    assert_eq!(readiness["wallet_fee_hac"], "0");
+    assert_eq!(readiness["max_channel_funding_hac_zhu"], 100_000_000);
+
+    let settled = prepare_and_confirm(
+        &client,
+        &base,
+        json!({
+            "payer": payer_address,
+            "payee": hub_address,
+            "amount": "1",
+            "channel_id": channel_id
+        }),
+        &payer,
+    )
+    .await;
+    assert_eq!(settled["status"], "settled", "{settled}");
+
+    hub_handle.abort();
+    node_handle.abort();
 }
 
 #[tokio::test]
