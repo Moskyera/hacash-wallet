@@ -108,6 +108,12 @@ export default function DappApprovalPanel({ onNotify }: Props) {
   return (
     <div className="dapp-mobile-backdrop" role="dialog" aria-modal="true" aria-labelledby="dapp-mobile-title">
       <section className="dapp-mobile-modal">
+        {/*
+          Which wallet the site is asking for. This sheet covers the space pill,
+          the only persistent space marker on the phone. A constant: the panel is
+          mounted only by the personal app.
+        */}
+        <span className="modal-space-label">My Wallet</span>
         <div className="dapp-mobile-badge">{meta.label}</div>
         <h2 id="dapp-mobile-title">{meta.label}</h2>
         <p className="dapp-mobile-origin">{copy.from} <strong>{displayHost(pending.origin)}</strong></p>

@@ -743,3 +743,25 @@
 .app-header .sub {
   max-width: 190px;
 }
+
+/*
+ * The wallet space, stated inside overlays.
+ *
+ * Full-screen dialogs cover the sidebar switcher, the top bar and the space
+ * pill - every element that names the wallet space - and they are exactly the
+ * moments a wallet asks to sign. So each one names the space itself.
+ */
+.modal-space-label {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 4px 9px;
+  border: 1px solid var(--hpay-gold-line, rgb(245 166 35 / 32%));
+  border-radius: 999px;
+  background: rgb(245 166 35 / 8%);
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}

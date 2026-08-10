@@ -23,6 +23,15 @@ export default function PreparedOperationConfirm() {
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal-sheet">
+        {/*
+          Which wallet is being asked to sign.
+          This sheet outranks the space pill in stacking order and covers it, so
+          without this line a confirmation for money leaving My Wallet is
+          indistinguishable from one in the Agent Wallet. It is a constant
+          because this component is mounted only by the personal app; the Agent
+          Wallet companion approves on its own branded screens.
+        */}
+        <span className="modal-space-label">My Wallet</span>
         <h2>{view.display.title}</h2>
         <p className="muted small">{view.display.summary}</p>
 
