@@ -590,7 +590,22 @@ export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void })
             <WalletLogo size="sm" variant="mark" />
             <div>
               <h1>HPAY</h1>
-              <p className="sub">{displayName}</p>
+              {/*
+                Names the space, not just the wallet file. The agent companion's
+                header says "AI Agent Wallet" outright; without the same here,
+                the only thing identifying the personal space was a chip in the
+                corner, which every full-screen overlay covers.
+              */}
+              <p className="sub">
+                <span className="mobile-header-space">My Wallet</span>
+                {/*
+                  walletDisplayName falls back to the literal "My Wallet" when no
+                  custom name is set (walletName.ts:40), which is every wallet by
+                  default, so appending it unconditionally reads "My Wallet ·
+                  My Wallet". Only a name that says something new is shown.
+                */}
+                {displayName && displayName !== "My Wallet" ? ` · ${displayName}` : ""}
+              </p>
             </div>
           </div>
           <span className="mobile-header-security" title={maskAddress(session.status?.address, session.privacy.hide_addresses)} aria-label="Encrypted wallet">

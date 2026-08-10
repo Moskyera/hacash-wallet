@@ -725,3 +725,21 @@
 .mobile-agent-card {
   border-color: rgb(245 166 35 / 32%);
 }
+
+/*
+ * The wallet space, named in the personal header.
+ *
+ * Brighter than the wallet file name beside it, because "which of the two
+ * wallets is this" is the question that matters when the two look alike.
+ */
+.mobile-header-space {
+  color: var(--accent);
+  font-family: inherit;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Widened so the space name and the wallet name both survive the ellipsis. */
+.app-header .sub {
+  max-width: 190px;
+}

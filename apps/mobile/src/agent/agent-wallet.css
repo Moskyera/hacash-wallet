@@ -930,9 +930,19 @@
     height: 28px;
   }
 
+  /*
+   * Wrap rather than truncate. At this width the cap of 95px turned
+   * "AI Agent Wallet" into "AI Agent W...", which clips the one thing on the
+   * screen that says which wallet is being looked at. Two short lines cost a
+   * few pixels of header; a clipped space name costs the answer.
+   */
   .agent-mobile-header h1 {
-    max-width: 95px;
+    max-width: none;
+    overflow: visible;
     font-size: 0.72rem;
+    line-height: 1.22;
+    text-overflow: clip;
+    white-space: normal;
   }
 
   .agent-metric-grid {
