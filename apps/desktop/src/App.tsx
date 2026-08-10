@@ -260,7 +260,8 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
   );
 
   const isAuthScreen = screen === "welcome" || screen === "unlock";
-  const screenTitle = screen === "home" ? "My Wallet" : t(`nav.${screen}`);
+  const screenTitle =
+    screen === "home" ? "My Wallet" : screen === "workspace" ? "Dual Workspace" : t(`nav.${screen}`);
   const screenSubtitle = SCREEN_SUBTITLES[screen];
   const nodeReady = Boolean(wallet.status && !wallet.status.locked && wallet.assets);
   // "On" if any privacy control is doing something, so the chip never claims
@@ -329,7 +330,15 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
                     }}
                   >
                     <span className="nav-item-mark" aria-hidden>{item.mark}</span>
-                    <span className="nav-item-label">{t(`nav.${item.id}`)}</span>
+                    {/*
+                      Dual Workspace is labelled here rather than through the
+                      message catalogue: adding a key means editing seven locale
+                      files in the shared package, and a key present in only one
+                      of them renders as the raw key in the other six.
+                    */}
+                    <span className="nav-item-label">
+                      {item.id === "workspace" ? "Dual Workspace" : t(`nav.${item.id}`)}
+                    </span>
                     {item.id === "fastpay" && (
                       <span className={`nav-fp-badge ${fastPayReady ? "nav-fp-on" : "nav-fp-off"}`}>
                         {fastPayNavHint(wallet.status?.fast_pay_state ?? "no_provider")}

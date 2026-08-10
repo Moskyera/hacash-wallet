@@ -802,3 +802,137 @@
   background: #58c878;
   box-shadow: 0 0 0 3px rgb(88 200 120 / 12%);
 }
+
+/*
+ * Dual Workspace: My Wallet and the Agent Wallet side by side.
+ *
+ * Only one of the two is ever unlocked, so only one column carries live
+ * figures. The agent column is deliberately sparse rather than padded out with
+ * numbers that would have to be invented.
+ */
+.workspace-guarantee {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--hpay-gold-line);
+  border-radius: 12px;
+  background: rgb(245 166 35 / 5%);
+  color: #cfcfcf;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.workspace-guarantee strong {
+  color: var(--accent);
+}
+
+.workspace-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+
+@media (width <= 1080px) {
+  .workspace-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.workspace-column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.workspace-column-head h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.workspace-tag {
+  padding: 4px 9px;
+  border: 1px solid rgb(88 200 120 / 34%);
+  border-radius: 999px;
+  color: #58c878;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.workspace-tag-locked {
+  border-color: var(--hpay-line);
+  color: var(--muted);
+}
+
+.workspace-column-agent {
+  border-color: var(--hpay-gold-line);
+}
+
+.workspace-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.workspace-actions button {
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 9px 6px;
+  border: 1px solid var(--hpay-line);
+  border-radius: 10px;
+  background: #070707;
+  color: #d6d6d6;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.workspace-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.workspace-facts {
+  display: grid;
+  margin: 0;
+  gap: 0;
+}
+
+.workspace-facts > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid #1c1c1c;
+}
+
+.workspace-facts > div:first-child {
+  border-top: 0;
+}
+
+.workspace-facts dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.workspace-facts dd {
+  margin: 0;
+  color: #e6e6e6;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+}
+
+.workspace-facts dd.ready {
+  color: #58c878;
+}
+
+.workspace-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}

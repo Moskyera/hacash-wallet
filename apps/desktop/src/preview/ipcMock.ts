@@ -149,6 +149,27 @@ const RESPONSES: Record<string, unknown> = {
 
   wallet_dapp_wallet: ADDRESS,
 
+  agent_wallet_runtime_status: {
+    available: true,
+    pilot_enabled: true,
+    application_version: "1.0.3",
+    build_profile: "release",
+    error: null,
+    wallets: [
+      {
+        wallet_id: "aw_7f3a2b91",
+        address: "1AgentQ4dbXcVvNmR2sTuWxYzAbCdEfGh",
+        created_at_unix: 1_746_871_320,
+      },
+    ],
+    connector: {
+      phase: "stopped",
+      walletId: null,
+      endpoint: null,
+      lastError: null,
+    },
+  },
+
   // Returns one approval or null, never a list. An empty array here reads as
   // truthy and renders the approval panel against a request that is not there.
   wallet_dapp_pending: null,

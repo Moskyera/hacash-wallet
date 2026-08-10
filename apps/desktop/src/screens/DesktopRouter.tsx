@@ -12,6 +12,7 @@ import FastPayScreen from "./FastPayScreen";
 import HacdScreen from "./HacdScreen";
 import HistoryScreen from "./HistoryScreen";
 import HomeScreen from "./HomeScreen";
+import DualWorkspaceScreen from "./DualWorkspaceScreen";
 import PrivacyScreen from "./PrivacyScreen";
 import QuantumScreen from "./QuantumScreen";
 import ReceiveScreen from "./ReceiveScreen";
@@ -278,6 +279,19 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           onOpenAgent={onOpenAgent}
           onNotify={onNotify}
           clearMessages={clearMessages}
+        />
+      );
+    case "workspace":
+      return (
+        <DualWorkspaceScreen
+          status={status}
+          assets={assets}
+          assetTrends={assetTrends}
+          hideBalances={hideBalances}
+          hideAddresses={hideAddresses}
+          privacy={privacy}
+          onNavigate={setScreen}
+          onOpenAgent={onOpenAgent}
         />
       );
     case "fastpay":

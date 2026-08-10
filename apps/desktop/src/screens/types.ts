@@ -2,6 +2,7 @@ export type Screen =
   | "welcome"
   | "unlock"
   | "home"
+  | "workspace"
   | "send"
   | "fastpay"
   | "receive"
@@ -26,6 +27,7 @@ export const NAV_GROUPS: { id: "wallet" | "tools" | "control"; items: NavItem[] 
     id: "wallet",
     items: [
       { id: "home", mark: "⌂" },
+      { id: "workspace", mark: "◫" },
       { id: "send", mark: "↑" },
       { id: "receive", mark: "↓" },
       { id: "hacd", mark: "◆" },
