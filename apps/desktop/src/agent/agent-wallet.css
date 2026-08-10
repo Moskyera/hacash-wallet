@@ -856,3 +856,50 @@
   font-size: 12px;
   font-weight: 700;
 }
+
+/*
+ * "You are here" in the Agent Wallet space.
+ *
+ * The current space is rendered as a <span class="wallet-space-current active">
+ * while the other space is a <button>. Every .active rule in this file and in
+ * dashboard.css targets buttons, so until now the CURRENT space drew as plain
+ * unstyled text and the OTHER space drew as a bordered control: the strongest
+ * element on screen pointed at the wallet you were not in. This is the exact
+ * inverse of the personal sidebar and it is fixed here.
+ */
+.wallet-space-switcher .wallet-space-current {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: #ff9d00;
+  color: #000;
+  font-size: inherit;
+  font-weight: 700;
+  text-align: center;
+}
+
+.agent-sidebar .wallet-space-switcher .wallet-space-current,
+.agent-entry .wallet-space-switcher .wallet-space-current {
+  min-height: 34px;
+  padding: 7px;
+  font-size: 10px;
+}
+
+/*
+ * Chrome that survives scrolling.
+ *
+ * The agent app had no sticky or fixed element in its unlocked state, so once a
+ * page scrolled, the brand, the space switcher, the pilot banner and the only
+ * heading naming the space all left the viewport together. On four of the six
+ * agent pages nothing else names the space at all, which meant a scrolled Rules
+ * or Activity screen gave no way to tell which wallet was on screen.
+ */
+.agent-sidebar {
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  align-self: start;
+  overflow-y: auto;
+}

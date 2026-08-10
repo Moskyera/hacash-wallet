@@ -417,6 +417,19 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
         {!isAuthScreen && (
           <header className="desktop-topbar">
             <div className="desktop-topbar-copy">
+              {/*
+                Names the wallet space, not the screen. The sidebar switcher can
+                scroll inside itself and disappears entirely at narrow widths,
+                and the heading below says "Send" or "History"; without this,
+                a scrolled page in either space looks like the other.
+              */}
+              <span className="desktop-topbar-space">
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path d="M4 7h16v13H4zM8 4h8" />
+                  <circle cx="12" cy="13" r="2.4" />
+                </svg>
+                My Wallet
+              </span>
               <h1>{screenTitle}</h1>
               {screenSubtitle ? <p>{screenSubtitle}</p> : null}
             </div>
