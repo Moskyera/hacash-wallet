@@ -75,6 +75,8 @@ export type DesktopActions = {
   onWatchOnly: (address: string) => void;
   onUnlock: (passphrase: string) => void;
   onLock: () => void;
+  /** Switches to the Agent Wallet space. Locks My Wallet on the way there. */
+  onOpenAgent: () => void;
   onOpenQrPay: () => void;
   onEnableFastPay: (userDeposit: string) => void;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
@@ -183,6 +185,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     onWatchOnly,
     onUnlock,
     onLock,
+    onOpenAgent,
     onOpenQrPay,
     onEnableFastPay,
     onApplyHub,
@@ -272,6 +275,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           lastTx={lastTx}
           privacy={privacy}
           onNavigate={setScreen}
+          onOpenAgent={onOpenAgent}
           onNotify={onNotify}
           clearMessages={clearMessages}
         />

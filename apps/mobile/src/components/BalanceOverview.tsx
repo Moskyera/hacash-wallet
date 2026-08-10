@@ -52,19 +52,37 @@ export default function BalanceOverview({ assets, hideBalances, topHint, actions
           </div>
           {topHint}
           <div className="balance-portfolio-total">
-            <div className="balance-primary">
-              <span className="balance-primary-value">{maskBalance(assets?.hac_mei ?? null, hideBalances)}</span>
-              <span className="balance-primary-unit">HAC</span>
-            </div>
-            <p className="balance-total-usd">{maskUsd(portfolio?.totalUsd, hideBalances)} {t("balance.totalUsd")}</p>
+            {/* The USD figure leads while a price exists, and the balance leads
+                when none does. The price comes from an external source that can
+                be missing or stale; the balance is what the wallet itself knows,
+                and "N/A" must never be the largest text on a wallet screen. */}
+            {portfolio ? (
+              <>
+                <div className="balance-primary">
+                  <span className="balance-primary-value">{maskUsd(portfolio.totalUsd, hideBalances)}</span>
+                  <span className="balance-primary-unit">USD</span>
+                </div>
+                <p className="balance-total-usd">
+                  &asymp; {maskBalance(assets?.hac_mei ?? null, hideBalances)} HAC
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="balance-primary">
+                  <span className="balance-primary-value">{maskBalance(assets?.hac_mei ?? null, hideBalances)}</span>
+                  <span className="balance-primary-unit">HAC</span>
+                </div>
+                <p className="balance-total-usd">{t("prices.unavailable")}</p>
+              </>
+            )}
           </div>
         </section>
         {actions ? <div className="mobile-primary-actions-slot">{actions}</div> : null}
         <div className="balance-assets-grid">
-          <MobileAsset kind="hac" label="HAC" amount={maskBalance(assets?.hac_mei ?? null, hideBalances)} usd={maskUsd(portfolio?.hacUsd, hideBalances)} />
-          <MobileAsset kind="hacd" label="HACD" amount={maskAssetCount(hacdCount, hideBalances)} hint={hacdHint} usd={maskUsd(portfolio?.hacdUsd, hideBalances)} />
+          <MobileAsset kind="hac" label="HAC" amount={maskBalance(assets?.hac_mei ?? null, hideBalances)} usd={maskUsd(portfolio?.hacUsd, hideBalances)} unitPrice={formatUnitPrice(prices?.hacUsd)} />
+          <MobileAsset kind="hacd" label="HACD" amount={maskAssetCount(hacdCount, hideBalances)} hint={hacdHint} usd={maskUsd(portfolio?.hacdUsd, hideBalances)} unitPrice={formatUnitPrice(prices?.hacdUsd)} />
           <MobileAsset kind="hip20" label="HIP-20" amount={hideBalances ? "••••" : String(nativeAssetCount)} hint={hideBalances ? null : `${nativeAssetCount} native assets`} usd="Native on Hacash" />
-          <MobileAsset kind="btc" label="BTC on Hacash" amount={maskBtcFromSatoshi(btcTotalSat || null, hideBalances)} hint={btcChannelHint} usd={maskUsd(portfolio?.btcUsd, hideBalances)} />
+          <MobileAsset kind="btc" label="BTC on Hacash" amount={maskBtcFromSatoshi(btcTotalSat || null, hideBalances)} hint={btcChannelHint} usd={maskUsd(portfolio?.btcUsd, hideBalances)} unitPrice={formatUnitPrice(prices?.btcUsd)} />
         </div>
       </div>
       <NativeAssetBalances assets={assets?.native_assets ?? []} hidden={hideBalances} loadMetadata={api.queryNativeAssetMetadata} />
@@ -75,13 +93,31 @@ export default function BalanceOverview({ assets, hideBalances, topHint, actions
   );
 }
 
-function MobileAsset({ kind, label, amount, hint, usd }: { kind: "hac" | "hacd" | "btc" | "hip20"; label: string; amount: string; hint?: string | null; usd: string }) {
+/**
+ * One unit of the asset in USD.
+ *
+ * Not masked by the privacy setting: hiding balances hides what this wallet
+ * holds, and a public market price says nothing about the holder. Shown with no
+ * change percentage, because the price feed carries a spot value with no history
+ * behind it and there is nothing to draw an arrow from.
+ */
+function formatUnitPrice(value: number | undefined): string | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  const digits = value < 1 ? 4 : 2;
+  return `$${value.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
+function MobileAsset({ kind, label, amount, hint, usd, unitPrice }: { kind: "hac" | "hacd" | "btc" | "hip20"; label: string; amount: string; hint?: string | null; usd: string; unitPrice?: string | null }) {
   return (
     <article className={`balance-asset-card balance-asset-card-${kind}`}>
       <header className="balance-asset-heading"><AssetMark kind={kind} size="sm" /><span className="symbol">{label}</span></header>
       <span className="amount">{amount}</span>
       {hint ? <span className="hint">{hint}</span> : null}
       <span className="usd">{usd}</span>
+      {unitPrice ? <span className="balance-asset-unit-price">{unitPrice}</span> : null}
     </article>
   );
 }

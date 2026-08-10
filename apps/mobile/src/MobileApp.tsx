@@ -616,20 +616,22 @@ export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void })
         {tab === "home" && (
           <HomeTab
             assets={session.assets}
+            status={session.status}
+            history={session.history}
             hideBalances={session.privacy.hide_balances}
             refreshing={session.refreshing}
             watchOnly={session.watchOnly}
+            fastPayReady={session.status?.fast_pay_state === "ready"}
+            onOpenHistory={() => {
+              setMorePage("history");
+              setTab("more");
+            }}
+            onOpenAgent={onOpenAgent}
             onPullStart={onBalanceTouchStart}
             onPullMove={onBalanceTouchMove}
             onPullEnd={onBalanceTouchEnd}
-            onAirgap={() => {
-              setMorePage("airgap");
-              setTab("more");
-            }}
-            onChat={() => {
-              setMorePage("messages");
-              setTab("more");
-            }}
+            onSend={() => setTab("pay")}
+            onReceive={() => setTab("receive")}
             onHacd={() => setTab("hacd")}
             onOpenFastPay={() => {
               setMorePage("fastpay");

@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "desktop-ui-preview",
+      "runtimeExecutable": "yarn",
+      "runtimeArgs": ["--cwd", "apps/desktop", "dev"],
+      "port": 1420,
+      "url": "http://127.0.0.1:1420"
+    },
+    {
+      "name": "mobile-ui-preview",
+      "runtimeExecutable": "yarn",
+      "runtimeArgs": ["--cwd", "apps/mobile", "dev"],
+      "port": 1421,
+      "url": "http://127.0.0.1:1421"
+    }
+  ]
+}

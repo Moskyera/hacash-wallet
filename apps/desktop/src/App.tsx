@@ -15,19 +15,21 @@ import {
   fastPayNavHint,
 } from "./fastPayUi";
 import { maskAddress } from "./privacy";
+import { WALLET_VERSION } from "./walletVersion";
 import "./quantum.css";
+/**
+ * Subtitles worth the line they take.
+ *
+ * Screens whose name already says what they are (Home, Send, Receive, History,
+ * Settings) no longer carry one: repeating "Send assets" under "Send" is the
+ * kind of text that makes a screen harder to read, not easier. What stays is
+ * the wording that changes what someone does, above all the two screens that
+ * are not safe to treat like the rest of the wallet.
+ */
 const SCREEN_SUBTITLES: Partial<Record<Screen, string>> = {
-  home: "Portfolio overview",
-  send: "Review and send assets",
-  receive: "Addresses and payment requests",
   fastpay: "Hacash L2 channel payments",
-  hacd: "Owned diamond metadata",
-  history: "Local wallet activity",
   quantum: "Experimental lab, not for mainnet",
   airgap: "Offline transaction signing",
-  security: "Vault and signing controls",
-  privacy: "Local privacy controls",
-  settings: "Network and wallet preferences",
   advanced: "Node-gated protocol tools",
 };
 
@@ -200,6 +202,7 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
       onWatchOnly: (a: string) => void wallet.handleWatchOnlyImport(a),
       onUnlock: (p: string) => void wallet.handleUnlock(p),
       onLock: handleLock,
+      onOpenAgent: () => void handleOpenAgent(),
       onOpenQrPay: hacSend.openQrPay,
       onEnableFastPay: (d: string) => void wallet.handleEnableFastPay(d),
       onApplyHub: wallet.handleApplyHub,
@@ -258,8 +261,13 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
 
   const isAuthScreen = screen === "welcome" || screen === "unlock";
   const screenTitle = screen === "home" ? "My Wallet" : t(`nav.${screen}`);
-  const screenSubtitle = SCREEN_SUBTITLES[screen] ?? "HPAY Wallet";
+  const screenSubtitle = SCREEN_SUBTITLES[screen];
   const nodeReady = Boolean(wallet.status && !wallet.status.locked && wallet.assets);
+  // "On" if any privacy control is doing something, so the chip never claims
+  // protection the wallet is not actually applying.
+  const privacyOn = Boolean(
+    wallet.privacy.hide_balances || wallet.privacy.hide_addresses || wallet.privacy.screen_privacy,
+  );
 
   return (
     <div className={`app${isAuthScreen ? " app-auth" : ""}`}>
@@ -300,9 +308,15 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
         </div>
         {wallet.status && !wallet.status.locked && (
           <nav>
+            {/*
+              The group heading text is gone and a hairline takes its place.
+              Three uppercase labels cost three rows and told nobody anything
+              they could act on, but the grouping itself still earns its keep:
+              it keeps the experimental and node-gated screens from sitting
+              flush against Send and Receive.
+            */}
             {NAV_GROUPS.map((group) => (
               <div className="nav-group" key={group.id}>
-                <span className="nav-group-label">{t(`group.${group.id}`)}</span>
                 {group.items.map((item) => (
                   <button
                     key={item.id}
@@ -328,6 +342,13 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
           </nav>
         )}
         <div className="sidebar-foot">
+          <div className="sidebar-build">
+            <strong>HPAY Wallet</strong>
+            <span>
+              <i className={wallet.status && !wallet.status.locked ? "on" : ""} aria-hidden />
+              v{WALLET_VERSION} &middot; Desktop
+            </span>
+          </div>
           {wallet.status?.node_url && (
             <span className="muted">{wallet.status.node_url}</span>
           )}
@@ -388,13 +409,20 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
           <header className="desktop-topbar">
             <div className="desktop-topbar-copy">
               <h1>{screenTitle}</h1>
-              <p>{screenSubtitle}</p>
+              {screenSubtitle ? <p>{screenSubtitle}</p> : null}
             </div>
-            <div className="desktop-topbar-actions">
-              <span className="desktop-topbar-pill">{wallet.status?.network_mode === "testnet" ? "Testnet" : "Mainnet"}</span>
+            <div className="desktop-topbar-status">
+              <span className={`desktop-topbar-pill${wallet.status?.network_mode === "testnet" ? " testnet" : " ready"}`}>
+                {wallet.status?.network_mode === "testnet" ? "Testnet" : "Mainnet"}
+              </span>
               <span className={`desktop-topbar-pill${nodeReady ? " ready" : ""}`}>
                 {nodeReady ? "Node connected" : "Node checking"}
               </span>
+              <span className={`desktop-topbar-pill${privacyOn ? " ready" : ""}`}>
+                {privacyOn ? "Privacy on" : "Privacy standard"}
+              </span>
+            </div>
+            <div className="desktop-topbar-actions">
               {wallet.status?.address ? (
                 <code className="desktop-topbar-address">
                   {maskAddress(wallet.status.address, hideAddresses)}
