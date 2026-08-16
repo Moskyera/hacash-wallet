@@ -189,7 +189,7 @@ async fn signer_without_authenticated_storage_never_advertises_ready_or_signs() 
         Some(secret_hex(&hub)),
     )
     .unwrap();
-    assert!(!state.health().await.settlement_ready);
+    assert!(!state.health().settlement_ready);
     let req = request(
         account("memory-only-payer").readable(),
         &hub_address,
@@ -453,7 +453,7 @@ async fn durable_state_failure_prevents_signature_production() {
         "1",
     );
     assert!(state.settle_fast_pay(&req).await.is_err());
-    assert!(!state.health().await.settlement_ready);
+    assert!(!state.health().settlement_ready);
     let readiness = state.mainnet_readiness().await;
     assert!(!readiness.payments_enabled);
     assert!(

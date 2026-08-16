@@ -41,6 +41,12 @@ pub struct HubHealth {
     #[serde(default)]
     pub external_rollback_anchor_ready: bool,
     /// Network has a proven unilateral dispute/final-claim path.
+    ///
+    /// `/v1/health` performs no fullnode I/O, so an honest Hub reports this
+    /// conservatively: `false` here means "not proven on this endpoint", not
+    /// "proven absent". The authority is `unilateral_l1_enforceable` in the
+    /// `/v1/readiness/mainnet` document, which is what every mainnet gate on
+    /// both sides already requires.
     #[serde(default)]
     pub l1_dispute_path_ready: bool,
     /// Provider speaks an authenticated Official ChannelPay session.

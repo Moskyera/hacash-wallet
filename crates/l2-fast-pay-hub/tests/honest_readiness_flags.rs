@@ -6,6 +6,28 @@
 //! A flag that is hardcoded `true` is the worst failure available on this
 //! path; a flag that is hardcoded `false` is merely useless, because it can
 //! never distinguish a real guarantee from a missing one. Both are tested.
+//!
+//! # Which endpoint proves which half
+//!
+//! The measurement lives on `mainnet_readiness()` (`/v1/readiness/mainnet`),
+//! because that is the endpoint that pays for the evidence: it probes the
+//! fullnode and runs `HubHardGuarantees::measure` over what comes back. So the
+//! discriminating half of every capability-dependent flag - the half that must
+//! read `true` exactly when the subject is present - is asserted there.
+//!
+//! `health()` (`/v1/health`) is a cheap liveness endpoint and performs no node
+//! I/O at all, so it has no evidence to weigh and runs the same measurement
+//! with `None`. Its capability-dependent flags therefore read `false`
+//! unconditionally, which is the conservative direction: on this endpoint
+//! `false` means "not proven to you here", never "proven absent". The
+//! `false`-when-the-subject-is-missing assertions stay on `health()` because
+//! they cost nothing and pin the endpoint's floor, but they are deliberately
+//! not the assertions that carry the discriminating power - see
+//! `health_under_reports_without_probing_while_readiness_measures` for the
+//! test that pins the asymmetry itself, both directions at once, on one Hub.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::routing::get;
 use axum::{Json, Router};
@@ -105,6 +127,14 @@ fn unverified_exit_evidence() -> Value {
 /// A mainnet fullnode that either does or does not report a verified native
 /// unilateral-exit capability.
 async fn spawn_node(exit_supported: bool) -> (String, JoinHandle<()>) {
+    let (url, handle, _probes) = spawn_counting_node(exit_supported).await;
+    (url, handle)
+}
+
+/// The same fullnode, plus a counter of how many capability probes it has been
+/// asked to serve. Any endpoint that claims to do no node I/O can be held to it.
+async fn spawn_counting_node(exit_supported: bool) -> (String, JoinHandle<()>, Arc<AtomicUsize>) {
+    let probes = Arc::new(AtomicUsize::new(0));
     let features = if exit_supported {
         json!({
             "channel_unilateral_exit": true,
@@ -118,48 +148,53 @@ async fn spawn_node(exit_supported: bool) -> (String, JoinHandle<()>) {
     };
     let app = Router::new().route(
         "/query/capabilities",
-        get(move || {
-            let features = features.clone();
-            async move {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                Json(json!({
-                    "ret": 0,
-                    "api_version": 1,
-                    "api": {
-                        "transaction_submit_bound": true,
-                        "hpay_channel_registry_query": true
-                    },
-                    "chain": {
-                        "id": 0,
-                        "height": OBSERVED_HEIGHT,
-                        "next_height": OBSERVED_HEIGHT + 1,
-                        "mainnet": true
-                    },
-                    "network": {
-                        "kind": "mainnet",
-                        "node_profile_id": "hacash-mainnet",
-                        "block_1_hash":
-                            "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
-                        "instance_id": "11".repeat(32),
-                        "transaction_format_version": 2
-                    },
-                    "sync": {
-                        "tip_timestamp_unix": now,
-                        "observed_unix": now,
-                        "tip_age_seconds": 0,
-                        "max_tip_age_seconds": 3600,
-                        "fresh": true
-                    },
-                    "actions": {
-                        "registered": [1, 2, 3, 14, 1041],
-                        "enabled": [1, 2, 3, 14, 1041]
-                    },
-                    "transactions": {"registered": [2], "enabled": [2]},
-                    "features": features
-                }))
+        get({
+            let probes = probes.clone();
+            move || {
+                let features = features.clone();
+                let probes = probes.clone();
+                async move {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    Json(json!({
+                        "ret": 0,
+                        "api_version": 1,
+                        "api": {
+                            "transaction_submit_bound": true,
+                            "hpay_channel_registry_query": true
+                        },
+                        "chain": {
+                            "id": 0,
+                            "height": OBSERVED_HEIGHT,
+                            "next_height": OBSERVED_HEIGHT + 1,
+                            "mainnet": true
+                        },
+                        "network": {
+                            "kind": "mainnet",
+                            "node_profile_id": "hacash-mainnet",
+                            "block_1_hash":
+                                "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+                            "instance_id": "11".repeat(32),
+                            "transaction_format_version": 2
+                        },
+                        "sync": {
+                            "tip_timestamp_unix": now,
+                            "observed_unix": now,
+                            "tip_age_seconds": 0,
+                            "max_tip_age_seconds": 3600,
+                            "fresh": true
+                        },
+                        "actions": {
+                            "registered": [1, 2, 3, 14, 1041],
+                            "enabled": [1, 2, 3, 14, 1041]
+                        },
+                        "transactions": {"registered": [2], "enabled": [2]},
+                        "features": features
+                    }))
+                }
             }
         }),
     );
@@ -168,7 +203,7 @@ async fn spawn_node(exit_supported: bool) -> (String, JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (format!("http://{addr}"), handle)
+    (format!("http://{addr}"), handle, probes)
 }
 
 fn build_hub(node_url: &str, seed: &str) -> HubState {
@@ -186,21 +221,25 @@ fn build_hub(node_url: &str, seed: &str) -> HubState {
 
 /// The subject is present: the node reports a verified mainnet deployment of
 /// the reviewed exit contract. The dispute-path flag must say so.
+///
+/// This is asserted on `mainnet_readiness()` because that is where the
+/// measurement happens. `readiness.unilateral_l1_enforceable` is not a
+/// paraphrase of the dispute-path flag, it *is* that flag: `mainnet_readiness`
+/// probes the node, calls `HubHardGuarantees::measure`, and hands
+/// `guarantees.l1_dispute_path_ready` straight to `MainnetReadinessV1::
+/// evaluate`, which publishes it verbatim as `unilateral_l1_enforceable`. Same
+/// probe, same `measure` call, same boolean - read off the endpoint that owns
+/// it instead of the one that has no evidence to read.
 #[tokio::test]
 async fn l1_dispute_path_flag_is_true_only_when_the_node_proves_a_verified_exit() {
     let (node_url, server) = spawn_node(true).await;
     let hub = build_hub(&node_url, "dispute-present-hub");
 
-    let health = hub.health().await;
-    assert!(
-        health.l1_dispute_path_ready,
-        "the node reports a verified unilateral-exit deployment, so the flag must be true"
-    );
-
     let readiness = hub.mainnet_readiness().await;
     assert!(
         readiness.unilateral_l1_enforceable,
-        "unilateral_l1_enforceable must track the measured dispute path"
+        "the node reports a verified unilateral-exit deployment, so the measured \
+         dispute-path flag must be true"
     );
     assert!(
         !readiness
@@ -215,12 +254,16 @@ async fn l1_dispute_path_flag_is_true_only_when_the_node_proves_a_verified_exit(
 
 /// The subject is absent: the node reports no verified deployment. The flag
 /// must read false, and it must keep reading false everywhere it is mirrored.
+///
+/// The `health()` half is the endpoint's floor and stays where it is; the
+/// `mainnet_readiness()` half is the discriminating one, since that is the
+/// call that saw the evidence and still said no.
 #[tokio::test]
 async fn l1_dispute_path_flag_is_false_when_the_node_reports_no_verified_exit() {
     let (node_url, server) = spawn_node(false).await;
     let hub = build_hub(&node_url, "dispute-absent-hub");
 
-    let health = hub.health().await;
+    let health = hub.health();
     assert!(
         !health.l1_dispute_path_ready,
         "no verified deployment is present, so the flag must be false"
@@ -229,18 +272,81 @@ async fn l1_dispute_path_flag_is_false_when_the_node_reports_no_verified_exit() 
     let readiness = hub.mainnet_readiness().await;
     assert!(!readiness.unilateral_l1_enforceable);
     assert!(!readiness.trustless_finality);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "unilateral_l1_dispute_path_is_not_ready"),
+        "an unverified exit path must raise its own blocker, got {:?}",
+        readiness.blockers
+    );
+    server.abort();
+}
+
+/// The two endpoints disagree by design, and the disagreement must run in the
+/// safe direction only.
+///
+/// One Hub, one node that genuinely proves a verified unilateral exit:
+///
+/// * `health()` must report the capability-dependent flag `false` and must not
+///   probe the node even once. That is property A - `/v1/health` is a cheap
+///   liveness endpoint and must never make the Hub reach for the mainnet gate
+///   on a caller's behalf, whatever network the caller is on.
+/// * `mainnet_readiness()` must report the very same flag `true`, because it
+///   probed and the evidence holds. That is property B.
+///
+/// Under-reporting on the liveness endpoint costs at most availability;
+/// over-reporting there would cost funds. The Hub's own money gate reads
+/// `mainnet_readiness`, never `health`, so nothing is gated on the `false`.
+#[tokio::test]
+async fn health_under_reports_without_probing_while_readiness_measures() {
+    let (node_url, server, probes) = spawn_counting_node(true).await;
+    let hub = build_hub(&node_url, "under-report-hub");
+
+    let health = hub.health();
+    assert_eq!(
+        probes.load(Ordering::SeqCst),
+        0,
+        "health() must perform no node I/O"
+    );
+    assert!(
+        !health.l1_dispute_path_ready,
+        "health() has no measurement available, so it must under-report, not guess"
+    );
+    assert!(!health.production_mainnet_ready);
+
+    let readiness = hub.mainnet_readiness().await;
+    assert_eq!(
+        probes.load(Ordering::SeqCst),
+        1,
+        "mainnet_readiness() is the endpoint that pays for the evidence"
+    );
+    assert!(
+        readiness.unilateral_l1_enforceable,
+        "the authority for the guarantee must report the measured truth"
+    );
+
+    // The asymmetry is only ever safe in this direction.
+    assert!(
+        !health.l1_dispute_path_ready && readiness.unilateral_l1_enforceable,
+        "health may under-report what readiness measures; it must never over-report"
+    );
     server.abort();
 }
 
 /// The Hub has no external monotonic rollback anchor. The flag must therefore
 /// be false even on a node that satisfies every other mainnet condition, and
 /// the blocker must remain listed.
+///
+/// This flag is not capability-dependent - `measure_external_rollback_anchor_
+/// ready` weighs a subsystem that does not exist, not fullnode evidence - so
+/// asserting it on `health()` loses nothing to the no-I/O rule.
 #[tokio::test]
 async fn external_rollback_anchor_flag_is_false_because_no_anchor_exists() {
     let (node_url, server) = spawn_node(true).await;
     let hub = build_hub(&node_url, "anchor-absent-hub");
 
-    let health = hub.health().await;
+    let health = hub.health();
     assert!(
         !health.external_rollback_anchor_ready,
         "no external anchor subsystem exists, so this must never read true"
@@ -269,24 +375,41 @@ async fn production_mainnet_ready_is_false_while_any_part_is_missing() {
     let (node_url, server) = spawn_node(true).await;
     let hub = build_hub(&node_url, "production-hub");
     assert!(
-        !hub.health().await.production_mainnet_ready,
+        !hub.health().production_mainnet_ready,
         "the anchor is absent and the profile is not mainnet-pilot, so this must be false"
     );
     server.abort();
 
     let (node_url, server) = spawn_node(false).await;
     let hub = build_hub(&node_url, "production-hub-2");
-    assert!(!hub.health().await.production_mainnet_ready);
+    assert!(!hub.health().production_mainnet_ready);
     server.abort();
 }
 
 /// A flag must not survive the loss of its evidence. When the node is
-/// unreachable the Hub knows nothing, so every measured guarantee reads false.
+/// unreachable the Hub knows nothing, so every measured guarantee reads false -
+/// on the endpoint that tried to measure and failed as much as on the one that
+/// never tries.
 #[tokio::test]
 async fn measured_flags_fail_closed_when_the_node_is_unreachable() {
     let hub = build_hub("http://127.0.0.1:1", "unreachable-hub");
-    let health = hub.health().await;
+    let health = hub.health();
     assert!(!health.l1_dispute_path_ready);
     assert!(!health.external_rollback_anchor_ready);
     assert!(!health.production_mainnet_ready);
+
+    // The load-bearing half: `mainnet_readiness` did probe, the probe failed,
+    // and a failed probe must not leave a guarantee standing.
+    let readiness = hub.mainnet_readiness().await;
+    assert!(!readiness.unilateral_l1_enforceable);
+    assert!(!readiness.trustless_finality);
+    assert!(!readiness.payments_enabled);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("fullnode_capability_probe_failed")),
+        "a failed probe must be reported as a blocker, got {:?}",
+        readiness.blockers
+    );
 }

@@ -360,11 +360,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!(
         "Fast Pay hub: {}",
-        hub.health().await.name.as_deref().unwrap_or("hub")
+        hub.health().name.as_deref().unwrap_or("hub")
     );
     eprintln!(
         "Hub address:  {}",
-        hub.health().await.hub_address.as_deref().unwrap_or("?")
+        hub.health().hub_address.as_deref().unwrap_or("?")
     );
     eprintln!("Node API:     {}", args.node_url);
     eprintln!("Listen:       {}", args.listen);
@@ -378,7 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             gas_max: args.hvm_lease_gas_max,
         };
         config.validate()?;
-        if !hub.health().await.settlement_ready {
+        if !hub.health().settlement_ready {
             return Err("HVM lease scheduler requires authenticated durable Hub storage".into());
         }
         eprintln!(

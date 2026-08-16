@@ -6,6 +6,17 @@ use crate::error::{HubError, HubResult};
 
 pub const HUB_API_VERSION: u32 = 7;
 
+/// The `/v1/health` payload: a cheap liveness answer, served from Hub-local
+/// state without any fullnode I/O.
+///
+/// Flags whose truth depends on fullnode evidence are therefore reported
+/// conservatively here - they read `false` because no measurement was taken,
+/// not because the guarantee was checked and found absent. `/v1/readiness/
+/// mainnet` is the authority for those; it probes and publishes the same
+/// `HubHardGuarantees::measure` result, and it is what the Hub's own mainnet
+/// money gate reads. A client must never treat a `false` on this struct as
+/// proof of absence, and must never accept a `true` here in place of the
+/// readiness document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubHealth {
     pub ok: bool,
@@ -25,12 +36,18 @@ pub struct HubHealth {
     #[serde(default)]
     pub external_rollback_anchor_ready: bool,
     /// True only after unilateral dispute and final-claim recovery is proven on this network.
+    ///
+    /// Fullnode-dependent, so this endpoint cannot prove it and always reports
+    /// `false`. Read `unilateral_l1_enforceable` from `/v1/readiness/mainnet`.
     #[serde(default)]
     pub l1_dispute_path_ready: bool,
     /// True only for an authenticated Official ChannelPay session, not Wallet Hub API v7.
     #[serde(default)]
     pub official_channelpay_ready: bool,
     /// Aggregate operator assertion. Wallets still verify every prerequisite independently.
+    ///
+    /// Depends on the fullnode-dependent flags above, so it is likewise
+    /// conservative here; `/v1/readiness/mainnet` is the authority.
     #[serde(default)]
     pub production_mainnet_ready: bool,
     /// Explicit bounded pilot that depends on Hub availability and configured caps.

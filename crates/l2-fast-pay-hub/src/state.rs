@@ -519,19 +519,34 @@ impl HubState {
             && !self.recovery_required.load(Ordering::Acquire)
     }
 
-    /// Publish the Hub's health, with every mainnet-grade guarantee measured
-    /// from live evidence rather than asserted.
+    /// Publish the Hub's health from local state alone. This performs no node
+    /// I/O, and the signature is synchronous so that it cannot acquire any.
     ///
-    /// The fullnode is probed on each call so the flags cannot outlive the
-    /// evidence behind them. A probe failure yields `None`, which fails every
-    /// measured guarantee closed.
-    pub async fn health(&self) -> crate::api::HubHealth {
+    /// `/v1/health` is a cheap liveness endpoint. It is polled by every client
+    /// on every network, so it must never make the Hub reach for the mainnet
+    /// gate on a caller's behalf; `official_hub_contract` pins that by counting
+    /// fullnode capability calls after a testnet `health()` and requiring zero.
+    ///
+    /// The consequence is deliberate and is the conservative direction: a
+    /// capability-dependent guarantee has no measurement available here, so
+    /// `HubHardGuarantees::measure` is handed `None` and every such guarantee
+    /// fails closed to `false`. False on this endpoint therefore means "not
+    /// proven to you here", never "proven absent", and a client must not read a
+    /// `false` as evidence of anything except the absence of a claim.
+    ///
+    /// The authority for these guarantees is [`Self::mainnet_readiness`]
+    /// (`/v1/readiness/mainnet`), which probes the fullnode and publishes the
+    /// result of the very same `HubHardGuarantees::measure` call. That is also
+    /// the endpoint the Hub's own money gate reads, so nothing is advertised as
+    /// ready here that the gate has not measured. Under-reporting a guarantee
+    /// on a liveness probe can only cost availability; over-reporting one would
+    /// cost funds.
+    pub fn health(&self) -> crate::api::HubHealth {
         let settlement_ready = self.settlement_ready();
-        let capabilities = self.node.capabilities().await.ok();
         let guarantees = crate::readiness::HubHardGuarantees::measure(
             &self.deployment_profile,
             settlement_ready,
-            capabilities.as_ref(),
+            None,
         );
         crate::api::HubHealth {
             ok: true,
@@ -551,10 +566,17 @@ impl HubState {
         }
     }
 
+    /// The authority for every capability-dependent guarantee the Hub makes.
+    ///
+    /// This endpoint owns the measurement: it probes the fullnode and runs
+    /// `HubHardGuarantees::measure` over the evidence it gets back. `health()`
+    /// runs the same measurement without evidence and therefore reports those
+    /// guarantees conservatively; a client that needs the real answer asks
+    /// here, and so does the Hub's own mainnet money gate.
     pub async fn mainnet_readiness(&self) -> crate::readiness::MainnetReadinessV1 {
         let capabilities = self.node.capabilities().await;
-        // The same measurement that `health()` publishes, so the advertised
-        // guarantees and the enforced gate can never disagree.
+        // The measurement itself, on the endpoint that pays for the evidence,
+        // so the advertised guarantees and the enforced gate cannot disagree.
         let guarantees = crate::readiness::HubHardGuarantees::measure(
             &self.deployment_profile,
             self.settlement_ready(),

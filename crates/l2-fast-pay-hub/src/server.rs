@@ -289,7 +289,7 @@ async fn health_handler(State(state): State<AppState>) -> Result<Json<HubHealth>
         .map_err(|_| public_readiness_busy_response())?;
     let snapshot = state
         .public_health_cache
-        .get_or_refresh(|| state.hub.health())
+        .get_or_refresh(|| std::future::ready(state.hub.health()))
         .await;
     Ok(Json(snapshot))
 }

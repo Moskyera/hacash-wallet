@@ -452,7 +452,7 @@ async fn a_response_is_refused_not_attempted_when_the_window_is_under_the_margin
     let commitment = binding.commitment().unwrap();
 
     let hub = harness.hub();
-    assert!(hub.health().await.settlement_ready);
+    assert!(hub.health().settlement_ready);
     let error = hub
         .run_hvm_registry_watchtower(monitor(&commitment, "margin"))
         .await
@@ -467,7 +467,7 @@ async fn a_response_is_refused_not_attempted_when_the_window_is_under_the_margin
         "the refusal must state the arithmetic, got: {error}"
     );
     assert!(
-        !hub.health().await.settlement_ready,
+        !hub.health().settlement_ready,
         "the RecoveryRequired latch must be raised, not merely reported"
     );
     assert_eq!(
@@ -713,7 +713,7 @@ async fn the_tick_escalates_rather_than_attempting_a_response_it_cannot_land() {
             "expected an escalation naming the window, got: {error}"
         );
         assert_eq!(harness.submits(), 0);
-        assert!(!hub.health().await.settlement_ready, "the latch is raised");
+        assert!(!hub.health().settlement_ready, "the latch is raised");
 
         // And the latch holds: the next tick does not quietly try again.
         let again = hub
@@ -736,7 +736,7 @@ async fn the_tick_escalates_rather_than_attempting_a_response_it_cannot_land() {
     // re-derived every pass, never trusted to a flag.
     let restarted = harness.hub();
     assert!(
-        restarted.health().await.settlement_ready,
+        restarted.health().settlement_ready,
         "a fresh Hub genuinely starts unlatched, so the refusal below is earned"
     );
     let after_restart = restarted
@@ -748,7 +748,7 @@ async fn the_tick_escalates_rather_than_attempting_a_response_it_cannot_land() {
         error.contains("RecoveryRequired:") && error.contains("1 blocks left"),
         "the margin must be re-derived from evidence, got: {error}"
     );
-    assert!(!restarted.health().await.settlement_ready);
+    assert!(!restarted.health().settlement_ready);
     assert_eq!(harness.submits(), 0);
     harness.server.abort();
 }
