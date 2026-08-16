@@ -41,6 +41,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 default = []
 server = ["dep:clap", "dep:tracing-subscriber"]
 local-pilot-tools = ["server"]
+# The witness service. Deliberately absent from a default Hub build: the Hub's
+# only witness client is a network client, and a configuration that would
+# collapse the anchor into a file on the Hub's own disk has to be built rather
+# than selected. See crates/l2-fast-pay-hub/src/rollback_anchor/witness.rs.
+rollback-witness = ["server"]
 
 [[bin]]
 name = "fast-pay-hub"
@@ -56,6 +61,11 @@ required-features = ["local-pilot-tools"]
 name = "hpay-hvm-registry-local-pilot"
 path = "src/bin/hpay-hvm-registry-local-pilot.rs"
 required-features = ["local-pilot-tools"]
+
+[[bin]]
+name = "hpay-rollback-witness"
+path = "src/bin/hpay-rollback-witness.rs"
+required-features = ["rollback-witness"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

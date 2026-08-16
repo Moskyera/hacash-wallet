@@ -27,6 +27,7 @@ use crate::journal::{
 };
 use crate::node::HvmChannelLiveSnapshot;
 use crate::operation::{IdempotencyRecord, ReservationStatus};
+use crate::rollback_anchor::{HubAnchorRequestV1, HubWitnessReceiptV1, RollbackAnchorPin};
 use crate::sealed_state::StateStore;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,6 +515,45 @@ pub(crate) struct HubPersistedState {
     pub hvm_registry_progressions: HashMap<String, PersistedHvmRegistryProgression>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hvm_registry_chain_operations: HashMap<String, PersistedHvmRegistryChainOperation>,
+    /// The Hub's half of the external monotonic rollback anchor: the pinned
+    /// witness store, the highest counter this Hub has durably recorded, and
+    /// the exact reservation for each in-flight signature.
+    ///
+    /// Absent on every state file written before the anchor existed, and
+    /// skipped when absent, so the state commitment of an anchor-free Hub is
+    /// byte-identical to what it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_anchor: Option<PersistedRollbackAnchorState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedRollbackAnchorState {
+    #[serde(default)]
+    pub pin: RollbackAnchorPin,
+    /// Highest serial this Hub has reserved with the witness, per channel.
+    #[serde(default)]
+    pub channel_serials: HashMap<String, u64>,
+    /// The exact anchor request this Hub put on the wire, per operation, made
+    /// durable **before** it was sent. A receipt that does not match one of
+    /// these matches nothing.
+    #[serde(default)]
+    pub reservations: HashMap<String, PersistedRollbackAnchorReservation>,
+    /// Channels latched in anchor refusal. A latched channel never signs again
+    /// without the operator procedure, and a single latched channel holds
+    /// `external_rollback_anchor_ready` false for the whole Hub.
+    #[serde(default)]
+    pub latched_refusals: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedRollbackAnchorReservation {
+    pub request: HubAnchorRequestV1,
+    pub request_commitment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<HubWitnessReceiptV1>,
+    pub updated_unix: u64,
 }
 
 pub(crate) fn state_commitment(state: &HubPersistedState) -> HubResult<String> {
@@ -650,7 +690,56 @@ pub(crate) fn initialize_authenticated_state(
 
 pub(crate) fn validate_hvm_state(state: &HubPersistedState) -> HubResult<()> {
     validate_hvm_channel_activations_v1(state)?;
-    validate_hvm_registry_activations_v2(state)
+    validate_hvm_registry_activations_v2(state)?;
+    validate_rollback_anchor_state(state)
+}
+
+/// The Hub's durable anchor record has to be internally consistent, because
+/// the whole point of it is to be the thing a restored Hub is measured
+/// against. Each stored reservation must re-derive its own commitment, each
+/// stored receipt must restate the exact request it answers, and the pinned
+/// counter must not sit below any receipt the Hub already holds.
+fn validate_rollback_anchor_state(state: &HubPersistedState) -> HubResult<()> {
+    let Some(anchor) = state.rollback_anchor.as_ref() else {
+        return Ok(());
+    };
+    for (operation_id, reservation) in &anchor.reservations {
+        if reservation.request.commitment()? != reservation.request_commitment {
+            return Err(HubError::State(format!(
+                "rollback anchor reservation {operation_id} does not re-derive its commitment"
+            )));
+        }
+        let Some(receipt) = reservation.receipt.as_ref() else {
+            continue;
+        };
+        if receipt.request_id != reservation.request.request_id
+            || receipt.request_commitment != reservation.request_commitment
+            || receipt.hub_identity != reservation.request.hub_identity
+            || receipt.binding_commitment != reservation.request.binding_commitment
+            || receipt.serial != reservation.request.serial
+            || receipt.proposed_bill_commitment != reservation.request.proposed_bill_commitment
+            || receipt.counter_value != reservation.request.counter_value
+        {
+            return Err(HubError::State(format!(
+                "rollback anchor receipt for {operation_id} does not restate its request"
+            )));
+        }
+        if receipt.counter_value > anchor.pin.highest_counter_value {
+            return Err(HubError::State(format!(
+                "rollback anchor receipt for {operation_id} is ahead of the durable counter"
+            )));
+        }
+        if anchor
+            .channel_serials
+            .get(&receipt.binding_commitment)
+            .is_none_or(|serial| *serial < receipt.serial)
+        {
+            return Err(HubError::State(format!(
+                "rollback anchor receipt for {operation_id} is ahead of the durable channel serial"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_hvm_channel_activations_v1(state: &HubPersistedState) -> HubResult<()> {

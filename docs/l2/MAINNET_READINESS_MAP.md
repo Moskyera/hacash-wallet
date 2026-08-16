@@ -14,7 +14,6 @@ a checklist. As of writing, on the Local Pilot Hub:
 
 ```
 profile                    local-pilot
-production_mainnet_ready   false
 payments_enabled           false
 trustless_finality         false
 unilateral_l1_enforceable  false
@@ -42,22 +41,34 @@ built to reach today: mainnet with deliberately bounded exposure.
 
 ## Why full mainnet cannot be reached today
 
-`HubState::health` (`crates/l2-fast-pay-hub/src/state.rs:532-534`):
+`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:247-248`)
+publishes the measurement:
 
 ```rust
-external_rollback_anchor_ready: false,
-l1_dispute_path_ready: false,
-production_mainnet_ready: false,
+trustless_finality: external_rollback_anchor_ready && l1_dispute_path_ready,
+unilateral_l1_enforceable: l1_dispute_path_ready,
 ```
 
-These are constants. Nothing in the Hub crate ever sets them true; the only
-assignments to `true` anywhere in the repo are on the agent wallet's own
-unrelated struct (`agent-wallet-core/src/service/companion/witness.rs:180`) and
-in a test (`service/l2/verification.rs:1567-1568`).
+Both inputs are measurements taken by `HubHardGuarantees::measure`, on the
+endpoint that pays for the evidence. `trustless_finality` needs the external
+monotonic rollback anchor as well as the dispute path, so it reads `false` on
+any Hub whose anchor evidence is missing, unverified or stale — which is every
+Hub with no witness configured. That is a fail-closed stance, not an oversight.
 
-So the Hub's own evaluator cannot report full mainnet readiness by construction.
-That is a deliberate fail-closed stance, not an oversight, and it should be the
-last thing changed rather than the first.
+### `/v1/health` publishes none of this, on purpose
+
+`HubState::health` performs no fullnode I/O, so it has no evidence to weigh. It
+used to mirror `external_rollback_anchor_ready`, `l1_dispute_path_ready` and
+`production_mainnet_ready` as conservative constants; those fields were removed
+from `HubHealth` on 2026-08-16, because a flag that is structurally always
+`false` cannot distinguish "not measured here" from "proven absent", and a
+wallet gating on one could never be un-bricked by the guarantee arriving.
+`/v1/readiness/mainnet` is now the only place a guarantee is published, and
+gating on `HubHealth` for one is a compile error.
+
+`HubHardGuarantees::production_mainnet_ready` still exists as the Hub's internal
+aggregate measurement (`readiness.rs:456-464`); it is simply no longer exported
+on the liveness endpoint.
 
 ### 1. Unilateral L1 dispute path
 
@@ -102,15 +113,39 @@ Deploying the exit contract from the Hub identity would have collided with it.
 
 ### 2. External monotonic rollback anchor
 
-Requirements are already written up in
+Requirements are written up in
 `docs/agent-wallet/EXTERNAL_ROLLBACK_ANCHOR_REQUIREMENTS.md:29` and
 `docs/l2/L2_SAFETY_MODEL.md:172`: a TPM or OS-keystore counter, or a remote
-witness. Nothing implements it on the Hub side.
+witness. `docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md` chose the remote
+witness, because it is the only one of the three whose counter is not restored
+when the Hub is.
 
-### 3. The flags must become measurements
+The code exists and is on the signing path
+(`crates/l2-fast-pay-hub/src/rollback_anchor/`, the witness binary
+`hpay-rollback-witness` behind the `rollback-witness` feature, and the Hub side
+in `src/state/rollback_anchor.rs`). What remains is **deployment**: this item
+is no longer "nothing implements it", it is "no witness is configured". A Hub
+with no witness configured — which is every Hub today — reads
+`external_rollback_anchor_ready = false`, exactly as before, because
+configuration is not evidence and the flag is a live measurement of a signed,
+pinned, fresh witness answer. Wiring is
+`fast-pay-hub --rollback-witness-url/-id/-receipt-address/-authorisation-address/-attestation-file`,
+all five together or none; a partial anchor configuration refuses to start.
+Operator procedure before it is switched on: `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md`.
 
-Even with 1 and 2 built, `health()` returns constants. They have to be wired to
-the real state or the gate stays closed for the wrong reason.
+### 3. The flags are measurements, and nothing downstream needs an edit
+
+`measure_l1_dispute_path_ready` weighs the node's capability block and the exit
+evidence, so it turns true on its own once 1 lands.
+`measure_external_rollback_anchor_ready` weighs signed, pinned, fresh witness
+evidence, so it turns true on its own once 2 is configured and verified.
+
+Both feed `HubHardGuarantees::measure`, which feeds `MainnetReadinessV1`, which
+is what the Hub's money gate and both wallet gates read. No gate has to be
+rewritten when either subject arrives: the wallet's channel-binding gate reads
+`trustless_finality` and `unilateral_l1_enforceable` off the readiness document
+and is correct in both eras by construction
+(`crates/wallet-core/src/l2_hub.rs`, `require_channel_binding_guarantees`).
 
 ## "Full authenticated network witness", precisely
 

@@ -16,15 +16,15 @@
 //! read `true` exactly when the subject is present - is asserted there.
 //!
 //! `health()` (`/v1/health`) is a cheap liveness endpoint and performs no node
-//! I/O at all, so it has no evidence to weigh and runs the same measurement
-//! with `None`. Its capability-dependent flags therefore read `false`
-//! unconditionally, which is the conservative direction: on this endpoint
-//! `false` means "not proven to you here", never "proven absent". The
-//! `false`-when-the-subject-is-missing assertions stay on `health()` because
-//! they cost nothing and pin the endpoint's floor, but they are deliberately
-//! not the assertions that carry the discriminating power - see
-//! `health_under_reports_without_probing_while_readiness_measures` for the
-//! test that pins the asymmetry itself, both directions at once, on one Hub.
+//! I/O at all, so it has no evidence to weigh and therefore carries no
+//! capability-dependent flag whatsoever. It used to carry them, reported
+//! conservatively as `false`; that was removed, because a flag that is
+//! structurally always `false` cannot distinguish "no evidence here" from
+//! "proven absent", and any gate reading one could never open even after the
+//! guarantee arrived. Their absence is now a type-level fact, and
+//! `health_carries_no_guarantee_flag_while_readiness_measures` pins both halves
+//! at once on one Hub: the liveness payload publishes no guarantee key and
+//! probes nothing, while the authority probes and reports the measured truth.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -252,22 +252,13 @@ async fn l1_dispute_path_flag_is_true_only_when_the_node_proves_a_verified_exit(
     server.abort();
 }
 
-/// The subject is absent: the node reports no verified deployment. The flag
-/// must read false, and it must keep reading false everywhere it is mirrored.
-///
-/// The `health()` half is the endpoint's floor and stays where it is; the
-/// `mainnet_readiness()` half is the discriminating one, since that is the
-/// call that saw the evidence and still said no.
+/// The subject is absent: the node reports no verified deployment. The
+/// measured flag must read false on the authority that saw the evidence and
+/// still said no.
 #[tokio::test]
 async fn l1_dispute_path_flag_is_false_when_the_node_reports_no_verified_exit() {
     let (node_url, server) = spawn_node(false).await;
     let hub = build_hub(&node_url, "dispute-absent-hub");
-
-    let health = hub.health();
-    assert!(
-        !health.l1_dispute_path_ready,
-        "no verified deployment is present, so the flag must be false"
-    );
 
     let readiness = hub.mainnet_readiness().await;
     assert!(!readiness.unilateral_l1_enforceable);
@@ -283,23 +274,26 @@ async fn l1_dispute_path_flag_is_false_when_the_node_reports_no_verified_exit() 
     server.abort();
 }
 
-/// The two endpoints disagree by design, and the disagreement must run in the
-/// safe direction only.
+/// The two endpoints have different jobs, and only one of them may publish a
+/// guarantee.
 ///
 /// One Hub, one node that genuinely proves a verified unilateral exit:
 ///
-/// * `health()` must report the capability-dependent flag `false` and must not
+/// * `health()` must publish no capability-dependent flag at all and must not
 ///   probe the node even once. That is property A - `/v1/health` is a cheap
 ///   liveness endpoint and must never make the Hub reach for the mainnet gate
-///   on a caller's behalf, whatever network the caller is on.
-/// * `mainnet_readiness()` must report the very same flag `true`, because it
-///   probed and the evidence holds. That is property B.
+///   on a caller's behalf, whatever network the caller is on. It is checked
+///   against the serialized payload, so a flag cannot creep back in under a
+///   different name and be read by a client.
+/// * `mainnet_readiness()` must report the guarantee `true`, because it probed
+///   and the evidence holds. That is property B.
 ///
-/// Under-reporting on the liveness endpoint costs at most availability;
-/// over-reporting there would cost funds. The Hub's own money gate reads
-/// `mainnet_readiness`, never `health`, so nothing is gated on the `false`.
+/// A guarantee flag on the liveness payload could only ever be an unmeasured
+/// constant. When it read `false` it bricked every gate that trusted it; were
+/// it ever to read `true` it would be an assertion backed by nothing. The only
+/// safe number of guarantee flags on this endpoint is zero.
 #[tokio::test]
-async fn health_under_reports_without_probing_while_readiness_measures() {
+async fn health_carries_no_guarantee_flag_while_readiness_measures() {
     let (node_url, server, probes) = spawn_counting_node(true).await;
     let hub = build_hub(&node_url, "under-report-hub");
 
@@ -309,11 +303,21 @@ async fn health_under_reports_without_probing_while_readiness_measures() {
         0,
         "health() must perform no node I/O"
     );
-    assert!(
-        !health.l1_dispute_path_ready,
-        "health() has no measurement available, so it must under-report, not guess"
-    );
-    assert!(!health.production_mainnet_ready);
+    let payload = serde_json::to_value(&health).unwrap();
+    let keys = payload.as_object().unwrap();
+    for guarantee in [
+        "external_rollback_anchor_ready",
+        "l1_dispute_path_ready",
+        "production_mainnet_ready",
+        "trustless_finality",
+        "unilateral_l1_enforceable",
+    ] {
+        assert!(
+            !keys.contains_key(guarantee),
+            "/v1/health must publish no capability-dependent guarantee, found {guarantee} in \
+             {payload}"
+        );
+    }
 
     let readiness = hub.mainnet_readiness().await;
     assert_eq!(
@@ -325,31 +329,24 @@ async fn health_under_reports_without_probing_while_readiness_measures() {
         readiness.unilateral_l1_enforceable,
         "the authority for the guarantee must report the measured truth"
     );
-
-    // The asymmetry is only ever safe in this direction.
-    assert!(
-        !health.l1_dispute_path_ready && readiness.unilateral_l1_enforceable,
-        "health may under-report what readiness measures; it must never over-report"
-    );
     server.abort();
 }
 
-/// The Hub has no external monotonic rollback anchor. The flag must therefore
-/// be false even on a node that satisfies every other mainnet condition, and
-/// the blocker must remain listed.
+/// No witness is configured on this Hub. The flag must therefore be false even
+/// on a node that satisfies every other mainnet condition, and the blocker
+/// must remain listed.
 ///
-/// This flag is not capability-dependent - `measure_external_rollback_anchor_
-/// ready` weighs a subsystem that does not exist, not fullnode evidence - so
-/// asserting it on `health()` loses nothing to the no-I/O rule.
+/// This is the half that was already true before the anchor existed and must
+/// stay true now that it does: a Hub with no witness has no anchor, whatever
+/// else is in the build.
 #[tokio::test]
 async fn external_rollback_anchor_flag_is_false_because_no_anchor_exists() {
     let (node_url, server) = spawn_node(true).await;
     let hub = build_hub(&node_url, "anchor-absent-hub");
 
-    let health = hub.health();
     assert!(
-        !health.external_rollback_anchor_ready,
-        "no external anchor subsystem exists, so this must never read true"
+        !l2_fast_pay_hub::readiness::measure_external_rollback_anchor_ready(None, now_unix()),
+        "with no witness configured there is no evidence, so this must never read true"
     );
 
     let readiness = hub.mainnet_readiness().await;
@@ -368,35 +365,252 @@ async fn external_rollback_anchor_flag_is_false_because_no_anchor_exists() {
     server.abort();
 }
 
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// The three directions the anchor flag has to be able to point, proven on the
+/// endpoint that owns the measurement.
+///
+/// A flag that can only read one way is not a measurement, and a flag that
+/// reads `true` because a URL was configured is worse than no flag at all.
+#[cfg(feature = "rollback-witness")]
+mod anchor {
+    use super::{build_hub, now_unix, spawn_node};
+    use l2_fast_pay_hub::HubState;
+    use l2_fast_pay_hub::rollback_anchor::witness::{WitnessService, WitnessServiceConfig, router};
+    use l2_fast_pay_hub::rollback_anchor::{RollbackAnchorConfig, WitnessPosture};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use sys::Account;
+    use tokio::task::JoinHandle;
+
+    const ANCHOR_BLOCKER: &str = "external_monotonic_rollback_anchor_is_not_ready";
+
+    struct Witness {
+        url: String,
+        service: Arc<WitnessService>,
+        authorisation: Account,
+        handle: JoinHandle<()>,
+        #[allow(dead_code)]
+        store: tempfile::TempDir,
+    }
+
+    async fn spawn_witness(seed: &str) -> Witness {
+        let store = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            WitnessService::open(
+                WitnessServiceConfig {
+                    witness_id: format!("witness-{seed}"),
+                    witness_epoch: 1,
+                    store_path: store.path().join("witness-log.jsonl"),
+                    receipt_account: Account::create_by(&format!("{seed}-receipt")).unwrap(),
+                },
+                now_unix(),
+            )
+            .unwrap(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let served = service.clone();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router(served)).await;
+        });
+        Witness {
+            url: format!("http://{address}"),
+            service,
+            authorisation: Account::create_by(&format!("{seed}-offline")).unwrap(),
+            handle,
+            store,
+        }
+    }
+
+    fn config(witness: &Witness, hub_identity: &str, url: &str) -> RollbackAnchorConfig {
+        RollbackAnchorConfig {
+            witness_url: url.to_owned(),
+            witness_id: witness.service.witness_id().to_owned(),
+            witness_epoch: witness.service.witness_epoch(),
+            witness_receipt_address: witness.service.receipt_address().to_owned(),
+            witness_authorisation_address: witness.authorisation.readable().to_owned(),
+            attestation: witness
+                .service
+                .issue_attestation(
+                    &witness.authorisation,
+                    hub_identity,
+                    WitnessPosture::NeutralThirdParty,
+                    "Example Neutral Witness Co",
+                    "separate operator, separate hosting, separate backup set",
+                    now_unix(),
+                    30 * 86_400,
+                )
+                .unwrap(),
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+
+    fn with_anchor(hub: HubState, witness: &Witness, url: &str) -> HubState {
+        let identity = hub.hub_address.clone();
+        hub.with_rollback_anchor(config(witness, &identity, url))
+            .unwrap()
+    }
+
+    /// A witness is configured, pinned, and attested - and it is not there.
+    /// Configuration is not evidence, so the flag must read false.
+    #[tokio::test]
+    async fn external_rollback_anchor_flag_is_false_when_the_configured_witness_is_unreachable() {
+        let (node_url, server) = spawn_node(true).await;
+        let witness = spawn_witness("unreachable-flag").await;
+        let hub = with_anchor(
+            build_hub(&node_url, "anchor-unreachable-hub"),
+            &witness,
+            "http://127.0.0.1:1",
+        );
+        assert!(hub.rollback_anchor_configured());
+
+        assert!(
+            hub.run_rollback_anchor_startup_probe().await.is_err(),
+            "an unreachable witness must refuse the startup probe"
+        );
+        assert!(
+            hub.rollback_anchor_evidence().await.is_none(),
+            "an unreachable witness produces no evidence"
+        );
+        let readiness = hub.mainnet_readiness().await;
+        assert!(
+            !readiness.trustless_finality,
+            "a configured but unreachable witness must not hold the flag true"
+        );
+        assert!(
+            readiness.blockers.iter().any(|it| it == ANCHOR_BLOCKER),
+            "got {:?}",
+            readiness.blockers
+        );
+        server.abort();
+        witness.handle.abort();
+    }
+
+    /// A live witness, pinned keys, a valid unexpired attestation, a startup
+    /// probe that agreed, and a signed answer inside the freshness window.
+    /// Now, and only now, the flag reads true.
+    #[tokio::test]
+    async fn external_rollback_anchor_flag_is_true_with_a_live_witness_returning_valid_receipts() {
+        let (node_url, server) = spawn_node(true).await;
+        let witness = spawn_witness("live-flag").await;
+        let url = witness.url.clone();
+        let hub = with_anchor(build_hub(&node_url, "anchor-live-hub"), &witness, &url);
+
+        hub.run_rollback_anchor_startup_probe()
+            .await
+            .expect("a live witness must agree with a Hub that has signed nothing");
+
+        let evidence = hub
+            .rollback_anchor_evidence()
+            .await
+            .expect("a live witness must produce verified evidence");
+        assert!(
+            l2_fast_pay_hub::readiness::measure_external_rollback_anchor_ready(
+                Some(&evidence),
+                now_unix()
+            ),
+            "a live, pinned, attested witness inside the freshness window must read true"
+        );
+        assert_eq!(evidence.witness_posture, "neutral_third_party");
+        assert_eq!(evidence.witness_operator, "Example Neutral Witness Co");
+        assert!(
+            evidence.witness_endpoint_is_local,
+            "this witness is on loopback, and that must be published rather than hidden"
+        );
+
+        let readiness = hub.mainnet_readiness().await;
+        assert!(
+            !readiness.blockers.iter().any(|it| it == ANCHOR_BLOCKER),
+            "a live witness must clear the anchor blocker, got {:?}",
+            readiness.blockers
+        );
+        assert!(
+            readiness.trustless_finality,
+            "with a verified exit path and a live anchor, this must be true"
+        );
+
+        // And the same Hub reads false the moment the witness goes away, which
+        // is what makes the true above mean something.
+        witness.handle.abort();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let readiness = hub.mainnet_readiness().await;
+        assert!(
+            !readiness.trustless_finality,
+            "the flag must not survive the loss of its evidence"
+        );
+        assert!(
+            readiness.blockers.iter().any(|it| it == ANCHOR_BLOCKER),
+            "got {:?}",
+            readiness.blockers
+        );
+        server.abort();
+    }
+}
+
 /// `production_mainnet_ready` is the strongest claim the Hub makes. It must be
 /// false while any of its parts is missing, and the anchor is missing.
+///
+/// Asserted on `HubHardGuarantees::measure`, which is where the claim is
+/// computed, and on the readiness document, which is where it is enforced. It
+/// is no longer asserted on `health()`, because `health()` no longer publishes
+/// it - see `health_carries_no_guarantee_flag_while_readiness_measures`.
 #[tokio::test]
 async fn production_mainnet_ready_is_false_while_any_part_is_missing() {
+    use l2_fast_pay_hub::readiness::HubHardGuarantees;
+
     let (node_url, server) = spawn_node(true).await;
     let hub = build_hub(&node_url, "production-hub");
+    let capabilities = hub.mainnet_readiness().await.fullnode_capabilities;
     assert!(
-        !hub.health().production_mainnet_ready,
-        "the anchor is absent and the profile is not mainnet-pilot, so this must be false"
+        capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.mainnet),
+        "the probe must have succeeded, otherwise this proves nothing"
     );
+    assert!(
+        !HubHardGuarantees::measure(
+            "mainnet-pilot",
+            true,
+            capabilities.as_ref(),
+            None,
+            now_unix()
+        )
+        .production_mainnet_ready,
+        "every other part holds and the anchor is still absent, so this must be false"
+    );
+    assert!(!hub.mainnet_readiness().await.trustless_finality);
     server.abort();
 
     let (node_url, server) = spawn_node(false).await;
     let hub = build_hub(&node_url, "production-hub-2");
-    assert!(!hub.health().production_mainnet_ready);
+    let capabilities = hub.mainnet_readiness().await.fullnode_capabilities;
+    assert!(
+        !HubHardGuarantees::measure(
+            "mainnet-pilot",
+            true,
+            capabilities.as_ref(),
+            None,
+            now_unix()
+        )
+        .production_mainnet_ready
+    );
     server.abort();
 }
 
 /// A flag must not survive the loss of its evidence. When the node is
-/// unreachable the Hub knows nothing, so every measured guarantee reads false -
-/// on the endpoint that tried to measure and failed as much as on the one that
-/// never tries.
+/// unreachable the Hub knows nothing, so every measured guarantee reads false
+/// on the endpoint that tried to measure and failed.
 #[tokio::test]
 async fn measured_flags_fail_closed_when_the_node_is_unreachable() {
     let hub = build_hub("http://127.0.0.1:1", "unreachable-hub");
-    let health = hub.health();
-    assert!(!health.l1_dispute_path_ready);
-    assert!(!health.external_rollback_anchor_ready);
-    assert!(!health.production_mainnet_ready);
+    // The liveness endpoint still answers, and still claims nothing.
+    assert!(hub.health().ok);
 
     // The load-bearing half: `mainnet_readiness` did probe, the probe failed,
     // and a failed probe must not leave a guarantee standing.

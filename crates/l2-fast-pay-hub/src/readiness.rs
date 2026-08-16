@@ -394,20 +394,55 @@ fn validate_cap(cap: u64, hard_max: u64, label: &str, blockers: &mut Vec<String>
 /// An external anchor is a counter held *outside* the Hub's state directory,
 /// beyond the reach of whoever can restore that directory, which can only ever
 /// rise, which the Hub advances before it signs and re-reads at startup. See
-/// `docs/agent-wallet/EXTERNAL_ROLLBACK_ANCHOR_REQUIREMENTS.md`.
+/// `docs/agent-wallet/EXTERNAL_ROLLBACK_ANCHOR_REQUIREMENTS.md`,
+/// `docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md` and
+/// `docs/l2/ROLLBACK-ANCHOR-PROTOCOL.md`.
 ///
-/// No such subsystem exists in this build. Nothing produces an anchor receipt,
-/// so there is no evidence to weigh and the only truthful answer is `false`.
-/// This is the measured absence of the anchor, not a policy switch, and it is
-/// deliberately unreachable from configuration.
+/// This is a conjunction over one live probe of the pinned witness, and it is
+/// false if any part is missing. `evidence` is `None` whenever no witness is
+/// configured **or** the configured witness could not be reached, could not be
+/// verified against its pinned keys, or answered from a store the Hub did not
+/// pin - all of which fail closed to the same `false`, because an unreachable
+/// oracle is not evidence.
 ///
-/// When the anchor is built this must become a function of a verified,
-/// unexpired anchor receipt. It must never become a function of an anchor URL
-/// being configured, an operator assertion, or a counter file on this same
-/// host: `EXTERNAL_ROLLBACK_ANCHOR_REQUIREMENTS.md` rules all three out, and a
-/// flag derived from any of them would report a guarantee that does not exist.
-pub fn measure_external_rollback_anchor_ready() -> bool {
-    false
+/// It is never a function of a witness URL being configured, of an operator
+/// assertion, of a flag, or of a counter file on this same host. The doc
+/// comment that used to stand here ruled all three out and they stay ruled
+/// out: the only input is a signed, fresh, pinned-key-verified statement from
+/// the witness, weighed against what this Hub durably recorded.
+///
+/// **What this deliberately does not gate on.** The witness *endpoint* posture,
+/// meaning whether the URL points at this host or at plaintext transport, is
+/// not a term here, because it cannot reach this function in the configuration
+/// that matters: [`crate::rollback_anchor::RollbackAnchorClient::connect`] refuses
+/// outright to build a client for a mainnet profile against a loopback,
+/// link-local or plaintext endpoint. Off the mainnet profiles the deviation is
+/// allowed but never silent: it is published as
+/// `witness_endpoint_is_local` beside this flag, along with the witness
+/// posture and the operating entity, because a guarantee whose strength
+/// depends on who holds a key must not be reported as a lone boolean with the
+/// key holder hidden.
+pub fn measure_external_rollback_anchor_ready(
+    evidence: Option<&crate::rollback_anchor::RollbackAnchorEvidenceV1>,
+    now_unix: u64,
+) -> bool {
+    evidence.is_some_and(|evidence| {
+        evidence.schema == crate::rollback_anchor::ROLLBACK_ANCHOR_EVIDENCE_SCHEMA
+            && !evidence.witness_id.trim().is_empty()
+            && !evidence.witness_instance_id.trim().is_empty()
+            && evidence.attestation_valid
+            && evidence.attestation_expires_unix > now_unix
+            && evidence.key_custody_distinct
+            && evidence.instance_pin_holds
+            && evidence.counter_never_decreased
+            && evidence.startup_probe_agreed
+            && evidence.channels_latched_in_refusal == 0
+            && evidence.verified_unix
+                <= now_unix
+                    .saturating_add(crate::rollback_anchor::protocol::MAX_WITNESS_MESSAGE_AGE_SECS)
+            && now_unix.saturating_sub(evidence.verified_unix)
+                <= crate::rollback_anchor::protocol::MAX_WITNESS_MESSAGE_AGE_SECS
+    })
 }
 
 /// Measured readiness of the unilateral L1 dispute path.
@@ -445,13 +480,18 @@ pub struct HubHardGuarantees {
 
 impl HubHardGuarantees {
     /// Weigh the evidence. `capabilities` is `None` whenever the fullnode
-    /// could not be probed, which fails every measurement closed.
+    /// could not be probed and `anchor` is `None` whenever the rollback anchor
+    /// witness is unconfigured or could not be probed and verified. Either
+    /// fails its measurement closed.
     pub fn measure(
         profile: &str,
         hub_operational_ready: bool,
         capabilities: Option<&FullnodeCapabilitiesV1>,
+        anchor: Option<&crate::rollback_anchor::RollbackAnchorEvidenceV1>,
+        now_unix: u64,
     ) -> Self {
-        let external_rollback_anchor_ready = measure_external_rollback_anchor_ready();
+        let external_rollback_anchor_ready =
+            measure_external_rollback_anchor_ready(anchor, now_unix);
         let l1_dispute_path_ready = measure_l1_dispute_path_ready(capabilities);
         // The strongest claim the Hub makes: a full production mainnet
         // deployment with trustless finality. Every part must hold.
@@ -749,20 +789,103 @@ mod tests {
         );
     }
 
+    fn anchor_evidence(now: u64) -> crate::rollback_anchor::RollbackAnchorEvidenceV1 {
+        crate::rollback_anchor::RollbackAnchorEvidenceV1 {
+            schema: crate::rollback_anchor::ROLLBACK_ANCHOR_EVIDENCE_SCHEMA.into(),
+            witness_id: "witness-alpha".into(),
+            witness_instance_id: "ab".repeat(32),
+            witness_boot_id: "cd".repeat(32),
+            witness_operator: "Example Counterparty Ltd".into(),
+            witness_posture: "counterparty".into(),
+            witness_endpoint_posture: "external".into(),
+            witness_endpoint_is_local: false,
+            attestation_valid: true,
+            attestation_expires_unix: now + 86_400,
+            key_custody_distinct: true,
+            instance_pin_holds: true,
+            counter_never_decreased: true,
+            startup_probe_agreed: true,
+            counter_value: 42,
+            verified_unix: now,
+            channels_latched_in_refusal: 0,
+        }
+    }
+
+    /// The flag must follow the evidence in both directions, and every part of
+    /// the conjunction must be able to hold it false on its own. A flag that
+    /// only ever reads one way is not a measurement.
     #[test]
-    fn the_external_anchor_flag_is_false_because_no_anchor_subsystem_exists() {
+    fn the_external_anchor_flag_is_a_conjunction_over_live_witness_evidence() {
+        let now = 1_800_000_000;
         assert!(
-            !measure_external_rollback_anchor_ready(),
-            "no external anchor is implemented, so this must never read true"
+            !measure_external_rollback_anchor_ready(None, now),
+            "no witness configured, or an unreachable one, proves nothing"
         );
+        assert!(
+            measure_external_rollback_anchor_ready(Some(&anchor_evidence(now)), now),
+            "a live witness with a verified, fresh, pinned answer must read true"
+        );
+
+        let stale = anchor_evidence(now);
+        assert!(
+            !measure_external_rollback_anchor_ready(
+                Some(&stale),
+                now + crate::rollback_anchor::protocol::MAX_WITNESS_MESSAGE_AGE_SECS + 1
+            ),
+            "evidence outside the freshness window is not evidence of a live witness"
+        );
+
+        for hold_false in [
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.attestation_valid = false;
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.attestation_expires_unix = 0;
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.key_custody_distinct = false;
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.instance_pin_holds = false;
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.counter_never_decreased = false;
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.startup_probe_agreed = false;
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.channels_latched_in_refusal = 1;
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.witness_instance_id = String::new();
+            },
+            |evidence: &mut crate::rollback_anchor::RollbackAnchorEvidenceV1| {
+                evidence.schema = "something-else/1".into();
+            },
+        ] {
+            let mut evidence = anchor_evidence(now);
+            hold_false(&mut evidence);
+            assert!(
+                !measure_external_rollback_anchor_ready(Some(&evidence), now),
+                "each part of the conjunction must hold the flag false on its own"
+            );
+        }
     }
 
     /// `production_mainnet_ready` must be held false by every one of its parts
     /// independently, and the anchor must be enough on its own.
     #[test]
     fn production_mainnet_ready_is_held_false_by_each_missing_part() {
-        let best_available =
-            HubHardGuarantees::measure(MAINNET_PILOT_PROFILE, true, Some(&capabilities()));
+        let now = crate::node::now_unix();
+        let anchor = anchor_evidence(now);
+        let best_available = HubHardGuarantees::measure(
+            MAINNET_PILOT_PROFILE,
+            true,
+            Some(&capabilities()),
+            None,
+            now,
+        );
         assert!(best_available.l1_dispute_path_ready);
         assert!(!best_available.external_rollback_anchor_ready);
         assert!(
@@ -771,32 +894,68 @@ mod tests {
         );
 
         assert!(
-            !HubHardGuarantees::measure(MAINNET_PILOT_PROFILE, false, Some(&capabilities()))
-                .production_mainnet_ready,
+            HubHardGuarantees::measure(
+                MAINNET_PILOT_PROFILE,
+                true,
+                Some(&capabilities()),
+                Some(&anchor),
+                now
+            )
+            .production_mainnet_ready,
+            "with every part present, including a live witness, the claim must be reachable"
+        );
+
+        assert!(
+            !HubHardGuarantees::measure(
+                MAINNET_PILOT_PROFILE,
+                false,
+                Some(&capabilities()),
+                Some(&anchor),
+                now
+            )
+            .production_mainnet_ready,
             "a Hub that cannot settle is not production ready"
         );
         assert!(
-            !HubHardGuarantees::measure("development", true, Some(&capabilities()))
-                .production_mainnet_ready,
+            !HubHardGuarantees::measure(
+                "development",
+                true,
+                Some(&capabilities()),
+                Some(&anchor),
+                now
+            )
+            .production_mainnet_ready,
             "a non-mainnet-pilot profile is not production ready"
         );
 
-        let blind = HubHardGuarantees::measure(MAINNET_PILOT_PROFILE, true, None);
+        let blind = HubHardGuarantees::measure(MAINNET_PILOT_PROFILE, true, None, None, now);
         assert!(!blind.production_mainnet_ready);
         assert!(!blind.l1_dispute_path_ready);
 
         let mut below_checkpoint = capabilities();
         below_checkpoint.height = HACASH_MAINNET_MIN_SAFE_HEIGHT - 1;
         assert!(
-            !HubHardGuarantees::measure(MAINNET_PILOT_PROFILE, true, Some(&below_checkpoint))
-                .production_mainnet_ready
+            !HubHardGuarantees::measure(
+                MAINNET_PILOT_PROFILE,
+                true,
+                Some(&below_checkpoint),
+                Some(&anchor),
+                now
+            )
+            .production_mainnet_ready
         );
 
         let mut not_mainnet = capabilities();
         not_mainnet.mainnet = false;
         assert!(
-            !HubHardGuarantees::measure(MAINNET_PILOT_PROFILE, true, Some(&not_mainnet))
-                .production_mainnet_ready
+            !HubHardGuarantees::measure(
+                MAINNET_PILOT_PROFILE,
+                true,
+                Some(&not_mainnet),
+                Some(&anchor),
+                now
+            )
+            .production_mainnet_ready
         );
     }
 

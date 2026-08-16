@@ -35,6 +35,7 @@ pub mod node;
 pub mod operation;
 pub mod protocol_registry;
 pub mod readiness;
+pub mod rollback_anchor;
 pub mod routing;
 mod sealed_state;
 pub mod server;

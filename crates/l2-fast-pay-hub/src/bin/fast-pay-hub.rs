@@ -133,12 +133,111 @@ struct Args {
     /// Type 3 gas limit byte for HVM renew-all calls.
     #[arg(long, default_value_t = 255)]
     hvm_lease_gas_max: u8,
+
+    /// External monotonic rollback anchor: the witness base URL.
+    ///
+    /// The anchor is a counter that lives outside this Hub's state, beyond the
+    /// reach of whoever can restore that state, and only ever goes up. Set it
+    /// and every Hub signature first reserves its exact ledger position with
+    /// the witness; an unreachable witness then refuses rather than signs.
+    ///
+    /// All five anchor settings are required together. A partial configuration
+    /// is a startup failure, never a Hub that quietly runs without an anchor.
+    #[arg(long, env = "HACASH_HUB_ROLLBACK_WITNESS_URL")]
+    rollback_witness_url: Option<String>,
+
+    /// Pinned witness identity.
+    #[arg(long, env = "HACASH_HUB_ROLLBACK_WITNESS_ID")]
+    rollback_witness_id: Option<String>,
+
+    /// Pinned witness receipt key generation.
+    #[arg(long, env = "HACASH_HUB_ROLLBACK_WITNESS_EPOCH", default_value_t = 1)]
+    rollback_witness_epoch: u64,
+
+    /// Pinned online witness receipt address. Verifies receipts and refusals.
+    #[arg(long, env = "HACASH_HUB_ROLLBACK_WITNESS_RECEIPT_ADDRESS")]
+    rollback_witness_receipt_address: Option<String>,
+
+    /// Pinned offline witness authorisation address. Verifies the deployment
+    /// attestation, and nothing that signs unattended.
+    #[arg(long, env = "HACASH_HUB_ROLLBACK_WITNESS_AUTHORISATION_ADDRESS")]
+    rollback_witness_authorisation_address: Option<String>,
+
+    /// The signed `WitnessDeploymentAttestationV1`, as produced by
+    /// `hpay-rollback-witness attest`.
+    #[arg(long, env = "HACASH_HUB_ROLLBACK_WITNESS_ATTESTATION_FILE")]
+    rollback_witness_attestation_file: Option<PathBuf>,
+
+    /// Witness request timeout. There is no "proceed on timeout".
+    #[arg(long, default_value_t = 5)]
+    rollback_witness_timeout_seconds: u64,
+}
+
+/// Assemble the anchor configuration, or say plainly that there is none.
+///
+/// Absent configuration reads as *no witness*, which reads as
+/// `external_rollback_anchor_ready = false`. It never reads as "anchor not
+/// required". Partial configuration is refused outright: a Hub that was meant
+/// to have an anchor and silently does not is the worst outcome available.
+fn rollback_anchor_config(
+    args: &Args,
+) -> Result<
+    Option<l2_fast_pay_hub::rollback_anchor::RollbackAnchorConfig>,
+    Box<dyn std::error::Error>,
+> {
+    let supplied = [
+        args.rollback_witness_url.is_some(),
+        args.rollback_witness_id.is_some(),
+        args.rollback_witness_receipt_address.is_some(),
+        args.rollback_witness_authorisation_address.is_some(),
+        args.rollback_witness_attestation_file.is_some(),
+    ];
+    if supplied.iter().all(|present| !present) {
+        return Ok(None);
+    }
+    if !supplied.iter().all(|present| *present) {
+        return Err(
+            "the external rollback anchor needs --rollback-witness-url, --rollback-witness-id, \
+             --rollback-witness-receipt-address, --rollback-witness-authorisation-address and \
+             --rollback-witness-attestation-file together. A partial anchor configuration is \
+             refused rather than run without an anchor"
+                .into(),
+        );
+    }
+    let attestation_path = args
+        .rollback_witness_attestation_file
+        .as_ref()
+        .expect("checked above");
+    let attestation = serde_json::from_slice(&std::fs::read(attestation_path)?)?;
+    Ok(Some(
+        l2_fast_pay_hub::rollback_anchor::RollbackAnchorConfig {
+            witness_url: args.rollback_witness_url.clone().expect("checked above"),
+            witness_id: args.rollback_witness_id.clone().expect("checked above"),
+            witness_epoch: args.rollback_witness_epoch,
+            witness_receipt_address: args
+                .rollback_witness_receipt_address
+                .clone()
+                .expect("checked above"),
+            witness_authorisation_address: args
+                .rollback_witness_authorisation_address
+                .clone()
+                .expect("checked above"),
+            attestation,
+            request_timeout: std::time::Duration::from_secs(
+                args.rollback_witness_timeout_seconds.max(1),
+            ),
+        },
+    ))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+
+    // Read before anything consumes `args`, and before any key material is
+    // touched: a partial anchor configuration must fail the process here.
+    let anchor_config = rollback_anchor_config(&args)?;
 
     if args.create_dpapi_identity && args.migrate_dpapi_identity_v3 {
         return Err(
@@ -269,7 +368,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hub_signer = (!hub_secret_hex.is_empty())
         .then(|| HubSigner::from_secret_hex(hub_secret_hex.as_str()))
         .transpose()?;
-    let hub = Arc::new(
+    let hub_state = {
         if l2_fast_pay_hub::readiness::is_mainnet_pilot_profile(&args.deployment_profile) {
             let state_file = args
                 .state_file
@@ -355,8 +454,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     hub_signer.take(),
                 )?,
             }
-        },
-    );
+        }
+    };
+    let anchored = anchor_config.is_some();
+    let hub_state = match anchor_config {
+        Some(config) => hub_state.with_rollback_anchor(config)?,
+        None => hub_state,
+    };
+    let hub = Arc::new(hub_state);
+    if anchored {
+        // The anti-rollback check proper, before the money path serves
+        // anything. A Hub that cannot agree with its witness on every channel
+        // it holds does not start.
+        hub.run_rollback_anchor_startup_probe().await?;
+        eprintln!("Rollback anchor: witness agreed on every channel this Hub holds");
+    } else {
+        eprintln!(
+            "Rollback anchor: NONE configured. external_rollback_anchor_ready will read false \
+             and full mainnet stays blocked"
+        );
+    }
 
     eprintln!(
         "Fast Pay hub: {}",

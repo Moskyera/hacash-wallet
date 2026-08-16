@@ -1370,6 +1370,17 @@ pub(super) fn require_exact_live_channel(
     Ok(())
 }
 
+/// Re-verify the provider identity and liveness contract behind an existing
+/// binding.
+///
+/// This weighs only what `/v1/health` can actually answer without fullnode
+/// I/O: identity, fee, routing support, and the profile label the provider
+/// publishes. The mainnet hard guarantees are deliberately not read here -
+/// `/v1/health` cannot measure them, so a gate reading them could never open.
+/// Every mainnet caller pairs this with the readiness document
+/// (`require_mainnet_hard_guarantees` or `require_mainnet_payment_ready`),
+/// which is the authority for `trustless_finality` and
+/// `unilateral_l1_enforceable`.
 pub(super) fn require_exact_hub_health(
     health: &HubHealth,
     binding: &AgentL2Binding,
@@ -1381,9 +1392,7 @@ pub(super) fn require_exact_hub_health(
         health.trusted_bounded_pilot_ready
             && health.deployment_profile.as_deref() == Some("mainnet-bounded-pilot")
     } else {
-        health.external_rollback_anchor_ready
-            && health.l1_dispute_path_ready
-            && health.production_mainnet_ready
+        !health.trusted_bounded_pilot_ready
             && health.deployment_profile.as_deref() == Some("mainnet-pilot")
     };
     if !health.ok
@@ -1473,10 +1482,7 @@ mod tests {
             hub_fee_mei: Some(serde_json::json!("0")),
             settlement_ready: true,
             cross_channel_ready: true,
-            external_rollback_anchor_ready: false,
-            l1_dispute_path_ready: false,
             official_channelpay_ready: false,
-            production_mainnet_ready: false,
             trusted_bounded_pilot_ready: false,
             deployment_profile: Some("testnet".to_owned()),
         };
@@ -1564,10 +1570,13 @@ mod tests {
 
         health.deployment_profile = Some("mainnet-pilot".to_owned());
         health.trusted_bounded_pilot_ready = false;
-        health.external_rollback_anchor_ready = true;
-        health.l1_dispute_path_ready = true;
-        health.production_mainnet_ready = true;
         assert!(require_exact_hub_health(&health, &binding, false).is_ok());
         assert!(require_exact_hub_health(&health, &binding, true).is_err());
+
+        // The profile label is a liveness fact and is all this check may weigh.
+        // The hard guarantees are not on `HubHealth` at all any more, so no
+        // amount of health drift can open the mainnet money path on its own.
+        health.deployment_profile = Some("mainnet-bounded-pilot".to_owned());
+        assert!(require_exact_hub_health(&health, &binding, false).is_err());
     }
 }

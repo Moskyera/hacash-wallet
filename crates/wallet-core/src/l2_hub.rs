@@ -20,6 +20,15 @@ use crate::l2_bill::{
     validate_sender_bill,
 };
 
+/// The `/v1/health` payload: a cheap liveness/identity answer.
+///
+/// The Hub serves this without any fullnode I/O, so it carries no
+/// capability-dependent guarantee and this struct deliberately has no field
+/// that could be mistaken for one. Everything a mainnet money gate needs -
+/// `trustless_finality`, `unilateral_l1_enforceable` - lives on
+/// [`HubMainnetReadiness`] (`/v1/readiness/mainnet`), the endpoint that pays
+/// for the evidence. Re-adding a guarantee flag here would recreate a document
+/// that can only ever under-report, which is why none exists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubHealth {
     pub ok: bool,
@@ -37,25 +46,13 @@ pub struct HubHealth {
     /// Hub has a complete recipient-signature exchange for routed payments.
     #[serde(default)]
     pub cross_channel_ready: bool,
-    /// Provider anchors the journal head outside rollbackable local storage.
-    #[serde(default)]
-    pub external_rollback_anchor_ready: bool,
-    /// Network has a proven unilateral dispute/final-claim path.
-    ///
-    /// `/v1/health` performs no fullnode I/O, so an honest Hub reports this
-    /// conservatively: `false` here means "not proven on this endpoint", not
-    /// "proven absent". The authority is `unilateral_l1_enforceable` in the
-    /// `/v1/readiness/mainnet` document, which is what every mainnet gate on
-    /// both sides already requires.
-    #[serde(default)]
-    pub l1_dispute_path_ready: bool,
     /// Provider speaks an authenticated Official ChannelPay session.
     #[serde(default)]
     pub official_channelpay_ready: bool,
-    /// Provider's aggregate production-readiness assertion.
-    #[serde(default)]
-    pub production_mainnet_ready: bool,
     /// Explicit bounded pilot that remains dependent on Hub availability.
+    ///
+    /// Not capability-dependent: the Hub can answer this from its own
+    /// configuration and signing key without touching a fullnode.
     #[serde(default)]
     pub trusted_bounded_pilot_ready: bool,
     /// Truthful transport/deployment label.
@@ -318,6 +315,61 @@ impl HubMainnetReadiness {
         }
         Ok(())
     }
+    /// The hard-guarantee gate for putting new money behind a channel binding.
+    ///
+    /// This is the authority for `trustless_finality` and
+    /// `unilateral_l1_enforceable`. `/v1/health` cannot answer either one: it
+    /// performs no fullnode I/O, so an honest Hub reports every
+    /// capability-dependent guarantee `false` there by construction, and a gate
+    /// reading those flags could never open even once the guarantee exists.
+    /// `/v1/readiness/mainnet` publishes the same `HubHardGuarantees::measure`
+    /// result the Hub's own money gate enforces, so this reads it instead.
+    ///
+    /// Correct in both eras with no further edit: while the external rollback
+    /// anchor is absent the Hub measures `trustless_finality: false` and this
+    /// denies, naming the missing guarantee; once the anchor lands and the Hub
+    /// measures it `true`, this allows.
+    fn require_channel_binding_guarantees(&self, policy: MainnetFastPayPolicy) -> WalletResult<()> {
+        if self.schema != MAINNET_READINESS_SCHEMA {
+            return Err(WalletError::L2(
+                "Fast Pay mainnet readiness document is not the expected schema; new funding is blocked"
+                    .into(),
+            ));
+        }
+        match policy {
+            MainnetFastPayPolicy::TrustlessOnly => {
+                if self.profile != MAINNET_PILOT_PROFILE || self.trusted_bounded_pilot {
+                    return Err(WalletError::L2(
+                        "Fast Pay Hub does not publish the trustless mainnet pilot profile; new funding is blocked"
+                            .into(),
+                    ));
+                }
+                let mut missing = Vec::new();
+                if !self.trustless_finality {
+                    missing.push("trustless_finality");
+                }
+                if !self.unilateral_l1_enforceable {
+                    missing.push("unilateral_l1_enforceable");
+                }
+                if !missing.is_empty() {
+                    return Err(WalletError::L2(format!(
+                        "Fast Pay Hub mainnet readiness does not report the required hard guarantee: {}; new funding is blocked",
+                        missing.join(" and ")
+                    )));
+                }
+            }
+            MainnetFastPayPolicy::TrustedBoundedPilot => {
+                if self.profile != MAINNET_BOUNDED_PILOT_PROFILE || !self.trusted_bounded_pilot {
+                    return Err(WalletError::L2(
+                        "Fast Pay Hub mainnet readiness does not report the required hard guarantee: trusted_bounded_pilot; new funding is blocked"
+                            .into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn require_channel_funding_ready(&self, amount_mei: &str) -> WalletResult<()> {
         self.require_payment_ready(None)?;
         let amount = l2_fast_pay_hub::amount::parse_amount_mei(amount_mei)
@@ -673,6 +725,20 @@ impl L2HubClient {
         Ok(readiness)
     }
 
+    /// Re-read the readiness document and require the hard guarantees this
+    /// client's mainnet policy depends on, naming whichever one is missing.
+    ///
+    /// For callers that hold a `HubHealth` and used to re-check the guarantee
+    /// flags that lived on it. Those flags are gone: `/v1/health` does no
+    /// fullnode I/O and could only ever under-report them, so the check has to
+    /// come from `/v1/readiness/mainnet`. Fails closed when the document cannot
+    /// be obtained or does not parse.
+    pub async fn require_mainnet_hard_guarantees(&self) -> WalletResult<HubMainnetReadiness> {
+        let readiness = self.mainnet_readiness().await?;
+        readiness.require_channel_binding_guarantees(self.mainnet_policy)?;
+        Ok(readiness)
+    }
+
     /// Verify the provider contract used by a wallet-funded channel open.
     ///
     /// This check is intentionally performed at both preparation and execution.
@@ -721,12 +787,13 @@ impl L2HubClient {
             ));
         }
         if self.mainnet {
-            let health_contract_ready = match self.mainnet_policy {
+            // Liveness-only facts, answerable without fullnode I/O: which
+            // profile the provider says it is running, and (for the bounded
+            // pilot) that it is configured and keyed for it. No hard guarantee
+            // is read here - `/v1/health` cannot measure one.
+            let health_profile_matches = match self.mainnet_policy {
                 MainnetFastPayPolicy::TrustlessOnly => {
-                    health.external_rollback_anchor_ready
-                        && health.l1_dispute_path_ready
-                        && health.production_mainnet_ready
-                        && health.deployment_profile.as_deref() == Some(MAINNET_PILOT_PROFILE)
+                    health.deployment_profile.as_deref() == Some(MAINNET_PILOT_PROFILE)
                 }
                 MainnetFastPayPolicy::TrustedBoundedPilot => {
                     health.trusted_bounded_pilot_ready
@@ -734,15 +801,19 @@ impl L2HubClient {
                             == Some(MAINNET_BOUNDED_PILOT_PROFILE)
                 }
             };
-            if !health_contract_ready {
+            if !health_profile_matches {
                 return Err(WalletError::L2(
                     "Fast Pay provider does not match the explicitly selected mainnet settlement policy; new funding is blocked"
                         .into(),
                 ));
             }
-            self.require_mainnet_payment_ready(None)
-                .await?
-                .require_channel_funding_ready(user_deposit_mei)?;
+            // One fetch of the authority, on a path that already paid for it.
+            // A missing, malformed, expired or unreachable document errors out
+            // of `mainnet_readiness()` and this gate stays shut.
+            let readiness = self.mainnet_readiness().await?;
+            readiness.require_channel_binding_guarantees(self.mainnet_policy)?;
+            readiness.require_payment_ready_for_policy(None, self.mainnet_policy)?;
+            readiness.require_channel_funding_ready(user_deposit_mei)?;
         }
         Ok(health)
     }
@@ -1748,7 +1819,7 @@ fn require_lower_commitment(value: &str, label: &str) -> WalletResult<()> {
 #[cfg(test)]
 mod transport_tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use axum::routing::get;
     use axum::{Json, Router, extract::State};
@@ -1835,6 +1906,8 @@ mod transport_tests {
             "hub_fee_mei": "0",
             "settlement_ready": true,
             "cross_channel_ready": true,
+            // Still served by hubs that have not upgraded. The wallet must
+            // ignore them, not gate on them.
             "external_rollback_anchor_ready": true,
             "l1_dispute_path_ready": true,
             "official_channelpay_ready": true,
@@ -1842,6 +1915,178 @@ mod transport_tests {
             "trusted_bounded_pilot_ready": false,
             "deployment_profile": "mainnet-pilot"
         })
+    }
+
+    /// The readiness document an honest Hub publishes today: no external
+    /// monotonic rollback anchor exists, so `trustless_finality` is measured
+    /// `false` and the blocker is listed.
+    fn anchorless_readiness_json(unilateral_l1_enforceable: bool) -> serde_json::Value {
+        let mut blockers = vec!["external_monotonic_rollback_anchor_is_not_ready"];
+        if !unilateral_l1_enforceable {
+            blockers.push("unilateral_l1_dispute_path_is_not_ready");
+        }
+        let mut value = readiness_json(false, blockers, 500_000);
+        value["trustless_finality"] = serde_json::json!(false);
+        value["unilateral_l1_enforceable"] = serde_json::json!(unilateral_l1_enforceable);
+        value
+    }
+
+    async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), server)
+    }
+
+    const GATE_HUB_ADDRESS: &str = "1Luek83YChwrkRYGUGpHmYVeC55tQz49Jo";
+
+    /// The channel-binding gate must follow `/v1/readiness/mainnet`, and only
+    /// `/v1/readiness/mainnet`, in both directions.
+    ///
+    /// One mock Hub, one client, one unedited gate. `/v1/health` advertises the
+    /// retired guarantee flags as `true` for the whole test and is ignored - the
+    /// wallet has no field to deserialize them into. Only the readiness document
+    /// moves, and the gate moves with it:
+    ///
+    /// * anchor not reported: the Hub measures `trustless_finality: false` and
+    ///   the wallet refuses, naming the guarantee it did not get.
+    /// * anchor reported: the Hub publishes both guarantees and the same gate
+    ///   opens, with no code change between the two halves of this test.
+    #[tokio::test]
+    async fn channel_binding_follows_the_readiness_document_in_both_directions() {
+        let anchored = Arc::new(AtomicBool::new(false));
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async { Json(health_json(GATE_HUB_ADDRESS)) }),
+            )
+            .route(
+                "/v1/readiness/mainnet",
+                get(|State(anchored): State<Arc<AtomicBool>>| async move {
+                    Json(if anchored.load(Ordering::SeqCst) {
+                        readiness_json(true, vec![], 500_000)
+                    } else {
+                        anchorless_readiness_json(false)
+                    })
+                }),
+            )
+            .with_state(anchored.clone());
+        let (url, server) = serve(app).await;
+        let client = L2HubClient::new_for_network(url, "mainnet");
+
+        let refusal = client
+            .require_channel_open_ready(GATE_HUB_ADDRESS, "0.005")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            refusal,
+            "l2: Fast Pay Hub mainnet readiness does not report the required hard guarantee: \
+             trustless_finality and unilateral_l1_enforceable; new funding is blocked",
+            "the refusal must name the guarantees that are missing"
+        );
+
+        anchored.store(true, Ordering::SeqCst);
+        client
+            .require_channel_open_ready(GATE_HUB_ADDRESS, "0.005")
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    /// The refusal must name the guarantee that is actually absent, not a
+    /// blanket "not ready".
+    ///
+    /// This is the exact shape of a Hub whose fullnode proves a verified
+    /// unilateral-exit deployment while the external rollback anchor still does
+    /// not exist: `unilateral_l1_enforceable` is measured `true`,
+    /// `trustless_finality` is measured `false`, and only the second may appear
+    /// in the refusal.
+    #[tokio::test]
+    async fn channel_binding_names_only_the_hard_guarantee_that_is_missing() {
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async { Json(health_json(GATE_HUB_ADDRESS)) }),
+            )
+            .route(
+                "/v1/readiness/mainnet",
+                get(|| async { Json(anchorless_readiness_json(true)) }),
+            );
+        let (url, server) = serve(app).await;
+        let refusal = L2HubClient::new_for_network(url, "mainnet")
+            .require_channel_open_ready(GATE_HUB_ADDRESS, "0.005")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("trustless_finality"),
+            "the missing guarantee must be named, got: {refusal}"
+        );
+        assert!(
+            !refusal.contains("unilateral_l1_enforceable"),
+            "a guarantee the Hub did report must not be blamed, got: {refusal}"
+        );
+        server.abort();
+    }
+
+    /// A readiness document that cannot be obtained is not a green one.
+    ///
+    /// `/v1/health` is fully green in every case here, including the retired
+    /// guarantee flags, so the only thing that can hold the gate shut is the
+    /// wallet's refusal to proceed without the authority.
+    #[tokio::test]
+    async fn channel_binding_fails_closed_without_a_usable_readiness_document() {
+        let missing = Router::new().route(
+            "/v1/health",
+            get(|| async { Json(health_json(GATE_HUB_ADDRESS)) }),
+        );
+        let malformed = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async { Json(health_json(GATE_HUB_ADDRESS)) }),
+            )
+            .route("/v1/readiness/mainnet", get(|| async { "not-json" }));
+        let wrong_schema = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async { Json(health_json(GATE_HUB_ADDRESS)) }),
+            )
+            .route(
+                "/v1/readiness/mainnet",
+                get(|| async {
+                    let mut value = readiness_json(true, vec![], 500_000);
+                    value["schema"] = serde_json::json!("hpay-fast-pay-mainnet-readiness/2");
+                    Json(value)
+                }),
+            );
+
+        for (label, app) in [
+            ("missing", missing),
+            ("malformed", malformed),
+            ("wrong schema", wrong_schema),
+        ] {
+            let (url, server) = serve(app).await;
+            let error = L2HubClient::new_for_network(url, "mainnet")
+                .require_channel_open_ready(GATE_HUB_ADDRESS, "0.005")
+                .await
+                .unwrap_err();
+            assert!(
+                !error.to_string().is_empty(),
+                "the {label} readiness document must not open the gate"
+            );
+            server.abort();
+        }
+
+        // Unreachable Hub: nothing answers at all.
+        assert!(
+            L2HubClient::new_for_network("http://127.0.0.1:1", "mainnet")
+                .require_channel_open_ready(GATE_HUB_ADDRESS, "0.005")
+                .await
+                .is_err()
+        );
     }
 
     fn bounded_readiness_json() -> serde_json::Value {
@@ -1864,10 +2109,7 @@ mod transport_tests {
             hub_fee_mei: Some(serde_json::json!("0")),
             settlement_ready: true,
             cross_channel_ready: true,
-            external_rollback_anchor_ready: false,
-            l1_dispute_path_ready: false,
             official_channelpay_ready: false,
-            production_mainnet_ready: false,
             trusted_bounded_pilot_ready: false,
             deployment_profile: Some("legacy_wallet_hub_v4_development".into()),
         };

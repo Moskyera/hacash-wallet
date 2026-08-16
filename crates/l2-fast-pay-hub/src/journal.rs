@@ -99,6 +99,16 @@ pub enum JournalPhase {
     /// time and found absent, and retired to a terminal state so a correct
     /// replacement can be signed.
     HvmChainAbandonedInadmissible,
+    /// The exact external rollback anchor request was made durable before it
+    /// went on the wire. A receipt that matches no such record matches
+    /// nothing.
+    RollbackAnchorRequestPersisted,
+    /// The witness's signed receipt was verified and made durable together
+    /// with the advanced counter, before the signing key was used.
+    RollbackAnchorReceiptPersisted,
+    /// The witness refused. The channel is latched and will not sign again
+    /// without `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md`.
+    RollbackAnchorRefused,
 }
 
 #[derive(Debug, Clone)]

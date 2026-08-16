@@ -4,6 +4,7 @@ mod hvm_chain;
 mod hvm_registry;
 mod hvm_registry_chain;
 mod open;
+mod rollback_anchor;
 
 use std::fs;
 use std::path::PathBuf;
@@ -128,6 +129,13 @@ pub struct HubState {
     open_recovery_lock: tokio::sync::Mutex<()>,
     close_recovery_lock: tokio::sync::Mutex<()>,
     hvm_signing_lock: tokio::sync::Mutex<()>,
+    /// The external monotonic rollback anchor. `None` means no anchor is
+    /// configured, which reads as `external_rollback_anchor_ready = false` and
+    /// never as "anchor not required".
+    rollback_anchor: Option<crate::rollback_anchor::RollbackAnchorClient>,
+    /// Set only by a startup probe that agreed with the witness on every
+    /// channel this Hub holds. While it is false the anchor path refuses.
+    rollback_anchor_probe_agreed: AtomicBool,
     deployment_profile: String,
     mainnet_max_payment_hac_zhu: u64,
     mainnet_max_channel_funding_hac_zhu: u64,
@@ -504,6 +512,8 @@ impl HubState {
             open_recovery_lock: tokio::sync::Mutex::new(()),
             close_recovery_lock: tokio::sync::Mutex::new(()),
             hvm_signing_lock: tokio::sync::Mutex::new(()),
+            rollback_anchor: None,
+            rollback_anchor_probe_agreed: AtomicBool::new(false),
             deployment_profile,
             mainnet_max_payment_hac_zhu,
             mainnet_max_channel_funding_hac_zhu,
@@ -527,27 +537,23 @@ impl HubState {
     /// gate on a caller's behalf; `official_hub_contract` pins that by counting
     /// fullnode capability calls after a testnet `health()` and requiring zero.
     ///
-    /// The consequence is deliberate and is the conservative direction: a
-    /// capability-dependent guarantee has no measurement available here, so
-    /// `HubHardGuarantees::measure` is handed `None` and every such guarantee
-    /// fails closed to `false`. False on this endpoint therefore means "not
-    /// proven to you here", never "proven absent", and a client must not read a
-    /// `false` as evidence of anything except the absence of a claim.
+    /// Because no measurement is available here, this endpoint publishes no
+    /// capability-dependent guarantee at all. It used to publish them
+    /// conservatively - `HubHardGuarantees::measure` handed `None`, every such
+    /// flag falling to `false` - but a flag that is structurally always `false`
+    /// cannot distinguish "no evidence" from "proven absent", and a wallet that
+    /// gated on one could never be un-bricked by the guarantee arriving. The
+    /// flags are gone from [`crate::api::HubHealth`] so that gating on them is a
+    /// compile error rather than a convention.
     ///
-    /// The authority for these guarantees is [`Self::mainnet_readiness`]
-    /// (`/v1/readiness/mainnet`), which probes the fullnode and publishes the
-    /// result of the very same `HubHardGuarantees::measure` call. That is also
-    /// the endpoint the Hub's own money gate reads, so nothing is advertised as
-    /// ready here that the gate has not measured. Under-reporting a guarantee
-    /// on a liveness probe can only cost availability; over-reporting one would
-    /// cost funds.
+    /// The authority for those guarantees is [`Self::mainnet_readiness`]
+    /// (`/v1/readiness/mainnet`), which probes the fullnode, runs
+    /// `HubHardGuarantees::measure` over the evidence, and publishes the result
+    /// as `trustless_finality` / `unilateral_l1_enforceable`. That is also the
+    /// endpoint the Hub's own money gate reads, so nothing can be advertised as
+    /// ready that the gate has not measured.
     pub fn health(&self) -> crate::api::HubHealth {
         let settlement_ready = self.settlement_ready();
-        let guarantees = crate::readiness::HubHardGuarantees::measure(
-            &self.deployment_profile,
-            settlement_ready,
-            None,
-        );
         crate::api::HubHealth {
             ok: true,
             version: crate::api::HUB_API_VERSION,
@@ -556,10 +562,7 @@ impl HubState {
             hub_fee_mei: Some(format_amount_mei(self.hub_fee_mei)),
             settlement_ready,
             cross_channel_ready: settlement_ready,
-            external_rollback_anchor_ready: guarantees.external_rollback_anchor_ready,
-            l1_dispute_path_ready: guarantees.l1_dispute_path_ready,
             official_channelpay_ready: settlement_ready,
-            production_mainnet_ready: guarantees.production_mainnet_ready,
             trusted_bounded_pilot_ready: settlement_ready
                 && self.deployment_profile == MAINNET_BOUNDED_PILOT_PROFILE,
             deployment_profile: Some(self.deployment_profile.clone()),
@@ -575,12 +578,20 @@ impl HubState {
     /// here, and so does the Hub's own mainnet money gate.
     pub async fn mainnet_readiness(&self) -> crate::readiness::MainnetReadinessV1 {
         let capabilities = self.node.capabilities().await;
+        // The rollback anchor is measured the same way the fullnode is: by
+        // probing it here and weighing what comes back. No witness configured,
+        // an unreachable one, or one whose signed answer does not verify
+        // against the pinned keys and this Hub's durable position all produce
+        // `None`, and `None` reads false.
+        let anchor = self.rollback_anchor_evidence().await;
         // The measurement itself, on the endpoint that pays for the evidence,
         // so the advertised guarantees and the enforced gate cannot disagree.
         let guarantees = crate::readiness::HubHardGuarantees::measure(
             &self.deployment_profile,
             self.settlement_ready(),
             capabilities.as_ref().ok(),
+            anchor.as_ref(),
+            crate::node::now_unix(),
         );
         let mut readiness = crate::readiness::MainnetReadinessV1::evaluate(
             &self.deployment_profile,

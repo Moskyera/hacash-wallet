@@ -128,6 +128,8 @@ impl AgentWalletManager {
             .map_err(|_| AgentWalletError::SigningBlocked)?;
         permit.checkpoint(state.payments_suspended)?;
         require_exact_hub_health(&health, &binding, state.trusted_mainnet_fast_pay_pilot)?;
+        require_mainnet_hard_guarantees(&hub, &binding).await?;
+        permit.checkpoint(state.payments_suspended)?;
 
         let original_agent_units = HacUnits::new(
             plan.original_left_millimeis
@@ -299,6 +301,8 @@ impl AgentWalletManager {
             .map_err(|_| AgentWalletError::SigningBlocked)?;
         permit.checkpoint(initial.payments_suspended)?;
         require_exact_hub_health(&health, &binding, initial.trusted_mainnet_fast_pay_pilot)?;
+        require_mainnet_hard_guarantees(&hub, &binding).await?;
+        permit.checkpoint(initial.payments_suspended)?;
 
         let mut current = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
         if current.l2_channel_close.as_ref() != Some(&close)
@@ -729,5 +733,31 @@ async fn reverify_channel_close_context(
         .map_err(|_| AgentWalletError::SigningBlocked)?;
     context.permit.checkpoint(false)?;
     require_exact_hub_health(&health, binding, context.trusted_mainnet_fast_pay_pilot)?;
+    require_mainnet_hard_guarantees(&hub, binding).await?;
+    context.permit.checkpoint(false)?;
     Ok((node, hub))
+}
+
+/// On mainnet, re-read `/v1/readiness/mainnet` and require the hard guarantees
+/// the configured settlement policy depends on.
+///
+/// These used to be re-checked off the `HubHealth` payload. They are not on it
+/// any more, and could not honestly have been: `/v1/health` performs no
+/// fullnode I/O, so its guarantee flags were `false` by construction and this
+/// gate could never open. Reading the readiness document keeps the exact same
+/// answer today - the external rollback anchor is absent, so the Hub measures
+/// `trustless_finality: false` and this denies - and lets it open by itself
+/// once the anchor exists. Fails closed when the document is missing,
+/// malformed, expired or unreachable.
+async fn require_mainnet_hard_guarantees(
+    hub: &L2HubClient,
+    binding: &AgentL2Binding,
+) -> AgentWalletResult<()> {
+    if binding.network_mode() != "mainnet" {
+        return Ok(());
+    }
+    hub.require_mainnet_hard_guarantees()
+        .await
+        .map_err(|_| AgentWalletError::SigningBlocked)?;
+    Ok(())
 }

@@ -323,6 +323,37 @@ impl HubState {
             now_unix,
         )?;
 
+        // The external monotonic rollback anchor. The reviewed per-channel V1
+        // profile reaches the signing key exactly as the shared registry V2
+        // profile does, so it is in scope for the anchor exactly as V2 is: a
+        // design that covered only V2 would leave this path fully exposed.
+        let anchor_receipt = self
+            .reserve_rollback_anchor(
+                super::rollback_anchor::RollbackAnchorSubject {
+                    operation_id: &request.operation_id,
+                    settlement_profile: &binding.settlement_profile,
+                    network_instance_id: &binding.network_instance_id,
+                    binding_commitment: &request.binding_commitment,
+                    channel_id: &binding.channel_id,
+                    reuse_version: binding.reuse_version,
+                    serial: request.proposed_bill.serial,
+                    previous_bill_commitment: previous.commitment()?,
+                    proposed_bill_commitment: request.proposed_bill.commitment()?,
+                    payer: &request.payer,
+                    recipient: &request.recipient,
+                    amount_units: request.amount_zhu,
+                    idempotency_key: &request.idempotency_key,
+                },
+                now_unix,
+            )
+            .await?;
+        let key_use_time = now_unix.max(crate::node::now_unix());
+        super::rollback_anchor::require_receipt_authorises_bill(
+            anchor_receipt.as_ref(),
+            &request.proposed_bill.commitment()?,
+            request.proposed_bill.serial,
+            key_use_time,
+        )?;
         let signer = self
             .hub_signer
             .as_ref()
