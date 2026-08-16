@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-08-14",
+  "reviewBy": "2026-09-30",
+  "cargoAuditVersion": "0.22.2",
+  "notes": [
+    "Every Cargo.lock warning must match one exact advisory, package, version, and kind below.",
+    "This policy never permits vulnerabilities. Unknown, changed, or removed warnings fail the gate and require review.",
+    "The Linux GTK3 stack is pinned to the reviewed two-line RUSTSEC-2024-0429 backport commit; changing or removing that immutable source fails this gate."
+  ],
+  "requiredPinnedPackages": [
+    {
+      "package": "glib",
+      "version": "0.18.5",
+      "source": "git+https://github.com/jcfs/gtk-rs-core.git?rev=ea720152f28e293ef4362ee844ee5cc499f32d2a#ea720152f28e293ef4362ee844ee5cc499f32d2a",
+      "reason": "Exact two-line backport of gtk-rs/gtk-rs-core#1343; commit review confirmed that only VariantStrIter's out-pointer mutability changed."
+    }
+  ],
+  "allowedWarnings": [
+    {
+      "advisory": "RUSTSEC-2024-0370",
+      "package": "proc-macro-error",
+      "version": "1.0.4",
+      "kind": "unmaintained",
+      "reason": "Transitive procedural-macro dependency; no known vulnerability. Exact-version drift remains blocked."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0411",
+      "package": "gdkwayland-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0412",
+      "package": "gdk",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0413",
+      "package": "atk",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0414",
+      "package": "gdkx11-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0415",
+      "package": "gtk",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0416",
+      "package": "atk-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0417",
+      "package": "gdkx11",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0418",
+      "package": "gdk-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0419",
+      "package": "gtk3-macros",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2024-0420",
+      "package": "gtk-sys",
+      "version": "0.18.2",
+      "kind": "unmaintained",
+      "reason": "Linux-only GTK3 dependency inherited from the current Tauri/WRY stack."
+    },
+    {
+      "advisory": "RUSTSEC-2025-0075",
+      "package": "unic-char-range",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "reason": "Transitive Unicode dependency; no known vulnerability. Exact-version drift remains blocked."
+    },
+    {
+      "advisory": "RUSTSEC-2025-0080",
+      "package": "unic-common",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "reason": "Transitive Unicode dependency; no known vulnerability. Exact-version drift remains blocked."
+    },
+    {
+      "advisory": "RUSTSEC-2025-0081",
+      "package": "unic-char-property",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "reason": "Transitive Unicode dependency; no known vulnerability. Exact-version drift remains blocked."
+    },
+    {
+      "advisory": "RUSTSEC-2025-0098",
+      "package": "unic-ucd-version",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "reason": "Transitive Unicode dependency; no known vulnerability. Exact-version drift remains blocked."
+    },
+    {
+      "advisory": "RUSTSEC-2025-0100",
+      "package": "unic-ucd-ident",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "reason": "Transitive Unicode dependency; no known vulnerability. Exact-version drift remains blocked."
+    },
+    {
+      "advisory": "RUSTSEC-2025-0161",
+      "package": "libsecp256k1",
+      "version": "0.7.2",
+      "kind": "unmaintained",
+      "reason": "Pinned Hacash protocol cryptography dependency with no patched upstream release and no known vulnerability; replacement requires a separately verified consensus-compatible migration."
+    }
+  ]
+}
