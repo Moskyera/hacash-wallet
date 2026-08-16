@@ -96,6 +96,97 @@ For `mainnet-bounded-pilot`, `payments_enabled` may be `true` only when the node
 
 The current Istanbul full node reports `features.channel_unilateral_exit=false`. This is intentional: legacy Go dispute action numbers collide with Istanbul TEX/AST action kinds. Do not override this result with an operator flag and do not copy the legacy codecs into the mainnet registry.
 
+## External rollback anchor (witness)
+
+The anchor is a counter held by a small separate service — the **witness** — that
+the Hub asks before it uses its signing key. It exists because every safety check
+inside the Hub reads the Hub's own state file, and none of them survive that file
+going backwards. A Hub restored from an old backup will re-sign a bill serial it
+has already signed, with different balances, and both signatures are valid to the
+contract. The witness catches that only because it is not in the Hub's backup set.
+
+**What ships today: no witness configured.** There is no public witness address
+yet, so there is no default to point at. A default hostname that did not answer
+would be worse than an empty field — the Hub would refuse to sign for a reason
+nobody could explain. With no witness configured the Hub starts, prints that it
+has no anchor, and measures `external_rollback_anchor_ready = false`. The
+trustless `mainnet-pilot` profile therefore stays blocked, which is the honest
+result. `mainnet-bounded-pilot` is unaffected: it never claimed an anchor.
+
+**What changes when a public witness exists.** It becomes a documented,
+copy-and-paste address in this guide and in `docs/l2/RUNNING-A-WITNESS.md`, and
+nothing else. It will never be a compiled-in constant, never a fallback the Hub
+reaches for on its own, and never a requirement — a Hub pointed at any other
+witness gets identical behaviour and an identical readiness measurement. See
+`docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md`, "Who runs the witness".
+
+All five settings are required together. A partial configuration is a startup
+failure, never a Hub that quietly runs without an anchor:
+
+```bash
+export HACASH_HUB_ROLLBACK_WITNESS_URL=https://witness.example.org
+export HACASH_HUB_ROLLBACK_WITNESS_ID=their-witness-id
+export HACASH_HUB_ROLLBACK_WITNESS_RECEIPT_ADDRESS=1TheirOnlineReceiptAddress
+export HACASH_HUB_ROLLBACK_WITNESS_AUTHORISATION_ADDRESS=1TheirOfflineAuthorisationAddress
+export HACASH_HUB_ROLLBACK_WITNESS_ATTESTATION_FILE=/etc/hpay-fast-pay-hub/witness-attestation.json
+
+scripts/START-HUB-WITH-REMOTE-WITNESS.sh https://witness.example.org
+```
+
+The witness operator supplies all five values. Moving to a different witness —
+your own on separate infrastructure, the counterparty's, a neutral third party's
+— is a change to those five values and nothing else. It is not a code change.
+
+**When the witness is unreachable the Hub refuses to sign and channels freeze.**
+That is designed, not a defect, and there is no flag, timeout, grace period or
+override that changes it: an unreachable oracle is not evidence. If a deployment
+cannot accept that availability cost, the honest answer is
+`mainnet-bounded-pilot`, which reports `trustless_finality: false` and says out
+loud that it depends on trusting the Hub. Do not run a mainnet profile with a
+hole in it and call it an anchor.
+
+**It refuses to sign; it does not refuse to run.** A Hub whose witness is
+unreachable at startup still starts. It serves reads, `/v1/readiness/mainnet`
+and cooperative close, refuses every signature, prints
+`rollback_anchor_witness_unreachable`, and publishes that same identifier in the
+readiness document's `blockers`. It re-probes every 30 seconds and resumes
+signing by itself once the witness answers and agrees, so there is nothing to
+restart. This is not a softening of the paragraph above: nothing signs until a
+probe agrees. It exists because a Hub that crash-loops under
+`Restart=on-failure` cannot serve a close and cannot tell you what is wrong.
+
+**Where the witness sits is published, not hidden.** `/v1/readiness/mainnet`
+carries a `rollback_anchor` object beside the flag, naming the attested posture
+and operator (`witness_posture`, `witness_operator`) and the Hub's own
+measurement of where the witness actually is (`witness_endpoint_is_local`,
+`witness_store_in_hub_state_tree`, and the verdict `witness_co_located`). A
+wallet, or anyone choosing a Hub, can read whether that Hub witnesses itself
+rather than inferring it from a missing blocker string. `null` means no verified
+live witness right now; it never means the anchor is optional.
+
+**A mainnet profile refuses to start if a witness store is in its own backup
+set.** At startup the Hub looks for a witness append-only log in its state
+directory, and directly beside it in the parent, recognising it by its header
+rather than its filename. Finding one on `mainnet-pilot` or
+`mainnet-bounded-pilot` is a hard refusal naming the exact file, because a
+counter that gets restored with the state it guards is not an anchor. Off the
+mainnet profiles it is allowed — local development and the Local Pilot need it —
+and published as `witness_co_located: true`. This check sees the store beside
+your state tree; it cannot see one a directory further out, so it is a lint that
+makes the weak layout loud, not a boundary.
+
+| Task | Document |
+|---|---|
+| Run a witness | `docs/l2/RUNNING-A-WITNESS.md` |
+| A Hub has refused to sign | `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` |
+| Why it is built this way | `docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md` |
+| Wire protocol | `docs/l2/ROLLBACK-ANCHOR-PROTOCOL.md` |
+
+For local development only, `scripts/DEV-ONLY-HUB-AND-WITNESS-SAME-HOST.sh` (and
+the `.bat`) starts a Hub and witness together on one machine. It exercises the
+real protocol and anchors nothing, because the witness shares the Hub's
+filesystem and backup set. It says so, at length, every time it starts.
+
 ## Production hardening
 
 - Keep `--listen` on a private interface and publish only HTTPS port 443 through a reverse proxy with per-IP rate, connection and request-size limits.

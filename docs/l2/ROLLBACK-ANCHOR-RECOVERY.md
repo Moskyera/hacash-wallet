@@ -74,11 +74,17 @@ The Hub emits exactly one of these identifiers. Find yours.
 | `rollback_anchor_witness_behind_hub` | The witness's record is *lower* than this Hub's head. The witness lost state. | [Procedure B](#procedure-b--the-witness-is-behind-the-hub) |
 | `rollback_anchor_witness_instance_changed` | The witness's durable store identity changed. It was re-provisioned, or you are talking to a different witness. | [Procedure B](#procedure-b--the-witness-is-behind-the-hub) |
 | `rollback_anchor_witness_unreachable` | Network, DNS, TLS, or timeout. No evidence either way. | [Section 6](#6-the-witness-is-simply-down) |
-| `rollback_anchor_witness_is_not_external` | The configured witness failed the separation checks — it resolves to this host, or shares this Hub's key. | [Section 7](#7-the-witness-failed-the-separation-check) |
+| `rollback_anchor_witness_is_not_external` | The configured witness failed the separation checks — its URL names this host or plaintext, it shares this Hub's key, or its durable store is sitting inside this Hub's own backup set. | [Section 7](#7-the-witness-failed-the-separation-check) |
 | `rollback_anchor_attestation_missing_or_expired` | The deployment attestation naming who runs the witness is absent or out of date. | [Section 7](#7-the-witness-failed-the-separation-check) |
+| `rollback_anchor_channels_latched_in_refusal` | Published on `/v1/readiness/mainnet`, not on the signing path. One or more channels are **already condemned** in this Hub's durable state by an earlier refusal, and will not sign again until the procedure that condemned them is completed. The count is in `limitations`. This appears whether or not a witness is configured now: a latch lives in `hub-state.json`, so removing the witness configuration does not clear it. | Whichever procedure the original refusal named — re-read your incident record, not this table |
 
-If the Hub printed nothing and simply will not start on the money path, treat it
-as `rollback_anchor_witness_unreachable` and go to Section 6.
+**You do not have to catch the log line.** A Hub whose startup probe did not
+agree still starts, and it publishes the identifier above as a blocker on
+`/v1/readiness/mainnet`, with the same identifier spelled out in `limitations`.
+Read it from there. If the process is not running at all, that is not the anchor:
+the anchor refuses signatures, not the process. Look at the exit status and the
+configuration, and note that a partial `--rollback-witness-*` configuration is
+refused outright at startup on purpose.
 
 ---
 
@@ -369,8 +375,9 @@ Say so out loud rather than pretending otherwise. In that posture:
 - the authorisation key must still be offline and held by a **different named
   person** than the one performing the recovery;
 - both names go in the incident record;
-- the Hub reports its posture over health (see the protocol document) so a
-  counterparty can see what the guarantee is actually worth.
+- the Hub publishes its posture on `/v1/readiness/mainnet`, as the
+  `rollback_anchor` document beside the flag (see the protocol document), so a
+  counterparty can see what the guarantee is actually worth without asking.
 
 This is weaker. It is not nothing — it still means a restore cannot be
 laundered into service by one person at 3am without a second signature — but
@@ -386,12 +393,24 @@ Network partition, DNS, TLS expiry, the witness host is rebooting.
 unreachable oracle is not evidence. The Hub already behaves this way when the
 fullnode is unreachable, for the same reason.
 
+**The Hub keeps running.** Refusing to sign and refusing to start are different
+things, and the second one is worse: a Hub that will not start cannot serve a
+cooperative close, cannot answer readiness, and cannot tell you why. So a Hub
+whose witness was unreachable at boot starts, serves reads, readiness and
+cooperative close, refuses every signature, and publishes
+`rollback_anchor_witness_unreachable` in `blockers` on `/v1/readiness/mainnet`.
+Nothing is waived by it running: the startup probe has not agreed, and the
+signing path gates on that.
+
 1. Confirm it is really reachability and not a refusal: a refusal is *signed*, a
    reachability failure is not. If you have a signed refusal, you are not in this
    section.
 2. Fix the reachability problem. Certificates, DNS, firewall, capacity.
 3. The Hub resumes on its own once the witness answers. No authorisation, no
-   resynchronisation, nothing to approve — because nothing moved.
+   resynchronisation, nothing to approve — because nothing moved. It re-runs the
+   startup probe every 30 seconds while the refusal is a reachability one, so you
+   do not need to restart it, and restarting it buys you nothing. Only a probe
+   that agrees on every channel restores signing.
 4. If the outage is long, the correct escalation is "restore the witness", never
    "bypass the witness".
 
@@ -413,8 +432,18 @@ guard section of [ROLLBACK-ANCHOR-PROTOCOL.md](ROLLBACK-ANCHOR-PROTOCOL.md) for
 what is checked.
 
 This is a configuration incident. Someone pointed the Hub at a witness on
-localhost, or reused the Hub's key for the witness, or let the deployment
-attestation lapse.
+localhost, or reused the Hub's key for the witness, or left a witness counter
+store inside the directory tree that gets backed up and restored with the Hub,
+or let the deployment attestation lapse.
+
+**If the refusal names a file**, that is a witness durable store the Hub found
+in its own backup set. Restoring this Hub would restore that counter along with
+it, which is the one thing an anchor must not allow. Move the store onto
+infrastructure that is genuinely separate from this Hub's failure domain — not
+to another directory on the same disk — and re-attest. Do not simply delete it
+without first establishing whether it is the store your live witness is using;
+if it is, deleting it is destroying the anchor's record, which
+[Section 9](#9-things-that-must-never-be-done) item 3 forbids.
 
 1. Do not "fix" it by relaxing the check.
 2. Find out whether the witness has *always* been in that position, or whether
@@ -500,6 +529,14 @@ exists to prevent.
    leave the original alone.
 9. **Never let an authorisation live in a config file.** Short expiry, one
    channel, one incident, then it is dead.
+10. **Never remove the witness configuration to clear a latch.** Deleting the
+    `--rollback-witness-*` flags is the cheapest-looking way out of a refusal and
+    it is the worst one: it does not resolve the rollback, it removes your only
+    way of seeing it. The condemnation is in `hub-state.json`, not in the flags,
+    and the Hub goes on refusing that channel with the anchor gone — which is
+    correct, and is the point. A latch is cleared by completing the procedure
+    that raised it and by nothing else. If the Hub still refuses after you
+    removed the anchor, that is the design working, not a bug to route around.
 
 ---
 

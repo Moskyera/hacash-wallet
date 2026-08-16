@@ -30,8 +30,10 @@ use std::sync::atomic::Ordering;
 use crate::error::{HubError, HubResult};
 use crate::journal::{JournalEvent, JournalOperationType, JournalPhase};
 use crate::rollback_anchor::protocol::{
-    MAX_ANCHOR_LIFETIME_SECS, REFUSAL_HUB_BEHIND_WITNESS, REFUSAL_RECEIPT_NOT_BOUND,
-    REFUSAL_WITNESS_BEHIND_HUB,
+    MAX_ANCHOR_LIFETIME_SECS, REFUSAL_ATTESTATION_MISSING_OR_EXPIRED, REFUSAL_COUNTER_SKIPPED,
+    REFUSAL_FORK_AT_SERIAL, REFUSAL_HUB_BEHIND_WITNESS, REFUSAL_RECEIPT_NOT_BOUND,
+    REFUSAL_REPLAY_MISMATCH, REFUSAL_WITNESS_BEHIND_HUB, REFUSAL_WITNESS_INSTANCE_CHANGED,
+    REFUSAL_WITNESS_IS_NOT_EXTERNAL, REFUSAL_WITNESS_UNREACHABLE, refusal_condemns_the_channel,
 };
 use crate::rollback_anchor::{
     HubAnchorRequestV1, RollbackAnchorClient, RollbackAnchorConfig, RollbackAnchorEvidenceV1,
@@ -43,6 +45,66 @@ use crate::storage::{
 };
 
 use super::HubState;
+
+/// What a startup probe means for the **process**, which is a different
+/// question from what it means for a **signature**.
+///
+/// The signature question is answered by `rollback_anchor_probe_agreed` and is
+/// not softened anywhere: unless `agreed` is true, nothing signs. This type
+/// exists so the boot path can act on the answer without the answer being an
+/// error that kills the process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackAnchorBootPosture {
+    /// True only when the probe agreed with the witness on every channel this
+    /// Hub holds. This is the exact bit the signing path gates on.
+    pub agreed: bool,
+    /// Which refusal this is, by the identifier
+    /// `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2 indexes its procedures
+    /// by. `None` when the probe agreed.
+    pub refusal_identifier: Option<&'static str>,
+    /// The refusal in full, for the log.
+    pub refusal: Option<String>,
+    /// Whether this refusal means the anchor and the Hub disagree about
+    /// history, per
+    /// [`crate::rollback_anchor::protocol::refusal_condemns_the_channel`].
+    ///
+    /// The distinction that function already draws is honoured here rather than
+    /// re-invented: a condemning refusal is a durable, human-resolved condition
+    /// and retrying it is pointless noise, while an unreachable witness or a
+    /// timed-out request is transient and deliberately **not** condemning - the
+    /// Hub resumes on its own the moment the witness answers, which is what
+    /// `ROLLBACK-ANCHOR-RECOVERY.md` section 6 step 3 promises the operator.
+    pub condemning: bool,
+}
+
+/// Which identifier from `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2 a
+/// probe refusal carries.
+///
+/// Every refusal in this subsystem is constructed with its identifier inside
+/// the message precisely so the code and the operator document cannot drift, so
+/// this reads the identifier back out. Condemning identifiers are matched first,
+/// so a message that mentions more than one is classified by the worse.
+///
+/// A failure naming none of them is reachability by elimination - a dropped
+/// packet, DNS, TLS, a timeout - which is exactly what section 2's closing line
+/// already tells the operator to assume when the Hub said nothing at all.
+fn probe_refusal_identifier(message: &str) -> &'static str {
+    [
+        REFUSAL_HUB_BEHIND_WITNESS,
+        REFUSAL_FORK_AT_SERIAL,
+        REFUSAL_COUNTER_SKIPPED,
+        REFUSAL_WITNESS_BEHIND_HUB,
+        REFUSAL_WITNESS_INSTANCE_CHANGED,
+        REFUSAL_REPLAY_MISMATCH,
+        REFUSAL_WITNESS_IS_NOT_EXTERNAL,
+        REFUSAL_ATTESTATION_MISSING_OR_EXPIRED,
+        REFUSAL_RECEIPT_NOT_BOUND,
+        REFUSAL_WITNESS_UNREACHABLE,
+    ]
+    .into_iter()
+    .find(|identifier| message.contains(identifier))
+    .unwrap_or(REFUSAL_WITNESS_UNREACHABLE)
+}
 
 /// Everything the anchor needs to know about the exact bill about to be
 /// signed. Commitments and positions only.
@@ -79,11 +141,21 @@ impl HubState {
             })?
             .address()
             .to_owned();
+        // The Hub's own state file, so the client can look for a witness store
+        // inside this Hub's backup set. A Hub with no durable storage cannot
+        // settle at all, so there is nothing for an anchor to guard and nothing
+        // to scan.
+        let state_path = self
+            .state_store
+            .as_ref()
+            .map(crate::sealed_state::StateStore::path)
+            .map(std::path::Path::to_path_buf);
         self.rollback_anchor = Some(RollbackAnchorClient::connect(
             config,
             &self.hub_address,
             &signing_address,
             &self.deployment_profile,
+            state_path.as_deref(),
         )?);
         Ok(self)
     }
@@ -98,6 +170,54 @@ impl HubState {
             .read()
             .map_err(|_| HubError::State("state lock poisoned".into()))?;
         Ok(guard.rollback_anchor.clone().unwrap_or_default())
+    }
+
+    /// The durable condemnation for one channel, read from this Hub's own
+    /// state file and from nowhere else.
+    ///
+    /// It deliberately does not consult `self.rollback_anchor`. A latch is
+    /// written by the Hub into `hub-state.json`, it survives every restart,
+    /// and it is the strongest refusal this subsystem can produce - so the one
+    /// thing it must never depend on is whether a witness happens to be
+    /// configured *now*. Removing the `--rollback-witness-*` flags removes the
+    /// ability to reserve new positions; it does not, and must not, remove a
+    /// condemnation that is already on disk.
+    ///
+    /// A Hub that has never had an anchor has no `rollback_anchor` record at
+    /// all, so this reads `None` for every channel and changes nothing for it.
+    fn latched_rollback_anchor_refusal(
+        &self,
+        binding_commitment: &str,
+    ) -> HubResult<Option<String>> {
+        let guard = self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        Ok(guard
+            .rollback_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.latched_refusals.get(binding_commitment))
+            .cloned())
+    }
+
+    /// How many channels this Hub holds condemned in anchor refusal, read from
+    /// durable state without going near the witness.
+    ///
+    /// `RollbackAnchorEvidenceV1::channels_latched_in_refusal` carries the same
+    /// number, but only when a live witness could be probed - so it goes to
+    /// zero-by-absence exactly when the anchor client is removed, which is the
+    /// moment the number matters most. This one cannot.
+    pub(crate) fn latched_rollback_anchor_refusal_count(&self) -> u64 {
+        let Ok(guard) = self.inner.read() else {
+            // A poisoned lock is not evidence that nothing is latched.
+            return u64::MAX;
+        };
+        guard
+            .rollback_anchor
+            .as_ref()
+            .map_or(0, |anchor| anchor.latched_refusals.len())
+            .try_into()
+            .unwrap_or(u64::MAX)
     }
 
     /// Every channel this Hub holds, in both settlement profiles, as
@@ -153,7 +273,75 @@ impl HubState {
     /// are required - the startup check alone would miss a state file swapped
     /// underneath a running Hub, and the per-signature check alone would let a
     /// restored Hub serve reads and accept requests before refusing.
+    ///
+    /// The check itself is [`Self::rollback_anchor_startup_probe_check`] and is
+    /// unchanged. This wrapper adds one thing and takes nothing away: it records
+    /// *which* refusal the check produced, so a Hub that is refusing can name it
+    /// on `/v1/readiness/mainnet` instead of only in a log line nobody kept. A
+    /// probe that agrees clears the record.
     pub async fn run_rollback_anchor_startup_probe(&self) -> HubResult<()> {
+        let result = self.rollback_anchor_startup_probe_check().await;
+        self.record_rollback_anchor_probe_refusal(
+            result
+                .as_ref()
+                .err()
+                .map(|error| probe_refusal_identifier(&error.to_string())),
+        );
+        result
+    }
+
+    /// The startup probe, as the **process** must treat it.
+    ///
+    /// Refusing to SIGN without a witness is the anchor working and is not
+    /// changed here, at all. Refusing to START is a different and worse thing: a
+    /// Hub that will not start cannot serve a cooperative close, cannot answer
+    /// readiness, and cannot tell anyone why. Under a systemd unit with
+    /// `Restart=on-failure` it crash-loops, and the operator's instinct - restart
+    /// it - makes things strictly worse while telling them nothing, which is the
+    /// first thing `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` tells them not to do.
+    ///
+    /// So the process starts in every case, and this returns the posture instead
+    /// of an error. **It cannot become a bypass and it changes no signature.** On
+    /// any refusal `rollback_anchor_probe_agreed` stays false, which is the bit
+    /// [`Self::reserve_rollback_anchor`] checks before it will reserve anything,
+    /// and every channel latched by the check stays latched in the durable state.
+    /// A bill that would not be signed before this existed is not signed after.
+    pub async fn run_rollback_anchor_startup_probe_at_boot(&self) -> RollbackAnchorBootPosture {
+        match self.run_rollback_anchor_startup_probe().await {
+            Ok(()) => RollbackAnchorBootPosture {
+                agreed: self.rollback_anchor_probe_agreed.load(Ordering::Acquire),
+                refusal_identifier: None,
+                refusal: None,
+                condemning: false,
+            },
+            Err(error) => {
+                let refusal = error.to_string();
+                RollbackAnchorBootPosture {
+                    agreed: false,
+                    refusal_identifier: Some(probe_refusal_identifier(&refusal)),
+                    condemning: refusal_condemns_the_channel(&refusal),
+                    refusal: Some(refusal),
+                }
+            }
+        }
+    }
+
+    /// The identifier of the most recent startup probe refusal, or `None` when
+    /// the last probe agreed or none has run. Published, never gating.
+    pub fn rollback_anchor_probe_refusal(&self) -> Option<&'static str> {
+        self.rollback_anchor_probe_refusal
+            .read()
+            .ok()
+            .and_then(|slot| *slot)
+    }
+
+    fn record_rollback_anchor_probe_refusal(&self, identifier: Option<&'static str>) {
+        if let Ok(mut slot) = self.rollback_anchor_probe_refusal.write() {
+            *slot = identifier;
+        }
+    }
+
+    async fn rollback_anchor_startup_probe_check(&self) -> HubResult<()> {
         let Some(client) = self.rollback_anchor.as_ref() else {
             return Ok(());
         };
@@ -258,14 +446,34 @@ impl HubState {
 
     /// Reserve the exact bill position with the witness, or refuse.
     ///
-    /// Returns `Ok(None)` only when no anchor is configured at all. When one
-    /// is configured it is mandatory: an unreachable witness, a malformed
-    /// receipt or a counter behind the state all refuse rather than sign.
+    /// Returns `Ok(None)` only when no anchor is configured at all **and** this
+    /// channel carries no durable condemnation. When one is configured it is
+    /// mandatory: an unreachable witness, a malformed receipt or a counter
+    /// behind the state all refuse rather than sign.
+    ///
+    /// The latch check comes **first**, before the unconfigured-anchor exit,
+    /// and that ordering is the point of it. A latch is written into this
+    /// Hub's own `hub-state.json` when a rollback is caught; it is durable and
+    /// only the operator procedure clears it. If it were read after the exit
+    /// above, an operator could un-condemn a channel caught in a real rollback
+    /// by deleting five command-line flags - no cryptography, no attack, a
+    /// text editor - and the Hub would co-sign the already-signed serial a
+    /// second time with different balances, which is the exact double
+    /// signature this whole subsystem exists to prevent. Removing the anchor
+    /// removes the ability to reserve new positions; it must never remove a
+    /// condemnation already on disk.
+    ///
+    /// This is not a new refusal for Hubs that never had an anchor: they hold
+    /// no `rollback_anchor` record, so there is nothing to latch on and they
+    /// reach the `Ok(None)` exit exactly as before.
     pub(super) async fn reserve_rollback_anchor(
         &self,
         subject: RollbackAnchorSubject<'_>,
         now_unix: u64,
     ) -> HubResult<Option<VerifiedAnchorReceipt>> {
+        if let Some(reason) = self.latched_rollback_anchor_refusal(subject.binding_commitment)? {
+            return Err(HubError::State(reason));
+        }
         let Some(client) = self.rollback_anchor.as_ref() else {
             return Ok(None);
         };
@@ -277,9 +485,6 @@ impl HubState {
             ));
         }
         let anchor = self.anchor_state()?;
-        if let Some(reason) = anchor.latched_refusals.get(subject.binding_commitment) {
-            return Err(HubError::State(reason.clone()));
-        }
         let signer = self
             .hub_signer
             .as_ref()

@@ -121,6 +121,40 @@ chown root:hpayhub "${TMP_ENV}"
   if [[ -n "${NODE_TOKEN}" ]]; then
     printf 'HACASH_NODE_API_TOKEN=%s\n' "${NODE_TOKEN}"
   fi
+  cat <<'ANCHOR'
+
+# --- External monotonic rollback anchor -----------------------------------
+# Not configured. That is the shipped default and it is the honest one: there
+# is no public witness address yet, and a default pointing at a host that does
+# not answer would make this Hub refuse to sign for a reason nobody could
+# explain.
+#
+# With no witness, external_rollback_anchor_ready reads false and the trustless
+# mainnet-pilot profile stays blocked. mainnet-bounded-pilot, which this
+# installer selects, never claimed an anchor and is unaffected.
+#
+# The anchor is what stops a Hub restored from an old backup re-signing a bill
+# serial it has already signed with different balances. Every check inside this
+# Hub reads this Hub's own state file, and none of them survive that file going
+# backwards.
+#
+# To turn it on, uncomment all five and restart. All five are required
+# together: a partial configuration is a startup failure, never a Hub that
+# quietly runs without an anchor. The witness operator gives you all five.
+#
+#HACASH_HUB_ROLLBACK_WITNESS_URL=https://witness.example.org
+#HACASH_HUB_ROLLBACK_WITNESS_ID=their-witness-id
+#HACASH_HUB_ROLLBACK_WITNESS_RECEIPT_ADDRESS=1TheirOnlineReceiptAddress
+#HACASH_HUB_ROLLBACK_WITNESS_AUTHORISATION_ADDRESS=1TheirOfflineAuthorisationAddress
+#HACASH_HUB_ROLLBACK_WITNESS_ATTESTATION_FILE=/etc/hpay-fast-pay-hub/witness-attestation.json
+#
+# Once set, an unreachable witness means this Hub refuses to sign and channels
+# freeze. There is no bypass and there will not be one. Frozen channels lose
+# nobody any money.
+#
+# Running your own witness: /opt/hpay-fast-pay-hub/README.md and
+# docs/l2/RUNNING-A-WITNESS.md. It must not share a backup set with this Hub.
+ANCHOR
 } > "${TMP_ENV}"
 mv -f "${TMP_ENV}" "${ENV_FILE}"
 unset HUB_SECRET JOURNAL_KEY STATE_KEY NODE_TOKEN ALLOWED_USERS PILOT_USERS AGGREGATE_TVL_CAP
@@ -134,6 +168,10 @@ for _ in {1..20}; do
     echo "HPAY Fast Pay Hub is installed and running locally."
     echo "Readiness: http://127.0.0.1:8790/v1/readiness/mainnet"
     echo "Publish it only through an HTTPS reverse proxy. Do not expose port 8790 directly."
+    echo
+    echo "No external rollback anchor is configured. That is the default and it is"
+    echo "reported honestly: external_rollback_anchor_ready reads false. See the"
+    echo "commented block at the end of ${ENV_FILE} to point this Hub at a witness."
     exit 0
   fi
   sleep 1

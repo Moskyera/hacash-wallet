@@ -6,6 +6,11 @@ mod hvm_registry_chain;
 mod open;
 mod rollback_anchor;
 
+/// What a rollback anchor startup probe means for the process, as opposed to
+/// what it means for a signature. The boot path in `bin/fast-pay-hub.rs` reads
+/// it; nothing gates on it.
+pub use self::rollback_anchor::RollbackAnchorBootPosture;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -136,6 +141,18 @@ pub struct HubState {
     /// Set only by a startup probe that agreed with the witness on every
     /// channel this Hub holds. While it is false the anchor path refuses.
     rollback_anchor_probe_agreed: AtomicBool,
+    /// Why the most recent startup probe did not agree, by the identifier
+    /// `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2 indexes its procedures
+    /// by. `None` means the last probe agreed, or that none has run.
+    ///
+    /// In memory rather than in the durable state, and deliberately: this is a
+    /// fact about this process's contact with the witness, not about the state
+    /// the anchor guards, and it must clear the instant the witness answers
+    /// again. It gates nothing. The gate is
+    /// `rollback_anchor_probe_agreed`; this is only what the Hub *says* about
+    /// it on `/v1/readiness/mainnet`, so an operator reading the endpoint of a
+    /// Hub that is refusing to sign learns which procedure to open.
+    rollback_anchor_probe_refusal: RwLock<Option<&'static str>>,
     deployment_profile: String,
     mainnet_max_payment_hac_zhu: u64,
     mainnet_max_channel_funding_hac_zhu: u64,
@@ -514,6 +531,7 @@ impl HubState {
             hvm_signing_lock: tokio::sync::Mutex::new(()),
             rollback_anchor: None,
             rollback_anchor_probe_agreed: AtomicBool::new(false),
+            rollback_anchor_probe_refusal: RwLock::new(None),
             deployment_profile,
             mainnet_max_payment_hac_zhu,
             mainnet_max_channel_funding_hac_zhu,
@@ -599,9 +617,33 @@ impl HubState {
             self.mainnet_max_channel_funding_hac_zhu,
             self.settlement_ready(),
             guarantees.external_rollback_anchor_ready,
+            // The same evidence the flag above was measured from, published
+            // verbatim: the posture and the operating entity travel with the
+            // boolean rather than being computed and thrown away.
+            anchor.as_ref(),
             guarantees.l1_dispute_path_ready,
             capabilities,
         );
+        // A condemnation this Hub wrote into its own state file, read from
+        // that file rather than from the anchor evidence above. The evidence
+        // carries the same count, but it is `None` whenever no witness is
+        // configured - so an operator who deleted the witness flags would
+        // otherwise publish a clean document for a Hub holding a channel that
+        // must never sign again. Zero for a Hub that never had an anchor.
+        //
+        // Ordered before `apply_mainnet_admission` so the blocker is in the
+        // list that call recomputes `payments_enabled` from.
+        readiness.block_on_latched_rollback_anchor_refusals(
+            self.latched_rollback_anchor_refusal_count(),
+        );
+        // Why the startup probe has not agreed, by the identifier
+        // `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2 indexes its
+        // procedures by. A Hub whose witness was unreachable at boot now
+        // starts, refuses to sign, and says so here - where an operator can
+        // read it - instead of failing to start, which under
+        // `Restart=on-failure` is a crash loop that answers no endpoint and
+        // names no identifier. Same ordering rule as the line above.
+        readiness.note_rollback_anchor_probe_refusal(self.rollback_anchor_probe_refusal());
         readiness.apply_mainnet_admission(
             &self.mainnet_admission_policy,
             self.aggregate_pilot_tvl_zhu(),

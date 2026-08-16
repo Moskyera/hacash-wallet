@@ -371,12 +371,49 @@ nothing: it is an absence of code.
 Each of these refuses at startup and on every reconnection. None can be
 overridden by configuration.
 
-1. **Endpoint is not this host.** Refuse a witness URL that resolves to loopback,
-   to a link-local address, or to any address bound to a local interface of this
-   host. Refuse plaintext transport. *Strength: catches accidents and lazy
-   configurations. Defeated by a port forward or a container on the same physical
-   host with a routable address. This is a configuration lint, not a security
-   boundary, and calling it one would be dishonest.*
+1. **Endpoint is not *written as* this host.** Refuse a witness URL whose host is
+   written as a loopback address, a link-local address, the unspecified address,
+   or a `localhost` name — `localhost` itself and anything beneath it, which
+   RFC 6761 section 6.3 reserves and requires to resolve to loopback. The
+   IPv4-in-IPv6 spellings `::ffff:127.0.0.1` and `::127.0.0.1` count as loopback;
+   they are the same address written differently. Refuse plaintext transport.
+
+   **This check reads the URL and nothing else. It performs no DNS resolution
+   and enumerates no local interfaces.** That is deliberate; see
+   [Why refusal 1 is lexical](#why-refusal-1-is-lexical-and-what-it-leaves-open)
+   after this list, which also states what an operator can therefore still do by
+   accident. *Strength: catches accidents and lazy configurations that name this
+   host outright. Defeated by a port forward, by a container on the same
+   physical host with a routable address, and by any hostname whatsoever. This
+   is a configuration lint, not a security boundary, and calling it one would be
+   dishonest.*
+
+   **1b. No witness store in this Hub's backup set.** Refuse when a witness
+   durable store is found inside or beside the Hub's own state tree — recognised
+   by the `hpay-hub-rollback-anchor-witness-log/1` header on its first line, not
+   by filename, since renaming a file does not move it out of a backup set. This
+   is a separate check from 1 and neither subsumes the other: check 1 asks how
+   the endpoint is *written*, this asks whether a counter store is inside the
+   directory tree that gets snapshotted and restored with the Hub. A witness on
+   a routable address over HTTPS — the port-forward case check 1 openly admits it
+   cannot see — still fails this one if its store is in the Hub's directory.
+
+   Without it, ADR-001 Option B is reachable while every other check passes:
+   three freshly generated keys satisfy check 2, a signed attestation satisfies
+   check 5, the instance pin and counter checks hold, and the Hub reports that
+   the witness agreed on every channel it holds. That configuration was built
+   during a live run — one directory holding the Hub state, the witness store
+   and all three secret keys — and nothing refused it.
+
+   *Strength: it verifies a fact about the Hub's own failure domain locally,
+   needing no cooperation from the witness and unaffected by anything the witness
+   says. That is deliberate: a witness asked to report its own store path would
+   be trusted to incriminate itself. What it proves is narrow — that **a**
+   witness store is in this Hub's backup set, not that it is **the** store this
+   Hub's witness answers from. One `mv` one directory further out defeats it, as
+   does a second disk on the same host or a container volume cut from the same
+   snapshot. Like every check in this section it makes the weak configuration
+   loud and deliberate rather than impossible.*
 2. **Distinct key custody.** Refuse if the witness receipt key equals the Hub's
    signing key, if the authorisation key equals the receipt key, or if either
    witness key is derivable from material present in the Hub's own configuration
@@ -402,6 +439,69 @@ overridden by configuration.
    they chose it, and to re-sign it when it expires rather than setting it once
    and forgetting.*
 
+### Why refusal 1 is lexical, and what it leaves open
+
+An earlier draft of refusal 1 said the Hub refuses a URL that *resolves* to
+loopback or link-local, or to an address bound to one of this host's own
+interfaces. The code never did either of those things and is not going to.
+Written down here so the gap is a stated limit rather than a discovery, and so
+nobody re-adds the resolver as an improvement.
+
+The obvious stronger check is to resolve `witness_url` and compare the answers
+against the addresses bound to this host's interfaces. It is rejected because:
+
+- **It puts DNS on the startup path with no legal way to fail open.** Client
+  construction does no network I/O today (`RollbackAnchorClient::connect` in
+  `crates/l2-fast-pay-hub/src/rollback_anchor/client.rs`), which is exactly what
+  lets a configured-but-unreachable witness be a live client whose *probes*
+  fail — the thing the readiness measurement has to be able to observe. A
+  resolver there turns a DNS hiccup into a Hub that will not start. ADR-001
+  forbids a grace period, a timeout that proceeds and an operator override *by
+  name*, so there is no honest escape from that, and the outage would be
+  indistinguishable from the refusal it is meant to express.
+- **A resolution is true for an instant.** Records change under a running
+  process. A verdict computed once at construction is stale immediately;
+  recomputing it per request puts a lookup on the money path before every
+  signature and hands whoever controls the zone a switch that stops the Hub.
+- **The answer is not stable across time or hosts.** A name that resolves
+  locally today may not tomorrow, and split-horizon DNS means two correctly
+  configured Hubs legitimately get different answers for the same name. A hard
+  refusal is the wrong instrument for a fact with that shape.
+- **The reach gained is small.** The check is already defeated by a port
+  forward, which no amount of resolution sees. Resolution would move it from
+  "catches an operator who typed `localhost`" to "catches an operator who typed
+  a name that pointed at loopback at the moment we looked", at the cost of every
+  item above.
+
+**So state plainly what an operator can still do by accident.** A witness URL of
+`https://witness.internal.example/` whose address record is `127.0.0.1`, or is
+an address of this very host — a `hosts` file entry, a split-horizon record, an
+internal name for the box the Hub runs on, a provider name that loops back to
+the same machine — is classified `External` by this Hub. On a mainnet profile it
+is **not** refused, and `witness_endpoint_is_local` is published as `false`,
+which is a true statement about the URL and a misleading impression of the
+deployment. Refusal 1 does not catch it. An operator who wants to know should
+look at where the witness actually runs; the Hub cannot tell them.
+
+What covers that case instead, so the design does not rest on refusal 1:
+
+- **Refusal 1b** reads the Hub's own filesystem rather than the URL, so it sees
+  a co-located store whatever hostname the witness answers to. It is the check
+  that fired on the live gap this section was written from, and it is the reason
+  refusal 1 being weak is survivable.
+- **Refusal 3**, the pinned `witness_instance_id`, catches the effect a
+  co-located witness is actually used for — a counter that was reset.
+- **Refusal 5**, the attestation, makes a named person sign a statement of what
+  separates the two failure domains. A same-host witness reached through a
+  friendly hostname still has no posture in the enum that describes it
+  truthfully, and `SameHost` is not a value that exists.
+
+None of that makes the accident impossible. This section already says no check
+here can, and that the goal is to make the weak configuration loud and
+deliberate rather than unreachable. The point of writing the limit down is that
+refusal 1 is now an honest lint with stated edges instead of a promise the code
+does not keep.
+
 ### `WitnessDeploymentAttestationV1`
 
 | Field | Type | Purpose |
@@ -417,14 +517,46 @@ overridden by configuration.
 The three postures are all valid — ADR-001 says who runs the witness is the
 owner's trust decision and the code must work for all three. So the posture does
 **not** change whether `external_rollback_anchor_ready` may be true. What it
-changes is what the Hub *publishes*: `witness_posture` and `witness_operator`
-appear in health output, so a wallet deciding whether to trust this Hub with
-mainnet funds can see what the anchor is actually worth. A guarantee whose
-strength depends on who holds a key should not be reported as a single boolean
-with the key holder hidden.
+changes is what the Hub *publishes*.
 
 There is no `SameHost` posture. It is not an option in the enum, so a
 configuration that wants it cannot express it.
+
+### What the Hub publishes, and where
+
+On **`/v1/readiness/mainnet`**, as a `rollback_anchor` document beside the flag
+it explains — the same shape `fullnode_capabilities` already uses one field
+above, so the measured evidence for a guarantee always travels next to the
+boolean it produced. `null` means no verified live witness right now: none
+configured, or one that could not be reached, verified against its pinned keys,
+or matched to the store this Hub pinned. It never means "anchor not required".
+
+Not on `/v1/health`. That endpoint performs no I/O by design and has no evidence
+to publish; the contract settled in `233c470` is not reopened. An earlier draft
+of this section said "health output" and was wrong.
+
+The document separates two questions that a single boolean cannot answer:
+
+| Field | Question | Source |
+|---|---|---|
+| `witness_posture`, `witness_operator` | **Who** holds the witness key | The signed attestation. A statement, not proof. |
+| `witness_endpoint_is_local` | Is the witness *URL* written as this host, or as plaintext | Read from the URL by the Hub. Not resolved: a `false` here means the URL does not name this host, never that the witness is not on it |
+| `witness_store_in_hub_state_tree` | Is a witness counter store in this Hub's backup set | Measured by the Hub |
+| `witness_co_located` | The verdict: either of the two above | Derived |
+
+`witness_co_located` is the one a wallet reads to answer "does this hub witness
+itself". A guarantee whose strength depends on who holds a key, and on whether
+that key's store shares a restore with the state it guards, must not be reported
+as a single boolean with both hidden.
+
+Publishing rather than gating is deliberate. Co-location is refused outright on
+the mainnet profiles, at client construction, before any of this is reached. Off
+those profiles it is legitimate — local development and the Local Pilot need a
+loopback witness and would otherwise be unable to run at all — so it is allowed
+and told truthfully. Making it a term in `external_rollback_anchor_ready` would
+make that flag read `false` on every development Hub, which is how a flag stops
+being consulted; and a flag nobody consults is worth less than a posture
+everybody can read.
 
 ### A soft signal, reported and never enforced
 
@@ -483,12 +615,14 @@ and a TPM failure refuses. It is a second lock on the same door, not a spare key
 
 ## 11. Deployment configuration
 
-Who runs the witness is not decided here. It is configuration, and the same code
-serves all three postures.
+Who runs the witness is decided in ADR-001 under "Who runs the witness", and it
+is configuration: the same code and the same binary serve all three postures, and
+moving between them is a change of address rather than a change of code. Nothing
+in this section privileges one witness address over another.
 
 | Setting | Required | Notes |
 |---|---|---|
-| `witness_url` | yes | HTTPS only. Must not resolve to this host. |
+| `witness_url` | yes | HTTPS only. Its host must not be written as loopback, link-local, unspecified or a `localhost` name. Not resolved — Section 10, refusal 1. |
 | `witness_id` | yes | Pinned. |
 | `witness_receipt_public_key` | yes | Pinned. Online key, verifies receipts and refusals. |
 | `witness_authorisation_public_key` | yes | Pinned. Offline key, verifies attestations and resyncs. |
@@ -504,9 +638,15 @@ required".
 
 ## 12. Open questions for the owner
 
-1. **Who runs the witness.** Deliberately not decided here, per the ADR. It needs
-   to be decided before the witness service is built (ADR item 3) and written
-   into `docs/agent-wallet/EXTERNAL_ROLLBACK_ANCHOR_REQUIREMENTS.md`.
+1. ~~**Who runs the witness.**~~ **Decided.** ADR-001, "Who runs the witness":
+   the wallet user runs nothing, the Hub operator points at a witness over the
+   network, the project will run one public witness as a starting default that
+   must never become mandatory — no such address exists yet, so the shipped
+   default stays "no witness configured" — and a Hub holding serious value moves
+   to its own, the counterparty's or a neutral witness by changing an address
+   rather than any code. Operator guide:
+   `docs/l2/RUNNING-A-WITNESS.md`. Still to do: mirror the decision into
+   `docs/agent-wallet/EXTERNAL_ROLLBACK_ANCHOR_REQUIREMENTS.md`.
 2. **One witness for many Hubs.** The ADR flags this. The counter namespace is
    per `hub_identity`, so it is mechanically fine — but if the witness operator
    is also a Hub operator, the trust story changes and `previous_counter_value`

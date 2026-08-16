@@ -538,6 +538,7 @@ mod tests {
             0,
             true,
             false,
+            None,
             false,
             Err(HubError::Node("test capability failure".into())),
         )

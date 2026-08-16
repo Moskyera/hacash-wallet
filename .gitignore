@@ -31,3 +31,9 @@ test-*.txt
 /.audit/
 /.build-backups/
 **/rebuild-run.out
+
+# Local development rollback-anchor scratch: the throwaway witness store, its
+# one-day attestation and the dev Hub state, written by
+# scripts/DEV-ONLY-HUB-AND-WITNESS-SAME-HOST.*. Nothing here is an anchor and
+# nothing here may ever hold value.
+/.dev-anchor/

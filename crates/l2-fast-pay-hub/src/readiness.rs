@@ -23,6 +23,11 @@ pub const MAINNET_PILOT_MAX_AGGREGATE_TVL_HAC_ZHU: u64 = 10_000_000_000;
 pub const ZHU_PER_MILLIMEI: u64 = 100_000;
 const READINESS_VALID_SECONDS: u64 = 60;
 const ADMISSION_NOT_EVALUATED: &str = "mainnet_pilot_admission_policy_not_evaluated";
+/// Published on `/v1/readiness/mainnet` while this Hub's durable state holds
+/// any channel latched in external rollback anchor refusal, whether or not a
+/// witness is configured. Indexed by `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md`
+/// section 2 like every other anchor identifier.
+pub const ROLLBACK_ANCHOR_LATCHED_BLOCKER: &str = "rollback_anchor_channels_latched_in_refusal";
 
 pub fn is_mainnet_pilot_profile(profile: &str) -> bool {
     matches!(
@@ -102,6 +107,35 @@ pub struct MainnetReadinessV1 {
     pub close_enabled: bool,
     pub mainnet_detected: Option<bool>,
     pub fullnode_capabilities: Option<FullnodeCapabilitiesV1>,
+    /// The evidence behind `trustless_finality`'s anchor half, published in
+    /// full beside the flag it explains.
+    ///
+    /// **Shape, and why.** This is the same shape `fullnode_capabilities`
+    /// already uses one field above: the measured evidence for a guarantee
+    /// travels as a nested document beside the boolean it produced, verbatim
+    /// as measured, so the published posture and the enforced gate are read off
+    /// one object and cannot drift into disagreeing. A hand-copied subset would
+    /// be a second place to forget.
+    ///
+    /// `None` is itself the honest answer, and it means exactly one thing: this
+    /// Hub has no verified live witness right now - none configured, or one
+    /// that could not be reached, could not be verified against its pinned
+    /// keys, or answered from a store this Hub did not pin. It never means
+    /// "anchor not required". Before this field existed the *only* outward sign
+    /// that an anchor existed at all was the absence of a blocker string, which
+    /// made a same-operator loopback single-host witness indistinguishable over
+    /// the API from a neutral third party on separate infrastructure.
+    ///
+    /// It is published whether or not the flag reads `true`, because the two
+    /// answer different questions. A witness can be live, attested and pinned
+    /// while a channel is latched in refusal: flag `false`, posture still worth
+    /// reading. `ROLLBACK-ANCHOR-PROTOCOL.md` section 10.
+    ///
+    /// Deliberately not on `/v1/health`: that endpoint does no I/O by design
+    /// and there is no evidence to publish there. Settled in `233c470` and not
+    /// reopened.
+    #[serde(default)]
+    pub rollback_anchor: Option<crate::rollback_anchor::RollbackAnchorEvidenceV1>,
     pub max_payment_hac_zhu: u64,
     pub max_channel_funding_hac_zhu: u64,
     pub allowlist_configured: bool,
@@ -120,12 +154,19 @@ pub struct MainnetReadinessV1 {
 }
 
 impl MainnetReadinessV1 {
+    /// `anchor` is the very evidence `external_rollback_anchor_ready` was
+    /// measured from, and is published verbatim. Passing `None` alongside a
+    /// `true` flag is not expressible in the Hub - both come from one
+    /// `HubHardGuarantees::measure` call over one probe - and `None` alongside
+    /// `false` is the ordinary "no witness" case.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         profile: &str,
         max_payment_hac_zhu: u64,
         max_channel_funding_hac_zhu: u64,
         hub_operational_ready: bool,
         external_rollback_anchor_ready: bool,
+        anchor: Option<&crate::rollback_anchor::RollbackAnchorEvidenceV1>,
         l1_dispute_path_ready: bool,
         capabilities: Result<FullnodeCapabilitiesV1, HubError>,
     ) -> Self {
@@ -220,6 +261,35 @@ impl MainnetReadinessV1 {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let mut limitations = vec![
+            "settled does not mean unilateral L1 finality".into(),
+            "the active Hacash mainnet exposes cooperative original-funding close action 3".into(),
+            "pilot exposure must remain inside the configured payment and channel caps".into(),
+        ];
+        // The posture in plain words as well as in the document, because a
+        // nested boolean is easy to miss and this is the sentence a person
+        // choosing a hub has to see. It is a limitation and not a blocker on
+        // purpose: ADR-001 leaves who runs the witness to the owner, the
+        // mainnet profiles refuse a co-located witness outright before this
+        // point, and off those profiles co-location is legitimate for local
+        // development and the Local Pilot - told truthfully rather than
+        // forbidden.
+        if let Some(anchor) = anchor {
+            if anchor.witness_co_located {
+                limitations.push(format!(
+                    "the external rollback anchor witness is co-located with this Hub \
+                     (endpoint on this host: {}; witness store inside this Hub's state tree: {}), \
+                     so it shares the failure domain it exists to guard and a restore of this Hub \
+                     may restore its counter with it",
+                    anchor.witness_endpoint_is_local, anchor.witness_store_in_hub_state_tree
+                ));
+            }
+            limitations.push(format!(
+                "the external rollback anchor witness is attested as {} operated by {}; an \
+                 attestation is a signed statement about where the witness runs, not proof of it",
+                anchor.witness_posture, anchor.witness_operator
+            ));
+        }
         Self {
             schema: READINESS_SCHEMA,
             evaluated_unix,
@@ -229,6 +299,7 @@ impl MainnetReadinessV1 {
             close_enabled: close_blockers.is_empty(),
             mainnet_detected,
             fullnode_capabilities,
+            rollback_anchor: anchor.cloned(),
             max_payment_hac_zhu: if is_mainnet_pilot {
                 max_payment_hac_zhu
             } else {
@@ -250,12 +321,7 @@ impl MainnetReadinessV1 {
             settlement_model: "official Hacash ChannelPay bills with hub-coordinated bounded mainnet pilot",
             blockers,
             close_blockers,
-            limitations: vec![
-                "settled does not mean unilateral L1 finality".into(),
-                "the active Hacash mainnet exposes cooperative original-funding close action 3"
-                    .into(),
-                "pilot exposure must remain inside the configured payment and channel caps".into(),
-            ],
+            limitations,
         }
     }
 
@@ -268,6 +334,96 @@ impl MainnetReadinessV1 {
             )));
         }
         Ok(())
+    }
+
+    /// A durable anchor condemnation, published whether or not a witness is
+    /// configured right now.
+    ///
+    /// `external_rollback_anchor_ready` already reads `false` while any channel
+    /// is latched - but it learns that from
+    /// [`crate::rollback_anchor::RollbackAnchorEvidenceV1`], which only exists
+    /// when a live witness could be probed and verified. Remove the witness
+    /// configuration and the evidence becomes `None`, taking the latch count
+    /// with it: the number goes to zero-by-absence at exactly the moment it
+    /// matters most. On the full mainnet pilot profile that is survivable,
+    /// because a missing anchor is itself a blocker. On
+    /// `MAINNET_BOUNDED_PILOT_PROFILE` it is not - that profile deliberately
+    /// waives `external_monotonic_rollback_anchor_is_not_ready`, so without
+    /// this a Hub holding a channel condemned for a real rollback would publish
+    /// an empty blocker list and `payments_enabled: true` while its own state
+    /// file says the channel must never sign again.
+    ///
+    /// `latched` is read from the Hub's own durable state
+    /// ([`crate::state::HubState::latched_rollback_anchor_refusal_count`]), so
+    /// it is `0` for a Hub that never had an anchor - such a Hub is entirely
+    /// unaffected - and it cannot be edited away by changing command-line
+    /// flags.
+    ///
+    /// Payments are blocked; **close is deliberately not**. A latch condemns
+    /// the off-chain signing path, and `ROLLBACK-ANCHOR-RECOVERY.md` Procedure
+    /// A ends either at a mutually verified position or with the channel
+    /// closing through the L1 path, which needs close to stay available.
+    pub fn block_on_latched_rollback_anchor_refusals(&mut self, latched: u64) {
+        if latched == 0 {
+            return;
+        }
+        // A fixed identifier, with the count in the limitation beside it, so an
+        // operator can look this up in the recovery document by exact string
+        // the way every other anchor refusal is looked up. A blocker whose name
+        // carries the count is a blocker nobody can grep for.
+        self.blockers
+            .push(ROLLBACK_ANCHOR_LATCHED_BLOCKER.to_owned());
+        self.payments_enabled = false;
+        self.limitations.push(format!(
+            "{latched} channel(s) are latched in external rollback anchor refusal in this Hub's \
+             durable state and will not sign again until the operator procedure in \
+             docs/l2/ROLLBACK-ANCHOR-RECOVERY.md has been completed; removing the witness \
+             configuration does not clear a latch"
+        ));
+    }
+
+    /// Publish why the external rollback anchor startup probe has not agreed,
+    /// by name.
+    ///
+    /// `identifier` is one of the refusal identifiers in
+    /// `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2 -
+    /// `rollback_anchor_witness_unreachable` for the reachability case - and
+    /// `None` when the last probe agreed or none has run.
+    ///
+    /// **This publishes; it does not gate.** The gate is
+    /// `rollback_anchor_probe_agreed`, checked in
+    /// [`crate::state::HubState::reserve_rollback_anchor`] before any signature.
+    /// That gate is untouched: a probe that has not agreed refuses every bill
+    /// exactly as it did before this method existed. What this adds is that the
+    /// refusal is now *legible from outside the process*.
+    ///
+    /// It exists because the Hub used to answer this question by not starting.
+    /// Propagating the probe failure out of `main` meant a Hub whose witness was
+    /// briefly unreachable did not merely refuse to sign - it did not boot, so
+    /// it could not serve a cooperative close, could not answer this endpoint,
+    /// and could not name the identifier that selects the operator procedure.
+    /// Under `Restart=on-failure` that is a crash loop, and the operator's first
+    /// instinct is the one thing the recovery document opens by forbidding.
+    ///
+    /// Payments are blocked; **close is deliberately not**, for the same reason
+    /// as [`Self::block_on_latched_rollback_anchor_refusals`] above: an anchor
+    /// that cannot answer must not stop a channel leaving through the L1 path.
+    /// A Hub kept alive to serve close is the entire point of the change.
+    pub fn note_rollback_anchor_probe_refusal(&mut self, identifier: Option<&str>) {
+        let Some(identifier) = identifier else {
+            return;
+        };
+        if !self.blockers.iter().any(|blocker| blocker == identifier) {
+            self.blockers.push(identifier.to_owned());
+        }
+        self.payments_enabled = false;
+        self.limitations.push(format!(
+            "the external rollback anchor startup probe has not agreed with the witness \
+             ({identifier}); this Hub is running and answering reads and cooperative close, and it \
+             refuses to sign any bill until a probe agrees. Look the identifier up in \
+             docs/l2/ROLLBACK-ANCHOR-RECOVERY.md section 2 - do not restart the Hub in a loop and \
+             do not reconfigure the anchor to restore signing"
+        ));
     }
 
     pub fn apply_mainnet_admission(
@@ -411,17 +567,27 @@ fn validate_cap(cap: u64, hard_max: u64, label: &str, blockers: &mut Vec<String>
 /// out: the only input is a signed, fresh, pinned-key-verified statement from
 /// the witness, weighed against what this Hub durably recorded.
 ///
-/// **What this deliberately does not gate on.** The witness *endpoint* posture,
-/// meaning whether the URL points at this host or at plaintext transport, is
-/// not a term here, because it cannot reach this function in the configuration
-/// that matters: [`crate::rollback_anchor::RollbackAnchorClient::connect`] refuses
-/// outright to build a client for a mainnet profile against a loopback,
-/// link-local or plaintext endpoint. Off the mainnet profiles the deviation is
-/// allowed but never silent: it is published as
-/// `witness_endpoint_is_local` beside this flag, along with the witness
-/// posture and the operating entity, because a guarantee whose strength
-/// depends on who holds a key must not be reported as a lone boolean with the
-/// key holder hidden.
+/// **What this deliberately does not gate on.** Neither half of the
+/// co-location guard is a term here — not the witness *endpoint* posture
+/// (whether the URL points at this host or at plaintext transport), and not
+/// whether a witness durable store was found in this Hub's own state tree.
+/// Both are refused outright by
+/// [`crate::rollback_anchor::RollbackAnchorClient::connect`] on a mainnet
+/// profile, so neither can reach this function in the configuration that
+/// matters. Off the mainnet profiles both are allowed — local development and
+/// the Local Pilot are legitimate and need them — but never silently: they are
+/// published as `witness_endpoint_is_local`,
+/// `witness_store_in_hub_state_tree` and the derived `witness_co_located` in
+/// the [`crate::rollback_anchor::RollbackAnchorEvidenceV1`] document that
+/// [`MainnetReadinessV1::rollback_anchor`] carries beside this flag, along with
+/// the witness posture and the operating entity, because a guarantee whose
+/// strength depends on who holds a key must not be reported as a lone boolean
+/// with the key holder hidden.
+///
+/// Making co-location a term here would read `false` for every local
+/// development Hub and every Local Pilot, which is how a flag stops being
+/// consulted. The posture is published instead, and it is the profile gate —
+/// not this measurement — that keeps the weak configuration off mainnet.
 pub fn measure_external_rollback_anchor_ready(
     evidence: Option<&crate::rollback_anchor::RollbackAnchorEvidenceV1>,
     now_unix: u64,
@@ -592,6 +758,7 @@ mod tests {
             MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
             true,
             true,
+            None,
             true,
             Ok(capabilities()),
         );
@@ -632,6 +799,7 @@ mod tests {
             0,
             false,
             false,
+            None,
             false,
             Ok(capabilities()),
         );
@@ -643,6 +811,7 @@ mod tests {
             1_000_000,
             false,
             true,
+            None,
             true,
             Ok(capabilities()),
         );
@@ -660,6 +829,7 @@ mod tests {
             1_000_000,
             true,
             true,
+            None,
             true,
             Err(HubError::Node("offline".into())),
         );
@@ -674,6 +844,7 @@ mod tests {
             1_000_000,
             true,
             false,
+            None,
             false,
             Ok(capabilities()),
         );
@@ -698,6 +869,7 @@ mod tests {
             1_000_000,
             true,
             true,
+            None,
             true,
             Ok(node),
         );
@@ -715,6 +887,7 @@ mod tests {
             1_000_000,
             true,
             true,
+            None,
             true,
             Ok(missing_evidence),
         );
@@ -732,6 +905,7 @@ mod tests {
             MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
             true,
             false,
+            None,
             false,
             Ok(capabilities()),
         );
@@ -799,6 +973,8 @@ mod tests {
             witness_posture: "counterparty".into(),
             witness_endpoint_posture: "external".into(),
             witness_endpoint_is_local: false,
+            witness_store_in_hub_state_tree: false,
+            witness_co_located: false,
             attestation_valid: true,
             attestation_expires_unix: now + 86_400,
             key_custody_distinct: true,
@@ -970,6 +1146,7 @@ mod tests {
             MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
             true,
             false,
+            None,
             true,
             Ok(capabilities()),
         );
@@ -982,10 +1159,97 @@ mod tests {
             MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
             true,
             true,
+            None,
             true,
             Ok(capabilities()),
         );
         assert!(with.trustless_finality);
         assert!(!with.blockers.iter().any(|it| it == anchor_blocker));
+    }
+
+    /// The posture must reach the published document, and it must reach it
+    /// whether or not the flag it explains reads `true`.
+    ///
+    /// Two guarantees of very different worth - a neutral third party on
+    /// separate infrastructure, and a witness on this Hub's own host with its
+    /// store in this Hub's own backup set - are the same single boolean. If the
+    /// only thing that crosses the wire is that boolean, the two are
+    /// indistinguishable to a wallet and to a person choosing a hub.
+    #[test]
+    fn the_published_document_carries_the_posture_and_not_just_the_flag() {
+        let now = crate::node::now_unix();
+        let neutral = anchor_evidence(now);
+        let published = MainnetReadinessV1::evaluate(
+            MAINNET_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            true,
+            Some(&neutral),
+            true,
+            Ok(capabilities()),
+        );
+        assert_eq!(
+            published.rollback_anchor.as_ref(),
+            Some(&neutral),
+            "the document must publish the exact evidence the flag was measured from"
+        );
+        assert!(
+            published
+                .limitations
+                .iter()
+                .any(|it| it.contains("counterparty")),
+            "who runs the witness belongs in plain words too, got {:?}",
+            published.limitations
+        );
+        assert!(
+            !published
+                .limitations
+                .iter()
+                .any(|it| it.contains("co-located")),
+            "a witness on separate infrastructure must not be smeared as co-located"
+        );
+
+        // Same flag, same blockers, a materially weaker guarantee. The
+        // difference has to be visible.
+        let mut same_host = anchor_evidence(now);
+        same_host.witness_posture = "same_operator_separate_infrastructure".into();
+        same_host.witness_endpoint_is_local = true;
+        same_host.witness_endpoint_posture = "same_host_or_plaintext".into();
+        same_host.witness_store_in_hub_state_tree = true;
+        same_host.witness_co_located = true;
+        let weak = MainnetReadinessV1::evaluate(
+            "local-pilot",
+            0,
+            0,
+            true,
+            true,
+            Some(&same_host),
+            true,
+            Ok(capabilities()),
+        );
+        assert_eq!(weak.trustless_finality, published.trustless_finality);
+        assert!(
+            weak.limitations.iter().any(|it| it.contains("co-located")),
+            "a witness inside this Hub's failure domain must say so, got {:?}",
+            weak.limitations
+        );
+        assert_ne!(
+            weak.rollback_anchor, published.rollback_anchor,
+            "two guarantees of different worth must not publish identically"
+        );
+
+        // And a Hub with no witness says exactly that, rather than nothing.
+        let none = MainnetReadinessV1::evaluate(
+            "local-pilot",
+            0,
+            0,
+            true,
+            false,
+            None,
+            true,
+            Ok(capabilities()),
+        );
+        assert!(none.rollback_anchor.is_none());
     }
 }

@@ -9,6 +9,8 @@
 //! evidence, a malformed receipt is not a receipt, and a counter behind the
 //! Hub's own record is a refusal, never a warning.
 
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -26,12 +28,16 @@ use crate::readiness::is_mainnet_pilot_profile;
 
 /// Where the configured witness endpoint sits relative to this host.
 ///
-/// Honest naming: this is a **configuration lint, not a security boundary**.
-/// It catches an operator who pointed the Hub at a witness on the same box. It
-/// is defeated by a port forward or by a container on the same physical host
-/// with a routable address, and no check in this protocol can prove the
-/// witness is outside the Hub's failure domain. What it does buy is that the
-/// weak configuration cannot be reached by accident on a mainnet profile.
+/// Honest naming: this is a **configuration lint, not a security boundary**,
+/// and it is decided from the URL string alone — see [`endpoint_is_local`]. It
+/// catches an operator who *wrote down* this host: a loopback or link-local
+/// literal, the unspecified address, a `localhost` name, or plaintext
+/// transport. It does not catch a hostname that resolves here, because nothing
+/// resolves it. It is further defeated by a port forward or by a container on
+/// the same physical host with a routable address, and no check in this
+/// protocol can prove the witness is outside the Hub's failure domain. What it
+/// does buy is that the *written-down* weak configuration cannot be reached by
+/// accident on a mainnet profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WitnessEndpointPosture {
@@ -112,7 +118,18 @@ pub struct RollbackAnchorPin {
 ///
 /// A guarantee whose strength depends on who holds a key should not be
 /// reported as a single boolean with the key holder hidden, so the posture and
-/// the operator travel with the flag.
+/// the operator travel with the flag. This whole document is published on
+/// `/v1/readiness/mainnet` beside the flag it explains - see
+/// [`crate::readiness::MainnetReadinessV1::rollback_anchor`].
+///
+/// It separates two questions a wallet has to be able to answer independently:
+///
+/// * **Who** holds the witness key - `witness_posture` and `witness_operator`,
+///   both taken from the signed deployment attestation. An attestation is a
+///   statement, not proof, and is labelled as one.
+/// * **Where** the witness sits relative to this Hub - `witness_endpoint_is_local`,
+///   `witness_store_in_hub_state_tree` and the derived `witness_co_located`.
+///   These are measured by the Hub itself, not attested by anyone.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RollbackAnchorEvidenceV1 {
     pub schema: String,
@@ -123,6 +140,16 @@ pub struct RollbackAnchorEvidenceV1 {
     pub witness_posture: String,
     pub witness_endpoint_posture: String,
     pub witness_endpoint_is_local: bool,
+    /// A witness durable store was found inside or beside this Hub's own state
+    /// tree, so it is in the backup set that gets restored with the Hub. This
+    /// is ADR-001 Option B, which defends against nothing.
+    #[serde(default)]
+    pub witness_store_in_hub_state_tree: bool,
+    /// The verdict: either signal above is enough. `true` means the anchor is
+    /// not outside the failure domain it exists to guard, whatever the attested
+    /// posture says.
+    #[serde(default)]
+    pub witness_co_located: bool,
     pub attestation_valid: bool,
     pub attestation_expires_unix: u64,
     pub key_custody_distinct: bool,
@@ -143,18 +170,192 @@ fn unreachable(detail: &str) -> HubError {
     ))
 }
 
+/// Bounds on the co-location scan. A guard that costs an unbounded traversal
+/// at every start is a guard someone deletes, so it is deliberately shallow,
+/// counted, and finished in milliseconds.
+const MAX_SCANNED_ENTRIES: usize = 4_096;
+const MAX_SCAN_DEPTH: usize = 2;
+/// Only the first line of a candidate is ever read, and only this much of it.
+const WITNESS_LOG_HEADER_PROBE_BYTES: u64 = 4_096;
+
+/// Is this file a witness durable store?
+///
+/// Recognised by content, never by name: a store renamed to `notes.txt` is
+/// still in the backup set, and a check that can be defeated by `mv` is not a
+/// check. Every witness store opens with one header line carrying
+/// [`super::WITNESS_LOG_SCHEMA`], written at store creation by
+/// `WitnessStore::open`.
+fn is_witness_store(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut reader = BufReader::new(file.take(WITNESS_LOG_HEADER_PROBE_BYTES));
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return false;
+    }
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return false;
+    };
+    record.get("record").and_then(serde_json::Value::as_str) == Some("header")
+        && record.get("schema").and_then(serde_json::Value::as_str)
+            == Some(super::WITNESS_LOG_SCHEMA)
+}
+
+/// Look for a witness durable store **inside or beside** the Hub's own state
+/// tree, and return the first one found.
+///
+/// # What this proves, and what it does not
+///
+/// ADR-001 rejected Option B - a counter in the Hub's own filesystem - because
+/// it "shares the filesystem, the same backup set, and the same restore as the
+/// state it is supposed to guard". Option C degrades into exactly that the
+/// moment the witness's store is written into the directory tree that gets
+/// snapshotted with the Hub. `key_custody_distinct` cannot see it: that check
+/// compares three *addresses*, and Option B built with three freshly generated
+/// keys passes it with room to spare. This is the missing half.
+///
+/// It proves one narrow thing: **a witness durable store is in this Hub's
+/// backup set.** That is a fact about the Hub's own failure domain, verified
+/// locally, needing no cooperation from the witness and unaffected by anything
+/// the witness says - which is precisely why it is done this way rather than by
+/// asking the witness where its store lives. A witness that reported its own
+/// path would be trusted to incriminate itself.
+///
+/// It does not prove that the store found is *the* store this Hub's witness is
+/// answering from, and it cannot: a store moved one directory further out, onto
+/// a second disk on the same host, or into a container volume mounted from the
+/// same snapshot is invisible here. A determined operator defeats it in one
+/// `mv`. The goal is not impossibility. The goal is that the weak configuration
+/// cannot be reached by accident, cannot be reached by drift, and on a mainnet
+/// profile cannot be reached at all without moving the file the refusal names.
+///
+/// # Where it looks, and where it deliberately stops
+///
+/// **Inside**: the state directory and [`MAX_SCAN_DEPTH`] levels beneath it.
+/// Everything there is the Hub's own and is in its backup set by definition.
+///
+/// **Beside**: files sitting *directly* in the state directory's parent, and no
+/// deeper. This is the shape the live gap took - one deployment directory
+/// holding the Hub state, the witness store and every secret key.
+///
+/// It does **not** sweep sibling directories under the parent, and that is a
+/// deliberate trade rather than an oversight. A Hub whose state lives in a
+/// shared or shallow parent - a temp directory, a user profile, a drive root -
+/// would otherwise drag unrelated trees into a check whose mainnet verdict is a
+/// hard startup refusal. Refusing a correct deployment over an unrelated file is
+/// how a guard gets switched off at 3am, and this section's own advice is that
+/// the weak configuration should be loud, not that every configuration should
+/// be suspect. The cost is a real blind spot: a witness store in a *sibling*
+/// directory of the Hub's state is very likely in the same backup set and is
+/// not seen here. The endpoint check catches it whenever that witness is also
+/// reached on this host, which is the overwhelmingly common case, and the
+/// published posture tells the truth either way.
+pub fn witness_store_in_hub_state_tree(hub_state_path: &Path) -> Option<PathBuf> {
+    let state_directory = hub_state_path.parent()?;
+    let mut budget = MAX_SCANNED_ENTRIES;
+    if let Some(found) = scan_for_witness_store(state_directory, MAX_SCAN_DEPTH, &mut budget) {
+        return Some(found);
+    }
+    state_directory
+        .parent()
+        .and_then(|parent| scan_for_witness_store(parent, 0, &mut budget))
+}
+
+/// `remaining_depth` of `0` means "the files directly in this directory, and no
+/// subdirectory".
+fn scan_for_witness_store(
+    directory: &Path,
+    remaining_depth: usize,
+    budget: &mut usize,
+) -> Option<PathBuf> {
+    if *budget == 0 {
+        return None;
+    }
+    let entries = std::fs::read_dir(directory).ok()?;
+    let mut directories = Vec::new();
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        // `file_type` does not follow symlinks, so a link to a directory is
+        // never descended into and the walk cannot loop.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if remaining_depth > 0 {
+                directories.push(entry.path());
+            }
+        } else if file_type.is_file() && is_witness_store(&entry.path()) {
+            return Some(entry.path());
+        }
+    }
+    directories
+        .into_iter()
+        .find_map(|child| scan_for_witness_store(&child, remaining_depth - 1, budget))
+}
+
+/// Is this *literal* address one of the forms that names this host?
+///
+/// The IPv4-in-IPv6 forms are unwrapped because `::ffff:127.0.0.1` and
+/// `::127.0.0.1` are loopback written a different way, while
+/// `Ipv6Addr::is_loopback` is true only for `::1`. Without the unwrapping a
+/// mapped literal reads as an ordinary routable v6 address, which is the
+/// document's own "loopback or link-local" claim failing on a spelling.
+fn address_is_local(address: std::net::IpAddr) -> bool {
+    fn v4_is_local(v4: std::net::Ipv4Addr) -> bool {
+        v4.is_loopback() || v4.is_unspecified() || v4.is_link_local()
+    }
+    match address {
+        std::net::IpAddr::V4(v4) => v4_is_local(v4),
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6.to_ipv4().is_some_and(v4_is_local)
+        }
+    }
+}
+
+/// RFC 6761 section 6.3 reserves `localhost` and every name beneath it, and
+/// requires them to resolve to loopback. `witness.localhost` is therefore this
+/// host by definition rather than by lookup, which is the only kind of "by
+/// definition" this function is allowed to use.
+///
+/// The rightmost label is what decides it, so `localhost.example.org` — an
+/// ordinary registrable name — is not caught.
+fn host_is_localhost_name(host: &str) -> bool {
+    let name = host.strip_suffix('.').unwrap_or(host);
+    name.rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .eq_ignore_ascii_case("localhost")
+}
+
+/// Hard refusal 1, and **it reads the URL string and nothing else.**
+///
+/// It performs no DNS resolution and enumerates no local interface. So
+/// `https://witness.example.org/` with an `A` record of `127.0.0.1` is
+/// classified [`WitnessEndpointPosture::External`] here and is not refused on a
+/// mainnet profile. That is a deliberate limit, not an oversight, and
+/// `docs/l2/ROLLBACK-ANCHOR-PROTOCOL.md` section 10 states it in the same words
+/// under "Why refusal 1 is lexical": a resolver in
+/// [`RollbackAnchorClient::connect`] would put DNS on a startup path that
+/// ADR-001 gives no legal way to fail open, would be recomputed against records
+/// that change under a running process, and would buy very little over a check
+/// that a port forward already defeats.
+///
+/// What covers the gap instead is refusal 1b (a witness store inside this Hub's
+/// own backup set, measured from the filesystem and blind to hostnames),
+/// refusal 3 (the pinned `witness_instance_id`, which catches the reset counter
+/// a co-located witness is actually used for) and refusal 5 (a named person
+/// signing what separates the two failure domains).
 fn endpoint_is_local(url: &reqwest::Url) -> bool {
     url.host_str().is_none_or(|host| {
         let host = host.trim_start_matches('[').trim_end_matches(']');
-        host.eq_ignore_ascii_case("localhost")
-            || host.parse::<std::net::IpAddr>().is_ok_and(|address| {
-                address.is_loopback()
-                    || address.is_unspecified()
-                    || match address {
-                        std::net::IpAddr::V4(v4) => v4.is_link_local(),
-                        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
-                    }
-            })
+        host_is_localhost_name(host) || host.parse::<std::net::IpAddr>().is_ok_and(address_is_local)
     })
 }
 
@@ -163,20 +364,31 @@ pub struct RollbackAnchorClient {
     http: reqwest::Client,
     hub_identity: String,
     endpoint_posture: WitnessEndpointPosture,
+    /// The witness store found inside or beside this Hub's state tree, if any.
+    /// Measured once at construction, from the Hub's own filesystem.
+    co_located_store: Option<PathBuf>,
     reserve_url: String,
     status_url: String,
 }
 
 impl RollbackAnchorClient {
     /// Builds the client and runs every hard refusal that does not need the
-    /// network. No I/O happens here, so a configured-but-unreachable witness
-    /// is a live client whose probes fail — which is exactly what the
+    /// network. No *network* I/O happens here, so a configured-but-unreachable
+    /// witness is a live client whose probes fail — which is exactly what the
     /// readiness measurement must be able to observe.
+    ///
+    /// `hub_state_path` is this Hub's own durable state file, or `None` for a
+    /// Hub with no durable storage (which cannot settle at all, so it has
+    /// nothing for an anchor to protect). It is read to scan for a witness
+    /// store in the Hub's own backup set; that is local filesystem I/O, and it
+    /// belongs here precisely so a degraded configuration is a startup fact
+    /// rather than a surprise on the first payment.
     pub fn connect(
         config: RollbackAnchorConfig,
         hub_identity: &str,
         hub_signing_address: &str,
         deployment_profile: &str,
+        hub_state_path: Option<&Path>,
     ) -> HubResult<Self> {
         if config.witness_id.trim().is_empty() || config.witness_epoch == 0 {
             return Err(HubError::State(
@@ -240,6 +452,27 @@ impl RollbackAnchorClient {
             WitnessEndpointPosture::External
         };
 
+        // Hard refusal 1b: the witness's durable store must not be in this
+        // Hub's backup set. Independent of the endpoint check above and not
+        // subsumed by it - a witness reached over HTTPS at a routable address
+        // can still be writing its counter into the directory that gets
+        // restored with this Hub, which is the port-forward case the endpoint
+        // check openly admits it cannot see.
+        let co_located_store = hub_state_path.and_then(witness_store_in_hub_state_tree);
+        if let Some(store) = co_located_store.as_ref()
+            && is_mainnet_pilot_profile(deployment_profile)
+        {
+            return Err(HubError::State(format!(
+                "{REFUSAL_WITNESS_IS_NOT_EXTERNAL}: a witness durable store is inside or beside \
+                 this Hub's own state tree, at {}. That store shares this Hub's filesystem, its \
+                 backup set and its restore, so restoring the Hub restores the counter with it and \
+                 the anchor has nothing left to say. Move the witness store onto infrastructure \
+                 that is genuinely separate from this Hub's failure domain and re-attest; see \
+                 docs/l2/ROLLBACK-ANCHOR-RECOVERY.md section 7",
+                store.display()
+            )));
+        }
+
         let http = reqwest::Client::builder()
             .connect_timeout(config.request_timeout)
             .timeout(config.request_timeout)
@@ -260,6 +493,7 @@ impl RollbackAnchorClient {
             http,
             hub_identity: hub_identity.trim().to_owned(),
             endpoint_posture,
+            co_located_store,
         })
     }
 
@@ -277,6 +511,22 @@ impl RollbackAnchorClient {
 
     pub fn endpoint_posture(&self) -> WitnessEndpointPosture {
         self.endpoint_posture
+    }
+
+    /// The witness store found in this Hub's own state tree, if any.
+    pub fn co_located_store(&self) -> Option<&Path> {
+        self.co_located_store.as_deref()
+    }
+
+    /// Is the anchor inside the failure domain it exists to guard?
+    ///
+    /// Either signal is enough on its own: an endpoint that is this host, or a
+    /// witness store in this Hub's backup set. Neither can be proven absent -
+    /// see [`witness_store_in_hub_state_tree`] and
+    /// [`WitnessEndpointPosture`] for what each one is and is not worth - so
+    /// this is a `true` that must be believed and a `false` that must not.
+    pub fn is_co_located(&self) -> bool {
+        self.endpoint_posture.is_local() || self.co_located_store.is_some()
     }
 
     pub fn posture(&self) -> WitnessPosture {
@@ -556,6 +806,10 @@ impl RollbackAnchorClient {
             witness_posture: self.posture().as_str().to_owned(),
             witness_endpoint_posture: self.endpoint_posture.as_str().to_owned(),
             witness_endpoint_is_local: self.endpoint_posture.is_local(),
+            // The path itself is deliberately not published: the verdict is
+            // everyone's business, the Hub's disk layout is not.
+            witness_store_in_hub_state_tree: self.co_located_store.is_some(),
+            witness_co_located: self.is_co_located(),
             attestation_valid: self.attestation_is_valid_at(now_unix),
             attestation_expires_unix: self.attestation_expires_unix(),
             key_custody_distinct: true,
@@ -593,5 +847,162 @@ mod tests {
             let parsed = reqwest::Url::parse(url).unwrap();
             assert!(!endpoint_is_local(&parsed), "{url} is not this host");
         }
+    }
+
+    /// Loopback and link-local written in their IPv4-in-IPv6 forms, and the
+    /// names RFC 6761 reserves for loopback, are the same host as `127.0.0.1`
+    /// and `localhost`. A lint that only recognises one spelling of an address
+    /// it names is not honest about the class it claims to cover.
+    #[test]
+    fn ipv4_in_ipv6_loopback_and_localhost_subdomains_are_this_host() {
+        for url in [
+            // `Ipv6Addr::is_loopback` is true only for `::1`, so these two read
+            // as routable v6 addresses unless the embedded v4 is unwrapped.
+            "https://[::ffff:127.0.0.1]:9000",
+            "https://[::ffff:169.254.10.4]:9000",
+            "https://[::127.0.0.1]:9000",
+            // RFC 6761 section 6.3 reserves `localhost` and everything under
+            // it, and requires it to resolve to loopback.
+            "https://witness.localhost:9000",
+            "https://a.b.localhost:9000",
+            "https://LOCALHOST.:9000",
+        ] {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            assert!(
+                endpoint_is_local(&parsed),
+                "{url} must be recognised as this host"
+            );
+        }
+        // The unwrapping must not drag routable addresses in with it, and a
+        // registrable name that merely contains the label is not reserved.
+        for url in [
+            "https://[::ffff:203.0.113.9]:9000",
+            "https://[2001:db8::1]:9000",
+            "https://localhost.example.org:9000",
+            "https://notlocalhost:9000",
+        ] {
+            let parsed = reqwest::Url::parse(url).unwrap();
+            assert!(!endpoint_is_local(&parsed), "{url} is not this host");
+        }
+    }
+
+    /// The check reads the URL and nothing else. Pinned as a test because the
+    /// document now says so out loud, and because a future "improvement" that
+    /// adds a resolver would put DNS on a startup path that has no legal way
+    /// to fail open.
+    #[test]
+    fn the_protocol_document_does_not_promise_a_resolution_the_code_does_not_do() {
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/l2/ROLLBACK-ANCHOR-PROTOCOL.md"),
+        )
+        .expect("the protocol document this module implements must be readable");
+        // Wrapping is a typesetting choice, so match on the prose rather than
+        // on where the lines happen to break.
+        let document = source.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        for promise in [
+            "resolves to loopback",
+            "any address bound to a local interface",
+            "Must not resolve to this host",
+        ] {
+            assert!(
+                !document.contains(promise),
+                "ROLLBACK-ANCHOR-PROTOCOL.md still promises {promise:?}, but endpoint_is_local \
+                 inspects the URL string and never resolves it"
+            );
+        }
+        assert!(
+            document.contains("performs no DNS resolution and enumerates no local interfaces"),
+            "section 10 must say outright that refusal 1 is lexical"
+        );
+        assert!(
+            document.contains("is classified `External` by this Hub"),
+            "section 10 must say what an operator can therefore still do by accident"
+        );
+    }
+
+    fn write_witness_store(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            format!(
+                "{{\"record\":\"header\",\"schema\":\"{}\",\"witness_id\":\"w\",\
+                 \"witness_instance_id\":\"{}\",\"created_unix\":1}}\n",
+                super::super::WITNESS_LOG_SCHEMA,
+                "ab".repeat(32)
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The co-location scan has to find a witness store in the places an
+    /// operator actually puts one, and has to stay quiet everywhere else. A
+    /// guard that never fires is decoration; a guard that always fires gets
+    /// switched off.
+    #[test]
+    fn a_witness_store_is_found_inside_or_beside_the_hub_state_tree_and_nowhere_else() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("hub").join("hub-state.json");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, "{}").unwrap();
+        assert!(
+            witness_store_in_hub_state_tree(&state).is_none(),
+            "a clean state tree must not be accused of holding a witness"
+        );
+
+        // Beside: the parent directory holds both. This is the configuration
+        // the live run built - one directory with the Hub state, the witness
+        // store and every secret key.
+        let beside = root.path().join("anchor.log");
+        write_witness_store(&beside);
+        assert_eq!(
+            witness_store_in_hub_state_tree(&state).as_deref(),
+            Some(beside.as_path())
+        );
+        std::fs::remove_file(&beside).unwrap();
+
+        // Inside: in the state directory itself.
+        let inside = state.parent().unwrap().join("witness").join("anchor.log");
+        write_witness_store(&inside);
+        assert_eq!(
+            witness_store_in_hub_state_tree(&state).as_deref(),
+            Some(inside.as_path())
+        );
+        std::fs::remove_file(&inside).unwrap();
+
+        // Recognised by content, not by name: renaming the store does not
+        // move it out of the backup set, so it must not move it out of view.
+        let renamed = state.parent().unwrap().join("notes.txt");
+        write_witness_store(&renamed);
+        assert_eq!(
+            witness_store_in_hub_state_tree(&state).as_deref(),
+            Some(renamed.as_path())
+        );
+        std::fs::remove_file(&renamed).unwrap();
+
+        // A file that merely looks like JSON is not a witness store, and the
+        // Hub's own state file is not one either.
+        std::fs::write(state.parent().unwrap().join("other.json"), "{\"a\":1}").unwrap();
+        std::fs::write(
+            state.parent().unwrap().join("empty.log"),
+            "not json at all\n",
+        )
+        .unwrap();
+        assert!(
+            witness_store_in_hub_state_tree(&state).is_none(),
+            "only the reviewed append-only witness header counts"
+        );
+
+        // The documented blind spot, pinned so it stays a decision rather than
+        // becoming a surprise. A store in a *sibling* directory of the state
+        // tree is not seen: the parent is searched one file deep and no
+        // further, because a Hub whose state sits in a shared or shallow
+        // parent must not be refused on mainnet over an unrelated tree.
+        let sibling = root.path().join("unrelated").join("anchor.log");
+        write_witness_store(&sibling);
+        assert!(
+            witness_store_in_hub_state_tree(&state).is_none(),
+            "sibling directories under the parent are deliberately out of scope"
+        );
     }
 }

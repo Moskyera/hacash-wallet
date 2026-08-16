@@ -29,10 +29,12 @@ use super::protocol::{
     SignedHubWitnessStatusV1, SignedWitnessDeploymentAttestationV1, WitnessDeploymentAttestationV1,
     WitnessPosture, WitnessRefusalReason,
 };
+// The header schema this service writes, shared with the client's co-location
+// scan so the detector and the writer cannot drift apart.
+use super::WITNESS_LOG_SCHEMA;
 use crate::error::{HubError, HubResult};
 
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const WITNESS_LOG_SCHEMA: &str = "hpay-hub-rollback-anchor-witness-log/1";
 /// Matches `MAX_ACCEPTED_ANCHOR_IDS` in the companion witness. Bounded per Hub.
 const MAX_REMEMBERED_REQUEST_IDS: usize = 4_096;
 

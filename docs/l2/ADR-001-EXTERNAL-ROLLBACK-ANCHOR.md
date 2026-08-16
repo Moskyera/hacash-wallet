@@ -218,9 +218,125 @@ rail charge a fee per payment.
 7. [ ] Optional: add the TPM counter as a second factor for single-operator
        deployments, ANDed with the witness, never substituted for it.
 
-## What this ADR does not decide
+## Who runs the witness
 
-Who runs the witness. Whether it is the counterparty, a neutral party or the same
-operator on separate infrastructure is a trust decision, not a technical one, and
-it changes what the guarantee is worth without changing a line of code. It should
-be decided before item 3 and written into the requirements document.
+This was previously left open. It is decided here, because leaving it open makes
+the design look like it costs three services to run and that impression is wrong.
+
+### Who runs what
+
+**The wallet user runs nothing.** No node, no Hub, no witness. They point their
+wallet at somebody else's Hub and somebody else's node, which is what they
+already do today. Nothing in this ADR changes what a wallet has to install. The
+anchor is entirely a property of the Hub they chose, and the only thing it costs
+the user is the ability to *read* what that Hub's anchor is worth — which is why
+the posture and the operating entity are published beside the flag rather than
+hidden behind it.
+
+**The Hub operator runs a Hub, and points it at a witness over the network.**
+One service, plus an address in their configuration. They are not required to run
+a witness themselves, and running one is not the normal starting position.
+
+**The project will run one public witness, so that an operator needs no second
+machine to start.** Stated as an intent, because **it does not exist yet**: there
+is no public witness address today and nothing in this repository points at one.
+When it exists, a Hub operator with nothing but a Hub can point at it, get a real
+external anchor on day one, and be honestly better off than with no anchor at
+all. It is the *default* only in the sense of "the address most operators will
+paste first", never in the sense of "what the code reaches for on its own".
+
+**A Hub holding serious value points somewhere else.** Its own witness on
+separate infrastructure, the counterparty's witness, or a neutral third party.
+That move is a change of address in configuration. It is not a code change, not a
+build flag, not a fork, and not a conversation with us. The same binary and the
+same protocol serve every one of these; the only things that differ are who holds
+the receipt key and whose backup set the counter lives in.
+
+### The two things that must never happen
+
+**1. The shared witness must never become mandatory.** There is no code path in
+which the project's witness address is privileged over any other. It is not
+compiled in, not a fallback when the configured witness is unreachable, not a
+second witness consulted alongside the operator's, and not a requirement for the
+readiness flag to read true. An operator must be able to point at an address we
+have never heard of and get exactly the same behaviour, including the same
+`external_rollback_anchor_ready` measurement. If a shared witness were mandatory,
+the whole design would have moved the trust rather than removed it: every Hub on
+the rail would depend on one service run by one party, who could then freeze the
+rail, and who would be the single most attractive target in the system. It would
+also make us a party to every channel we are not otherwise in.
+
+The test for this rule is simple and should be applied to any future change: if
+the project's witness went away permanently, every Hub pointed at a different
+witness must be entirely unaffected, and every Hub pointed at ours must be able
+to recover by editing one line of configuration.
+
+**2. There must never be a bypass that lets a Hub sign while the witness is
+unreachable.** No `--allow-unwitnessed-signing`, no "degraded mode", no grace
+period, no timeout that proceeds, no operator override, no environment variable,
+no emergency flag. An unreachable oracle is not evidence, and a Hub that signs
+without a receipt has no anchor at exactly the moment the anchor is being tested.
+The correct behaviour when the witness is down is that the Hub refuses to sign
+and the channels freeze. Frozen channels lose nobody any money; a bypass loses
+somebody all of it.
+
+A deployment that genuinely cannot accept the availability cost has an honest
+option already: the bounded pilot profile, which reports `trustless_finality:
+false` and says out loud that it depends on trusting the Hub. Use that. Do not
+run a mainnet profile with a hole in it and call it an anchor.
+
+If either rule looks like it needs an exception, the exception is the bug.
+
+### What a same-operator witness is actually worth
+
+Recorded honestly here, because this is the posture most Hubs will start in and
+it is the one most easily oversold.
+
+A witness run by the same operator as the Hub, on separate infrastructure and in
+a separate backup set, **does** catch:
+
+- a Hub restored from an old backup after a disk failure, a bad migration or a
+  failed upgrade — the ordinary disaster-recovery case, and the most likely one;
+- an operator error: the wrong snapshot restored, a stale volume reattached, a
+  state file copied from a staging box;
+- a second Hub instance started by accident against the same keys, through the
+  global counter;
+- a state file quietly reverted underneath a running Hub;
+- silent bit rot or filesystem corruption that rolls the state back.
+
+It **does not** catch a deliberate rollback by the operator who holds both keys.
+That operator can stop the Hub, stop the witness, restore both to an earlier
+point together, and every check in this system passes: same
+`witness_instance_id`, counter where the Hub expects it, every signature valid.
+No message, no counter and no attestation can distinguish that from normal
+operation. Against a dishonest operator, a same-operator witness is worth
+nothing, and this document will not pretend otherwise.
+
+That is why the posture travels with the flag. A counterparty-run or neutral
+witness is what turns the anchor from "protects the operator from their own
+infrastructure" into "protects the counterparty from the operator". Both are
+worth having. They are not the same guarantee and must never be reported as one.
+
+### What this means for the default that ships
+
+There is no public witness address today. Until one exists, the shipped default
+is **no witness configured**, which measures `external_rollback_anchor_ready =
+false` and keeps full mainnet blocked. That is the truth, and a configuration
+file pointing at a hostname that does not answer would be a worse lie than an
+empty field. When an address exists, it becomes a documented, copy-and-paste
+value in the operator guide and in the example configuration — never a compiled-in
+constant, and never a value the Hub reaches for on its own.
+
+### Consequences of this decision
+
+- The witness service must be operable by an ordinary person with an ordinary
+  machine, because the design depends on it being easy to leave ours. That is
+  what `docs/l2/RUNNING-A-WITNESS.md` is for, and it is load-bearing rather than
+  supplementary.
+- Whoever operates the project's witness carries an availability obligation to
+  every Hub pointed at it, and must publish the posture honestly: for a Hub
+  operator we have no other relationship with, it is a neutral third party; for
+  anything we also operate a Hub for, it is not.
+- Item 5 of the action items above stands unchanged. "Same operator, separate
+  infrastructure" is a valid posture; "same operator, same host" is not, and the
+  attestation enum has no value that can express it.

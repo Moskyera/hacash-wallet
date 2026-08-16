@@ -230,6 +230,76 @@ fn rollback_anchor_config(
     ))
 }
 
+/// How often a Hub whose witness was unreachable at boot re-runs the probe.
+///
+/// Not a grace period and not a timeout that proceeds: nothing signs during it.
+/// It is only how often the Hub asks again, so that a witness coming back
+/// restores signing without a restart - `ROLLBACK-ANCHOR-RECOVERY.md` section 6
+/// step 3, "the Hub resumes on its own once the witness answers".
+const ROLLBACK_ANCHOR_PROBE_RETRY_SECONDS: u64 = 30;
+
+/// Say, in the log, exactly what the anchor decided and what it means.
+///
+/// The operator is going to read this at 3am with the recovery document open,
+/// so it prints the identifier that document indexes its procedures by, and it
+/// states plainly that the process is up and refusing rather than leaving them
+/// to infer it from a Hub that answers reads but not payments.
+fn report_rollback_anchor_boot_posture(
+    posture: &l2_fast_pay_hub::state::RollbackAnchorBootPosture,
+) {
+    let Some(refusal) = posture.refusal.as_deref() else {
+        eprintln!("Rollback anchor: witness agreed on every channel this Hub holds");
+        return;
+    };
+    let identifier = posture.refusal_identifier.unwrap_or("rollback_anchor");
+    eprintln!("Rollback anchor: REFUSING TO SIGN - {identifier}");
+    eprintln!("Rollback anchor: {refusal}");
+    eprintln!(
+        "Rollback anchor: this Hub is STARTING anyway and will serve reads, readiness and \
+         cooperative close. It will NOT sign a bill until the startup probe agrees with the \
+         witness. The refusal is published as a blocker on /v1/readiness/mainnet."
+    );
+    eprintln!(
+        "Rollback anchor: look {identifier} up in docs/l2/ROLLBACK-ANCHOR-RECOVERY.md section 2. \
+         Do not restart this Hub in a loop and do not reconfigure the anchor to restore signing."
+    );
+    if posture.condemning {
+        eprintln!(
+            "Rollback anchor: the Hub and the witness disagree about history. This does not clear \
+             by waiting and the probe will not be retried; it needs the operator procedure."
+        );
+    } else {
+        eprintln!(
+            "Rollback anchor: no evidence either way - this is reachability, not a refusal from \
+             the witness. Retrying every {ROLLBACK_ANCHOR_PROBE_RETRY_SECONDS}s; signing resumes \
+             by itself once the witness answers and agrees."
+        );
+    }
+}
+
+/// Keep asking. Only a probe that fully agrees ever sets the bit the signing
+/// path reads, so this can restore service and cannot manufacture it.
+async fn retry_rollback_anchor_startup_probe(hub: Arc<l2_fast_pay_hub::HubState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(
+            ROLLBACK_ANCHOR_PROBE_RETRY_SECONDS,
+        ))
+        .await;
+        let posture = hub.run_rollback_anchor_startup_probe_at_boot().await;
+        if posture.agreed {
+            eprintln!(
+                "Rollback anchor: the witness answered and agreed on every channel this Hub \
+                 holds. Signing is available again."
+            );
+            return;
+        }
+        if posture.condemning {
+            report_rollback_anchor_boot_posture(&posture);
+            return;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -465,9 +535,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if anchored {
         // The anti-rollback check proper, before the money path serves
         // anything. A Hub that cannot agree with its witness on every channel
-        // it holds does not start.
-        hub.run_rollback_anchor_startup_probe().await?;
-        eprintln!("Rollback anchor: witness agreed on every channel this Hub holds");
+        // it holds does not sign.
+        //
+        // It does, however, start. This used to propagate out of `main` with a
+        // `?`, so a Hub whose witness was briefly unreachable did not merely
+        // refuse to sign - it did not boot. Under `Restart=on-failure` that is a
+        // crash loop that serves no cooperative close, answers no readiness
+        // request and names no identifier, while the operator's instinct
+        // (restart it) is the first thing docs/l2/ROLLBACK-ANCHOR-RECOVERY.md
+        // tells them not to do. The refusal is not weakened by starting: the
+        // probe has not agreed, so `reserve_rollback_anchor` refuses every
+        // signature, and any channel the probe condemned is latched durably.
+        let posture = hub.run_rollback_anchor_startup_probe_at_boot().await;
+        report_rollback_anchor_boot_posture(&posture);
+        if posture.refusal.is_some() && !posture.condemning {
+            // Transient by the same rule `refusal_condemns_the_channel` already
+            // draws: unreachable is deliberately not condemning. Keep probing so
+            // the Hub resumes on its own once the witness answers, which is what
+            // ROLLBACK-ANCHOR-RECOVERY.md section 6 step 3 promises. Nothing is
+            // waived by retrying - only a probe that fully agrees ever sets the
+            // bit the signing path reads.
+            tokio::spawn(retry_rollback_anchor_startup_probe(hub.clone()));
+        }
     } else {
         eprintln!(
             "Rollback anchor: NONE configured. external_rollback_anchor_ready will read false \

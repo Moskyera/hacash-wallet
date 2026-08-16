@@ -133,6 +133,15 @@ pinned, fresh witness answer. Wiring is
 all five together or none; a partial anchor configuration refuses to start.
 Operator procedure before it is switched on: `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md`.
 
+Who runs the witness is now decided rather than open (ADR-001, "Who runs the
+witness"): the wallet user runs nothing, a Hub operator points at a witness over
+the network, and moving between a shared witness, the counterparty's, a neutral
+third party's or their own is a change of address rather than a change of code.
+There is **no public witness address yet**, so the shipped default stays "no
+witness configured" — a default pointing at a host that does not answer would be
+a worse lie than an empty field. Standing up a witness:
+`docs/l2/RUNNING-A-WITNESS.md`.
+
 ### 3. The flags are measurements, and nothing downstream needs an edit
 
 `measure_l1_dispute_path_ready` weighs the node's capability block and the exit

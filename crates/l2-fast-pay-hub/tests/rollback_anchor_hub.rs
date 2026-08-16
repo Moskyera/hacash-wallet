@@ -276,17 +276,29 @@ struct Witness {
     handle: JoinHandle<()>,
     authorisation: Account,
     #[allow(dead_code)]
-    store: TempDir,
+    store: Option<TempDir>,
 }
 
 async fn spawn_witness(seed: &str) -> Witness {
     let store = tempfile::tempdir().unwrap();
+    let path = store.path().join("witness-log.jsonl");
+    spawn_witness_at(seed, Some(store), path).await
+}
+
+/// The same witness, with its durable store put exactly where the test wants
+/// it - including, deliberately, inside the Hub's own state directory. `store`
+/// is `None` when the caller owns the directory the store lives in.
+async fn spawn_witness_at(
+    seed: &str,
+    store: Option<TempDir>,
+    store_path: std::path::PathBuf,
+) -> Witness {
     let service = Arc::new(
         WitnessService::open(
             WitnessServiceConfig {
                 witness_id: format!("witness-{seed}"),
                 witness_epoch: 1,
-                store_path: store.path().join("witness-log.jsonl"),
+                store_path,
                 receipt_account: Account::create_by(&format!("{seed}-receipt-key")).unwrap(),
             },
             now_unix(),
@@ -552,6 +564,178 @@ async fn a_hub_restored_behind_the_witness_is_refused_and_the_refusal_names_the_
     witness.handle.abort();
 }
 
+/// Removing the witness configuration must not un-condemn a channel.
+///
+/// This is the cheapest attack on the whole subsystem and it needs no
+/// cryptography: catch a Hub in a real rollback, let it latch the channel into
+/// its own `hub-state.json`, then delete the five `--rollback-witness-*` flags
+/// and start it again. The anchor client is gone, so if the latch is only ever
+/// read *after* the "no anchor configured" exit, it is never read at all - and
+/// the condemned channel co-signs the already-signed serial a second time with
+/// different balances. Both signatures are valid to the contract, whichever
+/// reaches `finalize` first wins, and the counterparty's money is gone.
+///
+/// A latch lives in the Hub's own durable state, not in the anchor client.
+/// ADR-001 forbids a bypass by name, and a flag you can delete is the purest
+/// possible bypass.
+///
+/// The second half of the test is the part that keeps this honest: a Hub that
+/// never had an anchor holds no latches, and must sign exactly as it always
+/// did. This check condemns channels that were condemned; it does not invent a
+/// new anchor requirement for Hubs that never had one.
+#[tokio::test]
+async fn removing_the_witness_configuration_does_not_un_condemn_a_latched_channel() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-unlatch-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x44; 20])).to_readable();
+    let (left, bundle) = signed_bundle("rollback-anchor-unlatch-left", &hub_account, &contract);
+    let binding_commitment = bundle.binding.commitment().unwrap();
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let witness = spawn_witness("unlatch").await;
+
+    let live_directory = tempfile::tempdir().unwrap();
+    let backup_directory = tempfile::tempdir().unwrap();
+    let state_path = live_directory.path().join("hub-state.json");
+
+    // A live, honest Hub signs serial 2, with a backup taken just before.
+    {
+        let hub = build_hub(&state_path, &hub_account, &node_url)
+            .with_rollback_anchor(witness.config(&hub_identity, None))
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+        hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+            .await
+            .unwrap();
+        copy_state_directory(live_directory.path(), backup_directory.path());
+        let payment = left_signed_payment(&left, &bundle, "unlatch-payment-1", now_unix());
+        let signed = hub
+            .cosign_hvm_registry_payment(payment, now_unix())
+            .await
+            .unwrap();
+        assert_eq!(signed.serial, 2);
+    }
+    assert_eq!(
+        witness.observed_serial(&hub_identity, &binding_commitment),
+        Some(2)
+    );
+
+    // THE ROLLBACK, caught. The refusal latches into the restored state file.
+    let restored_state = backup_directory.path().join("hub-state.json");
+    {
+        let restored = build_hub(&restored_state, &hub_account, &node_url)
+            .with_rollback_anchor(witness.config(&hub_identity, None))
+            .unwrap();
+        let error = restored
+            .run_rollback_anchor_startup_probe()
+            .await
+            .expect_err("a Hub behind the witness must be refused")
+            .to_string();
+        assert!(
+            error.contains("rollback_anchor_hub_behind_witness"),
+            "{error}"
+        );
+    }
+
+    // The latching Hub is dropped above. Everything that follows reads the
+    // condemnation back off disk into a fresh `HubState`, which is what makes
+    // this a test of durable state rather than of a live process.
+
+    // THE EDIT. The five --rollback-witness-* flags are gone; everything else
+    // is byte-identical. `rollback_anchor_config` returns `Ok(None)` and the
+    // Hub is built with no anchor at all.
+    let unanchored = build_hub(&restored_state, &hub_account, &node_url);
+    assert!(
+        !unanchored.rollback_anchor_configured(),
+        "this is the un-anchored Hub the operator just created"
+    );
+
+    let replay = left_signed_payment(&left, &bundle, "unlatch-payment-2", now_unix());
+    let error = unanchored
+        .cosign_hvm_registry_payment(replay, now_unix())
+        .await
+        .expect_err(
+            "a durable condemnation must be honoured whether or not an anchor is configured - \
+             otherwise the strongest refusal in this system is undone with a text editor",
+        )
+        .to_string();
+    assert!(
+        error.contains("rollback_anchor_hub_behind_witness"),
+        "the refusal must still name the rollback that condemned the channel, got: {error}"
+    );
+    assert!(
+        error.contains("ROLLBACK-ANCHOR-RECOVERY.md"),
+        "and must still point at the procedure that clears it, got: {error}"
+    );
+    assert_eq!(
+        witness.observed_serial(&hub_identity, &binding_commitment),
+        Some(2),
+        "the un-anchored Hub must not have signed serial 2 a second time"
+    );
+
+    // And the Hub must not report itself clean while it carries the latch,
+    // even with no witness to measure - the evidence document is `None` here,
+    // so the count has to come from durable state or it comes from nowhere.
+    let readiness = unanchored.mainnet_readiness().await;
+    assert!(
+        readiness.rollback_anchor.is_none(),
+        "no witness is configured, so there is no live evidence to publish"
+    );
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "rollback_anchor_channels_latched_in_refusal"),
+        "a Hub carrying an unread latch must not publish a clean blocker list, got {:?}",
+        readiness.blockers
+    );
+    assert!(!readiness.payments_enabled);
+
+    // THE CONTROL. A Hub that never had an anchor has no latches, so nothing
+    // above may touch it. If this fails, the fix turned into a blanket refusal.
+    let never_anchored_directory = tempfile::tempdir().unwrap();
+    let (control_left, control_bundle) = signed_bundle(
+        "rollback-anchor-never-anchored-left",
+        &hub_account,
+        &contract,
+    );
+    let (control_node_url, control_node) = spawn_node(control_bundle.binding.clone()).await;
+    let never_anchored = build_hub(
+        &never_anchored_directory.path().join("hub-state.json"),
+        &hub_account,
+        &control_node_url,
+    );
+    never_anchored
+        .activate_hvm_registry_recovery(control_bundle.clone(), 5_000, 1)
+        .await
+        .unwrap();
+    let control_payment = left_signed_payment(
+        &control_left,
+        &control_bundle,
+        "never-anchored-payment-1",
+        now_unix(),
+    );
+    let control_signed = never_anchored
+        .cosign_hvm_registry_payment(control_payment, now_unix())
+        .await
+        .expect("a Hub that never had an anchor holds no latches and must be unaffected");
+    assert_eq!(control_signed.serial, 2);
+    let control_readiness = never_anchored.mainnet_readiness().await;
+    assert!(
+        !control_readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "rollback_anchor_channels_latched_in_refusal"),
+        "a Hub with no latches must gain no latch blocker, got {:?}",
+        control_readiness.blockers
+    );
+
+    control_node.abort();
+    node.abort();
+    witness.handle.abort();
+}
+
 /// A receipt is only a receipt if it verifies against the pinned key **and**
 /// restates the exact request this Hub persisted before sending.
 ///
@@ -705,6 +889,7 @@ async fn a_malformed_or_wrongly_bound_receipt_is_refused() {
             &hub_identity,
             witness.service.receipt_address(),
             "local-pilot",
+            None,
         )
         .err()
         .expect("the witness receipt key must not be the Hub signing key")
@@ -720,6 +905,7 @@ async fn a_malformed_or_wrongly_bound_receipt_is_refused() {
             &hub_identity,
             &hub_identity,
             "local-pilot",
+            None,
         )
         .unwrap();
         let error = client
@@ -738,6 +924,132 @@ async fn a_malformed_or_wrongly_bound_receipt_is_refused() {
         hostile.abort();
         witness.handle.abort();
     }
+}
+
+/// ADR-001 Option B, built literally.
+///
+/// Three distinct keys, a valid attestation, a live witness answering signed
+/// status - and its durable store sitting in the very directory that gets
+/// restored with the Hub's state. Every equality check in `key_custody_distinct`
+/// passes, because nothing here is equal to anything; the witness shares the
+/// filesystem, the backup set and the restore with the state it is supposed to
+/// guard, which is the option this design rejected.
+///
+/// The guard cannot prove the witness is outside the Hub's failure domain -
+/// nothing in this protocol can - so what it must do instead is make this
+/// configuration impossible to reach by accident and impossible to reach
+/// silently.
+#[tokio::test]
+async fn a_witness_store_in_the_hub_state_tree_is_detected_published_and_refused_on_mainnet() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-colocated-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x43; 20])).to_readable();
+    let (_left, bundle) = signed_bundle("rollback-anchor-colocated-left", &hub_account, &contract);
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+
+    // One directory. The Hub state, the witness store, and by implication one
+    // backup set and one restore.
+    let shared = tempfile::tempdir().unwrap();
+    let state_path = shared.path().join("hub-state.json");
+    let witness = spawn_witness_at(
+        "colocated",
+        None,
+        shared.path().join("witness-anchor-log.jsonl"),
+    )
+    .await;
+
+    // Off the mainnet profiles this is allowed - local development and the
+    // Local Pilot are legitimate and needed - but never silently.
+    let hub = build_hub(&state_path, &hub_account, &node_url)
+        .with_rollback_anchor(witness.config(&hub_identity, None))
+        .expect("a non-mainnet profile must still start, so the pilot keeps working");
+    hub.run_rollback_anchor_startup_probe().await.unwrap();
+    let evidence = hub
+        .rollback_anchor_evidence()
+        .await
+        .expect("a live witness must produce verified evidence");
+    assert!(
+        evidence.witness_store_in_hub_state_tree,
+        "a witness durable store sitting in this Hub's own state tree must be seen"
+    );
+    assert!(
+        evidence.witness_co_located,
+        "and it must be published as co-located rather than as a bare true flag"
+    );
+
+    let readiness = hub.mainnet_readiness().await;
+    assert!(
+        readiness
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("co-located")),
+        "the weak configuration must be stated in the document a wallet reads, got {:?}",
+        readiness.limitations
+    );
+
+    // The two signals are independent. A witness whose store is somewhere else
+    // entirely is still on loopback, so it is still co-located - but the store
+    // half must now read false, or it is not measuring anything.
+    let elsewhere = spawn_witness("colocated-control").await;
+    let control_directory = tempfile::tempdir().unwrap();
+    let control = build_hub(
+        &control_directory.path().join("hub-state.json"),
+        &hub_account,
+        &node_url,
+    )
+    .with_rollback_anchor(elsewhere.config(&hub_identity, None))
+    .unwrap();
+    control.run_rollback_anchor_startup_probe().await.unwrap();
+    let control_evidence = control.rollback_anchor_evidence().await.unwrap();
+    assert!(
+        !control_evidence.witness_store_in_hub_state_tree,
+        "a store outside the Hub's state tree must not be reported as inside it"
+    );
+    assert!(
+        control_evidence.witness_co_located,
+        "loopback alone is still co-location, on its own signal"
+    );
+
+    // On a mainnet profile it is refused outright. Deliberately proven with an
+    // endpoint that is *not* loopback and *is* HTTPS, so hard refusal 1 cannot
+    // fire and this refusal has to come from the store check on its own.
+    let external = "https://witness.example.org";
+    let refusal = RollbackAnchorClient::connect(
+        witness.config(&hub_identity, Some(external)),
+        &hub_identity,
+        &hub_identity,
+        "mainnet-pilot",
+        Some(&state_path),
+    )
+    .err()
+    .expect("a mainnet Hub must not start with a witness store in its own backup set")
+    .to_string();
+    assert!(
+        refusal.contains("rollback_anchor_witness_is_not_external"),
+        "the refusal must name the identifier the recovery document indexes, got: {refusal}"
+    );
+    assert!(
+        refusal.contains("witness-anchor-log.jsonl"),
+        "the refusal must name the file the operator has to move, got: {refusal}"
+    );
+
+    // Same external endpoint, same keys, same attestation, clean directory:
+    // the mainnet profile must accept it, or the check is refusing the wrong
+    // thing.
+    RollbackAnchorClient::connect(
+        witness.config(&hub_identity, Some(external)),
+        &hub_identity,
+        &hub_identity,
+        "mainnet-pilot",
+        Some(&control_directory.path().join("hub-state.json")),
+    )
+    .expect("a witness outside the Hub's state tree over HTTPS is the configuration this is for");
+
+    node.abort();
+    witness.handle.abort();
+    elsewhere.handle.abort();
 }
 
 /// The refusal a Hub prints at 3am is only useful if the operator can look it
@@ -763,6 +1075,10 @@ fn every_refusal_identifier_is_indexed_by_the_recovery_document() {
         "rollback_anchor_witness_unreachable",
         "rollback_anchor_witness_is_not_external",
         "rollback_anchor_attestation_missing_or_expired",
+        // Published on the readiness document rather than raised on the
+        // signing path, but an operator meets it the same way and has to be
+        // able to look it up the same way.
+        l2_fast_pay_hub::readiness::ROLLBACK_ANCHOR_LATCHED_BLOCKER,
     ] {
         assert!(
             document.contains(identifier),
@@ -787,4 +1103,404 @@ fn every_refusal_identifier_is_indexed_by_the_recovery_document() {
             reason.identifier()
         );
     }
+}
+
+/// Can a Hub that has already anchored ever gain a **new** witness?
+///
+/// The proposed answer was adoption: the joining witness joins at an explicit
+/// baseline - the Hub's current position at the moment of joining - co-signed
+/// by the joining witness operator's offline authorisation key, so that the
+/// Hub cannot mint itself a convenient history.
+///
+/// This test is the reason that answer does not hold. It runs the same joining
+/// witness against two Hubs that differ only in whether their operator is
+/// honest, and shows that nothing available to either the Hub or the joining
+/// witness separates them:
+///
+/// 1. An **honest** Hub, fully current at serial 2, that simply wants a second
+///    witness. This is the multi-witness case, and it is refused.
+/// 2. A **rolled-back** Hub, restored to the snapshot taken before that bill,
+///    pointing at a fresh witness to escape the incumbent that holds serial 2.
+///    This is exactly the move `ROLLBACK-ANCHOR-RECOVERY.md` section 9 item 4
+///    forbids by name.
+///
+/// Both are refused, by the same check, with character-identical words. That
+/// is not a bug in the refusal - it is the whole finding. Any change that lets
+/// case 1 through by consulting a credential from the joining side lets case 2
+/// through with it, because the joining witness's offline key signs a number
+/// the Hub handed it and has no independent knowledge of the Hub's history.
+///
+/// The test also walks the three gates in the order they actually fire, which
+/// is not the order the defect report assumed: the instance pin
+/// (`client.rs`, `verify_status`) fires first, the global counter second, and
+/// only then the per-channel amnesia arm in `state/rollback_anchor.rs`. The
+/// middle gate is the one that cannot be rescued by any counterparty, because
+/// the global counter exists precisely to catch a restore that lost an entire
+/// channel - and a channel the Hub has forgotten has no counterparty in the
+/// Hub's view to ask.
+#[tokio::test]
+async fn a_joining_witness_cannot_be_told_apart_from_an_amnesiac_one() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-adopt-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x44; 20])).to_readable();
+    let (left, bundle) = signed_bundle("rollback-anchor-adopt-left", &hub_account, &contract);
+    let binding_commitment = bundle.binding.commitment().unwrap();
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let incumbent = spawn_witness("adopt-incumbent").await;
+
+    let live_directory = tempfile::tempdir().unwrap();
+    let backup_directory = tempfile::tempdir().unwrap();
+    let state_path = live_directory.path().join("hub-state.json");
+
+    {
+        let hub = build_hub(&state_path, &hub_account, &node_url)
+            .with_rollback_anchor(incumbent.config(&hub_identity, None))
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+        hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+            .await
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+
+        // THE BACKUP. Taken here, after the Hub has pinned the incumbent and
+        // before it signs anything, exactly as an operator snapshot would be.
+        copy_state_directory(live_directory.path(), backup_directory.path());
+
+        let payment = left_signed_payment(&left, &bundle, "adopt-payment-1", now_unix());
+        assert_eq!(
+            hub.cosign_hvm_registry_payment(payment, now_unix())
+                .await
+                .unwrap()
+                .serial,
+            2
+        );
+    }
+    assert_eq!(
+        incumbent.observed_serial(&hub_identity, &binding_commitment),
+        Some(2),
+        "the incumbent witness holds the true position"
+    );
+
+    // The joining witness. A fresh durable store, a counter at zero, and no
+    // record of this Hub at all.
+    let joining = spawn_witness("adopt-joining").await;
+    assert_eq!(
+        joining.observed_serial(&hub_identity, &binding_commitment),
+        None
+    );
+
+    // The credential the proposed design rests on: the joining witness
+    // operator's OFFLINE authorisation key, signing a statement bound to
+    // (witness_id, witness_instance_id, hub_identity). This is the machinery
+    // at `protocol.rs` `WitnessDeploymentAttestationV1`, verified in
+    // `client.rs` `RollbackAnchorClient::connect`. It is valid, and it is the
+    // strongest thing the joining side can produce.
+    let credential = joining.config(&hub_identity, None).attestation;
+    credential
+        .verify_against_pinned_key(joining.authorisation.readable())
+        .expect("the joining witness operator's offline key signs a valid statement");
+
+    // Case 1: the HONEST Hub, current at serial 2, adding a second witness.
+    let honest = build_hub(&state_path, &hub_account, &node_url)
+        .with_rollback_anchor(joining.config(&hub_identity, None))
+        .unwrap();
+    let honest_refusal = honest
+        .run_rollback_anchor_startup_probe()
+        .await
+        .expect_err("a Hub that has anchored cannot currently gain a witness")
+        .to_string();
+    drop(honest);
+
+    // Case 2: the ROLLED-BACK Hub, restored to the pre-payment snapshot, which
+    // has forgotten the bill at serial 2 entirely, pointing at the same fresh
+    // witness to get past the incumbent.
+    let restored_state = backup_directory.path().join("hub-state.json");
+    let rolled_back = build_hub(&restored_state, &hub_account, &node_url)
+        .with_rollback_anchor(joining.config(&hub_identity, None))
+        .unwrap();
+    let rolled_back_refusal = rolled_back
+        .run_rollback_anchor_startup_probe()
+        .await
+        .expect_err("a rolled-back Hub must not escape by changing witness")
+        .to_string();
+
+    // THE FINDING. Same check, same words, two opposite intentions.
+    assert_eq!(
+        honest_refusal, rolled_back_refusal,
+        "an honest join and a rollback escape are indistinguishable at the point of refusal"
+    );
+    assert!(
+        honest_refusal.contains("rollback_anchor_witness_instance_changed"),
+        "the first gate a joining witness trips is the instance pin, not the amnesia arm, got: \
+         {honest_refusal}"
+    );
+
+    // Gate 2. Waiving the instance pin - which any adoption must do, since a
+    // joining witness is by definition a different durable store - exposes the
+    // global counter, and this is the gate no counterparty can answer: it
+    // exists to catch a restore that lost an entire channel, and a forgotten
+    // channel has no counterparty in the Hub's view to be asked.
+    let client = RollbackAnchorClient::connect(
+        joining.config(&hub_identity, None),
+        &hub_identity,
+        &hub_identity,
+        "local-pilot",
+        None,
+    )
+    .unwrap();
+    let counter_refusal = client
+        .probe(
+            &RollbackAnchorPin {
+                witness_id: String::new(),
+                witness_instance_id: String::new(),
+                highest_counter_value: 1,
+                updated_unix: now_unix(),
+            },
+            now_unix(),
+        )
+        .await
+        .expect_err("a witness at counter zero is behind a Hub that has recorded one")
+        .to_string();
+    assert!(
+        counter_refusal.contains("rollback_anchor_witness_behind_hub"),
+        "got: {counter_refusal}"
+    );
+
+    // Gate 3. Waiving the counter too - a fully adopted pin - and the joining
+    // witness answers happily, holding nothing. That empty answer, against a
+    // Hub whose anchor record reaches serial 2, is the exact input to the
+    // amnesia arm in `state/rollback_anchor.rs`. A fresh witness agrees with
+    // everything, which is what makes it worthless rather than what makes it
+    // wrong.
+    let adopted = client
+        .probe(&RollbackAnchorPin::default(), now_unix())
+        .await
+        .expect("a fully adopted pin waives both earlier gates");
+    assert_eq!(adopted.status.counter_value, 0);
+    assert!(
+        adopted.status.channel(&binding_commitment).is_none(),
+        "the joining witness holds no history for a channel this Hub has anchored to serial 2"
+    );
+
+    // And the reason no credential from the joining side can close gate 3: the
+    // joining witness operator's offline key certifies who they are and which
+    // Hub they serve. It names no ledger position, no serial and no counter,
+    // because it cannot - the joining operator has never seen this Hub's
+    // history. Extending it with a baseline would only move a number the Hub
+    // supplied under a signature from a party the Hub's operator chose.
+    let credential_text = serde_json::to_string(&credential).unwrap();
+    for absent in ["serial", "counter", "bill_commitment"] {
+        assert!(
+            !credential_text.contains(absent),
+            "the joining witness's offline credential names no position, so it cannot separate an \
+             honest join from a rollback escape: {credential_text}"
+        );
+    }
+
+    // Nothing in any of this moved the incumbent, which still holds the truth.
+    assert_eq!(
+        incumbent.observed_serial(&hub_identity, &binding_commitment),
+        Some(2)
+    );
+
+    node.abort();
+    incumbent.handle.abort();
+    joining.handle.abort();
+}
+
+/// A briefly unreachable witness must stop the Hub SIGNING. It must not stop
+/// the Hub EXISTING.
+///
+/// These are two different things and the second one is worse. A Hub that will
+/// not start cannot serve a cooperative close, cannot answer
+/// `/v1/readiness/mainnet`, and cannot tell the operator which of the
+/// identifiers in `ROLLBACK-ANCHOR-RECOVERY.md` section 2 it hit - and under a
+/// systemd unit with `Restart=on-failure` it crash-loops, so the operator's
+/// instinct to restart it makes things strictly worse while telling them
+/// nothing. Section 2 closes by telling the operator that a Hub which "printed
+/// nothing and simply will not start" should be treated as
+/// `rollback_anchor_witness_unreachable`. That line exists to paper over this
+/// defect; this test is what makes it unnecessary.
+///
+/// Every assertion here is about what the Hub *says* and whether the *process*
+/// is usable. The refusal is asserted too, unchanged, because the whole point
+/// is that nothing about the signature moved.
+#[tokio::test]
+async fn an_unreachable_witness_at_startup_refuses_the_signature_and_names_itself_in_readiness() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-boot-unreachable-hub").unwrap();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x47; 20])).to_readable();
+    let (left, bundle) = signed_bundle(
+        "rollback-anchor-boot-unreachable-left",
+        &hub_account,
+        &contract,
+    );
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let witness = spawn_witness("boot-unreachable").await;
+    let directory = tempfile::tempdir().unwrap();
+
+    // Pinned to a live witness's keys, pointed at a port that answers nothing.
+    let hub = build_hub(
+        &directory.path().join("hub-state.json"),
+        &hub_account,
+        &node_url,
+    )
+    .with_rollback_anchor(witness.config(
+        &Address::from(*hub_account.address()).to_readable(),
+        Some("http://127.0.0.1:1"),
+    ))
+    .unwrap();
+
+    let error = hub
+        .run_rollback_anchor_startup_probe()
+        .await
+        .expect_err("an unreachable witness must refuse")
+        .to_string();
+    assert!(
+        error.contains("rollback_anchor_witness_unreachable"),
+        "the refusal must name what is wrong, got: {error}"
+    );
+
+    // THE DEFECT. The Hub is up. Ask it what is wrong, the way an operator or a
+    // monitoring system would, and it must answer by name. Before this, the
+    // only way to learn any of it was the exit status of a process that had
+    // already gone.
+    let readiness = hub.mainnet_readiness().await;
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "rollback_anchor_witness_unreachable"),
+        "a running Hub that is refusing to sign must publish the identifier that selects the \
+         operator procedure, got {:?}",
+        readiness.blockers
+    );
+    assert!(
+        !readiness.payments_enabled,
+        "and it must not advertise payments it will refuse"
+    );
+    assert!(
+        readiness.limitations.iter().any(|limitation| {
+            limitation.contains("rollback_anchor_witness_unreachable")
+                && limitation.contains("ROLLBACK-ANCHOR-RECOVERY.md")
+        }),
+        "in words as well as in an identifier, pointing at the procedure, got {:?}",
+        readiness.limitations
+    );
+
+    // Close must NOT be taken down with it. A Hub kept alive to serve a
+    // cooperative close is most of the reason for keeping it alive at all, and
+    // an anchor that cannot answer must not trap a channel that wants to leave.
+    assert!(
+        !readiness
+            .close_blockers
+            .iter()
+            .any(|blocker| blocker == "rollback_anchor_witness_unreachable"),
+        "an unreachable anchor must not block cooperative close, got {:?}",
+        readiness.close_blockers
+    );
+
+    // AND THE PART THAT MUST NOT HAVE MOVED. Not one bill more is signed than
+    // was signed before any of this. The probe has not agreed, so the signing
+    // path refuses, exactly as it did.
+    hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+        .await
+        .unwrap();
+    let payment = left_signed_payment(&left, &bundle, "boot-unreachable-payment", now_unix());
+    let error = hub
+        .cosign_hvm_registry_payment(payment, now_unix())
+        .await
+        .expect_err("a Hub whose probe has not agreed must not sign, running or not")
+        .to_string();
+    assert!(
+        error.contains("startup probe has not agreed"),
+        "got: {error}"
+    );
+
+    node.abort();
+    witness.handle.abort();
+}
+
+/// The boot posture: what a startup probe means for the process, and what it
+/// still means for a signature.
+///
+/// Both directions, because a blocker that is always published is a constant
+/// rather than a measurement: a witness that answers clears it.
+#[tokio::test]
+async fn the_boot_posture_refuses_the_signature_without_refusing_the_process() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-boot-posture-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x48; 20])).to_readable();
+    let (_left, bundle) =
+        signed_bundle("rollback-anchor-boot-posture-left", &hub_account, &contract);
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let witness = spawn_witness("boot-posture").await;
+
+    // Unreachable: refused, named, and explicitly not condemning - which is the
+    // distinction `refusal_condemns_the_channel` already draws, and what lets
+    // the Hub keep asking instead of needing a human.
+    let down_directory = tempfile::tempdir().unwrap();
+    let down = build_hub(
+        &down_directory.path().join("hub-state.json"),
+        &hub_account,
+        &node_url,
+    )
+    .with_rollback_anchor(witness.config(&hub_identity, Some("http://127.0.0.1:1")))
+    .unwrap();
+    let posture = down.run_rollback_anchor_startup_probe_at_boot().await;
+    assert!(
+        !posture.agreed,
+        "an unreachable witness proves nothing, so nothing may sign"
+    );
+    assert_eq!(
+        posture.refusal_identifier,
+        Some("rollback_anchor_witness_unreachable")
+    );
+    assert!(
+        !posture.condemning,
+        "silence is not a refusal from the witness and must not condemn a channel"
+    );
+    assert!(
+        posture
+            .refusal
+            .as_deref()
+            .is_some_and(|refusal| refusal.contains("An unreachable oracle is not evidence")),
+        "the log line must say why silence is not permission, got {:?}",
+        posture.refusal
+    );
+    assert_eq!(
+        down.rollback_anchor_probe_refusal(),
+        Some("rollback_anchor_witness_unreachable")
+    );
+
+    // Reachable: agreed, nothing published, nothing blocked.
+    let up_directory = tempfile::tempdir().unwrap();
+    let up = build_hub(
+        &up_directory.path().join("hub-state.json"),
+        &hub_account,
+        &node_url,
+    )
+    .with_rollback_anchor(witness.config(&hub_identity, None))
+    .unwrap();
+    let posture = up.run_rollback_anchor_startup_probe_at_boot().await;
+    assert!(posture.agreed, "a live witness that agrees must agree");
+    assert_eq!(posture.refusal_identifier, None);
+    assert_eq!(up.rollback_anchor_probe_refusal(), None);
+    let readiness = up.mainnet_readiness().await;
+    assert!(
+        !readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("rollback_anchor_witness")),
+        "a Hub whose probe agreed publishes no anchor refusal, got {:?}",
+        readiness.blockers
+    );
+
+    node.abort();
+    witness.handle.abort();
 }

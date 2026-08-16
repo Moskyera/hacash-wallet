@@ -43,10 +43,21 @@ pub mod witness;
 pub const ANCHOR_RESERVE_PATH: &str = "/witness/v1/anchor";
 pub const ANCHOR_STATUS_PATH: &str = "/witness/v1/status";
 
+/// The schema on the header line every witness durable store opens with.
+///
+/// It lives here, outside the `rollback-witness` feature, because both halves
+/// of the degradation guard need it: the witness service *writes* it, and the
+/// co-location scan in [`client`] *reads* it looking for a witness store inside
+/// the Hub's own state tree. A default Hub build contains no witness but must
+/// still be able to recognise one. Sharing the constant is what stops the
+/// detector and the writer drifting apart into a guard that silently sees
+/// nothing.
+pub const WITNESS_LOG_SCHEMA: &str = "hpay-hub-rollback-anchor-witness-log/1";
+
 pub use client::{
     ROLLBACK_ANCHOR_EVIDENCE_SCHEMA, RollbackAnchorClient, RollbackAnchorConfig,
     RollbackAnchorEvidenceV1, RollbackAnchorPin, VerifiedAnchorReceipt, VerifiedWitnessStatus,
-    WitnessEndpointPosture,
+    WitnessEndpointPosture, witness_store_in_hub_state_tree,
 };
 pub use protocol::{
     HubAnchorRequestV1, HubWitnessAnswerV1, HubWitnessReceiptV1, HubWitnessRefusalV1,

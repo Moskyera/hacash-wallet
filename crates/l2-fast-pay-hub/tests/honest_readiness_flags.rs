@@ -457,6 +457,86 @@ mod anchor {
             .unwrap()
     }
 
+    /// The anchor's strength depends on **who** runs the witness and **where**
+    /// it sits, and neither of those is a boolean the flag can carry.
+    ///
+    /// Before this test existed the readiness document contained no key
+    /// matching `witness` or `anchor` at all: the only outward sign that an
+    /// anchor existed was the *absence* of a blocker string. A same-operator,
+    /// loopback, single-host witness was therefore indistinguishable over the
+    /// API from a neutral third party on separate infrastructure, which
+    /// contradicts `ROLLBACK-ANCHOR-PROTOCOL.md` section 10 and the doc comment
+    /// on `measure_external_rollback_anchor_ready`.
+    ///
+    /// Asserted against the serialized payload, because the payload is what a
+    /// wallet reads. A field that exists in Rust and never reaches the wire is
+    /// the bug this test is here to stop coming back.
+    #[tokio::test]
+    async fn the_readiness_document_publishes_who_witnesses_this_hub_and_where_it_sits() {
+        let (node_url, server) = spawn_node(true).await;
+        let witness = spawn_witness("published-posture").await;
+        let url = witness.url.clone();
+        let hub = with_anchor(build_hub(&node_url, "anchor-posture-hub"), &witness, &url);
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+
+        let readiness = hub.mainnet_readiness().await;
+        let payload = serde_json::to_value(&readiness).unwrap();
+        let anchor = payload
+            .get("rollback_anchor")
+            .and_then(serde_json::Value::as_object)
+            .expect("the readiness document must publish the anchor it measured, got {payload}");
+
+        assert_eq!(
+            anchor.get("witness_posture").and_then(|it| it.as_str()),
+            Some("neutral_third_party"),
+            "a wallet must be able to read who holds the witness key"
+        );
+        assert_eq!(
+            anchor.get("witness_operator").and_then(|it| it.as_str()),
+            Some("Example Neutral Witness Co"),
+            "the attested operating entity travels with the posture"
+        );
+        assert_eq!(
+            anchor
+                .get("witness_endpoint_is_local")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "this witness is on loopback and that must be published, not hidden"
+        );
+        assert_eq!(
+            anchor
+                .get("witness_co_located")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "a loopback witness shares this Hub's host, which is the verdict a \
+             person choosing a hub actually needs"
+        );
+        assert!(
+            readiness
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("co-located")),
+            "a witness inside this Hub's own failure domain must be stated in \
+             plain words too, got {:?}",
+            readiness.limitations
+        );
+
+        // And the same document says so honestly when there is nothing to say.
+        let bare = build_hub(&node_url, "anchor-posture-bare")
+            .mainnet_readiness()
+            .await;
+        assert!(
+            serde_json::to_value(&bare)
+                .unwrap()
+                .get("rollback_anchor")
+                .is_some_and(serde_json::Value::is_null),
+            "no witness must publish as an explicit null rather than as silence"
+        );
+
+        server.abort();
+        witness.handle.abort();
+    }
+
     /// A witness is configured, pinned, and attested - and it is not there.
     /// Configuration is not evidence, so the flag must read false.
     #[tokio::test]
