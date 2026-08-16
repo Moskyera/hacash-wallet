@@ -36,6 +36,8 @@ mod approval;
 mod codec;
 mod envelope;
 mod error;
+mod fast_pay_approval;
+mod hvm_approval;
 mod identity;
 mod message;
 mod pairing;
@@ -53,6 +55,15 @@ pub use approval::{
 };
 pub use envelope::{EncryptedCompanionFrame, FRAME_VERSION, SessionCipher};
 pub use error::{CompanionError, CompanionResult};
+pub use fast_pay_approval::{
+    AGENT_FAST_PAY_APPROVAL_MAX_LIFETIME_SECS, AGENT_FAST_PAY_APPROVAL_VERSION,
+    AgentFastPayApprovalCommitment, AgentFastPayApprovalDecision, AgentFastPayNetworkBinding,
+    SignedAgentFastPayApprovalDecision,
+};
+pub use hvm_approval::{
+    AGENT_HVM_APPROVAL_MAX_LIFETIME_SECS, AGENT_HVM_APPROVAL_VERSION, AgentHvmApprovalCommitment,
+    AgentHvmApprovalDecision, SignedAgentHvmApprovalDecision,
+};
 #[cfg(feature = "dev-software-identity")]
 pub use identity::SoftwareDeviceIdentity;
 pub use identity::{

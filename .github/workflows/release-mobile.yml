@@ -68,6 +68,12 @@ jobs:
         with:
           shared-key: release-android-arm64
 
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce Android mainnet Rust advisory policy
+        run: node scripts/check-rust-advisories.mjs release android-mainnet
+
       - name: Install pinned frontend dependencies
         working-directory: apps/mobile
         run: |
@@ -151,7 +157,7 @@ jobs:
 
       - name: Build unsigned Android arm64 release APK
         working-directory: apps/mobile
-        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-testnet-pilot
+        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-bounded-mainnet-pilot
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh

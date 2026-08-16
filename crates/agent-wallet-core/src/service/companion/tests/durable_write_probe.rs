@@ -128,6 +128,7 @@ fn crash_between_the_creation_journal_and_the_registry_entry() {
             node_url: "http://127.0.0.1:18081".into(),
             passphrase: PASSPHRASE.into(),
             block_one_fingerprint: Some(TESTNET_ANCHOR.into()),
+            mainnet_pilot_acknowledgement: None,
         },
         70_000,
     );
@@ -151,6 +152,7 @@ fn crash_between_the_creation_journal_and_the_registry_entry() {
             node_url: "http://127.0.0.1:18081".into(),
             passphrase: PASSPHRASE.into(),
             block_one_fingerprint: Some(TESTNET_ANCHOR.into()),
+            mainnet_pilot_acknowledgement: None,
         },
         70_100,
     );

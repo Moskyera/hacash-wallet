@@ -26,6 +26,8 @@ mod desktop_approval;
 mod desktop_witness_flow;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod durable_write_probe;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod fast_pay_decisions;
 mod fixtures;
 mod lifecycle;
 mod pairing;

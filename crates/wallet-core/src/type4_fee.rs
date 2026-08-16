@@ -3,7 +3,7 @@
 use field::{Amount, UNIT_MEI};
 
 use crate::error::{WalletError, WalletResult};
-use crate::hip23::{format_mei_for_node, parse_hacash_wire_mei};
+use crate::hip23::{format_l1_fee_mei_for_node, parse_hacash_wire_mei};
 
 /// Node default: ~1:244 on a 166-byte simple L1 tx → purity ≈ 6024.
 pub const L1_DEFAULT_LOWEST_FEE_PURITY: u64 = 1_000_000 / 166;
@@ -31,14 +31,14 @@ pub struct Type4FeeEstimate {
 }
 
 pub fn mei_to_fee_wire(mei: f64) -> String {
-    let rounded = (mei * 1000.0).ceil() / 1000.0;
-    let mut whole = rounded.floor();
-    let mut frac = ((rounded - whole) * 1000.0).round();
-    if frac >= 1000.0 {
-        whole += 1.0;
-        frac = 0.0;
-    }
-    format!("{}:{:03}", whole as u64, frac as u64)
+    let decimal = format_l1_fee_mei_for_node(mei);
+    Amount::from(&decimal)
+        .map(|amount| amount.to_fin_string())
+        .unwrap_or_else(|_| {
+            Amount::from("1:244")
+                .expect("valid fallback fee")
+                .to_fin_string()
+        })
 }
 
 pub fn parse_fee_mei_decimal(raw: &str) -> WalletResult<f64> {
@@ -70,7 +70,7 @@ fn fee_from_unit238(fee_238: u64, wire_bytes: usize, purity: u64) -> Type4FeeEst
     let amt = Amount::unit238(fee_238);
     let base_mei = unsafe { amt.to_unit_float(UNIT_MEI) };
     let fee_mei = base_mei * FEE_HEADROOM;
-    let fee_node = format_mei_for_node(fee_mei);
+    let fee_node = format_l1_fee_mei_for_node(fee_mei);
     let fee_wire = mei_to_fee_wire(fee_mei);
     Type4FeeEstimate {
         fee_mei,
@@ -90,7 +90,7 @@ pub fn fee_from_node_average(
     let fee_mei = base * FEE_HEADROOM;
     Ok(Type4FeeEstimate {
         fee_mei,
-        fee_node: format_mei_for_node(fee_mei),
+        fee_node: format_l1_fee_mei_for_node(fee_mei),
         fee_wire: mei_to_fee_wire(fee_mei),
         wire_bytes,
         purity,
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn mei_wire_roundtrip_small_fee() {
         let wire = mei_to_fee_wire(0.00365);
-        assert_eq!(wire, "0:004");
-        assert!((fee_mei_from_wire(&wire) - 0.004).abs() < 0.0001);
+        assert_eq!(wire, "365:243");
+        assert!((fee_mei_from_wire(&wire) - 0.00365).abs() < 0.000001);
     }
 }

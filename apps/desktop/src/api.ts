@@ -159,6 +159,7 @@ export type WalletSettings = {
   auto_node_failover?: boolean;
   network_mode?: "mainnet" | "testnet";
   l2_hub_url: string | null;
+  trusted_mainnet_fast_pay_pilot: boolean;
   hub_right_address: string | null;
   channel_id_hex: string | null;
   webauthn_enabled: boolean;
@@ -252,6 +253,7 @@ export type SendResult = {
 
 export type ChannelSetupPreview = {
   channel_id: string;
+  reuse_version: number;
   left_address: string;
   right_address: string;
   left_deposit: string;
@@ -321,6 +323,8 @@ export type HubHealth = {
   hub_fee_mei?: string | number;
   settlement_ready?: boolean;
   cross_channel_ready?: boolean;
+  trusted_bounded_pilot_ready?: boolean;
+  deployment_profile?: string;
 };
 
 export type HubDiscoveryEntry = {
@@ -605,19 +609,22 @@ export const api = {
     p3?: Record<string, unknown> | null,
   ) => invoke<Hip23PatternCheck[]>("wallet_validate_hip23", { universal, p2, p3 }),
   channelInfo: () => invoke<ChannelInfo | null>("wallet_channel_info"),
-  previewChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  previewChannelOpen: (hubAddress: string, userDepositMei: string, hubDepositMei: string) =>
     invoke<ChannelSetupPreview>("wallet_preview_channel_open", {
       hubAddress,
       userDepositMei,
       hubDepositMei,
     }),
-  prepareChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  prepareChannelOpen: (hubAddress: string, userDepositMei: string, hubDepositMei: string) =>
     invoke<PreparedOperationView>("wallet_prepare_channel_open", { hubAddress, userDepositMei, hubDepositMei }),
   executePreparedChannelOpen: (operationId: string) =>
     invoke<string>("wallet_execute_prepared_channel_open", { operationId }),
   prepareChannelClose: () => invoke<PreparedOperationView>("wallet_prepare_channel_close"),
   executePreparedChannelClose: (operationId: string) =>
-    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),
+  recoverChannelOpen: () => invoke<string>("wallet_recover_channel_open"),
+  recoverChannelClose: () => invoke<string>("wallet_recover_channel_close"),
+  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
     invoke<string>("wallet_open_channel", {
       hubAddress,
       userDepositMei,

@@ -2,7 +2,7 @@
 name = "l2-fast-pay-hub"
 version.workspace = true
 edition.workspace = true
-description = "Hacash CSP / Fast Pay hub. Wallet Hub API v4 reference server"
+description = "Hacash CSP / Fast Pay hub. Wallet Hub API v7 reference server"
 license.workspace = true
 
 [dependencies]
@@ -18,28 +18,44 @@ sha2.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
 zeroize.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
 fs2.workspace = true
 sha3 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 field = { path = "../../../hacash-fullnodedev/field" }
 sys = { path = "../../../hacash-fullnodedev/sys" }
 basis = { path = "../../../hacash-fullnodedev/basis" }
+protocol = { path = "../../../hacash-fullnodedev/protocol" }
+mint = { path = "../../../hacash-fullnodedev/mint" }
+vm = { path = "../../../hacash-fullnodedev/vm" }
 axum = { workspace = true }
 tower-http = { workspace = true }
 clap = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
 
 [features]
 default = []
 server = ["dep:clap", "dep:tracing-subscriber"]
+local-pilot-tools = ["server"]
 
 [[bin]]
 name = "fast-pay-hub"
 path = "src/bin/fast-pay-hub.rs"
 required-features = ["server"]
+
+[[bin]]
+name = "hpay-hvm-local-pilot"
+path = "src/bin/hpay-hvm-local-pilot.rs"
+required-features = ["local-pilot-tools"]
+
+[[bin]]
+name = "hpay-hvm-registry-local-pilot"
+path = "src/bin/hpay-hvm-registry-local-pilot.rs"
+required-features = ["local-pilot-tools"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

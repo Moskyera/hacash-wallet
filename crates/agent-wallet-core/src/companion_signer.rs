@@ -165,6 +165,8 @@ mod tests {
             DeviceSignaturePurpose::PairingMobileProof,
             DeviceSignaturePurpose::SessionResponse,
             DeviceSignaturePurpose::ApprovalDecision,
+            DeviceSignaturePurpose::AgentFastPayApprovalDecision,
+            DeviceSignaturePurpose::AgentHvmApprovalDecision,
             DeviceSignaturePurpose::AdminCommand,
             DeviceSignaturePurpose::WitnessReceipt,
             DeviceSignaturePurpose::WitnessRotationAuthorization,

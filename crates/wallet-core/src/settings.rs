@@ -114,6 +114,29 @@ pub fn validate_node_url(raw: &str) -> WalletResult<String> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
+/// Validate a node endpoint that will be trusted immediately before signing.
+///
+/// The legacy official API remains readable over HTTP for compatibility, but
+/// it must never become a mainnet signing authority. Mainnet signing accepts
+/// only authenticated remote transport or an endpoint on the same machine.
+pub fn validate_signing_node_url(raw: &str, network_mode: &str) -> WalletResult<String> {
+    let normalized = validate_node_url(raw)?;
+    if network_mode != "mainnet" {
+        return Ok(normalized);
+    }
+    let url = url::Url::parse(&normalized)
+        .map_err(|e| WalletError::Policy(format!("invalid signing node URL: {e}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| WalletError::Policy("signing node URL is missing a host".into()))?;
+    if url.scheme() == "https" || (url.scheme() == "http" && is_loopback_host(host)) {
+        return Ok(normalized);
+    }
+    Err(WalletError::Policy(
+        "mainnet signing requires HTTPS, except for a node on this same device".into(),
+    ))
+}
+
 /// Safe normalization for internal constructors and migration of old settings.
 pub fn sanitize_node_url(raw: &str) -> String {
     validate_node_url(raw).unwrap_or_else(|_| DEFAULT_NODE_URL.into())
@@ -196,6 +219,12 @@ pub struct WalletSettings {
     #[serde(default = "default_network_mode")]
     pub network_mode: String,
     pub l2_hub_url: Option<String>,
+    /// Explicit consent to the capped Hub-dependent mainnet pilot.
+    ///
+    /// False is the fail-closed default. This never weakens L1 sends and is
+    /// consulted only when constructing an L2 Hub client on mainnet.
+    #[serde(default)]
+    pub trusted_mainnet_fast_pay_pilot: bool,
     pub hub_right_address: Option<String>,
     pub channel_id_hex: Option<String>,
     pub webauthn_enabled: bool,
@@ -241,6 +270,7 @@ impl Default for WalletSettings {
             auto_node_failover: true,
             network_mode: default_network_mode(),
             l2_hub_url: None,
+            trusted_mainnet_fast_pay_pilot: false,
             hub_right_address: None,
             channel_id_hex: None,
             webauthn_enabled: false,
@@ -420,6 +450,20 @@ mod tests {
             validate_node_url("http://127.0.0.1:8080").unwrap(),
             "http://127.0.0.1:8080"
         );
+    }
+
+    #[test]
+    fn mainnet_signing_rejects_the_legacy_http_node_but_allows_https_or_loopback() {
+        assert!(validate_signing_node_url(DEFAULT_NODE_URL, "mainnet").is_err());
+        assert_eq!(
+            validate_signing_node_url("https://node.example", "mainnet").unwrap(),
+            "https://node.example"
+        );
+        assert_eq!(
+            validate_signing_node_url("http://127.0.0.1:8080", "mainnet").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert!(validate_signing_node_url(DEFAULT_NODE_URL, "testnet").is_ok());
     }
 
     #[test]

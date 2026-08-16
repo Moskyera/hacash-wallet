@@ -127,6 +127,11 @@ route pre-query (6)
 
 1. The pinned Rust full node currently registers channel open/close actions but
    does not expose the complete official challenge/final-claim action path.
+   The legacy Go core uses Actions 22, 23, 24, 26 and 27 for that lifecycle,
+   but Istanbul already assigns 22, 25 and 26 to TEX/AST. Copying the old
+   actions into the Rust registry would therefore be a consensus-breaking wire
+   collision, not a compatibility fix. A reviewed non-conflicting network
+   specification is required before implementation.
    High-value L2 use is blocked until dispute enforcement is implemented and
    testnet-proven.
 2. Completed for partial/local tampering: hub and Personal Wallet operation

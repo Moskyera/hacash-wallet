@@ -5,6 +5,8 @@ use hacash_wallet_core::settings::validate_node_url;
 
 use crate::amount::HacUnits;
 use crate::error::{AgentWalletError, AgentWalletResult};
+use crate::fast_pay_operation::AgentFastPayStatus;
+use crate::hvm_payment_operation::AgentHvmPaymentStatus;
 use crate::journal::{AgentJournal, AgentJournalEvent, AgentJournalEventKind, JournalCommitment};
 use crate::node_binding::validate_stored_anchor;
 use crate::operation::OperationStatus;
@@ -13,7 +15,7 @@ use crate::storage::AgentWalletPaths;
 use crate::types::{AgentId, AgentWalletId, WalletScope};
 
 use super::{
-    AgentWalletManager, AgentWalletState, JOURNAL_FILE, MAX_OPERATIONS_PER_WALLET,
+    AgentWalletManager, AgentWalletState, JOURNAL_FILE, MAX_OPERATIONS_PER_WALLET, OperationRail,
     PENDING_STATE_NAME, STATE_NAME, STATE_SCHEMA_VERSION, UnlockedAgentWallet, ZERO_HASH_HEX,
     connector,
 };
@@ -29,6 +31,11 @@ impl AgentWalletManager {
         let mut expired = 0;
         for operation in state.operations.values_mut() {
             if operation.expires_at() <= now && operation.cancel_pre_signing("expired")? {
+                expired += 1;
+            }
+        }
+        for operation in state.fast_pay_operations.values_mut() {
+            if operation.expires_at() <= now && operation.cancel_pre_signing() {
                 expired += 1;
             }
         }
@@ -272,11 +279,65 @@ pub(super) fn validate_state(
         || state.signer_epoch == 0
         || state.policy_epoch == 0
         || state.emergency_epoch == 0
+        || (state.network_mode != "mainnet" && state.trusted_mainnet_fast_pay_pilot)
         || state.journal_head_hash.len() != 64
         || !state
             .journal_head_hash
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
+    if let Some(binding) = state.l2_binding.as_ref()
+        && (binding.validate().is_err()
+            || binding.wallet_id() != expected_wallet_id
+            || binding.network_mode() != state.network_mode
+            || binding.agent_address() != state.address)
+    {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
+    if let Some(setup) = state.l2_channel_setup.as_ref()
+        && (setup.validate(expected_wallet_id, &state.address).is_err()
+            || state.l2_binding.is_some()
+                && setup.review.phase != super::l2::AgentChannelSetupPhase::Confirmed)
+    {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
+    if let Some(close) = state.l2_channel_close.as_ref()
+        && (close.validate(expected_wallet_id, &state.address).is_err()
+            || state.l2_binding.as_ref().is_none_or(|binding| {
+                binding.channel_id() != close.review.channel_id
+                    || binding.channel_reuse_version() != close.review.channel_reuse_version
+                    || binding.channel_open_height() != close.review.channel_open_height
+                    || binding.hub_address() != close.review.hub_address
+            })
+            || close.review.phase == super::l2::AgentChannelClosePhase::Confirmed
+                && state
+                    .l2_binding
+                    .as_ref()
+                    .is_none_or(|binding| binding.is_active())
+            || close.review.phase != super::l2::AgentChannelClosePhase::Confirmed
+                && state
+                    .l2_binding
+                    .as_ref()
+                    .is_none_or(|binding| !binding.is_active()))
+    {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
+    if let Some(binding) = state.hvm_channel_binding.as_ref()
+        && binding
+            .validate(expected_wallet_id, &state.address, &state.network_mode)
+            .is_err()
+    {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
+    if state.hvm_channel_binding.is_some() && state.hvm_registry_binding.is_some() {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
+    if let Some(binding) = state.hvm_registry_binding.as_ref()
+        && binding
+            .validate(expected_wallet_id, &state.address, &state.network_mode)
+            .is_err()
     {
         return Err(AgentWalletError::RecoveryRequired);
     }
@@ -289,21 +350,140 @@ pub(super) fn validate_state(
             return Err(AgentWalletError::RecoveryRequired);
         }
     }
-    if state.operations.len() > MAX_OPERATIONS_PER_WALLET
+    for (key, operation) in &state.fast_pay_operations {
+        if state
+            .l2_binding
+            .as_ref()
+            .is_none_or(|binding| !operation.matches_binding(binding))
+            || key != operation.operation_id().as_str()
+            || operation.agent_wallet_id() != expected_wallet_id
+            || operation.validate().is_err()
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+    }
+    for (key, operation) in &state.hvm_payment_operations {
+        let matches_active_binding = if operation.is_registry_v2() {
+            state
+                .hvm_registry_binding
+                .as_ref()
+                .is_some_and(|binding| operation.matches_registry_binding(binding))
+                && state.hvm_channel_binding.is_none()
+        } else {
+            state
+                .hvm_channel_binding
+                .as_ref()
+                .is_some_and(|binding| operation.matches_channel_binding(binding))
+                && state.hvm_registry_binding.is_none()
+        };
+        if key != operation.operation_id().as_str()
+            || operation.agent_wallet_id() != expected_wallet_id
+            || operation.validate().is_err()
+            || !matches_active_binding
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+    }
+    let operation_count = state
+        .operations
+        .len()
+        .checked_add(state.fast_pay_operations.len())
+        .and_then(|count| count.checked_add(state.hvm_payment_operations.len()))
+        .ok_or(AgentWalletError::RecoveryRequired)?;
+    if operation_count > MAX_OPERATIONS_PER_WALLET
         || state.idempotency.len() > MAX_OPERATIONS_PER_WALLET
+        || state
+            .operations
+            .keys()
+            .any(|operation_id| state.fast_pay_operations.contains_key(operation_id))
+        || state
+            .operations
+            .keys()
+            .any(|operation_id| state.hvm_payment_operations.contains_key(operation_id))
+        || state
+            .fast_pay_operations
+            .keys()
+            .any(|operation_id| state.hvm_payment_operations.contains_key(operation_id))
     {
         return Err(AgentWalletError::RecoveryRequired);
     }
-    for (key, record) in &state.idempotency {
-        let operation = state
-            .operations
-            .get(record.operation_id.as_str())
-            .ok_or(AgentWalletError::RecoveryRequired)?;
+    let mut operation_idempotency_keys = BTreeSet::new();
+    for operation in state.operations.values() {
         let view = operation.view();
-        if key != &scoped_idempotency_key(operation.agent_id(), &view.idempotency_key)
-            || record.request_commitment != view.request_commitment
+        let scoped_key = scoped_idempotency_key(operation.agent_id(), &view.idempotency_key);
+        if !operation_idempotency_keys.insert(scoped_key.clone()) {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        if let Some(record) = state.idempotency.get(&scoped_key)
+            && (record.rail != OperationRail::L1
+                || record.operation_id != view.operation_id
+                || record.request_commitment != view.request_commitment)
         {
             return Err(AgentWalletError::RecoveryRequired);
+        }
+    }
+    for operation in state.fast_pay_operations.values() {
+        let scoped_key = scoped_idempotency_key(operation.agent_id(), operation.idempotency_key());
+        if !operation_idempotency_keys.insert(scoped_key.clone()) {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        if let Some(record) = state.idempotency.get(&scoped_key)
+            && (record.rail != OperationRail::FastPay
+                || record.operation_id != *operation.operation_id()
+                || record.request_commitment != operation.request_commitment())
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+    }
+    for operation in state.hvm_payment_operations.values() {
+        let scoped_key = scoped_idempotency_key(operation.agent_id(), operation.idempotency_key());
+        if !operation_idempotency_keys.insert(scoped_key.clone()) {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        if let Some(record) = state.idempotency.get(&scoped_key)
+            && (record.rail != OperationRail::HvmFastPay
+                || record.operation_id != *operation.operation_id()
+                || record.request_commitment != operation.request_commitment())
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+    }
+    for (key, record) in &state.idempotency {
+        match record.rail {
+            OperationRail::L1 => {
+                let operation = state
+                    .operations
+                    .get(record.operation_id.as_str())
+                    .ok_or(AgentWalletError::RecoveryRequired)?;
+                let view = operation.view();
+                if key != &scoped_idempotency_key(operation.agent_id(), &view.idempotency_key)
+                    || record.request_commitment != view.request_commitment
+                {
+                    return Err(AgentWalletError::RecoveryRequired);
+                }
+            }
+            OperationRail::FastPay => {
+                let operation = state
+                    .fast_pay_operations
+                    .get(record.operation_id.as_str())
+                    .ok_or(AgentWalletError::RecoveryRequired)?;
+                if key != &scoped_idempotency_key(operation.agent_id(), operation.idempotency_key())
+                    || record.request_commitment != operation.request_commitment()
+                {
+                    return Err(AgentWalletError::RecoveryRequired);
+                }
+            }
+            OperationRail::HvmFastPay => {
+                let operation = state
+                    .hvm_payment_operations
+                    .get(record.operation_id.as_str())
+                    .ok_or(AgentWalletError::RecoveryRequired)?;
+                if key != &scoped_idempotency_key(operation.agent_id(), operation.idempotency_key())
+                    || record.request_commitment != operation.request_commitment()
+                {
+                    return Err(AgentWalletError::RecoveryRequired);
+                }
+            }
         }
     }
     if !state.authentication_challenges.is_empty() || !state.authenticated_sessions.is_empty() {
@@ -430,10 +610,65 @@ pub(super) fn cancel_pre_signing_operations(
             cancelled += 1;
         }
     }
+    for operation in state.fast_pay_operations.values_mut() {
+        if agent_id.is_none_or(|expected| operation.agent_id() == expected)
+            && operation.cancel_pre_signing()
+        {
+            cancelled += 1;
+        }
+    }
+    for operation in state.hvm_payment_operations.values_mut() {
+        if agent_id.is_none_or(|expected| operation.agent_id() == expected)
+            && operation.cancel_pre_signing()
+        {
+            cancelled += 1;
+        }
+    }
     Ok(cancelled)
 }
 
 pub(super) fn active_reservations(state: &AgentWalletState) -> AgentWalletResult<HacUnits> {
+    let l1 = active_l1_reservations(state)?;
+    l1.checked_add(active_fast_pay_reservations(state)?)?
+        .checked_add(active_hvm_payment_reservations(state)?)
+}
+
+fn active_hvm_payment_reservations(state: &AgentWalletState) -> AgentWalletResult<HacUnits> {
+    state
+        .hvm_payment_operations
+        .values()
+        .filter(|operation| operation.status().retains_reservation())
+        .try_fold(HacUnits::ZERO, |total, operation| {
+            total.checked_add(operation.view().reserved_units)
+        })
+}
+
+pub(super) fn active_fast_pay_reservations(
+    state: &AgentWalletState,
+) -> AgentWalletResult<HacUnits> {
+    state
+        .fast_pay_operations
+        .values()
+        .filter(|operation| operation.status().retains_reservation())
+        .try_fold(HacUnits::ZERO, |total, operation| {
+            total.checked_add(operation.view().reserved_units)
+        })
+}
+
+pub(super) fn fast_pay_channel_exposure(state: &AgentWalletState) -> AgentWalletResult<HacUnits> {
+    state
+        .fast_pay_operations
+        .values()
+        .filter(|operation| {
+            operation.status() == AgentFastPayStatus::Committed
+                || operation.status().retains_reservation()
+        })
+        .try_fold(HacUnits::ZERO, |total, operation| {
+            total.checked_add(operation.view().total_debit_units)
+        })
+}
+
+pub(super) fn active_l1_reservations(state: &AgentWalletState) -> AgentWalletResult<HacUnits> {
     state
         .operations
         .values()
@@ -448,7 +683,7 @@ pub(super) fn spent_in_window(
     now: u64,
     window_seconds: u64,
 ) -> AgentWalletResult<HacUnits> {
-    state
+    let l1 = state
         .operations
         .values()
         .filter(|operation| {
@@ -460,6 +695,30 @@ pub(super) fn spent_in_window(
         })
         .try_fold(HacUnits::ZERO, |total, operation| {
             total.checked_add(operation.view().total_debit_units)
+        })?;
+    let fast_pay = state
+        .fast_pay_operations
+        .values()
+        .filter(|operation| {
+            operation.status() == AgentFastPayStatus::Committed
+                && operation
+                    .settled_at()
+                    .is_some_and(|settled| settled >= now.saturating_sub(window_seconds))
+        })
+        .try_fold(l1, |total, operation| {
+            total.checked_add(operation.view().total_debit_units)
+        })?;
+    state
+        .hvm_payment_operations
+        .values()
+        .filter(|operation| {
+            operation.status() == AgentHvmPaymentStatus::Committed
+                && operation
+                    .settled_at()
+                    .is_some_and(|settled| settled >= now.saturating_sub(window_seconds))
+        })
+        .try_fold(fast_pay, |total, operation| {
+            total.checked_add(operation.view().amount_units)
         })
 }
 
@@ -469,7 +728,7 @@ pub(super) fn exposure_for_agent_in_window(
     now: u64,
     window_seconds: u64,
 ) -> AgentWalletResult<HacUnits> {
-    state
+    let l1 = state
         .operations
         .values()
         .filter(|operation| {
@@ -483,7 +742,105 @@ pub(super) fn exposure_for_agent_in_window(
         })
         .try_fold(HacUnits::ZERO, |total, operation| {
             total.checked_add(operation.view().total_debit_units)
+        })?;
+    let fast_pay = state
+        .fast_pay_operations
+        .values()
+        .filter(|operation| {
+            operation.agent_id() == agent_id
+                && ((operation.status() == AgentFastPayStatus::Committed
+                    && operation
+                        .settled_at()
+                        .is_some_and(|settled| settled >= now.saturating_sub(window_seconds)))
+                    || operation.status().retains_reservation())
         })
+        .try_fold(l1, |total, operation| {
+            total.checked_add(operation.view().total_debit_units)
+        })?;
+    state
+        .hvm_payment_operations
+        .values()
+        .filter(|operation| {
+            operation.agent_id() == agent_id
+                && ((operation.status() == AgentHvmPaymentStatus::Committed
+                    && operation
+                        .settled_at()
+                        .is_some_and(|settled| settled >= now.saturating_sub(window_seconds)))
+                    || operation.status().retains_reservation())
+        })
+        .try_fold(fast_pay, |total, operation| {
+            total.checked_add(operation.view().amount_units)
+        })
+}
+
+pub(super) fn pending_operations_for_agent(state: &AgentWalletState, agent_id: &AgentId) -> usize {
+    state
+        .operations
+        .values()
+        .filter(|operation| {
+            operation.agent_id() == agent_id && operation.status().retains_reservation()
+        })
+        .count()
+        .saturating_add(
+            state
+                .fast_pay_operations
+                .values()
+                .filter(|operation| {
+                    operation.agent_id() == agent_id && operation.status().retains_reservation()
+                })
+                .count(),
+        )
+        .saturating_add(
+            state
+                .hvm_payment_operations
+                .values()
+                .filter(|operation| {
+                    operation.agent_id() == agent_id && operation.status().retains_reservation()
+                })
+                .count(),
+        )
+}
+
+pub(super) fn recent_requests_for_agent(
+    state: &AgentWalletState,
+    agent_id: &AgentId,
+    now: u64,
+) -> usize {
+    state
+        .operations
+        .values()
+        .filter(|operation| {
+            operation.agent_id() == agent_id && operation.created_at() >= now.saturating_sub(60)
+        })
+        .count()
+        .saturating_add(
+            state
+                .fast_pay_operations
+                .values()
+                .filter(|operation| {
+                    operation.agent_id() == agent_id
+                        && operation.created_at() >= now.saturating_sub(60)
+                })
+                .count(),
+        )
+        .saturating_add(
+            state
+                .hvm_payment_operations
+                .values()
+                .filter(|operation| {
+                    operation.agent_id() == agent_id
+                        && operation.created_at() >= now.saturating_sub(60)
+                })
+                .count(),
+        )
+}
+
+pub(super) fn operation_count(state: &AgentWalletState) -> Option<usize> {
+    state
+        .operations
+        .len()
+        .checked_add(state.fast_pay_operations.len())
+        .and_then(|count| count.checked_add(state.hvm_payment_operations.len()))
 }
 
 fn hex_to_hash(encoded: &str) -> AgentWalletResult<[u8; 32]> {
@@ -510,7 +867,30 @@ pub(super) fn prune_aged_terminal_pre_signing_operations(
         })
         .map(|(key, _)| key.clone())
         .collect();
-    remove_operations_and_idempotency(state, &prunable)
+    let mut removed = remove_operations_and_idempotency(state, &prunable);
+    let l2_prunable: BTreeSet<String> = state
+        .fast_pay_operations
+        .iter()
+        .filter(|(_, operation)| {
+            operation.created_at() < now.saturating_sub(60)
+                && is_terminal_fast_pay_pre_signing_outcome(operation.status())
+                && now >= operation.expires_at()
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    removed += remove_operations_and_idempotency(state, &l2_prunable);
+    let hvm_prunable: BTreeSet<String> = state
+        .hvm_payment_operations
+        .iter()
+        .filter(|(_, operation)| {
+            operation.created_at() < now.saturating_sub(60)
+                && is_terminal_hvm_pre_signing_outcome(operation.status())
+                && now >= operation.expires_at()
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    removed += remove_operations_and_idempotency(state, &hvm_prunable);
+    removed
 }
 
 pub(super) fn prune_terminal_pre_signing_for_agent(
@@ -525,13 +905,48 @@ pub(super) fn prune_terminal_pre_signing_for_agent(
         })
         .map(|(key, _)| key.clone())
         .collect();
-    remove_operations_and_idempotency(state, &prunable)
+    let mut removed = remove_operations_and_idempotency(state, &prunable);
+    let l2_prunable: BTreeSet<String> = state
+        .fast_pay_operations
+        .iter()
+        .filter(|(_, operation)| {
+            operation.agent_id() == agent_id
+                && is_terminal_fast_pay_pre_signing_outcome(operation.status())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    removed += remove_operations_and_idempotency(state, &l2_prunable);
+    let hvm_prunable: BTreeSet<String> = state
+        .hvm_payment_operations
+        .iter()
+        .filter(|(_, operation)| {
+            operation.agent_id() == agent_id
+                && is_terminal_hvm_pre_signing_outcome(operation.status())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    removed += remove_operations_and_idempotency(state, &hvm_prunable);
+    removed
 }
 
 const fn is_terminal_pre_signing_outcome(status: OperationStatus) -> bool {
     matches!(
         status,
         OperationStatus::Rejected | OperationStatus::Failed | OperationStatus::Cancelled
+    )
+}
+
+const fn is_terminal_fast_pay_pre_signing_outcome(status: AgentFastPayStatus) -> bool {
+    matches!(
+        status,
+        AgentFastPayStatus::Rejected | AgentFastPayStatus::Cancelled
+    )
+}
+
+const fn is_terminal_hvm_pre_signing_outcome(status: AgentHvmPaymentStatus) -> bool {
+    matches!(
+        status,
+        AgentHvmPaymentStatus::Rejected | AgentHvmPaymentStatus::Cancelled
     )
 }
 
@@ -545,8 +960,20 @@ fn remove_operations_and_idempotency(
     state
         .idempotency
         .retain(|_, record| !prunable.contains(record.operation_id.as_str()));
+    let before = state.operations.len()
+        + state.fast_pay_operations.len()
+        + state.hvm_payment_operations.len();
     state.operations.retain(|key, _| !prunable.contains(key));
-    prunable.len()
+    state
+        .fast_pay_operations
+        .retain(|key, _| !prunable.contains(key));
+    state
+        .hvm_payment_operations
+        .retain(|key, _| !prunable.contains(key));
+    before
+        - state.operations.len()
+        - state.fast_pay_operations.len()
+        - state.hvm_payment_operations.len()
 }
 
 pub(super) fn scoped_idempotency_key(agent_id: &AgentId, idempotency_key: &str) -> String {

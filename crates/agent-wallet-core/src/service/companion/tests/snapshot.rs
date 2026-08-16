@@ -39,6 +39,18 @@ fn deterministic_overview(
         unlocked: true,
         payments_suspended: state.payments_suspended,
         mainnet_spending_ready: state.network_mode != "mainnet",
+        trusted_mainnet_fast_pay_pilot: state.trusted_mainnet_fast_pay_pilot,
+        l2_binding: state.l2_binding.clone(),
+        l2_channel_setup: state
+            .l2_channel_setup
+            .as_ref()
+            .map(|operation| operation.review.clone()),
+        l2_channel_close: state
+            .l2_channel_close
+            .as_ref()
+            .map(|operation| operation.review.clone()),
+        hvm_channel_binding: state.hvm_channel_binding.clone(),
+        hvm_registry_binding: state.hvm_registry_binding.clone(),
         confirmed_balance_units: available_units.map(|available| {
             available
                 .checked_add(reserved_units)
@@ -46,6 +58,9 @@ fn deterministic_overview(
         }),
         reserved_units,
         available_units,
+        fast_pay_deposit_units: None,
+        fast_pay_reserved_units: HacUnits::ZERO,
+        fast_pay_available_units: None,
         spent_today_units: HacUnits::ZERO,
         spent_this_month_units: HacUnits::ZERO,
         authorized_agents: state

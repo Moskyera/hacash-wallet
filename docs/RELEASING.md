@@ -28,6 +28,29 @@ Linux release contains deb, AppImage, and a raw `-x64-portable`. AppImage is the
 portable Linux option. The raw Linux binary needs compatible GTK 3,
 WebKitGTK 4.1, and their system runtime libraries.
 
+## Rust advisory gate
+
+Release builds use the pinned `cargo-audit` version and the exact reviewed
+policy in `security/rust-advisory-policy.json`. The gate rejects every known
+vulnerability, every new or changed warning, stale allowlist entries, and an
+expired review date. It does not use a blanket warning ignore.
+
+Run the target-specific gate before building:
+
+```text
+node scripts/check-rust-advisories.mjs release windows-mainnet
+node scripts/check-rust-advisories.mjs release android-mainnet
+node scripts/check-rust-advisories.mjs release linux-hub-mainnet
+node scripts/check-rust-advisories.mjs release linux-desktop-mainnet
+```
+
+Tauri 2 still requires the GTK3 `glib 0.18` line on Linux. Because no official
+`0.18.6` was published, the workspace pins the reviewed two-line backport of
+RUSTSEC-2024-0429 at the immutable commit recorded in `Cargo.toml` and
+`Cargo.lock`. The advisory gate independently verifies that exact source; any
+source, version, or commit drift blocks every release. Retire the patch when a
+fixed upstream Tauri desktop stack is available.
+
 ## Isolated release signing
 
 Create a GitHub Environment named `release-signing`, restrict deployment to the

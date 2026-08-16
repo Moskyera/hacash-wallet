@@ -335,10 +335,15 @@ describe("mobile Agent Wallet companion boundary", () => {
     expect(spaces).toContain('activityName: "AgentCompanionActivity"');
     expect(spaces).toContain('createdByActivityName: "MainActivity"');
     expect(spaces).not.toContain("new Webview(");
-    expect(agentWindow).toContain("getCurrentWindow().close()");
+    expect(agentWindow).toContain("AGENT_CLOSE_CLEANUP_GRACE_MS");
+    expect(agentWindow).toContain("Promise.race");
+    expect(agentWindow).toContain("requestBoundedLifecycleCleanup()");
+    expect(agentWindow).toContain("agentCompanionApi.closeActivity()");
+    expect(agentWindow).not.toContain("getCurrentWindow().close()");
+    expect(agentWindow).not.toContain("getCurrentWebviewWindow().close()");
     expect(agentWindow).not.toContain("getCurrentWebview().close()");
     expect(mainCapability).toContain("core:webview:allow-create-webview-window");
-    expect(agentCapability).toContain("core:window:allow-close");
+    expect(agentCapability).not.toContain("core:window:allow-close");
     expect(agentCapability).not.toContain("allow-main-wallet");
   });
 
@@ -688,6 +693,7 @@ describe("mobile Agent Wallet companion boundary", () => {
     );
     expect(commands).toEqual(
       new Set([
+        "agent_wallet_companion_close_activity",
         "agent_wallet_companion_identity_status",
         "agent_wallet_companion_create_identity",
         "agent_wallet_companion_pairing_start",
@@ -703,6 +709,10 @@ describe("mobile Agent Wallet companion boundary", () => {
         "agent_wallet_companion_lifecycle",
         "agent_wallet_companion_reset",
         "agent_wallet_companion_discard_consent",
+        "agent_wallet_companion_pending_fast_pay",
+        "agent_wallet_companion_decide_fast_pay",
+        "agent_wallet_companion_pending_hvm_fast_pay",
+        "agent_wallet_companion_decide_hvm_fast_pay",
         "agent_wallet_companion_decide_payment",
         "agent_wallet_companion_witness_pending",
         "agent_wallet_companion_rotation_step",
@@ -3355,5 +3365,86 @@ describe("a phone can let go of a payment it is holding", () => {
     expect(storage).toContain(
       '#[serde(default, skip_serializing_if = "Vec::is_empty")]\n    discarded_consents: Vec<MobileDiscardedConsent>,',
     );
+  });
+});
+
+describe("Agent Fast Pay mobile approval boundary", () => {
+  it("shows exact zero-fee facts and never sends WebView commitment data to native", () => {
+    const card = read("agent/AgentFastPayApprovalCard.tsx");
+    const app = read("agent/AgentCompanionApp.tsx");
+    const api = read("agent/api.ts");
+    expect(card).toContain('label="Amount"');
+    expect(card).toContain('label="To"');
+    expect(card).toContain('label="HPAY wallet fee" value="None"');
+    expect(card).toContain('label="Hub fee" value="None"');
+    expect(card).toContain("This phone never receives the Agent Wallet key");
+    expect(card).toContain("Approve Fast Pay");
+    expect(card).toContain("Reject");
+    expect(app).toContain("agentCompanionApi.decideFastPay(");
+    expect(app).toContain("approval.operation_id");
+    expect(api).toContain('"agent_wallet_companion_pending_fast_pay"');
+    expect(api).toContain('"agent_wallet_companion_decide_fast_pay"');
+    expect(api).not.toContain("decideFastPay: (commitment");
+  });
+
+  it("persists one exact biometric signature before transport and retries no other bytes", () => {
+    const pilot = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/pilot.rs",
+    );
+    const session = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/session.rs",
+    );
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    expect(pilot).toContain("SignedAgentFastPayApprovalDecision::sign(");
+    expect(pilot).toContain("pending.signed_decision = Some(signed.clone());");
+    expect(pilot).toContain("// The exact signature bytes are durable before transport.");
+    expect(pilot).toContain("PreparedAgentFastPayDecision::Signed(signed)");
+    expect(session).toContain("OutboundKind::AgentFastPayApprovalPoll { .. }");
+    expect(session).toContain("OutboundKind::AgentFastPayApprovalDecision(signed)");
+    expect(storage).toContain("pending_agent_fast_pay_approval");
+    expect(storage).toContain("Only one mobile payment consent may be pending");
+  });
+});
+
+describe("Agent HVM Fast Pay mobile approval boundary", () => {
+  it("shows the exact contract, 18-lease and zero-fee facts", () => {
+    const card = read("agent/AgentHvmApprovalCard.tsx");
+    const app = read("agent/AgentCompanionApp.tsx");
+    const api = read("agent/api.ts");
+    expect(card).toContain('label="Amount"');
+    expect(card).toContain('label="To"');
+    expect(card).toContain('label="Contract"');
+    expect(card).toContain('label="Contract leases" value="18 bound and verified"');
+    expect(card).toContain('label="HPAY wallet fee" value="None"');
+    expect(card).toContain('label="Hub fee" value="None"');
+    expect(card).toContain("The Agent");
+    expect(card).toContain("key and your Personal Wallet key never enter this phone");
+    expect(app).toContain("agentCompanionApi.decideHvmFastPay(");
+    expect(app).toContain("approval.operation_id");
+    expect(api).toContain('"agent_wallet_companion_pending_hvm_fast_pay"');
+    expect(api).toContain('"agent_wallet_companion_decide_hvm_fast_pay"');
+    expect(api).not.toContain("decideHvmFastPay: (commitment");
+  });
+
+  it("persists one exact HVM biometric signature before transport", () => {
+    const pilot = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/pilot.rs",
+    );
+    const session = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/session.rs",
+    );
+    const storage = readWorkspace(
+      "apps/mobile/src-tauri/src/agent_companion/storage.rs",
+    );
+    expect(pilot).toContain("SignedAgentHvmApprovalDecision::sign(");
+    expect(pilot).toContain("PreparedAgentHvmDecision::Signed(signed)");
+    expect(session).toContain("OutboundKind::AgentHvmApprovalPoll { .. }");
+    expect(session).toContain("OutboundKind::AgentHvmApprovalDecision(signed)");
+    expect(storage).toContain("pending_agent_hvm_approval");
+    expect(storage).toContain("network_fee_zhu != 0");
+    expect(storage).toContain("wallet_fee_zhu != 0");
+    expect(storage).toContain("hub_fee_zhu != 0");
   });
 });

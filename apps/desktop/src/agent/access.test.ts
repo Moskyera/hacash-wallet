@@ -52,6 +52,12 @@ const overview = (overrides: Partial<AgentWalletOverview> = {}): AgentWalletOver
   unlocked: true,
   payments_suspended: false,
   mainnet_spending_ready: true,
+  trusted_mainnet_fast_pay_pilot: false,
+  l2_binding: null,
+  hvm_channel_binding: null,
+  hvm_registry_binding: null,
+  l2_channel_setup: null,
+  l2_channel_close: null,
   confirmed_balance_units: "1000000",
   reserved_units: "0",
   available_units: "1000000",
@@ -90,7 +96,7 @@ describe("Agent Wallet UI access is independent from write readiness", () => {
     ["zero balance", { confirmed_balance_units: "0" }],
     ["missing mobile", { mobile_witness_ready: false }],
     ["missing witness", { mobile_witness_synchronized: false }],
-    ["mainnet node", { node: { ...overview().node!, mainnet: true } }],
+    ["wrong-network mainnet node", { node: { ...overview().node!, mainnet: true } }],
   ])("keeps the dashboard open read-only for %s", (_label, change) => {
     expect(agentWalletUiState(runtime(), overview(change))).toBe("read_only");
   });
@@ -117,6 +123,35 @@ describe("Agent Wallet UI access is independent from write readiness", () => {
 
   it("becomes available only when every write prerequisite is satisfied", () => {
     expect(agentWalletUiState(runtime(), overview())).toBe("available");
+  });
+
+  it("accepts an exact verified mainnet node only with authenticated pilot consent", () => {
+    const mainnet = overview({
+      network_mode: "mainnet",
+      mainnet_spending_ready: true,
+      trusted_mainnet_fast_pay_pilot: true,
+      block_one_fingerprint:
+        "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+      node: {
+        ...overview().node!,
+        chain_id: 0,
+        mainnet: true,
+        current_height: 765_432,
+        network_kind: "mainnet",
+        node_profile_id: "hacash-mainnet",
+        funding_confirmed: false,
+        block_one_fingerprint:
+          "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+      },
+    });
+    expect(agentWalletPaymentBlockers(runtime(), mainnet)).toEqual([]);
+    expect(
+      agentWalletPaymentBlockers(runtime(), {
+        ...mainnet,
+        trusted_mainnet_fast_pay_pilot: false,
+        mainnet_spending_ready: false,
+      }),
+    ).toContain("mainnet_consent_missing");
   });
 });
 
@@ -555,7 +590,7 @@ describe("the pairing refusal never names an escape route that is closed", () =>
     expect(text).toContain("Clear the emergency stop in Payment control first");
     expect(text).toContain("Enable locally is unavailable too");
     // And it must carry the actual reason, not merely say "unavailable".
-    expect(text).toContain("does not match this Local Pilot network");
+    expect(text).toContain("does not match this Agent Wallet network");
     // The control the sentence names is genuinely disabled in that state.
     expect(
       emergencyStopControl({

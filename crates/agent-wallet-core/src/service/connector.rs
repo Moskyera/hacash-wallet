@@ -2,15 +2,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use hpay_agent_connector::{
-    AgentBackend, AgentOperationStatus, AgentRequest, AgentResponse, ConnectorError,
-    ConnectorResult, PAIRING_COMPLETION_TTL_SECS, PairedAgent, PairedAgentStatus,
+    AgentBackend, AgentOperationStatus, AgentPaymentRail, AgentRequest, AgentResponse,
+    ConnectorError, ConnectorResult, PAIRING_COMPLETION_TTL_SECS, PairedAgent, PairedAgentStatus,
     PairingCompletionRequest, PairingSubmissionCommitment, VerifiedAgentRequest,
 };
 
 use super::{
     AgentAuthorization, AgentOperation, AgentPermission, AgentPolicy, AgentRecord, AgentStatus,
     AgentWalletManager, AgentWalletResult, HacUnits, OperationStatus, PaymentOperationView,
-    active_reservations, validate_authorization, validate_text,
+    active_l1_reservations, validate_authorization, validate_text,
 };
 use crate::pairing_outbox::{
     MAX_PAIRING_COMPLETION_OUTBOX_ENTRIES, PairingCompletionOutboxEntry, pairing_id_sha256,
@@ -217,44 +217,134 @@ impl AgentWalletManager {
                     reserved_units,
                 })
             }
-            AgentRequest::CreatePaymentIntent(intent) => {
-                let operation = self
-                    .create_payment_intent(
-                        &authorization,
-                        super::AgentPaymentRequest {
-                            idempotency_key: intent.idempotency_key,
-                            asset: intent.asset,
-                            amount_units: HacUnits::new(intent.amount_units),
-                            recipient: intent.recipient,
-                            reason: intent.reason,
-                            expires_at: intent.expires_at_unix,
-                        },
-                        now,
-                    )
-                    .await?;
-                Ok(AgentResponse::IntentCreated {
-                    operation_id: operation.operation_id,
-                })
-            }
+            AgentRequest::CreatePaymentIntent(intent) => match intent.rail {
+                AgentPaymentRail::Layer1 => {
+                    let operation = self
+                        .create_payment_intent(
+                            &authorization,
+                            super::AgentPaymentRequest {
+                                idempotency_key: intent.idempotency_key,
+                                asset: intent.asset,
+                                amount_units: HacUnits::new(intent.amount_units),
+                                recipient: intent.recipient,
+                                reason: intent.reason,
+                                expires_at: intent.expires_at_unix,
+                            },
+                            now,
+                        )
+                        .await?;
+                    Ok(AgentResponse::IntentCreated {
+                        operation_id: operation.operation_id,
+                    })
+                }
+                AgentPaymentRail::FastPay => {
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    {
+                        if intent.asset != "HAC" {
+                            return Err(super::AgentWalletError::UnsupportedAsset);
+                        }
+                        let operation = self.request_fast_pay_intent(
+                            &authorization,
+                            crate::fast_pay_operation::AgentFastPayRequest {
+                                idempotency_key: intent.idempotency_key,
+                                amount_units: HacUnits::new(intent.amount_units),
+                                recipient: intent.recipient,
+                                reason: intent.reason,
+                                expires_at: intent.expires_at_unix,
+                            },
+                            now,
+                        )?;
+                        Ok(AgentResponse::IntentCreated {
+                            operation_id: operation.operation_id,
+                        })
+                    }
+                    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+                    {
+                        Err(super::AgentWalletError::SigningBlocked)
+                    }
+                }
+                AgentPaymentRail::HvmFastPay => {
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    {
+                        if intent.asset != "HAC" {
+                            return Err(super::AgentWalletError::UnsupportedAsset);
+                        }
+                        let operation = self
+                            .request_hvm_payment_intent(
+                                &authorization,
+                                crate::hvm_payment_operation::AgentHvmPaymentRequest {
+                                    idempotency_key: intent.idempotency_key,
+                                    amount_units: HacUnits::new(intent.amount_units),
+                                    recipient: intent.recipient,
+                                    reason: intent.reason,
+                                    expires_at: intent.expires_at_unix,
+                                },
+                                now,
+                            )
+                            .await?;
+                        Ok(AgentResponse::IntentCreated {
+                            operation_id: operation.operation_id,
+                        })
+                    }
+                    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+                    {
+                        Err(super::AgentWalletError::SigningBlocked)
+                    }
+                }
+            },
             AgentRequest::GetOwnOperationStatus { operation_id } => {
-                let operation = self.operation_for_verified(&authorization, &operation_id, now)?;
-                Ok(AgentResponse::OperationStatus {
-                    operation_id,
-                    status: connector_status(operation.status),
-                })
+                match self.operation_for_verified(&authorization, &operation_id, now) {
+                    Ok(operation) => Ok(AgentResponse::OperationStatus {
+                        operation_id,
+                        status: connector_status(operation.status),
+                    }),
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    Err(super::AgentWalletError::OperationNotFound) => {
+                        match self.fast_pay_operation_for_verified(
+                            &authorization,
+                            &operation_id,
+                            now,
+                        ) {
+                            Ok(operation) => Ok(AgentResponse::OperationStatus {
+                                operation_id,
+                                status: connector_fast_pay_status(operation.status),
+                            }),
+                            Err(super::AgentWalletError::OperationNotFound) => {
+                                let operation = self.hvm_payment_operation_for_verified(
+                                    &authorization,
+                                    &operation_id,
+                                    now,
+                                )?;
+                                Ok(AgentResponse::OperationStatus {
+                                    operation_id,
+                                    status: connector_hvm_status(operation.status),
+                                })
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
             }
             AgentRequest::ListOwnOperations { limit, cursor } => {
                 let operations = self.list_operations_for_agent(&authorization, now)?;
-                let mut matching = operations
+                let mut operation_ids = operations
                     .into_iter()
-                    .filter(|operation| {
+                    .map(|operation| operation.operation_id)
+                    .collect::<Vec<_>>();
+                #[cfg(feature = "agent-wallet-testnet-pilot")]
+                operation_ids.extend(self.list_fast_pay_operations_for_agent(&authorization, now)?);
+                #[cfg(feature = "agent-wallet-testnet-pilot")]
+                operation_ids.extend(self.list_hvm_operations_for_agent(&authorization, now)?);
+                operation_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+                operation_ids.dedup();
+                let mut operation_ids = operation_ids
+                    .into_iter()
+                    .filter(|operation_id| {
                         cursor
                             .as_deref()
-                            .is_none_or(|cursor| operation.operation_id.as_str() > cursor)
+                            .is_none_or(|cursor| operation_id.as_str() > cursor)
                     })
-                    .map(|operation| operation.operation_id);
-                let mut operation_ids = matching
-                    .by_ref()
                     .take(usize::from(limit) + 1)
                     .collect::<Vec<_>>();
                 let has_more = operation_ids.len() > usize::from(limit);
@@ -270,7 +360,21 @@ impl AgentWalletManager {
                 })
             }
             AgentRequest::CancelOwnUnsigned { operation_id } => {
-                self.cancel_own_unsigned(&authorization, &operation_id, now)?;
+                match self.cancel_own_unsigned(&authorization, &operation_id, now) {
+                    Ok(_) => {}
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    Err(super::AgentWalletError::OperationNotFound) => {
+                        match self.cancel_fast_pay_own_unsigned(&authorization, &operation_id, now)
+                        {
+                            Ok(_) => {}
+                            Err(super::AgentWalletError::OperationNotFound) => {
+                                self.cancel_hvm_own_unsigned(&authorization, &operation_id, now)?;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
                 Ok(AgentResponse::Cancelled { operation_id })
             }
         }
@@ -304,7 +408,7 @@ impl AgentWalletManager {
         now: u64,
     ) -> AgentWalletResult<(u64, u64)> {
         let state = self.state_for_verified(authorization, now)?;
-        let reserved = active_reservations(&state)?;
+        let reserved = active_l1_reservations(&state)?;
         let node = crate::node_binding::verified_agent_node(
             &state.node_url,
             &state.network_mode,
@@ -437,6 +541,56 @@ fn connector_status(status: OperationStatus) -> AgentOperationStatus {
     }
 }
 
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn connector_fast_pay_status(
+    status: crate::fast_pay_operation::AgentFastPayStatus,
+) -> AgentOperationStatus {
+    use crate::fast_pay_operation::AgentFastPayStatus;
+
+    match status {
+        AgentFastPayStatus::PaymentIntentCreated => AgentOperationStatus::PaymentIntentCreated,
+        AgentFastPayStatus::FundsReserved => AgentOperationStatus::FundsReserved,
+        AgentFastPayStatus::ApprovalRequested => AgentOperationStatus::ApprovalRequested,
+        AgentFastPayStatus::Approved => AgentOperationStatus::Approved,
+        AgentFastPayStatus::ExecutionPrepared => AgentOperationStatus::Approved,
+        AgentFastPayStatus::Signed => AgentOperationStatus::RecoveryRequired,
+        AgentFastPayStatus::Submitted => AgentOperationStatus::FastPaySubmitted,
+        AgentFastPayStatus::AwaitingRecipient => AgentOperationStatus::FastPayAwaitingRecipient,
+        AgentFastPayStatus::Committed => AgentOperationStatus::Committed,
+        AgentFastPayStatus::Rejected => AgentOperationStatus::Rejected,
+        AgentFastPayStatus::Cancelled => AgentOperationStatus::Cancelled,
+        AgentFastPayStatus::ExactRetryReady | AgentFastPayStatus::RecoveryRequired => {
+            AgentOperationStatus::RecoveryRequired
+        }
+    }
+}
+
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn connector_hvm_status(
+    status: crate::hvm_payment_operation::AgentHvmPaymentStatus,
+) -> AgentOperationStatus {
+    use crate::hvm_payment_operation::AgentHvmPaymentStatus;
+    match status {
+        AgentHvmPaymentStatus::PaymentIntentCreated => AgentOperationStatus::PaymentIntentCreated,
+        AgentHvmPaymentStatus::FundsReserved => AgentOperationStatus::FundsReserved,
+        AgentHvmPaymentStatus::UnsignedPrepared => {
+            AgentOperationStatus::UnsignedTransactionPersisted
+        }
+        AgentHvmPaymentStatus::ApprovalRequested => AgentOperationStatus::ApprovalRequested,
+        AgentHvmPaymentStatus::Approved | AgentHvmPaymentStatus::SigningPrepared => {
+            AgentOperationStatus::Approved
+        }
+        AgentHvmPaymentStatus::Signed => AgentOperationStatus::Signed,
+        AgentHvmPaymentStatus::Submitted => AgentOperationStatus::FastPaySubmitted,
+        AgentHvmPaymentStatus::Committed => AgentOperationStatus::Committed,
+        AgentHvmPaymentStatus::Rejected => AgentOperationStatus::Rejected,
+        AgentHvmPaymentStatus::Cancelled => AgentOperationStatus::Cancelled,
+        AgentHvmPaymentStatus::ExactRetryReady | AgentHvmPaymentStatus::RecoveryRequired => {
+            AgentOperationStatus::RecoveryRequired
+        }
+    }
+}
+
 fn unix_now() -> ConnectorResult<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -546,6 +700,7 @@ mod tests {
                     block_one_fingerprint: Some(
                         "000008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff".into(),
                     ),
+                    mainnet_pilot_acknowledgement: None,
                 },
                 timestamp,
             )
@@ -878,6 +1033,7 @@ mod tests {
                 hpay_agent_connector::protocol::CreatePaymentIntent {
                     idempotency_key: "emergency-stop-test-0001".into(),
                     asset: "HAC".into(),
+                    rail: AgentPaymentRail::Layer1,
                     amount_units: 1,
                     recipient: "1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS".into(),
                     reason: "must never reach the node".into(),

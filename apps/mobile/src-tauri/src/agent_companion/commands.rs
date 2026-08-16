@@ -7,7 +7,7 @@ use hpay_companion_protocol::{
     WitnessRotationPhase,
 };
 use serde::{Deserialize, Serialize};
-use tauri::Webview;
+use tauri::{AppHandle, Webview};
 
 use super::AgentCompanionMobileState;
 
@@ -215,15 +215,24 @@ fn pending_consent_view(
             recorded_at_unix: pending.confirmed_at.clone(),
         });
     }
-    state
-        .pending_approval
-        .as_ref()
-        .map(|pending| CompanionPendingConsentView {
+    if let Some(pending) = &state.pending_approval {
+        return Some(CompanionPendingConsentView {
             kind: super::storage::DISCARDED_PILOT_APPROVAL.to_owned(),
             operation_id: pending.decision.operation_id.clone(),
             amount_units: pending.decision.amount_units.to_string(),
             recipient: pending.decision.recipient.clone(),
             recorded_at_unix: pending.decision.issued_at.to_string(),
+        });
+    }
+    state
+        .pending_agent_fast_pay_approval
+        .as_ref()
+        .map(|pending| CompanionPendingConsentView {
+            kind: super::storage::DISCARDED_AGENT_FAST_PAY_APPROVAL.to_owned(),
+            operation_id: pending.decision.commitment.operation_id.clone(),
+            amount_units: pending.decision.commitment.amount_units.to_string(),
+            recipient: pending.decision.commitment.payee.clone(),
+            recorded_at_unix: pending.decision.decision_issued_at.to_string(),
         })
 }
 
@@ -339,6 +348,12 @@ pub struct CompanionLifecycleRequest {
 pub struct CompanionLifecycleView {
     session_allowed_in_background: bool,
     native_disconnect_enforced: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionActivityCloseView {
+    closed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -882,6 +897,24 @@ pub async fn agent_wallet_companion_disconnect(
     #[cfg(not(target_os = "android"))]
     let _ = state;
     Ok(CompanionDisconnectView { disconnected: true })
+}
+
+#[tauri::command]
+pub async fn agent_wallet_companion_close_activity(
+    webview: Webview,
+    app: AppHandle,
+) -> Result<CompanionActivityCloseView, String> {
+    require_agent_companion_webview(&webview)?;
+    #[cfg(target_os = "android")]
+    {
+        crate::agent_companion_identity::finish_agent_activity(&app).await?;
+        return Ok(CompanionActivityCloseView { closed: true });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("The private Agent Wallet activity can close only on Android".to_owned())
+    }
 }
 
 #[tauri::command]

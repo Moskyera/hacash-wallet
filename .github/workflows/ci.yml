@@ -54,6 +54,14 @@ jobs:
         with:
           shared-key: wallet-rust-quality
 
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce the exact reviewed Rust advisory policy
+        run: |
+          node --test scripts/check-rust-advisories.test.mjs
+          node scripts/check-rust-advisories.mjs check
+
       - name: Check Rust formatting
         run: >-
           cargo fmt
@@ -187,15 +195,15 @@ jobs:
         working-directory: apps/desktop
         run: yarn install --frozen-lockfile --non-interactive
 
-      - name: Compile Linux desktop without the blocked Agent pilot
+      - name: Compile Linux desktop with bounded Agent mainnet
         if: runner.os == 'Linux'
         working-directory: apps/desktop
-        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-bounded-mainnet-pilot
 
-      - name: Compile Windows desktop with the Agent Wallet testnet pilot
+      - name: Compile Windows desktop with bounded Agent mainnet
         if: runner.os == 'Windows'
         working-directory: apps/desktop
-        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-testnet-pilot
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-bounded-mainnet-pilot
 
   android-compile:
     name: Android arm64 debug compile
@@ -270,7 +278,7 @@ jobs:
 
       - name: Build Android arm64 debug APK
         working-directory: apps/mobile
-        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-testnet-pilot
+        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-bounded-mainnet-pilot
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh

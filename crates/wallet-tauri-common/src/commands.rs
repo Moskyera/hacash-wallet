@@ -651,15 +651,16 @@ pub async fn wallet_channel_info(state: State<'_, AppState>) -> Result<serde_jso
 }
 
 #[tauri::command]
-pub fn wallet_preview_channel_open(
+pub async fn wallet_preview_channel_open(
     hub_address: String,
-    user_deposit_mei: f64,
-    hub_deposit_mei: f64,
+    user_deposit_mei: String,
+    hub_deposit_mei: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let mut svc = state.inner.blocking_lock();
+    let mut svc = state.inner.lock().await;
     let preview = svc
-        .preview_channel_open(&hub_address, user_deposit_mei, hub_deposit_mei)
+        .preview_channel_open(&hub_address, &user_deposit_mei, &hub_deposit_mei)
+        .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(preview).map_err(|e| e.to_string())
 }

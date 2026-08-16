@@ -41,6 +41,12 @@ pub enum JournalOperationType {
     RecipientConfirmation,
     Recovery,
     Reconciliation,
+    L1ChannelOpen,
+    L1ChannelClose,
+    HvmChannelActivation,
+    HvmPayment,
+    HvmWatchtower,
+    HvmLeaseRenewal,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +67,38 @@ pub enum JournalPhase {
     RecoveryStarted,
     RecoveryCompleted,
     ReconciliationCompleted,
+    L1IntentValidated,
+    L1OpenAbandonedUnsigned,
+    L1OpenSignatureMayExist,
+    L1SignatureProduced,
+    L1OpenSubmissionStarted,
+    L1OpenSubmitted,
+    L1OpenConfirmed,
+    L1OpenRecoveryRequired,
+    L1CloseFreezeIntentPersisted,
+    L1CloseFrozenBeforeSigning,
+    L1CloseSignatureMayExist,
+    L1CloseSubmissionStarted,
+    L1CloseSubmitted,
+    L1CloseConfirmed,
+    L1CloseRetired,
+    L1CloseRecoveryRequired,
+    HvmChannelActivated,
+    HvmPaymentProposalPersisted,
+    HvmPaymentSignatureMayExist,
+    HvmPaymentFullySigned,
+    HvmChainIntentPersisted,
+    HvmChainSignatureMayExist,
+    HvmChainSigned,
+    HvmChainSubmissionStarted,
+    HvmChainSubmitted,
+    HvmChainConfirmed,
+    HvmChainRecoveryRequired,
+    /// A signed chain transaction was proven inadmissible by a consensus rule
+    /// that block verification itself applies, read from the chain one last
+    /// time and found absent, and retired to a terminal state so a correct
+    /// replacement can be signed.
+    HvmChainAbandonedInadmissible,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +346,25 @@ impl AuthenticatedJournal {
         let mut encoded =
             serde_json::to_vec(&record).map_err(|error| HubError::State(error.to_string()))?;
         encoded.push(b'\n');
+        if encoded.len() > MAX_RECORD_BYTES {
+            return Err(HubError::State("L2 journal record is oversized".into()));
+        }
+        reject_symlink(&self.path, "L2 journal")?;
+        let current_len = if self.path.exists() {
+            fs::metadata(&self.path)
+                .map_err(|error| HubError::State(error.to_string()))?
+                .len()
+        } else {
+            0
+        };
+        let projected_len = current_len
+            .checked_add(encoded.len() as u64)
+            .ok_or_else(|| HubError::State("L2 journal size overflow".into()))?;
+        if projected_len > MAX_JOURNAL_BYTES {
+            return Err(HubError::State(
+                "L2 journal append would exceed the size limit".into(),
+            ));
+        }
 
         let mut options = OpenOptions::new();
         options.create(true).append(true);

@@ -108,7 +108,7 @@
   background: #070707;
   color: #d0d0d0;
   font-size: 0.64rem;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .wallet-spaces-root > .wallet-space-switcher button.active {
@@ -205,9 +205,16 @@
   border-bottom: 1px solid #171717;
 }
 
+/*
+ * One row, however many actions the wallet can honestly offer. It was pinned
+ * to four columns, which left two empty cells on a watch-only wallet (Send and
+ * Fast Pay are hidden there) and had nowhere to put Scan QR. Auto columns fit
+ * two, four or five without a second row.
+ */
 .mobile-primary-actions {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   gap: 7px;
 }
 
@@ -222,7 +229,7 @@
   background: #070707;
   color: #cfcfcf;
   font-size: 0.62rem;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .quick-action.primary-action {

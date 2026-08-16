@@ -52,6 +52,12 @@ jobs:
         with:
           shared-key: release-fast-pay-hub-linux-x64
 
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce Linux Hub mainnet Rust advisory policy
+        run: node scripts/check-rust-advisories.mjs release linux-hub-mainnet
+
       - name: Verify Hub source and installer
         shell: bash
         run: |

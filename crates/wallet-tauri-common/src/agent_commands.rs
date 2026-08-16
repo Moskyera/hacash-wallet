@@ -529,6 +529,7 @@ pub async fn agent_wallet_create(
     network_mode: String,
     node_url: String,
     block_one_fingerprint: Option<String>,
+    mainnet_pilot_acknowledgement: Option<String>,
     webview: Webview,
     state: tauri::State<'_, AgentAppState>,
 ) -> Result<Value, String> {
@@ -543,6 +544,7 @@ pub async fn agent_wallet_create(
                 network_mode,
                 node_url,
                 block_one_fingerprint,
+                mainnet_pilot_acknowledgement,
             },
             unix_now()?,
         )
@@ -744,6 +746,172 @@ pub async fn agent_wallet_overview(
 }
 
 #[tauri::command]
+pub async fn agent_wallet_prepare_fast_pay_channel(
+    wallet_id: String,
+    hub_url: String,
+    deposit: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let review = require_manager(&state)?
+            .lock()
+            .await
+            .prepare_l2_channel_setup(&wallet_id, &hub_url, &deposit, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(review).map_err(|_| "Agent channel review encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, hub_url, deposit, state);
+        Err("Agent channel setup is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_confirm_fast_pay_channel_setup(
+    wallet_id: String,
+    operation_id: String,
+    review_commitment: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let review = require_manager(&state)?
+            .lock()
+            .await
+            .confirm_l2_channel_setup(&wallet_id, &operation_id, &review_commitment, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(review).map_err(|_| "Agent channel result encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, review_commitment, state);
+        Err("Agent channel setup is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_recover_fast_pay_channel_setup(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let review = require_manager(&state)?
+            .lock()
+            .await
+            .recover_l2_channel_setup(&wallet_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(review)
+            .map_err(|_| "Agent channel recovery encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent channel setup is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_prepare_fast_pay_channel_close(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let review = require_manager(&state)?
+            .lock()
+            .await
+            .prepare_l2_channel_close(&wallet_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(review)
+            .map_err(|_| "Agent channel close review encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent channel close is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_confirm_fast_pay_channel_close(
+    wallet_id: String,
+    operation_id: String,
+    review_commitment: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let review = require_manager(&state)?
+            .lock()
+            .await
+            .confirm_l2_channel_close(&wallet_id, &operation_id, &review_commitment, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(review)
+            .map_err(|_| "Agent channel close result encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, review_commitment, state);
+        Err("Agent channel close is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_recover_fast_pay_channel_close(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let review = require_manager(&state)?
+            .lock()
+            .await
+            .recover_l2_channel_close(&wallet_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(review)
+            .map_err(|_| "Agent channel close recovery encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent channel close is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
 pub async fn agent_wallet_enable_payments(
     wallet_id: String,
     webview: Webview,
@@ -862,6 +1030,298 @@ pub async fn agent_wallet_list_activity(
         .await
         .list_operations_admin(&wallet_id, unix_now()?)
         .map_err(public_error)
+}
+
+/// Reads the independent Agent Fast Pay journal for the trusted desktop UI.
+/// This command cannot sign, submit, retry, or fall back to L1.
+#[tauri::command]
+pub async fn agent_wallet_list_fast_pay_activity(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let manager = require_manager(&state)?;
+        let operations = manager
+            .lock()
+            .await
+            .list_fast_pay_operations_admin(&wallet_id, unix_now()?)
+            .map_err(public_error)?;
+        serde_json::to_value(operations)
+            .map_err(|_| "Agent Fast Pay activity encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Owner-triggered execution of one exact, already approved Agent Fast Pay
+/// operation. The core durably stores the unsigned bill and signature before
+/// submission and has no L1 fallback.
+#[tauri::command]
+pub async fn agent_wallet_execute_approved_fast_pay(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        manager
+            .sign_prepared_approved_fast_pay_bill(&wallet_id, &operation_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        let operation = manager
+            .submit_signed_approved_fast_pay_bill(&wallet_id, &operation_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(operation)
+            .map_err(|_| "Agent Fast Pay result encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Read-only Hub reconciliation across the pre-sign/post-sign uncertainty
+/// boundary. It never signs, resubmits, creates new identifiers, or falls back
+/// to L1.
+#[tauri::command]
+pub async fn agent_wallet_reconcile_fast_pay(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let manager = require_manager(&state)?;
+        let operation = manager
+            .lock()
+            .await
+            .recover_fast_pay_operation(&wallet_id, &operation_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(operation)
+            .map_err(|_| "Agent Fast Pay reconciliation encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Explicit retry of the exact durable signed bytes after recovery. The core
+/// first proves that the bound Hub still holds the same pending bill.
+#[tauri::command]
+pub async fn agent_wallet_retry_fast_pay_exact(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let manager = require_manager(&state)?;
+        let operation = manager
+            .lock()
+            .await
+            .retry_reconciled_fast_pay_submission(&wallet_id, &operation_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(operation)
+            .map_err(|_| "Agent Fast Pay retry encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_bind_hvm_channel(
+    wallet_id: String,
+    hub_url: String,
+    binding_commitment: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let binding = require_manager(&state)?
+            .lock()
+            .await
+            .verify_and_bind_hvm_channel(&wallet_id, &hub_url, &binding_commitment, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(binding).map_err(|_| "Agent HVM channel encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, hub_url, binding_commitment, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_bind_hvm_registry(
+    wallet_id: String,
+    hub_url: String,
+    binding_commitment: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let binding = require_manager(&state)?
+            .lock()
+            .await
+            .verify_and_bind_hvm_registry(&wallet_id, &hub_url, &binding_commitment, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(binding).map_err(|_| "Agent HVM registry encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, hub_url, binding_commitment, state);
+        Err("Agent HVM registry Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_list_hvm_activity(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operations = require_manager(&state)?
+            .lock()
+            .await
+            .list_hvm_operations_admin(&wallet_id, unix_now()?)
+            .map_err(public_error)?;
+        serde_json::to_value(operations)
+            .map_err(|_| "Agent HVM activity encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_execute_approved_hvm(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let _transition = state.transition.lock().await;
+        let operation = require_manager(&state)?
+            .lock()
+            .await
+            .execute_approved_hvm_payment(&wallet_id, &operation_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(operation).map_err(|_| "Agent HVM result encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_reconcile_hvm(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let _transition = state.transition.lock().await;
+        let operation = require_manager(&state)?
+            .lock()
+            .await
+            .recover_hvm_payment(&wallet_id, &operation_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(operation)
+            .map_err(|_| "Agent HVM reconciliation encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_retry_hvm_exact(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let _transition = state.transition.lock().await;
+        let operation = require_manager(&state)?
+            .lock()
+            .await
+            .retry_reconciled_hvm_payment(&wallet_id, &operation_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(operation).map_err(|_| "Agent HVM retry encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
 }
 
 #[tauri::command]

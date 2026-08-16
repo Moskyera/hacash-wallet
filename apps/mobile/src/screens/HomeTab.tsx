@@ -17,6 +17,12 @@ type Props = {
   onPullEnd: () => void;
   onSend: () => void;
   onReceive: () => void;
+  /**
+   * Opens Pay with the QR scanner showing. Optional, and the action is left
+   * off the screen when it is absent: nothing here may offer a camera the
+   * host screen cannot actually open.
+   */
+  onScan?: () => void;
   onHacd: () => void;
   onOpenFastPay: () => void;
   onOpenHistory: () => void;
@@ -36,6 +42,7 @@ export default function HomeTab({
   onPullEnd,
   onSend,
   onReceive,
+  onScan,
   onHacd,
   onOpenFastPay,
   onOpenHistory,
@@ -50,6 +57,11 @@ export default function HomeTab({
    *
    * Receive stays available to a watch-only wallet. It cannot spend, but an
    * address it can show is precisely what it is for.
+   *
+   * Scan QR sits beside them because the scanner already existed on Pay and
+   * had no way in from here: reaching it meant Pay, then Scan QR code. It is
+   * hidden on a watch-only wallet for the same reason Send is - the Pay tab it
+   * opens is not rendered there - and hidden when no handler is supplied.
    */
   const primaryActions = (
     <section className="mobile-primary-actions" aria-label="Wallet actions">
@@ -57,6 +69,9 @@ export default function HomeTab({
         <QuickAction kind="send" label={t("nav.send")} onClick={onSend} primary />
       ) : null}
       <QuickAction kind="receive" label={t("nav.receive")} onClick={onReceive} />
+      {!watchOnly && onScan ? (
+        <QuickAction kind="scan" label="Scan QR" onClick={onScan} />
+      ) : null}
       <QuickAction kind="hacd" label="My HACD" onClick={onHacd} />
       {!watchOnly ? <QuickAction kind="fastpay" label="Fast Pay" onClick={onOpenFastPay} /> : null}
     </section>
@@ -152,7 +167,7 @@ export default function HomeTab({
   );
 }
 
-type QuickKind = "send" | "receive" | "hacd" | "fastpay";
+type QuickKind = "send" | "receive" | "scan" | "hacd" | "fastpay";
 
 function QuickAction({ kind, label, onClick, primary = false }: { kind: QuickKind; label: string; onClick: () => void; primary?: boolean }) {
   return (
@@ -168,8 +183,10 @@ function QuickIcon({ kind }: { kind: QuickKind }) {
     ? "M12 20V5M6 11l6-6 6 6"
     : kind === "receive"
       ? "M12 4v15M6 13l6 6 6-6"
-      : kind === "hacd"
-        ? "m12 3 7 6-7 12L5 9l7-6zM5 9h14M9 9l3 12 3-12"
-        : "m13 2-8 12h7l-1 8 8-12h-7l1-8z";
+      : kind === "scan"
+        ? "M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16M4 12h16"
+        : kind === "hacd"
+          ? "m12 3 7 6-7 12L5 9l7-6zM5 9h14M9 9l3 12 3-12"
+          : "m13 2-8 12h7l-1 8 8-12h-7l1-8z";
   return <svg className="quick-action-icon" viewBox="0 0 24 24" aria-hidden><path d={path} /></svg>;
 }

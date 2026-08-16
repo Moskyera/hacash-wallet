@@ -46,10 +46,14 @@ import {
 } from "./CompanionReadOnlyPages";
 import { CompanionSecurity } from "./CompanionSecurity";
 import { COMPANION_DISCARD_CONSENT_PHRASE } from "./companionHeldConsent";
+import { AgentFastPayApprovalCard } from "./AgentFastPayApprovalCard";
+import { AgentHvmApprovalCard } from "./AgentHvmApprovalCard";
 import { useCompanionSession } from "./useCompanionSession";
 import type {
   AgentCompanionActivity,
   AgentCompanionPendingApproval,
+  AgentFastPayApprovalCommitment,
+  AgentHvmApprovalCommitment,
   CompanionPairingCompletionView,
   RotationCandidatePairingCompletionView,
   SignedRotationCandidateAcceptance,
@@ -91,6 +95,10 @@ export default function AgentCompanionApp() {
   const [discardConfirm, setDiscardConfirm] = useState(false);
   const [discardText, setDiscardText] = useState("");
   const [actionNotice, setActionNotice] = useState("");
+  const [fastPayApproval, setFastPayApproval] =
+    useState<AgentFastPayApprovalCommitment | null>(null);
+  const [hvmApproval, setHvmApproval] =
+    useState<AgentHvmApprovalCommitment | null>(null);
   const busy = Boolean(companion.busy) || pairingBusy;
 
   const acceptOffer = async (raw: string) => {
@@ -441,6 +449,125 @@ export default function AgentCompanionApp() {
     }
   };
 
+  const checkFastPayApproval = async () => {
+    if (busy || !companion.session || !companion.stored?.pilotEnabled) {
+      companion.setError(
+        !companion.stored?.pilotEnabled
+          ? "Agent Fast Pay approvals are disabled in this build."
+          : "Connect to HPAY Desktop before checking Fast Pay approvals.",
+      );
+      return;
+    }
+    setPairingBusy("decision");
+    companion.setError("");
+    setActionNotice("");
+    try {
+      const result = await agentCompanionApi.pendingFastPay();
+      setFastPayApproval(result.commitment);
+      if (!result.commitment) {
+        setActionNotice("No Agent Fast Pay approval is waiting.");
+      }
+    } catch (reason) {
+      setFastPayApproval(null);
+      companion.setError(readableError(reason));
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+
+  const decideFastPay = async (decision: "approve" | "reject") => {
+    const approval = fastPayApproval;
+    if (busy || !approval) return;
+    setPairingBusy("decision");
+    companion.setError("");
+    setActionNotice("");
+    try {
+      const result = await agentCompanionApi.decideFastPay(
+        decision,
+        approval.operation_id,
+      );
+      if (
+        result.operationId !== approval.operation_id ||
+        result.approvalId !== approval.approval_id ||
+        result.approved !== (decision === "approve")
+      ) {
+        throw new Error("The desktop did not confirm the exact Fast Pay decision.");
+      }
+      setFastPayApproval(null);
+      setActionNotice(
+        decision === "approve"
+          ? "Fast Pay was approved on this phone. No payment was submitted yet."
+          : "Fast Pay was rejected. No payment bill was signed or submitted.",
+      );
+    } catch (reason) {
+      companion.setError(
+        `${readableError(reason)} If Android finished the fingerprint but the desktop answer was lost, tap the same choice to retry safely.`,
+      );
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+
+  const checkHvmApproval = async () => {
+    if (busy || !companion.session || !companion.stored?.pilotEnabled) {
+      companion.setError(
+        !companion.stored?.pilotEnabled
+          ? "HVM Fast Pay approvals are disabled in this build."
+          : "Connect to HPAY Desktop before checking HVM approvals.",
+      );
+      return;
+    }
+    setPairingBusy("decision");
+    companion.setError("");
+    setActionNotice("");
+    try {
+      const result = await agentCompanionApi.pendingHvmFastPay();
+      setHvmApproval(result.commitment);
+      if (!result.commitment) {
+        setActionNotice("No HVM Fast Pay approval is waiting.");
+      }
+    } catch (reason) {
+      setHvmApproval(null);
+      companion.setError(readableError(reason));
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+
+  const decideHvm = async (decision: "approve" | "reject") => {
+    const approval = hvmApproval;
+    if (busy || !approval) return;
+    setPairingBusy("decision");
+    companion.setError("");
+    setActionNotice("");
+    try {
+      const result = await agentCompanionApi.decideHvmFastPay(
+        decision,
+        approval.operation_id,
+      );
+      if (
+        result.operationId !== approval.operation_id ||
+        result.approvalId !== approval.approval_id ||
+        result.approved !== (decision === "approve")
+      ) {
+        throw new Error("The desktop did not confirm the exact HVM decision.");
+      }
+      setHvmApproval(null);
+      setActionNotice(
+        decision === "approve"
+          ? "HVM Fast Pay was approved on this phone. No payment was submitted yet."
+          : "HVM Fast Pay was rejected. No bill was signed or submitted.",
+      );
+    } catch (reason) {
+      companion.setError(
+        readableError(reason) +
+          " If Android finished the fingerprint but the desktop answer was lost, tap the same choice to retry safely.",
+      );
+    } finally {
+      setPairingBusy(false);
+    }
+  };
+
   const resetCompanion = () => {
     if (resetText !== "RESET COMPANION") return;
     if (busy) {
@@ -574,19 +701,35 @@ export default function AgentCompanionApp() {
         />
       ) : null}
       {configured && page === "activity" ? (
-        <CompanionActivity
-          snapshot={companion.trustedSnapshot}
-          // syncNow returns immediately while the eight-second heartbeat is in
-          // flight, so without this the button was enabled and the press did
-          // nothing at all: no spinner, no error, no change.
-          busy={busy || companion.syncInFlight}
-          hasSession={companion.session !== null}
-          onRefresh={companion.session ? () => void companion.syncNow() : undefined}
-          onDecision={(approval, decision) =>
-            void decidePayment(approval, decision)
-          }
-          onWitness={(operation) => void witnessPending(operation)}
-        />
+        <>
+          <AgentFastPayApprovalCard
+            approval={fastPayApproval}
+            busy={busy}
+            connected={companion.session !== null}
+            onCheck={() => void checkFastPayApproval()}
+            onDecision={(decision) => void decideFastPay(decision)}
+          />
+          <AgentHvmApprovalCard
+            approval={hvmApproval}
+            busy={busy}
+            connected={companion.session !== null}
+            onCheck={() => void checkHvmApproval()}
+            onDecision={(decision) => void decideHvm(decision)}
+          />
+          <CompanionActivity
+            snapshot={companion.trustedSnapshot}
+            // syncNow returns immediately while the eight-second heartbeat is in
+            // flight, so without this the button was enabled and the press did
+            // nothing at all: no spinner, no error, no change.
+            busy={busy || companion.syncInFlight}
+            hasSession={companion.session !== null}
+            onRefresh={companion.session ? () => void companion.syncNow() : undefined}
+            onDecision={(approval, decision) =>
+              void decidePayment(approval, decision)
+            }
+            onWitness={(operation) => void witnessPending(operation)}
+          />
+        </>
       ) : null}
       {page === "security" ? (
         <CompanionSecurity

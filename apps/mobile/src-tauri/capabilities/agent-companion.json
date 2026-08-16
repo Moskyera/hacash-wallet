@@ -5,7 +5,6 @@
   "local": true,
   "webviews": ["agent-companion"],
   "permissions": [
-    "allow-agent-companion",
-    "core:window:allow-close"
+    "allow-agent-companion"
   ]
 }

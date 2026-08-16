@@ -144,8 +144,11 @@ export default function SecurityScreen({
           spellCheck={false}
           onChange={(event) => setResetAddress(event.target.value)}
         />
+        {/* Permanently removes the wallet from this device. It drew as an
+            ordinary grey button, quieter than the Save buttons above it. */}
         <button
           type="button"
+          className="irreversible-action"
           disabled={
             busy ||
             (!watchOnly && !resetPassphrase) ||

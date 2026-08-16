@@ -102,8 +102,10 @@ commands.allow = [
   "wallet_execute_prepared_btc",
   "wallet_prepare_channel_open",
   "wallet_execute_prepared_channel_open",
+  "wallet_recover_channel_open",
   "wallet_prepare_channel_close",
   "wallet_execute_prepared_channel_close",
+  "wallet_recover_channel_close",
   "wallet_prepare_airgap_sign",
   "wallet_execute_prepared_airgap_sign",
   "wallet_prepare_cold_vault_activation",
@@ -140,8 +142,11 @@ commands.allow = [
 identifier = "allow-agent-companion"
 description = "Allows the isolated AI Agent Wallet companion webview to use native identity, pairing, read-only sync, and typed pilot approval/witness commands."
 commands.allow = [
+  "agent_wallet_companion_close_activity",
   "agent_wallet_companion_connect",
   "agent_wallet_companion_create_identity",
+  "agent_wallet_companion_decide_fast_pay",
+  "agent_wallet_companion_decide_hvm_fast_pay",
   "agent_wallet_companion_decide_payment",
   "agent_wallet_companion_disconnect",
   "agent_wallet_companion_discard_consent",
@@ -152,6 +157,8 @@ commands.allow = [
   "agent_wallet_companion_pairing_deliver_ack",
   "agent_wallet_companion_pairing_start",
   "agent_wallet_companion_pairing_retry_request",
+  "agent_wallet_companion_pending_fast_pay",
+  "agent_wallet_companion_pending_hvm_fast_pay",
   "agent_wallet_rotation_candidate_pairing_confirm",
   "agent_wallet_rotation_candidate_pairing_start",
   "agent_wallet_companion_ping",

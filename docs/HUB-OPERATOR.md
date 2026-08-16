@@ -2,15 +2,20 @@
 
 This guide is for operators running the official Hacash ChannelPay-compatible HPAY Fast Pay Hub. End users only need HPAY Wallet.
 
-## Mainnet-pilot safety model
+## Mainnet safety profiles
 
-The current mainnet profile is a deliberately bounded pilot. It uses official Hacash ChannelPay bill documents and does not change Hacash consensus, but it is hub coordinated and is not trustless or unilaterally enforceable on L1. The active Hacash mainnet exposes cooperative original-funding close action 3, so an operator and user must cooperate to settle a channel on L1.
+HPAY has two separate mainnet profiles. `mainnet-pilot` is the fail-closed trustless profile and remains unavailable until an independent rollback anchor and unilateral L1 dispute path exist. `mainnet-bounded-pilot` is an explicit trusted-Hub pilot. It uses official Hacash ChannelPay bill documents and does not change Hacash consensus, but it is Hub coordinated and is not trustless or unilaterally enforceable on L1. The active Hacash mainnet exposes cooperative original-funding close action 3, so an operator and user must cooperate to settle a channel on L1.
+
+**Current release status:** the one-click installer selects `mainnet-bounded-pilot`. It can enable new channel funding and payment signing only for explicitly allowlisted users, only while every readiness check is green, and only inside the hard 1/10/100 HAC limits. Wallets remain opted out by default and must display and persist the user's explicit trusted-pilot consent. The trustless `mainnet-pilot` profile still reports the missing rollback/dispute blockers and keeps `payments_enabled=false`.
 
 The Hub fails closed unless all of the following remain true:
 
 - a compatible HPAY full node reports fresh mainnet capabilities;
 - the full node is at or above the pinned mainnet checkpoint;
 - the Hub signer, durable state and authenticated journal are configured;
+- the selected profile is exactly the policy explicitly accepted by the wallet;
+- for `mainnet-pilot`, an independent rollback anchor and unilateral L1 dispute path are verified, and the exact full node reports `features.channel_unilateral_exit=true`;
+- for `mainnet-bounded-pilot`, the payer is allowlisted and aggregate Hub TVL stays within its cap;
 - the wallet fee is exactly zero;
 - both the payment and channel-funding amounts stay within their configured caps;
 - readiness is rechecked immediately before every Hub signature.
@@ -21,7 +26,7 @@ Normal HPAY Wallet L1 sends do not depend on this Hub and keep working when Fast
 
 | Piece | Binary | Role |
 |-------|--------|------|
-| Fast Pay Hub | `fast-pay-hub` | Wallet Hub API v4 and short-lived mainnet readiness |
+| Fast Pay Hub | `fast-pay-hub` | Wallet Hub API v7 and short-lived mainnet readiness |
 | HPAY full node | `hacash` / `hacash.exe` | Hacash L1 plus `/query/capabilities` |
 | Hub wallet | Separate Hacash keypair | Signs only the Hub side of ChannelPay bills |
 
@@ -39,10 +44,11 @@ Create and store three required independent values outside the source tree, plus
 
 - `HACASH_HUB_ADDRESS`: Hub Hacash address.
 - `HACASH_HUB_SECRET_HEX`: 64-character private key matching the Hub address.
-- `HACASH_HUB_JOURNAL_KEY_HEX`: independent random 32-byte key encoded as 64 hex characters.
+- HACASH_HUB_JOURNAL_KEY_HEX: independent random 32-byte key encoded as 64 hex characters.
+- HACASH_HUB_STATE_KEY_HEX: a second independent random 32-byte key used only to seal the complete durable state container.
 - `HACASH_NODE_API_TOKEN`: optional token matching the full node configuration. Required when the full node protects its API with a token.
 
-Never commit these values, upload them to a GitHub repository, include them in an image, or reuse the Hub private key as the journal key. Use the operating-system secret manager or a root-owned environment file with the narrowest possible permissions.
+All three secret keys must be different. Never commit these values, upload them to a GitHub repository, include them in an image, or reuse one key for another purpose. Use the operating-system secret manager or a root-owned environment file with the narrowest possible permissions.
 
 ## Build
 
@@ -54,20 +60,23 @@ cargo build -p l2-fast-pay-hub --features server --bin fast-pay-hub --release --
 
 A `vX.Y.Z-hub` tag builds `hpay-fast-pay-hub-vX.Y.Z-linux-x64.tar.gz` through `.github/workflows/release-hub.yml`. The release contains the compiled binary, installer, hardened systemd unit and operator README. Verify the published SHA-256 file and GitHub provenance, extract the archive, then run `sudo ./install.sh`.
 
-The installer verifies the local HPAY full node, creates an independent journal key, installs a dedicated service account and binds the Hub only to loopback. It refuses to overwrite an existing signer, journal key or state. HTTPS reverse-proxy setup remains an explicit operator step because it requires the operator's own domain and certificate.
+The installer verifies the local HPAY full node, creates independent journal and sealed-state keys, installs a dedicated service account and binds the Hub only to loopback. It refuses to overwrite an existing signer, journal key, state key or state. HTTPS reverse-proxy setup remains an explicit operator step because it requires the operator's own domain and certificate.
 
-## Mainnet-pilot run
+## Bounded mainnet pilot run
 
-The example caps each payment and each newly funded channel at 1 HAC (`100000000` Zhu). Use lower caps during initial deployment.
+The bounded mainnet pilot caps each payment at 1 HAC (`100000000` Zhu), each newly funded channel at 10 HAC (`1000000000` Zhu), and aggregate active/reserved Hub TVL at 100 HAC (`10000000000` Zhu). Operators may configure lower values, never higher ones.
 
 ```bash
 export HACASH_HUB_ADDRESS=1YourDedicatedHubAddress
 export HACASH_HUB_SECRET_HEX=your64characterhubprivatekey
 export HACASH_HUB_JOURNAL_KEY_HEX=yourIndependent64characterJournalKey
+export HACASH_HUB_STATE_KEY_HEX=yourDifferent64characterStateKey
 export HACASH_NODE_API_TOKEN=yourFullnodeApiToken
-export HACASH_HUB_DEPLOYMENT_PROFILE=mainnet-pilot
+export HACASH_HUB_DEPLOYMENT_PROFILE=mainnet-bounded-pilot
 export HACASH_HUB_MAINNET_MAX_PAYMENT_HAC_ZHU=100000000
-export HACASH_HUB_MAINNET_MAX_CHANNEL_FUNDING_HAC_ZHU=100000000
+export HACASH_HUB_MAINNET_MAX_CHANNEL_FUNDING_HAC_ZHU=1000000000
+export HACASH_HUB_MAINNET_ALLOWED_USERS=1YourPilotUserAddress
+export HACASH_HUB_MAINNET_MAX_AGGREGATE_TVL_HAC_ZHU=10000000000
 
 ./target/release/fast-pay-hub \
   --listen 127.0.0.1:8790 \
@@ -83,11 +92,14 @@ curl http://127.0.0.1:8790/v1/health
 curl http://127.0.0.1:8790/v1/readiness/mainnet
 ```
 
-`payments_enabled` must be `true`, `wallet_fee_hac` must be `"0"`, and `blockers` must be empty. Readiness expires quickly by design; never cache it as a permanent approval.
+For `mainnet-bounded-pilot`, `payments_enabled` may be `true` only when the node, durable storage, allowlist, TVL and caps are all green; `trusted_bounded_pilot` must be `true`, `wallet_fee_hac` must be `"0"`, and the wallet must have explicit local consent. For `mainnet-pilot`, `payments_enabled` must remain `false` until the rollback-anchor and unilateral-dispute blockers are backed by real independent services and tests. Readiness expires quickly by design; never cache it as permanent approval.
+
+The current Istanbul full node reports `features.channel_unilateral_exit=false`. This is intentional: legacy Go dispute action numbers collide with Istanbul TEX/AST action kinds. Do not override this result with an operator flag and do not copy the legacy codecs into the mainnet registry.
 
 ## Production hardening
 
 - Keep `--listen` on a private interface and publish only HTTPS port 443 through a reverse proxy with per-IP rate, connection and request-size limits.
+- By default the Hub ignores `X-Real-IP` and uses the socket peer. If the Hub itself must rate-limit original clients, set `--trusted-proxy-ip` to the one exact proxy IP and configure that proxy to overwrite, never append, a single `X-Real-IP` value. Never trust a subnet or a public peer.
 - Allow the Hub process to reach only its configured local full node.
 - Back up the state file, authenticated journal and checkpoint together while the service is stopped.
 - Monitor disk space, full-node synchronization, readiness blockers and clock synchronization.
@@ -110,7 +122,7 @@ Treat `/etc/hpay-fast-pay-hub` and `/var/lib/hpay-fast-pay-hub` as one inseparab
 
 Never delete, regenerate or manually edit the journal/checkpoint to make the Hub start. A failed authenticated recovery is a safety stop that requires operator investigation.
 
-## Wallet Hub API v4
+## Wallet Hub API v7
 
 - `GET /v1/health`: discovery and operational status.
 - `GET /v1/readiness/mainnet`: authoritative, short-lived mainnet-pilot gate.
@@ -118,6 +130,26 @@ Never delete, regenerate or manually edit the journal/checkpoint to make the Hub
 - `GET /v1/fast-pay/{id}`: payment status.
 - `GET /v1/fast-pay/inbox/{payee}`: routed payments awaiting recipient verification.
 - `POST /v1/fast-pay/{id}/confirm`: merges verified signatures and commits only when complete.
+
+## Read-only mainnet infrastructure preflight
+
+Before any canary funding, run the repository preflight against the exact public
+HTTPS node and Hub endpoints. It performs no unlock, signing, submission or
+state mutation. It reuses the wallet's production validators for node identity,
+block 1, freshness, bounded-pilot readiness, zero wallet fee, channel funding,
+cooperative close and verified HPAY HVM deployment.
+
+```text
+cargo run -p hacash-wallet-core --example hpay_mainnet_infrastructure_preflight -- --node-url https://NODE --hub-url https://HUB --hub-address HUB_HACASH_ADDRESS --payment 0.001 --channel-funding 1
+```
+
+A successful result deliberately prints `release_ready: false`. Infrastructure
+readiness is necessary but not sufficient: the next gate is the reviewed
+small-value mainnet lifecycle `open -> Personal Fast Pay -> Agent Fast Pay ->
+cooperative close`, including restart and exact-recovery checks. Preserve the
+JSON result with the canary report; never replace a failed field manually.
+Follow the exact stop conditions and evidence requirements in
+`docs/l2/MAINNET_CANARY_RUNBOOK.md`.
 
 ## Cross-channel settlement
 
@@ -131,7 +163,7 @@ Routed payments require two open channels: payer-to-Hub and recipient-to-Hub. Th
 
 ## Testnet/development
 
-For local development, omit `HACASH_HUB_DEPLOYMENT_PROFILE` or set it to `testnet`. Mainnet Wallet clients will not accept this profile. Existing testnet Wallet Hub API v4 behavior remains available for compatibility.
+For local development, omit `HACASH_HUB_DEPLOYMENT_PROFILE` or set it to `testnet`. Mainnet Wallet clients will not accept this profile. Existing testnet payment behavior remains available, but L1 open/close recovery requires Wallet Hub API v7.
 
 ## Troubleshooting
 

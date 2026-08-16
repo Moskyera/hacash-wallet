@@ -1,7 +1,20 @@
 import { useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { agentCompanionApi } from "./api";
 import AgentCompanionApp from "./AgentCompanionApp";
+
+const AGENT_CLOSE_CLEANUP_GRACE_MS = 1_000;
+
+async function requestBoundedLifecycleCleanup(): Promise<void> {
+  let timeout: number | undefined;
+  await Promise.race([
+    agentCompanionApi.lifecycle("webview_closing").catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timeout = window.setTimeout(resolve, AGENT_CLOSE_CLEANUP_GRACE_MS);
+    }),
+  ]).finally(() => {
+    if (timeout !== undefined) window.clearTimeout(timeout);
+  });
+}
 
 export default function AgentCompanionWindowApp() {
   const [closeError, setCloseError] = useState("");
@@ -16,9 +29,12 @@ export default function AgentCompanionWindowApp() {
     try {
       if ("__TAURI_INTERNALS__" in window) {
         try {
-          await agentCompanionApi.lifecycle("webview_closing");
+          await requestBoundedLifecycleCleanup();
         } finally {
-          await getCurrentWindow().close();
+          const result = await agentCompanionApi.closeActivity();
+          if (!result.closed) {
+            throw new Error("Agent Activity close was not confirmed");
+          }
         }
       } else {
         window.location.assign("/");

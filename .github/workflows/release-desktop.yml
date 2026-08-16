@@ -76,6 +76,12 @@ jobs:
         with:
           shared-key: release-desktop-windows-x64
 
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce Windows mainnet Rust advisory policy
+        run: node scripts/check-rust-advisories.mjs release windows-mainnet
+
       - name: Install pinned frontend dependencies
         working-directory: apps/desktop
         run: |
@@ -84,7 +90,7 @@ jobs:
 
       - name: Build unsigned Windows x64 NSIS and MSI
         working-directory: apps/desktop
-        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis,msi -- --locked --features agent-wallet-testnet-pilot
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --bundles nsis,msi -- --locked --features agent-wallet-bounded-mainnet-pilot
 
       - name: Stage and validate exact unsigned Windows artifacts
         run: node scripts/release-artifacts.mjs stage-desktop windows dist-release
@@ -333,6 +339,12 @@ jobs:
         with:
           shared-key: release-desktop-linux-x64
 
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce Linux desktop mainnet Rust advisory policy
+        run: node scripts/check-rust-advisories.mjs release linux-desktop-mainnet
+
       - name: Install pinned frontend dependencies
         working-directory: apps/desktop
         run: |
@@ -341,7 +353,7 @@ jobs:
 
       - name: Build Linux x64 deb and AppImage
         working-directory: apps/desktop
-        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --bundles deb,appimage -- --locked
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --bundles deb,appimage -- --locked --features agent-wallet-bounded-mainnet-pilot
 
       - name: Stage and validate exact Linux artifacts
         run: |

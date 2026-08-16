@@ -355,6 +355,7 @@ fn revocation_immediately_prunes_agents_terminal_pre_signing_rows_and_idempotenc
     state.idempotency.insert(
         scoped_key.clone(),
         crate::service::IdempotencyRecord {
+            rail: crate::service::OperationRail::L1,
             request_commitment: view.request_commitment,
             operation_id: operation_id.clone(),
         },
@@ -475,7 +476,7 @@ async fn legacy_mainnet_anchor_ready_remains_read_only_across_every_payment_path
     let baseline_bytes = serde_json::to_vec(&baseline).unwrap();
     assert_eq!(baseline.network_mode, "mainnet");
     assert!(baseline.external_rollback_anchor_ready);
-    assert!(!crate::service::agent_spending_ready("mainnet"));
+    assert!(!crate::service::agent_spending_ready("mainnet", false));
 
     let request = AgentPaymentRequest {
         idempotency_key: "legacy-mainnet-create-is-blocked".to_owned(),

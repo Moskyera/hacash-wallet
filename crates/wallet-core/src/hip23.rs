@@ -69,7 +69,8 @@ pub fn policy_amount_mei_ceil(amount_mei: f64) -> WalletResult<u64> {
     Ok(rounded as u64)
 }
 
-pub const L1_DEFAULT_FEE_MEI: f64 = 1.244;
+/// Protocol amount `1:244`, expressed in decimal HAC/mei for node APIs.
+pub const L1_DEFAULT_FEE_MEI: f64 = 0.0001;
 
 pub fn validate_simple_l1_send(
     to_address: &str,
@@ -266,19 +267,18 @@ pub fn format_mei_for_node(amount_mei: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-/// Convert wallet millis wire (`whole:frac`) to node mei decimal.
+/// Convert a Hacash fin amount (`value:unit`) to node mei decimal.
 pub fn wire_mei_for_node(wire: &str) -> String {
-    format_mei_for_node(parse_hacash_wire_mei(wire))
+    format_l1_fee_mei_for_node(parse_hacash_wire_mei(wire))
 }
 
-/// Parse HAC wire `whole:frac` (frac = millis) to mei float.
+/// Parse a canonical Hacash fin amount (`value:unit`) as HAC/mei.
 pub fn parse_hacash_wire_mei(wire: &str) -> f64 {
-    let Some((whole, frac)) = wire.split_once(':') else {
+    let Ok(amount) = field::Amount::from(wire) else {
         return 0.0;
     };
-    let whole: f64 = whole.parse().unwrap_or(0.0);
-    let frac: f64 = frac.parse().unwrap_or(0.0);
-    whole + frac / 1000.0
+    // Amount owns the protocol's value/unit scaling. UNIT_MEI is the node API's HAC unit.
+    unsafe { amount.to_unit_float(field::UNIT_MEI) }
 }
 
 pub fn validate_type4_send(
@@ -440,14 +440,14 @@ mod tests {
     #[test]
     fn parse_hacash_wire_mei_splits_whole_frac() {
         let mei = parse_hacash_wire_mei("40:244");
-        assert!((mei - 40.244).abs() < 0.001);
+        assert!((mei - 0.004).abs() < 0.000001);
     }
 
     #[test]
     fn wire_mei_for_node_uses_decimal_mei() {
-        assert_eq!(wire_mei_for_node("45:0"), "45");
-        assert_eq!(wire_mei_for_node("1:244"), "1.244");
-        assert_eq!(wire_mei_for_node("40:244"), "40.244");
+        assert_eq!(wire_mei_for_node("1:244"), "0.0001");
+        assert_eq!(wire_mei_for_node("40:244"), "0.004");
+        assert!((parse_hacash_wire_mei("1:248") - 1.0).abs() < f64::EPSILON);
     }
 }
 

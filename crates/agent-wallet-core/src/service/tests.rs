@@ -14,6 +14,7 @@ fn create_request() -> CreateAgentWallet {
         block_one_fingerprint: Some(
             "000008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff".into(),
         ),
+        mainnet_pilot_acknowledgement: None,
     }
 }
 
@@ -63,6 +64,7 @@ fn insert_indexed_operation(
     state.idempotency.insert(
         scoped_key.clone(),
         IdempotencyRecord {
+            rail: OperationRail::L1,
             request_commitment: view.request_commitment,
             operation_id: operation_id.clone(),
         },
@@ -113,6 +115,7 @@ fn mainnet_create_fails_before_registry_or_filesystem_mutation() {
         network_mode: "mainnet".into(),
         node_url: "http://nodeapi.hacash.org".into(),
         block_one_fingerprint: None,
+        mainnet_pilot_acknowledgement: None,
     };
     assert_eq!(
         manager.create_wallet(request, 100),
@@ -129,6 +132,48 @@ fn mainnet_create_fails_before_registry_or_filesystem_mutation() {
         .collect();
     entries_after.sort();
     assert_eq!(entries_after, entries_before);
+}
+
+#[cfg(feature = "agent-wallet-bounded-mainnet-pilot")]
+#[test]
+fn mainnet_create_requires_exact_acknowledgement_and_persists_bounded_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let mut manager = AgentWalletManager::open(root.path()).unwrap();
+    let insecure_request = CreateAgentWallet {
+        passphrase: PASSPHRASE.into(),
+        network_mode: "mainnet".into(),
+        node_url: hacash_wallet_core::settings::DEFAULT_NODE_URL.into(),
+        block_one_fingerprint: None,
+        mainnet_pilot_acknowledgement: Some(super::AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT.into()),
+    };
+    assert_eq!(
+        manager.create_wallet(insecure_request, 99),
+        Err(AgentWalletError::InvalidPaymentRequest)
+    );
+    assert!(manager.list_wallets().unwrap().is_empty());
+    let request = CreateAgentWallet {
+        passphrase: PASSPHRASE.into(),
+        network_mode: "mainnet".into(),
+        node_url: "https://node.example".into(),
+        block_one_fingerprint: None,
+        mainnet_pilot_acknowledgement: Some(super::AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT.into()),
+    };
+    let created = manager.create_wallet(request, 100).unwrap();
+    manager.unlock(&created.wallet_id, PASSPHRASE, 101).unwrap();
+    let session = manager.session(&created.wallet_id).unwrap();
+    let state = manager
+        .load_verified_state(
+            &created.wallet_id,
+            &session.state_master,
+            &session.journal_key,
+        )
+        .unwrap();
+    assert_eq!(state.network_mode, "mainnet");
+    assert!(state.trusted_mainnet_fast_pay_pilot);
+    assert_eq!(
+        state.block_one_fingerprint,
+        hacash_wallet_core::node_discovery::MAINNET_BLOCK_ONE_HASH
+    );
 }
 
 #[test]
@@ -202,21 +247,21 @@ async fn overview_does_not_report_verified_when_balance_data_fails() {
                 "ret": 0,
                 "api_version": 1,
                 "node": { "name": "hacash-fullnode", "version": "1.0.10", "build_time": "test" },
-                "chain": { "id": 7, "height": 1, "next_height": 2, "mainnet": false },
+                "chain": { "id": 7, "height": 2, "next_height": 3, "mainnet": false },
                 "network": {
                     "kind": hacash_wallet_core::HPAY_LOCAL_PILOT_NETWORK_KIND,
                     "node_profile_id": hacash_wallet_core::HPAY_LOCAL_PILOT_PROFILE_ID,
                     "block_1_available": true,
                     "block_1_hash": ANCHOR,
                     "instance_id": instance_id,
-                    "funding_confirmed": false,
-                    "transaction_ready": false,
-                    "current_height": 1,
+                    "funding_confirmed": true,
+                    "transaction_ready": true,
+                    "current_height": 2,
                     "transaction_format_version": 2
                 },
-                "istanbul": { "activation_height": 1, "evaluation_height": 2, "active": true },
+                "istanbul": { "activation_height": 1, "evaluation_height": 3, "active": true },
                 "transactions": { "registered": [2, 3], "enabled": [2, 3] },
-                "actions": { "registered": [1], "enabled": [1] },
+                "actions": { "registered": [1, 2, 3, 14, 1041], "enabled": [1, 2, 3, 14, 1041] },
                 "features": {
                     "action_guard": false, "tx_blob": false, "ast": false, "tex": false,
                     "native_assets": false, "hip20": false, "hip20_primitives": false,
@@ -228,6 +273,7 @@ async fn overview_does_not_report_verified_when_balance_data_fails() {
                 "api": {
                     "balance_query": true,
                     "transaction_submit": true,
+                    "transaction_submit_bound": true,
                     "transaction_query": true,
                     "reconciliation_by_tx_hash": true
                 },
@@ -839,6 +885,12 @@ fn daily_policy_counts_total_debit_of_pending_reservations() {
         emergency_epoch: 1,
         payments_suspended: false,
         external_rollback_anchor_ready: false,
+        trusted_mainnet_fast_pay_pilot: false,
+        l2_binding: None,
+        l2_channel_setup: None,
+        l2_channel_close: None,
+        hvm_channel_binding: None,
+        hvm_registry_binding: None,
         agents: BTreeMap::new(),
         pairing_completion_outbox: BTreeMap::new(),
         companion_security: None,
@@ -846,6 +898,8 @@ fn daily_policy_counts_total_debit_of_pending_reservations() {
         witness_rotation: None,
         witness_rotation_history: Vec::new(),
         operations: BTreeMap::from([(existing.operation_id().as_str().to_owned(), existing)]),
+        fast_pay_operations: BTreeMap::new(),
+        hvm_payment_operations: BTreeMap::new(),
         idempotency: BTreeMap::new(),
         authentication_challenges: BTreeMap::new(),
         authenticated_sessions: BTreeMap::new(),
@@ -884,6 +938,9 @@ fn empty_completion_outbox_preserves_the_exact_legacy_state_commitment() {
         .unwrap();
     assert!(state.pairing_completion_outbox.is_empty());
     assert!(state.companion_security.is_none());
+    assert!(state.l2_binding.is_none());
+    assert!(state.fast_pay_operations.is_empty());
+    assert!(!state.trusted_mainnet_fast_pay_pilot);
     let expected = state_commitment(&state).unwrap();
     let legacy_bytes = serde_json::to_vec(&state).unwrap();
     assert!(
@@ -894,8 +951,35 @@ fn empty_completion_outbox_preserves_the_exact_legacy_state_commitment() {
         !String::from_utf8_lossy(&legacy_bytes).contains("companion_security"),
         "unused companion state must not change legacy authenticated bytes"
     );
+    assert!(
+        !String::from_utf8_lossy(&legacy_bytes).contains("l2_binding"),
+        "an absent Agent L2 binding must not change legacy authenticated bytes"
+    );
+    assert!(
+        !String::from_utf8_lossy(&legacy_bytes).contains("fast_pay_operations"),
+        "empty Agent Fast Pay state must not change legacy authenticated bytes"
+    );
+    assert!(
+        !String::from_utf8_lossy(&legacy_bytes).contains("trusted_mainnet_fast_pay_pilot"),
+        "a false mainnet consent must not change legacy authenticated bytes"
+    );
     let legacy_roundtrip: AgentWalletState = serde_json::from_slice(&legacy_bytes).unwrap();
     assert_eq!(state_commitment(&legacy_roundtrip).unwrap(), expected);
+}
+
+#[test]
+fn legacy_l1_idempotency_record_omits_and_defaults_the_rail() {
+    let record = IdempotencyRecord {
+        rail: OperationRail::L1,
+        request_commitment: "11".repeat(32),
+        operation_id: OperationId::new(),
+    };
+    let encoded = serde_json::to_vec(&record).unwrap();
+    assert!(!String::from_utf8_lossy(&encoded).contains("rail"));
+    let decoded: IdempotencyRecord = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded.rail, OperationRail::L1);
+    assert_eq!(decoded.request_commitment, record.request_commitment);
+    assert_eq!(decoded.operation_id, record.operation_id);
 }
 
 #[test]

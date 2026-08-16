@@ -1,4 +1,4 @@
-//! L2 Fast Pay hub client (HPAY Wallet Hub API v4).
+//! L2 Fast Pay hub client (HPAY Wallet Hub API v7).
 //!
 //! CSP operators implement:
 //! - `GET /v1/health`
@@ -49,6 +49,9 @@ pub struct HubHealth {
     /// Provider's aggregate production-readiness assertion.
     #[serde(default)]
     pub production_mainnet_ready: bool,
+    /// Explicit bounded pilot that remains dependent on Hub availability.
+    #[serde(default)]
+    pub trusted_bounded_pilot_ready: bool,
     /// Truthful transport/deployment label.
     #[serde(default)]
     pub deployment_profile: Option<String>,
@@ -66,6 +69,8 @@ pub struct HubMainnetReadiness {
     pub valid_until_unix: u64,
     pub profile: String,
     pub payments_enabled: bool,
+    #[serde(default)]
+    pub close_enabled: bool,
     pub mainnet_detected: Option<bool>,
     pub fullnode_capabilities: Option<HubFullnodeCapabilities>,
     pub max_payment_hac_zhu: u64,
@@ -74,8 +79,12 @@ pub struct HubMainnetReadiness {
     pub wallet_fee_hac: String,
     pub trustless_finality: bool,
     pub unilateral_l1_enforceable: bool,
+    #[serde(default)]
+    pub trusted_bounded_pilot: bool,
     pub settlement_model: String,
     pub blockers: Vec<String>,
+    #[serde(default)]
+    pub close_blockers: Vec<String>,
     pub limitations: Vec<String>,
 }
 
@@ -90,24 +99,53 @@ pub struct HubFullnodeCapabilities {
     pub tip_timestamp_unix: u64,
     pub tip_age_seconds: u64,
     pub enabled_actions: Vec<u16>,
+    /// Exact node capability, not an operator assertion.
+    #[serde(default)]
+    pub channel_unilateral_exit: bool,
+    #[serde(default)]
+    pub channel_unilateral_exit_evidence:
+        Option<l2_fast_pay_hub::node::ChannelUnilateralExitEvidence>,
 }
 
 const MAINNET_READINESS_SCHEMA: &str = "hpay-fast-pay-mainnet-readiness/1";
 const MAINNET_PILOT_PROFILE: &str = "mainnet-pilot";
-const MAINNET_PILOT_HARD_MAX_HAC_ZHU: u64 = 100_000_000;
+const MAINNET_BOUNDED_PILOT_PROFILE: &str = "mainnet-bounded-pilot";
+const MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU: u64 = 100_000_000;
+const MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU: u64 = 1_000_000_000;
 const ZHU_PER_MILLIMEI: u64 = 100_000;
 const MAINNET_MIN_SAFE_HEIGHT: u64 = 765_432;
 const MAX_TIP_AGE_SECONDS: u64 = 3_600;
 const MAX_FUTURE_SKEW_SECONDS: u64 = 120;
 const MAX_READINESS_VALIDITY_SECONDS: u64 = 330;
+const REQUIRED_CHANNEL_OPEN_ACTION: u16 = 2;
 const REQUIRED_COOPERATIVE_CLOSE_ACTION: u16 = 3;
+const REQUIRED_CLOSE_PRINCIPAL_TRANSFER_ACTION: u16 = 14;
 
 impl HubMainnetReadiness {
     pub fn require_payment_ready(&self, amount_wire: Option<&str>) -> WalletResult<()> {
+        self.require_payment_ready_for_policy(amount_wire, MainnetFastPayPolicy::TrustlessOnly)
+    }
+
+    fn require_payment_ready_for_policy(
+        &self,
+        amount_wire: Option<&str>,
+        policy: MainnetFastPayPolicy,
+    ) -> WalletResult<()> {
+        let settlement_contract_ready = match policy {
+            MainnetFastPayPolicy::TrustlessOnly => {
+                self.profile == MAINNET_PILOT_PROFILE
+                    && self.trustless_finality
+                    && self.unilateral_l1_enforceable
+                    && !self.trusted_bounded_pilot
+            }
+            MainnetFastPayPolicy::TrustedBoundedPilot => {
+                self.profile == MAINNET_BOUNDED_PILOT_PROFILE && self.trusted_bounded_pilot
+            }
+        };
         if self.schema != MAINNET_READINESS_SCHEMA
-            || self.profile != MAINNET_PILOT_PROFILE
             || !self.payments_enabled
             || self.mainnet_detected != Some(true)
+            || !settlement_contract_ready
             || !self.blockers.is_empty()
         {
             return Err(WalletError::L2(
@@ -136,9 +174,9 @@ impl HubMainnetReadiness {
             ));
         }
         if self.max_payment_hac_zhu < ZHU_PER_MILLIMEI
-            || self.max_payment_hac_zhu > MAINNET_PILOT_HARD_MAX_HAC_ZHU
+            || self.max_payment_hac_zhu > MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU
             || self.max_channel_funding_hac_zhu < ZHU_PER_MILLIMEI
-            || self.max_channel_funding_hac_zhu > MAINNET_PILOT_HARD_MAX_HAC_ZHU
+            || self.max_channel_funding_hac_zhu > MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU
         {
             return Err(WalletError::L2(
                 "Fast Pay mainnet payment or channel-funding cap is missing, below wallet precision, or exceeds the HPAY pilot limit"
@@ -168,7 +206,18 @@ impl HubMainnetReadiness {
             || local_tip_age > MAX_TIP_AGE_SECONDS
             || !capabilities
                 .enabled_actions
+                .contains(&REQUIRED_CHANNEL_OPEN_ACTION)
+            || !capabilities
+                .enabled_actions
                 .contains(&REQUIRED_COOPERATIVE_CLOSE_ACTION)
+            || (matches!(policy, MainnetFastPayPolicy::TrustlessOnly)
+                && (!capabilities.channel_unilateral_exit
+                    || !capabilities
+                        .channel_unilateral_exit_evidence
+                        .as_ref()
+                        .is_some_and(
+                            l2_fast_pay_hub::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment,
+                        )))
         {
             return Err(WalletError::L2(
                 "Fast Pay Hub fullnode capabilities are incompatible or stale".into(),
@@ -191,10 +240,81 @@ impl HubMainnetReadiness {
         Ok(())
     }
 
-    pub(crate) fn require_channel_funding_ready(&self, amount_mei: f64) -> WalletResult<()> {
+    pub fn require_cooperative_close_ready(
+        &self,
+        requires_principal_transfer: bool,
+    ) -> WalletResult<()> {
+        if self.schema != MAINNET_READINESS_SCHEMA
+            || !matches!(
+                self.profile.as_str(),
+                MAINNET_PILOT_PROFILE | MAINNET_BOUNDED_PILOT_PROFILE
+            )
+            || !self.close_enabled
+            || self.mainnet_detected != Some(true)
+            || !self.close_blockers.is_empty()
+        {
+            return Err(WalletError::L2(
+                "Fast Pay mainnet cooperative-close readiness is not green".into(),
+            ));
+        }
+        let now = unix_now();
+        let validity = self
+            .valid_until_unix
+            .checked_sub(self.evaluated_unix)
+            .filter(|seconds| *seconds <= MAX_READINESS_VALIDITY_SECONDS);
+        if validity.is_none()
+            || self.evaluated_unix > now.saturating_add(MAX_FUTURE_SKEW_SECONDS)
+            || now > self.valid_until_unix
+        {
+            return Err(WalletError::L2(
+                "Fast Pay close readiness snapshot is invalid, expired, or from the future".into(),
+            ));
+        }
+        if !l2_fast_pay_hub::amount::parse_amount_mei(&self.wallet_fee_hac)
+            .is_ok_and(|amount| amount == l2_fast_pay_hub::amount::HacAmount::ZERO)
+        {
+            return Err(WalletError::L2(
+                "Fast Pay Hub did not explicitly declare a zero wallet fee for close".into(),
+            ));
+        }
+        let capabilities = self.fullnode_capabilities.as_ref().ok_or_else(|| {
+            WalletError::L2("Fast Pay Hub did not publish verified fullnode capabilities".into())
+        })?;
+        let expected_next_height = capabilities.height.checked_add(1);
+        let reported_tip_age = capabilities
+            .observed_unix
+            .saturating_sub(capabilities.tip_timestamp_unix);
+        let local_tip_age = now.saturating_sub(capabilities.tip_timestamp_unix);
+        if capabilities.observed_unix != self.evaluated_unix
+            || capabilities.api_version != 1
+            || capabilities.chain_id != 0
+            || !capabilities.mainnet
+            || capabilities.height < MAINNET_MIN_SAFE_HEIGHT
+            || expected_next_height != Some(capabilities.next_height)
+            || capabilities.tip_timestamp_unix
+                > capabilities
+                    .observed_unix
+                    .saturating_add(MAX_FUTURE_SKEW_SECONDS)
+            || capabilities.tip_age_seconds != reported_tip_age
+            || capabilities.tip_age_seconds > MAX_TIP_AGE_SECONDS
+            || local_tip_age > MAX_TIP_AGE_SECONDS
+            || !capabilities
+                .enabled_actions
+                .contains(&REQUIRED_COOPERATIVE_CLOSE_ACTION)
+            || (requires_principal_transfer
+                && !capabilities
+                    .enabled_actions
+                    .contains(&REQUIRED_CLOSE_PRINCIPAL_TRANSFER_ACTION))
+        {
+            return Err(WalletError::L2(
+                "Fast Pay Hub close fullnode capabilities are incompatible or stale".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn require_channel_funding_ready(&self, amount_mei: &str) -> WalletResult<()> {
         self.require_payment_ready(None)?;
-        let amount_wire = crate::hip23::format_mei_for_node(amount_mei);
-        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&amount_wire)
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(amount_mei)
             .map_err(|error| WalletError::L2(error.to_string()))?;
         let amount_zhu = amount
             .as_millimeis()
@@ -296,6 +416,13 @@ pub struct L2HubClient {
     base_url: String,
     http: Result<reqwest::Client, String>,
     mainnet: bool,
+    mainnet_policy: MainnetFastPayPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainnetFastPayPolicy {
+    TrustlessOnly,
+    TrustedBoundedPilot,
 }
 
 impl L2HubClient {
@@ -308,6 +435,31 @@ impl L2HubClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             http: crate::http_client::shared_http_client().cloned(),
             mainnet: network_mode == "mainnet",
+            mainnet_policy: MainnetFastPayPolicy::TrustlessOnly,
+        }
+    }
+
+    pub fn new_for_trusted_bounded_mainnet_pilot(
+        base_url: impl Into<String>,
+        network_mode: &str,
+    ) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            http: crate::http_client::shared_http_client().cloned(),
+            mainnet: network_mode == "mainnet",
+            mainnet_policy: MainnetFastPayPolicy::TrustedBoundedPilot,
+        }
+    }
+
+    pub fn new_for_wallet_policy(
+        base_url: impl Into<String>,
+        network_mode: &str,
+        trusted_mainnet_fast_pay_pilot: bool,
+    ) -> Self {
+        if network_mode == "mainnet" && trusted_mainnet_fast_pay_pilot {
+            Self::new_for_trusted_bounded_mainnet_pilot(base_url, network_mode)
+        } else {
+            Self::new_for_network(base_url, network_mode)
         }
     }
 
@@ -339,13 +491,336 @@ impl L2HubClient {
         Self::read_hub_json(response, "hub mainnet readiness").await
     }
 
+    /// Submit one exact Agent-signed HVM payment proposal for Hub co-signing.
+    /// Mainnet remains explicitly unavailable until the separate HVM
+    /// deployment/watchtower production gate is enabled in both wallet and Hub.
+    pub async fn cosign_hvm_payment(
+        &self,
+        request: &l2_fast_pay_hub::hvm_ledger::HvmPaymentRequestV1,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_channel::HvmChannelBillV1> {
+        if self.mainnet {
+            return Err(WalletError::L2(
+                "Agent HVM Fast Pay is not enabled for mainnet".into(),
+            ));
+        }
+        let url = format!("{}/v1/hvm/payment", self.base_url);
+        let response = self
+            .http()?
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| WalletError::L2(format!("Hub HVM payment unavailable: {error}")))?;
+        Self::read_hub_json(response, "Hub HVM payment").await
+    }
+
+    pub async fn hvm_payment_status(
+        &self,
+        operation_id: &str,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_ledger::HvmPaymentStatusV1> {
+        if operation_id.trim().is_empty() || operation_id.len() > 256 {
+            return Err(WalletError::L2("HVM operation id is invalid".into()));
+        }
+        let url = format!("{}/v1/hvm/payment/{operation_id}", self.base_url);
+        let response = self
+            .http()?
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| WalletError::L2(format!("Hub HVM status unavailable: {error}")))?;
+        Self::read_hub_json(response, "Hub HVM payment status").await
+    }
+
+    /// Fetch public activation and ledger evidence for one exact HVM channel.
+    /// Callers must independently verify the returned bundle against the live
+    /// pinned node and the expected Hub identity before using it.
+    pub async fn hvm_channel_status(
+        &self,
+        binding_commitment: &str,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_ledger::HvmChannelStatusV1> {
+        if binding_commitment.len() != 64
+            || !binding_commitment
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(WalletError::L2(
+                "HVM binding commitment must be canonical lowercase SHA-256 hex".into(),
+            ));
+        }
+        let url = format!("{}/v1/hvm/channel/{binding_commitment}", self.base_url);
+        let response =
+            self.http()?.get(url).send().await.map_err(|error| {
+                WalletError::L2(format!("Hub HVM channel unavailable: {error}"))
+            })?;
+        let status: l2_fast_pay_hub::hvm_ledger::HvmChannelStatusV1 =
+            Self::read_hub_json(response, "Hub HVM channel status").await?;
+        if status.schema != l2_fast_pay_hub::hvm_ledger::HVM_CHANNEL_STATUS_SCHEMA
+            || status.binding_commitment != binding_commitment
+            || status
+                .recovery_bundle
+                .binding
+                .commitment()
+                .map_err(|error| {
+                    WalletError::L2(format!("Hub HVM channel binding is invalid: {error}"))
+                })?
+                != binding_commitment
+        {
+            return Err(WalletError::L2(
+                "Hub HVM channel status does not match the requested binding".into(),
+            ));
+        }
+        status
+            .latest_fully_signed_bill
+            .validate_fully_signed(&status.recovery_bundle.binding)
+            .map_err(|error| WalletError::L2(format!("Hub HVM latest bill is invalid: {error}")))?;
+        Ok(status)
+    }
+
+    /// Submit one exact Agent-signed payment for the shared HVM registry V2.
+    /// Mainnet remains fail-closed until independently verified deployment
+    /// evidence and the production watchtower gates are enabled.
+    pub async fn cosign_hvm_registry_payment(
+        &self,
+        request: &l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryPaymentRequestV2,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_registry::HvmRegistryBillV2> {
+        if self.mainnet {
+            return Err(WalletError::L2(
+                "shared HVM registry Fast Pay is not enabled for mainnet".into(),
+            ));
+        }
+        let url = format!("{}/v2/hvm-registry/payment", self.base_url);
+        let response = self
+            .http()?
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| {
+                WalletError::L2(format!("Hub registry payment unavailable: {error}"))
+            })?;
+        Self::read_hub_json(response, "Hub registry payment").await
+    }
+
+    pub async fn hvm_registry_payment_status(
+        &self,
+        operation_id: &str,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryPaymentStatusV2> {
+        if operation_id.trim().is_empty() || operation_id.len() > 256 {
+            return Err(WalletError::L2(
+                "HVM registry operation id is invalid".into(),
+            ));
+        }
+        let url = format!("{}/v2/hvm-registry/payment/{operation_id}", self.base_url);
+        let response = self.http()?.get(url).send().await.map_err(|error| {
+            WalletError::L2(format!("Hub registry payment status unavailable: {error}"))
+        })?;
+        Self::read_hub_json(response, "Hub registry payment status").await
+    }
+
+    /// Fetch authenticated public evidence for one exact shared registry
+    /// channel. The caller must still re-probe its pinned full node before any
+    /// private key is used.
+    pub async fn hvm_registry_channel_status(
+        &self,
+        binding_commitment: &str,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryChannelStatusV2> {
+        require_lower_commitment(binding_commitment, "HVM registry binding")?;
+        let url = format!(
+            "{}/v2/hvm-registry/channel/{binding_commitment}",
+            self.base_url
+        );
+        let response = self.http()?.get(url).send().await.map_err(|error| {
+            WalletError::L2(format!("Hub registry channel unavailable: {error}"))
+        })?;
+        let status: l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryChannelStatusV2 =
+            Self::read_hub_json(response, "Hub registry channel status").await?;
+        if status.schema != l2_fast_pay_hub::hvm_registry_ledger::HVM_REGISTRY_CHANNEL_STATUS_SCHEMA
+            || status.binding_commitment != binding_commitment
+            || status
+                .recovery_bundle
+                .binding
+                .commitment()
+                .map_err(|error| {
+                    WalletError::L2(format!("Hub registry binding is invalid: {error}"))
+                })?
+                != binding_commitment
+        {
+            return Err(WalletError::L2(
+                "Hub registry status does not match the requested binding".into(),
+            ));
+        }
+        status
+            .latest_fully_signed_bill
+            .validate_fully_signed(&status.recovery_bundle.binding)
+            .map_err(|error| {
+                WalletError::L2(format!("Hub registry latest bill is invalid: {error}"))
+            })?;
+        Ok(status)
+    }
+
     pub async fn require_mainnet_payment_ready(
         &self,
         amount_wire: Option<&str>,
     ) -> WalletResult<HubMainnetReadiness> {
         let readiness = self.mainnet_readiness().await?;
-        readiness.require_payment_ready(amount_wire)?;
+        readiness.require_payment_ready_for_policy(amount_wire, self.mainnet_policy)?;
         Ok(readiness)
+    }
+
+    /// Verify the provider contract used by a wallet-funded channel open.
+    ///
+    /// This check is intentionally performed at both preparation and execution.
+    /// A prepared transaction must not remain authorized if the provider changes
+    /// its address, fee policy, routing support, readiness, or funding cap.
+    pub async fn require_channel_open_ready(
+        &self,
+        expected_hub_address: &str,
+        user_deposit_mei: &str,
+    ) -> WalletResult<HubHealth> {
+        self.require_channel_binding_ready(expected_hub_address, user_deposit_mei)
+            .await
+    }
+
+    /// Verify the live provider contract for an existing channel binding.
+    ///
+    /// This intentionally shares the exact identity, fee and funding policy
+    /// used when opening a channel, so adopting an existing Agent channel can
+    /// never bypass the mainnet exposure cap.
+    pub async fn require_channel_binding_ready(
+        &self,
+        expected_hub_address: &str,
+        user_deposit_mei: &str,
+    ) -> WalletResult<HubHealth> {
+        let health = self.health().await?;
+        if !health.ok
+            || health.version < 7
+            || !health.settlement_ready
+            || !health.cross_channel_ready
+            || !hub_fee_is_zero(&health)
+        {
+            return Err(WalletError::L2(
+                "Fast Pay provider is not ready for safe, fee-free routed settlement".into(),
+            ));
+        }
+        let published_address = health
+            .hub_address
+            .as_deref()
+            .filter(|address| !address.is_empty())
+            .ok_or_else(|| {
+                WalletError::L2("Fast Pay provider did not publish its address".into())
+            })?;
+        if published_address != expected_hub_address {
+            return Err(WalletError::L2(
+                "Fast Pay provider address changed; review the channel again".into(),
+            ));
+        }
+        if self.mainnet {
+            let health_contract_ready = match self.mainnet_policy {
+                MainnetFastPayPolicy::TrustlessOnly => {
+                    health.external_rollback_anchor_ready
+                        && health.l1_dispute_path_ready
+                        && health.production_mainnet_ready
+                        && health.deployment_profile.as_deref() == Some(MAINNET_PILOT_PROFILE)
+                }
+                MainnetFastPayPolicy::TrustedBoundedPilot => {
+                    health.trusted_bounded_pilot_ready
+                        && health.deployment_profile.as_deref()
+                            == Some(MAINNET_BOUNDED_PILOT_PROFILE)
+                }
+            };
+            if !health_contract_ready {
+                return Err(WalletError::L2(
+                    "Fast Pay provider does not match the explicitly selected mainnet settlement policy; new funding is blocked"
+                        .into(),
+                ));
+            }
+            self.require_mainnet_payment_ready(None)
+                .await?
+                .require_channel_funding_ready(user_deposit_mei)?;
+        }
+        Ok(health)
+    }
+
+    pub async fn open_channel(
+        &self,
+        request: &l2_fast_pay_hub::l1_channel::L1ChannelOpenRequest,
+    ) -> WalletResult<l2_fast_pay_hub::l1_channel::L1ChannelOpenStatusResponse> {
+        let binding = l2_fast_pay_hub::l1_channel::L1ChannelNetworkBinding {
+            network_kind: request.network.clone(),
+            chain_id: request.chain_id,
+            mainnet: request.mainnet,
+            block_1_hash: request.block_1_hash.clone(),
+            node_profile_id: request.node_profile_id.clone(),
+            network_instance_id: request.network_instance_id.clone(),
+            transaction_format_version: request.transaction_format_version,
+        };
+        if binding.validate().is_err() || request.mainnet != self.mainnet {
+            return Err(WalletError::L2(
+                "L1 channel-open request does not match this Hub client's exact network".into(),
+            ));
+        }
+        let url = format!("{}/v1/l1/channel/open", self.base_url);
+        let response = self
+            .http()?
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| WalletError::L2(format!("Hub channel open unavailable: {error}")))?;
+        Self::read_hub_json(response, "Hub channel open").await
+    }
+    pub async fn require_channel_close_ready(
+        &self,
+        expected_hub_address: &str,
+        requires_principal_transfer: bool,
+    ) -> WalletResult<HubHealth> {
+        let health = self.health().await?;
+        if !health.ok
+            || health.version < 7
+            || !health.settlement_ready
+            || !health.official_channelpay_ready
+            || !hub_fee_is_zero(&health)
+            || health.hub_address.as_deref() != Some(expected_hub_address)
+        {
+            return Err(WalletError::L2(
+                "Fast Pay Hub is not ready for an authenticated fee-free channel close".into(),
+            ));
+        }
+        if self.mainnet {
+            self.mainnet_readiness()
+                .await?
+                .require_cooperative_close_ready(requires_principal_transfer)?;
+        }
+        Ok(health)
+    }
+
+    pub async fn close_channel(
+        &self,
+        request: &l2_fast_pay_hub::l1_channel_close::L1ChannelCloseRequest,
+    ) -> WalletResult<l2_fast_pay_hub::l1_channel_close::L1ChannelCloseResponse> {
+        let binding = l2_fast_pay_hub::l1_channel::L1ChannelNetworkBinding {
+            network_kind: request.network.clone(),
+            chain_id: request.chain_id,
+            mainnet: request.mainnet,
+            block_1_hash: request.block_1_hash.clone(),
+            node_profile_id: request.node_profile_id.clone(),
+            network_instance_id: request.network_instance_id.clone(),
+            transaction_format_version: request.transaction_format_version,
+        };
+        if binding.validate().is_err() || request.mainnet != self.mainnet {
+            return Err(WalletError::L2(
+                "L1 channel-close request does not match this Hub client's exact network".into(),
+            ));
+        }
+        let url = format!("{}/v1/l1/channel/close", self.base_url);
+        let response = self
+            .http()?
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| WalletError::L2(format!("Hub channel close unavailable: {error}")))?;
+        Self::read_hub_json(response, "Hub channel close").await
     }
 
     pub async fn payment_status(&self, payment_id: &str) -> WalletResult<FastPayResponse> {
@@ -415,30 +890,76 @@ impl L2HubClient {
         req: &FastPayRequest,
         bills: &mut BillStore,
         safety: &mut crate::l2_safety::ClientL2Safety,
-        payer_account: &WalletAccount,
+        payer_signer: &dyn crate::l2_signer::FastPayBillSigner,
         payer_channel: &ChannelInfo,
         hub_address: &str,
     ) -> WalletResult<FastPayExecution> {
-        if payer_account.address() != req.payer {
+        if payer_signer.fast_pay_address() != req.payer {
             return Err(WalletError::Policy(
                 "Fast Pay payer account does not match the request".into(),
             ));
         }
-        let before_prepare = safety.operation(&req.operation_id)?;
+        self.prepare_and_persist_sender_bill(req, bills, safety, payer_channel, hub_address)
+            .await?;
+        // Personal Wallet preserves its existing final mainnet readiness
+        // re-check. Agent Wallet uses the staged API directly so it can also
+        // repeat its owner, emergency, node, Hub and channel checks here.
+        if self.mainnet {
+            self.require_mainnet_payment_ready(Some(&req.amount))
+                .await?;
+        }
+        self.revalidate_persisted_sender_bill(req, bills, safety, payer_channel, hub_address)?;
+        self.sign_and_persist_prepared_sender_bill(safety, payer_signer, &req.operation_id)?;
+        self.submit_signed_sender_bill(req, bills, safety, payer_channel, hub_address)
+            .await
+    }
+
+    /// Requests, validates and durably stores the exact unsigned Hub bill.
+    /// This stage never receives a signing key and can safely be followed by
+    /// caller-specific live re-verification before any secret is used.
+    pub async fn prepare_and_persist_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &BillStore,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<crate::l2_safety::ClientL2Operation> {
+        if req.fee_payer.as_deref() != Some("sender") {
+            return Err(WalletError::Policy(
+                "Fast Pay request must explicitly bind fee_payer=sender".into(),
+            ));
+        }
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&req.amount)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let before_prepare = safety.require_exact_sender_request(
+            &req.operation_id,
+            &req.idempotency_key,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            amount.as_millimeis(),
+            &req.channel_id,
+            payer_channel.reuse_version,
+            hub_address,
+        )?;
         if before_prepare.status.requires_explicit_reconciliation() {
             return Err(WalletError::L2(
                 "RecoveryRequired: this Fast Pay operation may already have reached the hub; automatic retry and L1 fallback are disabled".into(),
             ));
         }
-        let pay = match self.fast_pay(req).await {
-            Ok(pay) => pay,
-            Err(error) => {
-                if before_prepare.signed_bill_hex.is_some() {
-                    let _ = safety.mark_recovery_required(&req.operation_id);
-                }
-                return Err(error);
+        match before_prepare.status {
+            crate::l2_safety::ClientOperationStatus::PaymentIntentCreated => {}
+            crate::l2_safety::ClientOperationStatus::PersistedBeforeSigning => {
+                return Ok(before_prepare);
             }
-        };
+            _ => {
+                return Err(WalletError::L2(
+                    "Fast Pay preparation cannot resume from this durable operation state".into(),
+                ));
+            }
+        }
+        let pay = self.fast_pay(req).await?;
         if pay.payment_id != req.operation_id {
             return Err(WalletError::Policy(
                 "hub changed the durable Fast Pay operation id".into(),
@@ -468,18 +989,214 @@ impl L2HubClient {
             self.require_mainnet_payment_ready(Some(&req.amount))
                 .await?;
         }
-        let prepared = safety.persist_before_signing(&req.operation_id, bill_hex)?;
-        let signed_hex = match prepared.signed_bill_hex {
-            Some(existing) => existing,
-            None => {
-                let signed = cosign_bill_hex(bill_hex, payer_account)?;
-                safety.persist_signature(&req.operation_id, &signed)?;
-                signed
+        safety.persist_before_signing(&req.operation_id, bill_hex)
+    }
+
+    /// Rebuilds the trusted off-chain balance from the latest fully signed
+    /// local bill and proves that the durable unsigned Hub bill is still the
+    /// exact next transition. Call this immediately before key use.
+    pub fn revalidate_persisted_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &BillStore,
+        safety: &crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<crate::l2_safety::ClientL2Operation> {
+        if req.fee_payer.as_deref() != Some("sender") {
+            return Err(WalletError::Policy(
+                "Fast Pay request must explicitly bind fee_payer=sender".into(),
+            ));
+        }
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&req.amount)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let prepared = safety.require_exact_sender_request(
+            &req.operation_id,
+            &req.idempotency_key,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            amount.as_millimeis(),
+            &req.channel_id,
+            payer_channel.reuse_version,
+            hub_address,
+        )?;
+        if prepared.status != crate::l2_safety::ClientOperationStatus::PersistedBeforeSigning {
+            return Err(WalletError::L2(
+                "Fast Pay signing revalidation requires a durable unsigned bill".into(),
+            ));
+        }
+        let unsigned_bill_hex = prepared
+            .unsigned_bill_hex
+            .as_deref()
+            .ok_or_else(|| WalletError::L2("Fast Pay durable unsigned bill is missing".into()))?;
+        let trusted = trusted_channel_state(bills, payer_channel)?;
+        validate_sender_bill(
+            &req.operation_id,
+            unsigned_bill_hex,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            hub_address,
+            &req.channel_id,
+            &trusted,
+        )?;
+        Ok(prepared)
+    }
+
+    /// Adds exactly one local signature to an already durable unsigned bill
+    /// and persists the signed bytes before returning them to the caller.
+    pub fn sign_and_persist_prepared_sender_bill(
+        &self,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        payer_signer: &dyn crate::l2_signer::FastPayBillSigner,
+        operation_id: &str,
+    ) -> WalletResult<String> {
+        let prepared = safety.operation(operation_id)?;
+        if payer_signer.fast_pay_address() != prepared.payer {
+            return Err(WalletError::Policy(
+                "Fast Pay payer account does not match the durable operation".into(),
+            ));
+        }
+        let authorization =
+            crate::l2_signer::FastPaySigningAuthorization::from_persisted(&prepared)?;
+        let signed = payer_signer.cosign_authorized_fast_pay_bill(&authorization)?;
+        safety.persist_signature(operation_id, &signed)?;
+        Ok(signed)
+    }
+
+    /// Proves that the exact durable signed bytes still match the current
+    /// trusted L2 balance immediately before recording Submitted.
+    pub fn revalidate_persisted_signed_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &BillStore,
+        safety: &crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<crate::l2_safety::ClientL2Operation> {
+        if req.fee_payer.as_deref() != Some("sender") {
+            return Err(WalletError::Policy(
+                "Fast Pay request must explicitly bind fee_payer=sender".into(),
+            ));
+        }
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&req.amount)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let signed = safety.require_exact_sender_request(
+            &req.operation_id,
+            &req.idempotency_key,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            amount.as_millimeis(),
+            &req.channel_id,
+            payer_channel.reuse_version,
+            hub_address,
+        )?;
+        if signed.status != crate::l2_safety::ClientOperationStatus::Signed {
+            return Err(WalletError::L2(
+                "RecoveryRequired: Fast Pay submission requires one durably persisted signature"
+                    .into(),
+            ));
+        }
+        let signed_bill_hex = signed.signed_bill_hex.as_deref().ok_or_else(|| {
+            WalletError::L2("Fast Pay signed bytes are missing from durable storage".into())
+        })?;
+        let trusted = trusted_channel_state(bills, payer_channel)?;
+        validate_sender_bill(
+            &req.operation_id,
+            signed_bill_hex,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            hub_address,
+            &req.channel_id,
+            &trusted,
+        )?;
+        Ok(signed)
+    }
+
+    /// Submits only previously persisted signed bytes. Any unknown outcome is
+    /// frozen for explicit reconciliation and can never fall back to L1.
+    pub async fn submit_signed_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &mut BillStore,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<FastPayExecution> {
+        self.revalidate_persisted_signed_sender_bill(
+            req,
+            bills,
+            safety,
+            payer_channel,
+            hub_address,
+        )?;
+        safety.mark_submitted(&req.operation_id)?;
+        self.confirm_submitted_sender_bill(req, bills, safety, payer_channel, hub_address)
+            .await
+    }
+
+    /// Confirms an operation only after the caller has durably recorded the
+    /// exact Submitted intent. This is the network boundary used by Agent
+    /// Wallet after mirroring Submitted in its own authenticated journal.
+    pub async fn confirm_submitted_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &mut BillStore,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<FastPayExecution> {
+        if req.fee_payer.as_deref() != Some("sender") {
+            return Err(WalletError::Policy(
+                "Fast Pay request must explicitly bind fee_payer=sender".into(),
+            ));
+        }
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&req.amount)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let submitted = safety.require_exact_sender_request(
+            &req.operation_id,
+            &req.idempotency_key,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            amount.as_millimeis(),
+            &req.channel_id,
+            payer_channel.reuse_version,
+            hub_address,
+        )?;
+        if submitted.status != crate::l2_safety::ClientOperationStatus::Submitted {
+            return Err(WalletError::L2(
+                "RecoveryRequired: Hub confirmation requires a durable Submitted intent".into(),
+            ));
+        }
+        let signed_hex = submitted.signed_bill_hex.ok_or_else(|| {
+            WalletError::L2("Fast Pay signed bytes are missing from durable storage".into())
+        })?;
+        let trusted = match trusted_channel_state(bills, payer_channel) {
+            Ok(trusted) => trusted,
+            Err(error) => {
+                let _ = safety.mark_recovery_required(&req.operation_id);
+                return Err(error);
             }
         };
-        safety.mark_submitted(&req.operation_id)?;
+        if let Err(error) = validate_sender_bill(
+            &req.operation_id,
+            &signed_hex,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            hub_address,
+            &req.channel_id,
+            &trusted,
+        ) {
+            let _ = safety.mark_recovery_required(&req.operation_id);
+            return Err(error);
+        }
         let response = match self
-            .confirm_fast_pay(&pay.payment_id, &req.idempotency_key, &signed_hex)
+            .confirm_fast_pay(&req.operation_id, &req.idempotency_key, &signed_hex)
             .await
         {
             Ok(response) => response,
@@ -490,15 +1207,15 @@ impl L2HubClient {
                 )));
             }
         };
-        if response.payment_id != pay.payment_id {
+        if response.payment_id != req.operation_id {
             safety.mark_recovery_required(&req.operation_id)?;
             return Err(WalletError::Policy(
                 "hub confirmation changed the Fast Pay payment id".into(),
             ));
         }
         let confirmed_hex = response.bill_hex.as_deref().unwrap_or(&signed_hex);
-        validate_sender_bill(
-            &pay.payment_id,
+        if let Err(error) = validate_sender_bill(
+            &req.operation_id,
             confirmed_hex,
             &req.payer,
             &req.payee,
@@ -506,9 +1223,18 @@ impl L2HubClient {
             hub_address,
             &req.channel_id,
             &trusted,
-        )?;
+        ) {
+            let _ = safety.mark_recovery_required(&req.operation_id);
+            return Err(error);
+        }
         if response.status == "awaiting_recipient" {
-            let summary = summarize_bill(&pay.payment_id, confirmed_hex)?;
+            let summary = match summarize_bill(&req.operation_id, confirmed_hex) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    let _ = safety.mark_recovery_required(&req.operation_id);
+                    return Err(error);
+                }
+            };
             if !summary
                 .signatures
                 .iter()
@@ -521,7 +1247,7 @@ impl L2HubClient {
             }
             safety.mark_awaiting_recipient(&req.operation_id)?;
             return Ok(FastPayExecution {
-                payment_id: pay.payment_id,
+                payment_id: req.operation_id.clone(),
                 status: response.status,
                 summary: response
                     .summary
@@ -535,26 +1261,319 @@ impl L2HubClient {
                 response.status
             )));
         }
-        let summary = summarize_bill(&pay.payment_id, confirmed_hex)?;
+        let summary = match summarize_bill(&req.operation_id, confirmed_hex) {
+            Ok(summary) => summary,
+            Err(error) => {
+                let _ = safety.mark_recovery_required(&req.operation_id);
+                return Err(error);
+            }
+        };
         if !summary.dispute_ready {
             safety.mark_recovery_required(&req.operation_id)?;
             return Err(WalletError::L2(format!(
                 "payment {} is missing required verified signatures",
-                pay.payment_id
+                req.operation_id
             )));
         }
-        if let Err(error) = bills.store_bill(&pay.payment_id, confirmed_hex) {
+        if let Err(error) = bills.store_bill(&req.operation_id, confirmed_hex) {
             let _ = safety.mark_recovery_required(&req.operation_id);
             return Err(error);
         }
         safety.mark_committed(&req.operation_id)?;
         Ok(FastPayExecution {
-            payment_id: pay.payment_id,
+            payment_id: req.operation_id.clone(),
             status: response.status,
             summary: response
                 .summary
                 .unwrap_or_else(|| "Fast Pay settled with no fee".into()),
         })
+    }
+
+    /// Queries the exact Hub operation and reconciles only cryptographically
+    /// validated states. It never signs, creates a new id, or resubmits bytes.
+    pub async fn reconcile_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &mut BillStore,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<FastPayExecution> {
+        if req.fee_payer.as_deref() != Some("sender") {
+            return Err(WalletError::Policy(
+                "Fast Pay request must explicitly bind fee_payer=sender".into(),
+            ));
+        }
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&req.amount)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let local = safety.require_exact_sender_request(
+            &req.operation_id,
+            &req.idempotency_key,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            amount.as_millimeis(),
+            &req.channel_id,
+            payer_channel.reuse_version,
+            hub_address,
+        )?;
+        if !matches!(
+            local.status,
+            crate::l2_safety::ClientOperationStatus::Signed
+                | crate::l2_safety::ClientOperationStatus::Submitted
+                | crate::l2_safety::ClientOperationStatus::AwaitingRecipient
+                | crate::l2_safety::ClientOperationStatus::RecoveryRequired
+        ) || local.signed_bill_hex.is_none()
+        {
+            return Err(WalletError::L2(
+                "Fast Pay reconciliation requires exact durable signed bytes".into(),
+            ));
+        }
+        let response = match self.payment_status(&req.operation_id).await {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = safety.mark_recovery_required(&req.operation_id);
+                return Err(WalletError::L2(format!(
+                    "Fast Pay reconciliation could not determine the Hub outcome: {error}"
+                )));
+            }
+        };
+        if response.payment_id != req.operation_id {
+            let _ = safety.mark_recovery_required(&req.operation_id);
+            return Err(WalletError::Policy(
+                "hub reconciliation changed the Fast Pay payment id".into(),
+            ));
+        }
+        let Some(hub_bill) = response.bill_hex.as_deref() else {
+            let _ = safety.mark_recovery_required(&req.operation_id);
+            return Err(WalletError::L2(
+                "Hub reconciliation did not return the exact payment bill".into(),
+            ));
+        };
+        let trusted = match trusted_channel_state(bills, payer_channel) {
+            Ok(trusted) => trusted,
+            Err(error) => {
+                let _ = safety.mark_recovery_required(&req.operation_id);
+                return Err(error);
+            }
+        };
+        match response.status.as_str() {
+            "pending" => {
+                if local.unsigned_bill_hex.as_deref() != Some(hub_bill) {
+                    let _ = safety.mark_recovery_required(&req.operation_id);
+                    return Err(WalletError::Policy(
+                        "Hub pending bill differs from the durable unsigned bill".into(),
+                    ));
+                }
+                let _ = safety.mark_recovery_required(&req.operation_id);
+                Ok(FastPayExecution {
+                    payment_id: req.operation_id.clone(),
+                    status: response.status,
+                    summary: "Hub holds the exact pending bill; explicit exact retry is required"
+                        .into(),
+                })
+            }
+            "awaiting_recipient" => {
+                if let Err(error) = validate_sender_bill(
+                    &req.operation_id,
+                    hub_bill,
+                    &req.payer,
+                    &req.payee,
+                    &req.amount,
+                    hub_address,
+                    &req.channel_id,
+                    &trusted,
+                ) {
+                    let _ = safety.mark_recovery_required(&req.operation_id);
+                    return Err(error);
+                }
+                if local.status == crate::l2_safety::ClientOperationStatus::RecoveryRequired {
+                    safety.mark_reconciled_awaiting_recipient(&req.operation_id)?;
+                } else {
+                    safety.mark_awaiting_recipient(&req.operation_id)?;
+                }
+                Ok(FastPayExecution {
+                    payment_id: req.operation_id.clone(),
+                    status: response.status,
+                    summary: response.summary.unwrap_or_else(|| {
+                        "Fast Pay is waiting for the recipient signature".into()
+                    }),
+                })
+            }
+            "settled" => {
+                let summary = match validate_sender_bill(
+                    &req.operation_id,
+                    hub_bill,
+                    &req.payer,
+                    &req.payee,
+                    &req.amount,
+                    hub_address,
+                    &req.channel_id,
+                    &trusted,
+                ) {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        let _ = safety.mark_recovery_required(&req.operation_id);
+                        return Err(error);
+                    }
+                };
+                if !summary.dispute_ready {
+                    let _ = safety.mark_recovery_required(&req.operation_id);
+                    return Err(WalletError::L2(
+                        "reconciled Fast Pay bill is not dispute-ready".into(),
+                    ));
+                }
+                if let Err(error) = bills.store_bill(&req.operation_id, hub_bill) {
+                    let _ = safety.mark_recovery_required(&req.operation_id);
+                    return Err(error);
+                }
+                safety.mark_committed(&req.operation_id)?;
+                Ok(FastPayExecution {
+                    payment_id: req.operation_id.clone(),
+                    status: response.status,
+                    summary: response
+                        .summary
+                        .unwrap_or_else(|| "Fast Pay settlement reconciled".into()),
+                })
+            }
+            _ => {
+                let _ = safety.mark_recovery_required(&req.operation_id);
+                Err(WalletError::L2(format!(
+                    "Hub reconciliation returned unsupported status {}",
+                    response.status
+                )))
+            }
+        }
+    }
+
+    /// Recovers a preparation whose Hub response was lost before any signature
+    /// was stored. The Hub is queried by the already durable operation id; this
+    /// method never signs, submits, changes identifiers, or falls back to L1.
+    pub async fn reconcile_unsigned_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &BillStore,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<crate::l2_safety::ClientL2Operation> {
+        if req.fee_payer.as_deref() != Some("sender") {
+            return Err(WalletError::Policy(
+                "Fast Pay request must explicitly bind fee_payer=sender".into(),
+            ));
+        }
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&req.amount)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let local = safety.require_exact_sender_request(
+            &req.operation_id,
+            &req.idempotency_key,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            amount.as_millimeis(),
+            &req.channel_id,
+            payer_channel.reuse_version,
+            hub_address,
+        )?;
+        if !matches!(
+            local.status,
+            crate::l2_safety::ClientOperationStatus::RecoveryRequired
+                | crate::l2_safety::ClientOperationStatus::PersistedBeforeSigning
+        ) || local.signed_bill_hex.is_some()
+        {
+            return Err(WalletError::L2(
+                "Fast Pay unsigned recovery requires an operation with no durable signature".into(),
+            ));
+        }
+        let response = self.payment_status(&req.operation_id).await?;
+        if response.payment_id != req.operation_id || response.status != "pending" {
+            let _ = safety.mark_recovery_required(&req.operation_id);
+            return Err(WalletError::L2(
+                "Hub did not report the exact unsigned Fast Pay operation as pending".into(),
+            ));
+        }
+        let hub_bill = response.bill_hex.as_deref().ok_or_else(|| {
+            WalletError::L2("Hub unsigned reconciliation did not return the payment bill".into())
+        })?;
+        if local
+            .unsigned_bill_hex
+            .as_deref()
+            .is_some_and(|stored| stored != hub_bill)
+        {
+            let _ = safety.mark_recovery_required(&req.operation_id);
+            return Err(WalletError::Policy(
+                "Hub unsigned bill differs from the durable local bill".into(),
+            ));
+        }
+        let trusted = trusted_channel_state(bills, payer_channel)?;
+        validate_sender_bill(
+            &req.operation_id,
+            hub_bill,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            hub_address,
+            &req.channel_id,
+            &trusted,
+        )?;
+        safety.persist_reconciled_before_signing(&req.operation_id, hub_bill)
+    }
+
+    /// Explicitly retries only the same durable signed bytes after the bound
+    /// Hub proves that it still holds the exact unsigned pending bill.
+    pub async fn retry_reconciled_sender_bill(
+        &self,
+        req: &FastPayRequest,
+        bills: &mut BillStore,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        payer_channel: &ChannelInfo,
+        hub_address: &str,
+    ) -> WalletResult<FastPayExecution> {
+        let amount = l2_fast_pay_hub::amount::parse_amount_mei(&req.amount)
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        let local = safety.require_exact_sender_request(
+            &req.operation_id,
+            &req.idempotency_key,
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            amount.as_millimeis(),
+            &req.channel_id,
+            payer_channel.reuse_version,
+            hub_address,
+        )?;
+        if req.fee_payer.as_deref() != Some("sender")
+            || local.status != crate::l2_safety::ClientOperationStatus::RecoveryRequired
+            || local.signed_bill_hex.is_none()
+        {
+            return Err(WalletError::L2(
+                "Fast Pay exact retry requires fee_payer=sender and RecoveryRequired signed bytes"
+                    .into(),
+            ));
+        }
+        let response = self.payment_status(&req.operation_id).await?;
+        if response.payment_id != req.operation_id
+            || response.status != "pending"
+            || response.bill_hex.as_deref() != local.unsigned_bill_hex.as_deref()
+        {
+            return Err(WalletError::L2(
+                "Fast Pay exact retry requires an exact pending Hub bill; reconcile again".into(),
+            ));
+        }
+        let trusted = trusted_channel_state(bills, payer_channel)?;
+        validate_sender_bill(
+            &req.operation_id,
+            local.signed_bill_hex.as_deref().unwrap_or_default(),
+            &req.payer,
+            &req.payee,
+            &req.amount,
+            hub_address,
+            &req.channel_id,
+            &trusted,
+        )?;
+        safety.mark_reconciled_submitted(&req.operation_id)?;
+        self.confirm_submitted_sender_bill(req, bills, safety, payer_channel, hub_address)
+            .await
     }
 
     pub async fn accept_inbox_item(
@@ -584,8 +1603,9 @@ impl L2HubClient {
         )?;
         let amount = l2_fast_pay_hub::amount::parse_amount_mei(&item.amount)
             .map_err(|error| WalletError::L2(error.to_string()))?;
-        let mut safety = crate::l2_safety::ClientL2Safety::open(
+        let mut safety = crate::l2_safety::ClientL2Safety::open_for_network(
             recipient_account,
+            if self.mainnet { "mainnet" } else { "testnet" },
             hub_address,
             &item.payee_channel_id,
         )?;
@@ -706,6 +1726,19 @@ impl L2HubClient {
     }
 }
 
+fn require_lower_commitment(value: &str, label: &str) -> WalletResult<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(WalletError::L2(format!(
+            "{label} must be canonical lowercase SHA-256 hex"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod transport_tests {
     use std::sync::Arc;
@@ -724,6 +1757,7 @@ mod transport_tests {
             "valid_until_unix": now + 60,
             "profile": "mainnet-pilot",
             "payments_enabled": enabled,
+            "close_enabled": true,
             "mainnet_detected": true,
             "fullnode_capabilities": {
                 "observed_unix": now,
@@ -734,20 +1768,86 @@ mod transport_tests {
                 "mainnet": true,
                 "tip_timestamp_unix": now,
                 "tip_age_seconds": 0,
-                "enabled_actions": [1, 2, 3]
+                "enabled_actions": [1, 2, 3],
+                "channel_unilateral_exit": true,
+                "channel_unilateral_exit_evidence": {
+                    "schema": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_EVIDENCE_SCHEMA,
+                    "manifest_valid": true,
+                    "contract_name": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_CONTRACT_NAME,
+                    "protocol_domain": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_PROTOCOL_DOMAIN,
+                    "settlement_profile": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_SETTLEMENT_PROFILE,
+                    "source_sha256": "11".repeat(32),
+                    "bytecode_sha3": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_BYTECODE_SHA3,
+                    "required_action_kinds": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_ACTION_KINDS,
+                    "funding_model": {
+                        "left_deposit": "positive",
+                        "right_hub_deposit": "exactly_zero"
+                    },
+                    "storage_key_count": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_STORAGE_KEY_COUNT,
+                    "must_renew_every_storage_key": true,
+                    "deployment": {
+                        "enabled": true,
+                        "contract_address":
+                            vm::ContractAddress::from_unchecked(
+                                field::Address::create_contract([7_u8; 20]),
+                            )
+                            .to_readable(),
+                        "deployment_tx_hash": "22".repeat(32),
+                        "deployment_height": MAINNET_MIN_SAFE_HEIGHT,
+                        "independently_verified": true
+                    },
+                    "on_chain_verification": {
+                        "observed_height": 900000,
+                        "confirmed_tx_height": MAINNET_MIN_SAFE_HEIGHT,
+                        "deployment_tx_confirmed": true,
+                        "contract_code_sha3": l2_fast_pay_hub::node::HPAY_CHANNEL_EXIT_BYTECODE_SHA3,
+                        "contract_code_matches": true
+                    },
+                    "deployment_verified": true
+                }
             },
             "max_payment_hac_zhu": cap_zhu,
-            "max_channel_funding_hac_zhu": cap_zhu.min(MAINNET_PILOT_HARD_MAX_HAC_ZHU),
+            "max_channel_funding_hac_zhu": cap_zhu.min(MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU),
             "max_payment_satoshi": 0,
             "wallet_fee_hac": "0",
-            "trustless_finality": false,
-            "unilateral_l1_enforceable": false,
+            "trustless_finality": true,
+            "unilateral_l1_enforceable": true,
+            "trusted_bounded_pilot": false,
             "settlement_model": "hub-coordinated ordered signatures with durable recovery",
             "blockers": blockers,
+            "close_blockers": [],
             "limitations": ["settled is not unilateral L1 finality"]
         })
     }
 
+    fn health_json(hub_address: &str) -> serde_json::Value {
+        serde_json::json!({
+            "ok": true,
+            "version": 7,
+            "name": "Test Fast Pay Hub",
+            "hub_address": hub_address,
+            "hub_fee_mei": "0",
+            "settlement_ready": true,
+            "cross_channel_ready": true,
+            "external_rollback_anchor_ready": true,
+            "l1_dispute_path_ready": true,
+            "official_channelpay_ready": true,
+            "production_mainnet_ready": true,
+            "trusted_bounded_pilot_ready": false,
+            "deployment_profile": "mainnet-pilot"
+        })
+    }
+
+    fn bounded_readiness_json() -> serde_json::Value {
+        let mut value = readiness_json(true, vec![], MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU);
+        value["profile"] = serde_json::json!(MAINNET_BOUNDED_PILOT_PROFILE);
+        value["trustless_finality"] = serde_json::json!(false);
+        value["unilateral_l1_enforceable"] = serde_json::json!(false);
+        value["trusted_bounded_pilot"] = serde_json::json!(true);
+        value["max_channel_funding_hac_zhu"] =
+            serde_json::json!(MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU);
+        value
+    }
     #[test]
     fn health_fee_parser_accepts_only_exact_zero() {
         let mut health = HubHealth {
@@ -762,6 +1862,7 @@ mod transport_tests {
             l1_dispute_path_ready: false,
             official_channelpay_ready: false,
             production_mainnet_ready: false,
+            trusted_bounded_pilot_ready: false,
             deployment_profile: Some("legacy_wallet_hub_v4_development".into()),
         };
         assert!(hub_fee_is_zero(&health));
@@ -778,22 +1879,22 @@ mod transport_tests {
     #[test]
     fn authoritative_readiness_fails_closed_and_enforces_the_hac_cap() {
         let green: HubMainnetReadiness =
-            serde_json::from_value(readiness_json(true, vec![], 100_000_000)).unwrap();
-        green.require_payment_ready(Some("1")).unwrap();
-        assert_eq!(green.max_channel_funding_millimeis(), 1_000);
-        assert!(green.require_payment_ready(Some("1.001")).is_err());
+            serde_json::from_value(readiness_json(true, vec![], 1_000_000)).unwrap();
+        green.require_payment_ready(Some("0.01")).unwrap();
+        assert_eq!(green.max_channel_funding_millimeis(), 10);
+        assert!(green.require_payment_ready(Some("0.011")).is_err());
 
         let mut lower_channel_cap = green.clone();
-        lower_channel_cap.max_channel_funding_hac_zhu = 50_000_000;
+        lower_channel_cap.max_channel_funding_hac_zhu = 500_000;
         lower_channel_cap
-            .require_payment_ready(Some("0.75"))
+            .require_payment_ready(Some("0.007"))
             .unwrap();
         lower_channel_cap
-            .require_channel_funding_ready(0.5)
+            .require_channel_funding_ready("0.005")
             .unwrap();
         assert!(
             lower_channel_cap
-                .require_channel_funding_ready(0.501)
+                .require_channel_funding_ready("0.006")
                 .is_err()
         );
 
@@ -842,23 +1943,172 @@ mod transport_tests {
             .enabled_actions = vec![1, 2];
         assert!(missing_action.require_payment_ready(Some("0.001")).is_err());
 
+        let mut missing_unilateral_exit = green.clone();
+        missing_unilateral_exit
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .channel_unilateral_exit = false;
+        assert!(
+            missing_unilateral_exit
+                .require_payment_ready(Some("0.001"))
+                .is_err()
+        );
+
+        let mut missing_exit_evidence = green.clone();
+        missing_exit_evidence
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .channel_unilateral_exit_evidence = None;
+        assert!(
+            missing_exit_evidence
+                .require_payment_ready(Some("0.001"))
+                .is_err()
+        );
+
+        let mut tampered_exit_evidence = green.clone();
+        tampered_exit_evidence
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .channel_unilateral_exit_evidence
+            .as_mut()
+            .unwrap()
+            .bytecode_sha3 = "33".repeat(32);
+        assert!(
+            tampered_exit_evidence
+                .require_payment_ready(Some("0.001"))
+                .is_err()
+        );
+
+        let mut tampered_live_evidence = green.clone();
+        tampered_live_evidence
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .channel_unilateral_exit_evidence
+            .as_mut()
+            .unwrap()
+            .on_chain_verification
+            .contract_code_matches = false;
+        assert!(
+            tampered_live_evidence
+                .require_payment_ready(Some("0.001"))
+                .is_err()
+        );
+
         let blocked: HubMainnetReadiness = serde_json::from_value(readiness_json(
             false,
             vec!["fullnode_capability_probe_failed"],
-            100_000_000,
+            1_000_000,
         ))
         .unwrap();
         assert!(blocked.require_payment_ready(Some("0.001")).is_err());
 
-        let unsafe_cap: HubMainnetReadiness =
-            serde_json::from_value(readiness_json(true, vec![], 100_000_001)).unwrap();
+        let unsafe_cap: HubMainnetReadiness = serde_json::from_value(readiness_json(
+            true,
+            vec![],
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU + 1,
+        ))
+        .unwrap();
         assert!(unsafe_cap.require_payment_ready(Some("0.001")).is_err());
+
+        let mut unsafe_channel_cap = green.clone();
+        unsafe_channel_cap.max_channel_funding_hac_zhu =
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU + 1;
+        assert!(
+            unsafe_channel_cap
+                .require_payment_ready(Some("0.001"))
+                .is_err()
+        );
 
         let unusable_cap: HubMainnetReadiness =
             serde_json::from_value(readiness_json(true, vec![], ZHU_PER_MILLIMEI - 1)).unwrap();
         assert!(unusable_cap.require_payment_ready(Some("0.001")).is_err());
     }
 
+    #[tokio::test]
+    async fn bounded_mainnet_requires_the_explicit_wallet_policy() {
+        let app = Router::new().route(
+            "/v1/readiness/mainnet",
+            get(|| async { Json(bounded_readiness_json()) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{address}");
+
+        let default_client = L2HubClient::new_for_network(url.clone(), "mainnet");
+        assert!(
+            default_client
+                .require_mainnet_payment_ready(Some("1"))
+                .await
+                .is_err()
+        );
+
+        let bounded_client = L2HubClient::new_for_trusted_bounded_mainnet_pilot(url, "mainnet");
+        bounded_client
+            .require_mainnet_payment_ready(Some("1"))
+            .await
+            .unwrap();
+        assert!(
+            bounded_client
+                .require_mainnet_payment_ready(Some("1.001"))
+                .await
+                .is_err()
+        );
+        let bounded_close: HubMainnetReadiness =
+            serde_json::from_value(bounded_readiness_json()).unwrap();
+        bounded_close
+            .require_cooperative_close_ready(false)
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn channel_open_rechecks_address_and_mainnet_funding_cap() {
+        const HUB_ADDRESS: &str = "1Luek83YChwrkRYGUGpHmYVeC55tQz49Jo";
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async { Json(health_json(HUB_ADDRESS)) }),
+            )
+            .route(
+                "/v1/readiness/mainnet",
+                get(|| async { Json(readiness_json(true, vec![], 500_000)) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = L2HubClient::new_for_network(format!("http://{address}"), "mainnet");
+
+        client
+            .require_channel_open_ready(HUB_ADDRESS, "0.005")
+            .await
+            .unwrap();
+        assert!(
+            client
+                .require_channel_open_ready("1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW", "0.005")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("address changed")
+        );
+        assert!(
+            client
+                .require_channel_open_ready(HUB_ADDRESS, "0.006")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("funding exceeds")
+        );
+        server.abort();
+    }
     #[tokio::test]
     async fn invalid_readiness_response_is_never_treated_as_green() {
         let app = Router::new().route("/v1/readiness/mainnet", get(|| async { "not-json" }));
@@ -900,9 +2150,9 @@ mod transport_tests {
                 get(|State(calls): State<Arc<AtomicUsize>>| async move {
                     let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
                     Json(if first {
-                        readiness_json(true, vec![], 100_000_000)
+                        readiness_json(true, vec![], 1_000_000)
                     } else {
-                        readiness_json(false, vec!["fullnode_capability_probe_failed"], 100_000_000)
+                        readiness_json(false, vec!["fullnode_capability_probe_failed"], 1_000_000)
                     })
                 }),
             )

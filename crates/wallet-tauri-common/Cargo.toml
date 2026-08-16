@@ -43,6 +43,10 @@ agent-wallet-testnet-pilot = [
     "agent-wallet-core/agent-wallet-testnet-pilot",
     "hpay-companion-protocol/agent-wallet-testnet-pilot",
 ]
+agent-wallet-bounded-mainnet-pilot = [
+    "agent-wallet-testnet-pilot",
+    "agent-wallet-core/agent-wallet-bounded-mainnet-pilot",
+]
 agent-wallet-admin = [    "dep:agent-wallet-core",
     "dep:agent-wallet-runtime",
     "dep:hpay-agent-connector",

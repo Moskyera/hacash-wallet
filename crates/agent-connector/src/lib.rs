@@ -39,8 +39,8 @@ pub use pairing_protocol::{
     PairingSubmissionReceipt,
 };
 pub use protocol::{
-    AgentOperationStatus, AgentRequest, AgentResponse, MessageType, Nonce, PROTOCOL_VERSION,
-    ProtocolEnvelope, RequestId, SessionId, WireMessage,
+    AgentOperationStatus, AgentPaymentRail, AgentRequest, AgentResponse, MessageType, Nonce,
+    PROTOCOL_VERSION, ProtocolEnvelope, RequestId, SessionId, WireMessage,
 };
 pub use server::{
     AgentBackend, AuthenticationStart, ClientEnvelope, ClientMessage, ConnectionPhase,

@@ -1,16 +1,20 @@
-//! Explicit Android-only commands for the strict Agent Wallet testnet pilot.
+//! Explicit Android-only commands for strict Agent Wallet approvals.
 //!
 //! The mobile device signs only exact approval decisions and rollback witness
-//! receipts. It never receives a wallet key or a signed transaction body.
+//! receipts. L1 and rollback witnessing remain testnet-only. Agent Fast Pay may
+//! additionally use the explicit bounded-mainnet build. The phone never
+//! receives a wallet key or a signed transaction body.
 
 use hpay_companion_protocol::{
-    ApprovalCommitment, ApprovalDecision, SignedRollbackAnchor, WitnessRotationPhase,
+    AgentFastPayApprovalCommitment, AgentHvmApprovalCommitment, ApprovalCommitment,
+    ApprovalDecision, SignedRollbackAnchor, WitnessRotationPhase,
 };
 #[cfg(target_os = "android")]
 use hpay_companion_protocol::{
-    CompanionPayload, DevicePermission, MobileApprovalDecision, MobileWitnessState,
-    RollbackOperationPhase, SignedApprovalDecision, SignedWitnessReceipt,
-    SignedWitnessRotationAuthorization, SignedWitnessRotationBaselineReceipt,
+    AgentFastPayApprovalDecision, AgentHvmApprovalDecision, CompanionPayload, DevicePermission,
+    MobileApprovalDecision, MobileWitnessState, RollbackOperationPhase,
+    SignedAgentFastPayApprovalDecision, SignedAgentHvmApprovalDecision, SignedApprovalDecision,
+    SignedWitnessReceipt, SignedWitnessRotationAuthorization, SignedWitnessRotationBaselineReceipt,
     WitnessRotationBaselineReceipt, WitnessRotationMode, WitnessRotationRecord,
 };
 use serde::{Deserialize, Serialize};
@@ -19,7 +23,12 @@ use tauri::Webview;
 use super::AgentCompanionMobileState;
 use super::commands::require_agent_companion_webview;
 #[cfg(target_os = "android")]
-use super::storage::{MobilePendingApproval, MobilePendingWitness};
+use super::network::agent_fast_pay_network_allowed;
+#[cfg(target_os = "android")]
+use super::storage::{
+    MobilePendingAgentFastPayApproval, MobilePendingAgentHvmApproval, MobilePendingApproval,
+    MobilePendingWitness,
+};
 #[cfg(target_os = "android")]
 use super::unix_now;
 
@@ -30,6 +39,18 @@ const AGENT_NETWORK_FEE_UNITS: u64 = 1_000;
 enum PreparedPilotDecision {
     Fresh(SignedApprovalDecision),
     PendingRecovery,
+}
+
+#[cfg(target_os = "android")]
+enum PreparedAgentFastPayDecision {
+    NeedsSignature(AgentFastPayApprovalDecision),
+    Signed(SignedAgentFastPayApprovalDecision),
+}
+
+#[cfg(target_os = "android")]
+enum PreparedAgentHvmDecision {
+    NeedsSignature(AgentHvmApprovalDecision),
+    Signed(SignedAgentHvmApprovalDecision),
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +67,66 @@ pub struct CompanionPilotDecisionView {
     approved: bool,
     witnessed: bool,
     anchor_id: Option<String>,
+    detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub struct CompanionAgentFastPayPendingRequest {
+    operation_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAgentFastPayPendingView {
+    commitment: Option<AgentFastPayApprovalCommitment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub struct CompanionAgentFastPayDecisionRequest {
+    operation_id: Option<String>,
+    decision: ApprovalDecision,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAgentFastPayDecisionView {
+    operation_id: String,
+    approval_id: String,
+    approved: bool,
+    detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub struct CompanionAgentHvmPendingRequest {
+    operation_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAgentHvmPendingView {
+    commitment: Option<AgentHvmApprovalCommitment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub struct CompanionAgentHvmDecisionRequest {
+    operation_id: Option<String>,
+    decision: ApprovalDecision,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionAgentHvmDecisionView {
+    operation_id: String,
+    approval_id: String,
+    approved: bool,
     detail: String,
 }
 
@@ -407,6 +488,421 @@ impl AgentCompanionMobileState {
             phase: WitnessRotationPhase::Completed,
             detail,
         })
+    }
+
+    async fn poll_agent_fast_pay_approval(
+        &self,
+        app: tauri::AppHandle,
+        operation_id: Option<String>,
+    ) -> Result<Option<AgentFastPayApprovalCommitment>, String> {
+        let current = self
+            .shared
+            .current()
+            .await?
+            .ok_or_else(|| "Pair this phone before reviewing Agent Fast Pay".to_owned())?;
+        current.validate_at(unix_now()?)?;
+        let message = self
+            .exchange_with_reconnect(
+                app,
+                super::session::OutboundKind::AgentFastPayApprovalPoll {
+                    agent_wallet_id: current.agent_wallet_id,
+                    operation_id,
+                },
+            )
+            .await?;
+        match message.payload {
+            CompanionPayload::AgentFastPayApprovalRequest(commitment) => Ok(Some(commitment)),
+            CompanionPayload::AdminAck {
+                command_id,
+                accepted,
+                detail,
+            } if command_id == "agent_fast_pay_poll"
+                && accepted
+                && detail == "no_pending_agent_fast_pay_approval" =>
+            {
+                Ok(None)
+            }
+            _ => Err("Desktop returned an unexpected Agent Fast Pay approval response".to_owned()),
+        }
+    }
+
+    async fn prepare_agent_fast_pay_decision(
+        &self,
+        commitment: AgentFastPayApprovalCommitment,
+        decision: ApprovalDecision,
+    ) -> Result<PreparedAgentFastPayDecision, String> {
+        let now = unix_now()?;
+        let commitment_hash = commitment
+            .canonical_sha256_hex()
+            .map_err(|error| error.to_string())?;
+        let mut slot = self.shared.state.lock().await;
+        let current = slot
+            .as_ref()
+            .ok_or_else(|| "Pair this phone before approving Agent Fast Pay".to_owned())?
+            .clone();
+        current.validate_at(now)?;
+
+        if let Some(pending) = &current.pending_agent_fast_pay_approval {
+            if pending.commitment_hash != commitment_hash
+                || pending.decision.commitment != commitment
+                || pending.decision.decision != decision
+            {
+                return Err(
+                    "A different Agent Fast Pay approval is already pending recovery".to_owned(),
+                );
+            }
+            if let Some(signed) = &pending.signed_decision {
+                return Ok(PreparedAgentFastPayDecision::Signed(signed.clone()));
+            }
+            commitment
+                .validate_at(now)
+                .map_err(|error| error.to_string())?;
+            return Ok(PreparedAgentFastPayDecision::NeedsSignature(
+                pending.decision.clone(),
+            ));
+        }
+
+        commitment
+            .validate_at(now)
+            .map_err(|error| error.to_string())?;
+        if current.pending_approval.is_some()
+            || current.pending_agent_hvm_approval.is_some()
+            || current.pending_witness.is_some()
+        {
+            return Err(
+                "Finish or discard the payment confirmation already held by this phone".to_owned(),
+            );
+        }
+        if commitment.agent_wallet_id != current.agent_wallet_id
+            || commitment.desktop_device_id != current.desktop_device_id
+            || !agent_fast_pay_network_allowed(&commitment.network_binding)
+            || commitment.network_fee_units != 0
+            || commitment.wallet_fee_units != 0
+            || commitment.hub_fee_units != 0
+            || commitment.total_debit_units != commitment.amount_units
+            || commitment.fee_payer != "sender"
+        {
+            return Err(
+                "Agent Fast Pay approval does not match this paired wallet and network".to_owned(),
+            );
+        }
+        let permission = match decision {
+            ApprovalDecision::Approve => DevicePermission::ApprovePayment,
+            ApprovalDecision::Reject => DevicePermission::RejectPayment,
+        };
+        let mobile_authorization_epoch = current
+            .registry
+            .require(
+                &current.mobile_device_id,
+                &current.agent_wallet_id,
+                hpay_companion_protocol::DeviceRole::Mobile,
+                permission,
+            )
+            .map_err(|error| error.to_string())?
+            .authorization_epoch;
+        let mut next = current;
+        let approval_sequence = next
+            .approval_sequence
+            .checked_add(1)
+            .ok_or_else(|| "Mobile approval sequence is exhausted".to_owned())?;
+        let decision = AgentFastPayApprovalDecision::from_commitment(
+            commitment,
+            decision,
+            next.mobile_device_id.clone(),
+            mobile_authorization_epoch,
+            approval_sequence,
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+        next.approval_sequence = approval_sequence;
+        next.pending_agent_fast_pay_approval = Some(MobilePendingAgentFastPayApproval {
+            state_version: "1".to_owned(),
+            commitment_hash,
+            decision: decision.clone(),
+            signed_decision: None,
+        });
+        // The exact decision and monotonic sequence are durable before the
+        // Android biometric prompt can produce a signature.
+        self.shared.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(PreparedAgentFastPayDecision::NeedsSignature(decision))
+    }
+
+    async fn sign_and_persist_agent_fast_pay_decision(
+        &self,
+        app: &tauri::AppHandle,
+        decision: AgentFastPayApprovalDecision,
+    ) -> Result<SignedAgentFastPayApprovalDecision, String> {
+        let operation_id = decision.commitment.operation_id.clone();
+        let result = self
+            .run_biometric_guarded(
+                std::time::Duration::from_secs(120),
+                "Agent Fast Pay biometric approval timed out",
+                async {
+                    let signer = crate::agent_companion_identity::open(app)
+                        .await?
+                        .ok_or_else(|| "Android companion identity is not configured".to_owned())?;
+                    let signed =
+                        SignedAgentFastPayApprovalDecision::sign(decision.clone(), &signer)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    let mut slot = self.shared.state.lock().await;
+                    let current = slot
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "Agent Fast Pay approval state disappeared during biometric signing"
+                                .to_owned()
+                        })?
+                        .clone();
+                    current.validate_at(unix_now()?)?;
+                    let mut next = current;
+                    let pending =
+                        next.pending_agent_fast_pay_approval
+                            .as_mut()
+                            .ok_or_else(|| {
+                                "Agent Fast Pay approval state disappeared during biometric signing"
+                                    .to_owned()
+                            })?;
+                    if pending.decision != decision || pending.signed_decision.is_some() {
+                        return Err(
+                            "Agent Fast Pay approval changed during biometric signing".to_owned()
+                        );
+                    }
+                    pending.signed_decision = Some(signed.clone());
+                    // The exact signature bytes are durable before transport.
+                    self.shared.persist_locked(&next)?;
+                    *slot = Some(next);
+                    Ok(signed)
+                },
+            )
+            .await;
+        if result.is_err() {
+            self.clear_pending_agent_fast_pay_approval(&operation_id)
+                .await
+                .map_err(|clear_error| {
+                    format!(
+                        "Agent Fast Pay biometric signing failed and its unsigned recovery record could not be cleared: {clear_error}"
+                    )
+                })?;
+        }
+        result
+    }
+
+    async fn clear_pending_agent_fast_pay_approval(
+        &self,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        let mut slot = self.shared.state.lock().await;
+        let current = slot
+            .as_ref()
+            .ok_or_else(|| "Agent companion is not paired".to_owned())?
+            .clone();
+        let mut next = current;
+        next.clear_pending_agent_fast_pay_approval_for(operation_id)?;
+        self.shared.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(())
+    }
+
+    async fn poll_agent_hvm_approval(
+        &self,
+        app: tauri::AppHandle,
+        operation_id: Option<String>,
+    ) -> Result<Option<AgentHvmApprovalCommitment>, String> {
+        let current = self
+            .shared
+            .current()
+            .await?
+            .ok_or_else(|| "Pair this phone before reviewing Agent HVM Fast Pay".to_owned())?;
+        current.validate_at(unix_now()?)?;
+        let message = self
+            .exchange_with_reconnect(
+                app,
+                super::session::OutboundKind::AgentHvmApprovalPoll {
+                    agent_wallet_id: current.agent_wallet_id,
+                    operation_id,
+                },
+            )
+            .await?;
+        match message.payload {
+            CompanionPayload::AgentHvmApprovalRequest(commitment) => Ok(Some(commitment)),
+            CompanionPayload::AdminAck {
+                command_id,
+                accepted,
+                detail,
+            } if command_id == "agent_hvm_poll"
+                && accepted
+                && detail == "no_pending_agent_hvm_approval" =>
+            {
+                Ok(None)
+            }
+            _ => Err("Desktop returned an unexpected Agent HVM approval response".to_owned()),
+        }
+    }
+
+    async fn prepare_agent_hvm_decision(
+        &self,
+        commitment: AgentHvmApprovalCommitment,
+        decision: ApprovalDecision,
+    ) -> Result<PreparedAgentHvmDecision, String> {
+        let now = unix_now()?;
+        let commitment_hash = commitment
+            .canonical_sha256_hex()
+            .map_err(|error| error.to_string())?;
+        let mut slot = self.shared.state.lock().await;
+        let current = slot
+            .as_ref()
+            .ok_or_else(|| "Pair this phone before approving Agent HVM Fast Pay".to_owned())?
+            .clone();
+        current.validate_at(now)?;
+
+        if let Some(pending) = &current.pending_agent_hvm_approval {
+            if pending.commitment_hash != commitment_hash
+                || pending.decision.commitment != commitment
+                || pending.decision.decision != decision
+            {
+                return Err("A different Agent HVM approval is already pending recovery".to_owned());
+            }
+            if let Some(signed) = &pending.signed_decision {
+                return Ok(PreparedAgentHvmDecision::Signed(signed.clone()));
+            }
+            commitment
+                .validate_at(now)
+                .map_err(|error| error.to_string())?;
+            return Ok(PreparedAgentHvmDecision::NeedsSignature(
+                pending.decision.clone(),
+            ));
+        }
+
+        commitment
+            .validate_at(now)
+            .map_err(|error| error.to_string())?;
+        if current.pending_approval.is_some()
+            || current.pending_agent_fast_pay_approval.is_some()
+            || current.pending_witness.is_some()
+        {
+            return Err(
+                "Finish or discard the payment confirmation already held by this phone".to_owned(),
+            );
+        }
+        if commitment.agent_wallet_id != current.agent_wallet_id
+            || commitment.desktop_device_id != current.desktop_device_id
+            || !agent_fast_pay_network_allowed(&commitment.network_binding)
+            || commitment.network_fee_zhu != 0
+            || commitment.wallet_fee_zhu != 0
+            || commitment.hub_fee_zhu != 0
+            || commitment.total_debit_zhu != commitment.amount_zhu
+            || commitment.fee_payer != "sender"
+        {
+            return Err(
+                "Agent HVM approval does not match this paired wallet and network".to_owned(),
+            );
+        }
+        let permission = match decision {
+            ApprovalDecision::Approve => DevicePermission::ApprovePayment,
+            ApprovalDecision::Reject => DevicePermission::RejectPayment,
+        };
+        let mobile_authorization_epoch = current
+            .registry
+            .require(
+                &current.mobile_device_id,
+                &current.agent_wallet_id,
+                hpay_companion_protocol::DeviceRole::Mobile,
+                permission,
+            )
+            .map_err(|error| error.to_string())?
+            .authorization_epoch;
+        let mut next = current;
+        let approval_sequence = next
+            .approval_sequence
+            .checked_add(1)
+            .ok_or_else(|| "Mobile approval sequence is exhausted".to_owned())?;
+        let decision = AgentHvmApprovalDecision::from_commitment(
+            commitment,
+            decision,
+            next.mobile_device_id.clone(),
+            mobile_authorization_epoch,
+            approval_sequence,
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+        next.approval_sequence = approval_sequence;
+        next.pending_agent_hvm_approval = Some(MobilePendingAgentHvmApproval {
+            state_version: "1".to_owned(),
+            commitment_hash,
+            decision: decision.clone(),
+            signed_decision: None,
+        });
+        self.shared.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(PreparedAgentHvmDecision::NeedsSignature(decision))
+    }
+
+    async fn sign_and_persist_agent_hvm_decision(
+        &self,
+        app: &tauri::AppHandle,
+        decision: AgentHvmApprovalDecision,
+    ) -> Result<SignedAgentHvmApprovalDecision, String> {
+        let operation_id = decision.commitment.operation_id.clone();
+        let result = self
+            .run_biometric_guarded(
+                std::time::Duration::from_secs(120),
+                "Agent HVM biometric approval timed out",
+                async {
+                    let signer = crate::agent_companion_identity::open(app)
+                        .await?
+                        .ok_or_else(|| "Android companion identity is not configured".to_owned())?;
+                    let signed = SignedAgentHvmApprovalDecision::sign(decision.clone(), &signer)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let mut slot = self.shared.state.lock().await;
+                    let current = slot
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "Agent HVM approval state disappeared during biometric signing"
+                                .to_owned()
+                        })?
+                        .clone();
+                    current.validate_at(unix_now()?)?;
+                    let mut next = current;
+                    let pending = next.pending_agent_hvm_approval.as_mut().ok_or_else(|| {
+                        "Agent HVM approval state disappeared during biometric signing".to_owned()
+                    })?;
+                    if pending.decision != decision || pending.signed_decision.is_some() {
+                        return Err(
+                            "Agent HVM approval changed during biometric signing".to_owned()
+                        );
+                    }
+                    pending.signed_decision = Some(signed.clone());
+                    self.shared.persist_locked(&next)?;
+                    *slot = Some(next);
+                    Ok(signed)
+                },
+            )
+            .await;
+        if result.is_err() {
+            self.clear_pending_agent_hvm_approval(&operation_id)
+                .await
+                .map_err(|clear_error| {
+                    format!(
+                        "Agent HVM biometric signing failed and its unsigned recovery record could not be cleared: {clear_error}"
+                    )
+                })?;
+        }
+        result
+    }
+
+    async fn clear_pending_agent_hvm_approval(&self, operation_id: &str) -> Result<(), String> {
+        let mut slot = self.shared.state.lock().await;
+        let current = slot
+            .as_ref()
+            .ok_or_else(|| "Agent companion is not paired".to_owned())?
+            .clone();
+        let mut next = current;
+        next.clear_pending_agent_hvm_approval_for(operation_id)?;
+        self.shared.persist_locked(&next)?;
+        *slot = Some(next);
+        Ok(())
     }
 
     async fn sign_pilot_decision(
@@ -799,6 +1295,218 @@ impl AgentCompanionMobileState {
 }
 
 #[tauri::command]
+pub async fn agent_wallet_companion_pending_fast_pay(
+    webview: Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentCompanionMobileState>,
+    request: CompanionAgentFastPayPendingRequest,
+) -> Result<CompanionAgentFastPayPendingView, String> {
+    require_agent_companion_webview(&webview)?;
+    require_pilot_enabled()?;
+    #[cfg(target_os = "android")]
+    {
+        let commitment = state
+            .poll_agent_fast_pay_approval(app, request.operation_id)
+            .await?;
+        return Ok(CompanionAgentFastPayPendingView { commitment });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, state, request);
+        Err("Agent Fast Pay mobile approval is available only on Android".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_companion_decide_fast_pay(
+    webview: Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentCompanionMobileState>,
+    request: CompanionAgentFastPayDecisionRequest,
+) -> Result<CompanionAgentFastPayDecisionView, String> {
+    require_agent_companion_webview(&webview)?;
+    require_pilot_enabled()?;
+    #[cfg(target_os = "android")]
+    {
+        let _flow = state.consent_flow.lock().await;
+        let current = state
+            .shared
+            .current()
+            .await?
+            .ok_or_else(|| "Pair this phone before approving Agent Fast Pay".to_owned())?;
+        current.validate_at(unix_now()?)?;
+        let commitment = if let Some(pending) = &current.pending_agent_fast_pay_approval {
+            if request.operation_id.as_deref().is_some_and(|operation_id| {
+                operation_id != pending.decision.commitment.operation_id
+            }) || request.decision != pending.decision.decision
+            {
+                return Err(
+                    "A different Agent Fast Pay approval is already pending recovery".to_owned(),
+                );
+            }
+            pending.decision.commitment.clone()
+        } else {
+            drop(current);
+            state
+                .poll_agent_fast_pay_approval(app.clone(), request.operation_id.clone())
+                .await?
+                .ok_or_else(|| "No Agent Fast Pay approval is waiting".to_owned())?
+        };
+        let approval_id = commitment.approval_id.clone();
+        let operation_id = commitment.operation_id.clone();
+        let prepared = state
+            .prepare_agent_fast_pay_decision(commitment, request.decision)
+            .await?;
+        let signed = match prepared {
+            PreparedAgentFastPayDecision::Signed(signed) => signed,
+            PreparedAgentFastPayDecision::NeedsSignature(decision) => {
+                state
+                    .sign_and_persist_agent_fast_pay_decision(&app, decision)
+                    .await?
+            }
+        };
+        // Deliberately not transport-auto-retried. If the answer is lost, the
+        // next explicit command resends the byte-identical durable signature.
+        let response = state
+            .exchange_with_reconnect(
+                app,
+                super::session::OutboundKind::AgentFastPayApprovalDecision(signed),
+            )
+            .await?;
+        let CompanionPayload::AdminAck {
+            command_id,
+            accepted,
+            detail,
+        } = response.payload
+        else {
+            return Err(
+                "Desktop returned an unexpected Agent Fast Pay decision response".to_owned(),
+            );
+        };
+        if !accepted || command_id != approval_id {
+            return Err("Desktop did not accept the exact Agent Fast Pay decision".to_owned());
+        }
+        state
+            .clear_pending_agent_fast_pay_approval(&operation_id)
+            .await?;
+        return Ok(CompanionAgentFastPayDecisionView {
+            operation_id,
+            approval_id,
+            approved: request.decision == ApprovalDecision::Approve,
+            detail,
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, state, request);
+        Err("Agent Fast Pay mobile approval is available only on Android".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_companion_pending_hvm_fast_pay(
+    webview: Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentCompanionMobileState>,
+    request: CompanionAgentHvmPendingRequest,
+) -> Result<CompanionAgentHvmPendingView, String> {
+    require_agent_companion_webview(&webview)?;
+    require_pilot_enabled()?;
+    #[cfg(target_os = "android")]
+    {
+        let commitment = state
+            .poll_agent_hvm_approval(app, request.operation_id)
+            .await?;
+        return Ok(CompanionAgentHvmPendingView { commitment });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, state, request);
+        Err("Agent HVM mobile approval is available only on Android".to_owned())
+    }
+}
+
+#[tauri::command]
+pub async fn agent_wallet_companion_decide_hvm_fast_pay(
+    webview: Webview,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentCompanionMobileState>,
+    request: CompanionAgentHvmDecisionRequest,
+) -> Result<CompanionAgentHvmDecisionView, String> {
+    require_agent_companion_webview(&webview)?;
+    require_pilot_enabled()?;
+    #[cfg(target_os = "android")]
+    {
+        let _flow = state.consent_flow.lock().await;
+        let current = state
+            .shared
+            .current()
+            .await?
+            .ok_or_else(|| "Pair this phone before approving Agent HVM Fast Pay".to_owned())?;
+        current.validate_at(unix_now()?)?;
+        let commitment = if let Some(pending) = &current.pending_agent_hvm_approval {
+            if request.operation_id.as_deref().is_some_and(|operation_id| {
+                operation_id != pending.decision.commitment.operation_id
+            }) || request.decision != pending.decision.decision
+            {
+                return Err("A different Agent HVM approval is already pending recovery".to_owned());
+            }
+            pending.decision.commitment.clone()
+        } else {
+            drop(current);
+            state
+                .poll_agent_hvm_approval(app.clone(), request.operation_id.clone())
+                .await?
+                .ok_or_else(|| "No Agent HVM approval is waiting".to_owned())?
+        };
+        let approval_id = commitment.approval_id.clone();
+        let operation_id = commitment.operation_id.clone();
+        let prepared = state
+            .prepare_agent_hvm_decision(commitment, request.decision)
+            .await?;
+        let signed = match prepared {
+            PreparedAgentHvmDecision::Signed(signed) => signed,
+            PreparedAgentHvmDecision::NeedsSignature(decision) => {
+                state
+                    .sign_and_persist_agent_hvm_decision(&app, decision)
+                    .await?
+            }
+        };
+        let response = state
+            .exchange_with_reconnect(
+                app,
+                super::session::OutboundKind::AgentHvmApprovalDecision(signed),
+            )
+            .await?;
+        let CompanionPayload::AdminAck {
+            command_id,
+            accepted,
+            detail,
+        } = response.payload
+        else {
+            return Err("Desktop returned an unexpected Agent HVM decision response".to_owned());
+        };
+        if !accepted || command_id != approval_id {
+            return Err("Desktop did not accept the exact Agent HVM decision".to_owned());
+        }
+        state
+            .clear_pending_agent_hvm_approval(&operation_id)
+            .await?;
+        return Ok(CompanionAgentHvmDecisionView {
+            operation_id,
+            approval_id,
+            approved: request.decision == ApprovalDecision::Approve,
+            detail,
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, state, request);
+        Err("Agent HVM mobile approval is available only on Android".to_owned())
+    }
+}
+
+#[tauri::command]
 pub async fn agent_wallet_companion_decide_payment(
     webview: Webview,
     app: tauri::AppHandle,
@@ -1171,6 +1879,8 @@ mod tests {
                 approval_sequence: 0,
                 pending_pairing_ack: None,
                 pending_approval: None,
+                pending_agent_fast_pay_approval: None,
+                pending_agent_hvm_approval: None,
                 pending_witness: None,
                 discarded_consents: Vec::new(),
                 discarded_consents_dropped: 0,

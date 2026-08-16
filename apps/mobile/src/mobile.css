@@ -391,10 +391,16 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/*
+ * Pay, Receive and Security each carry four to six .primary buttons, so a
+ * solid gold slab per button emphasised nothing. A gold outline over a gold
+ * tint is still the only gold control in a column of neutral ones, and it
+ * leaves the destructive controls as the loudest thing on the screen.
+ */
 button.primary {
-  background: linear-gradient(135deg, var(--accent-dim), var(--accent));
-  border: none;
-  color: #000000;
+  border: 1px solid rgb(245 166 35 / 42%);
+  background: rgb(245 166 35 / 10%);
+  color: #ffbc4d;
 }
 
 button.ghost {
@@ -407,6 +413,22 @@ button.small {
   width: auto;
   padding: 8px 14px;
   font-size: 0.85rem;
+}
+
+/*
+ * The loudest control the personal wallet has, and now the only solid gold
+ * fill left in it.
+ *
+ * Softening `.primary` would otherwise have quietened Restore backup and
+ * Delete from device along with everything else. Those two cannot be undone,
+ * so they keep exactly the fill, black text and weight that `.primary` used
+ * to carry. Reserve this for actions that cannot be undone.
+ */
+button.irreversible-action {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #000000;
+  font-weight: 700;
 }
 
 .balance-hero {
@@ -891,7 +913,7 @@ button.small {
   border: none;
   color: var(--muted);
   font-size: 0.58rem;
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.01em;
   margin: 0;
   padding: 8px 2px;

@@ -206,8 +206,8 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
       onOpenQrPay: hacSend.openQrPay,
       onEnableFastPay: (d: string) => void wallet.handleEnableFastPay(d),
       onApplyHub: wallet.handleApplyHub,
-      onSaveL2Settings: (n: string, h: string, a: string) =>
-        void wallet.handleSaveL2Settings(n, h, a),
+      onSaveL2Settings: (n: string, h: string, a: string, trusted: boolean) =>
+        void wallet.handleSaveL2Settings(n, h, a, trusted),
       onHubHealth: () => void wallet.handleHubHealth(),
       onPreviewChannel: (...args: Parameters<typeof wallet.handlePreviewChannel>) =>
         void wallet.handlePreviewChannel(...args),

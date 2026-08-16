@@ -9,10 +9,19 @@ use hpay_companion_protocol::{
     DeviceRegistry, DeviceRole, ReplayGuard, ReplayGuardSnapshot, SignedAdminCommand,
     SignedApprovalDecision,
 };
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+use hpay_companion_protocol::{
+    AgentFastPayApprovalCommitment, AgentHvmApprovalCommitment, DevicePermission,
+    SignedAgentFastPayApprovalDecision, SignedAgentHvmApprovalDecision,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::amount::HacUnits;
 use crate::error::{AgentWalletError, AgentWalletResult};
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+use crate::fast_pay_operation::{AgentFastPayOperationView, AgentFastPayStatus};
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+use crate::hvm_payment_operation::{AgentHvmPaymentOperationView, AgentHvmPaymentStatus};
 use crate::journal::AgentJournalEventKind;
 use crate::operation::{ApprovalMode, OperationStatus, PaymentOperationView};
 use crate::types::{AgentWalletId, OperationId};
@@ -327,7 +336,10 @@ impl AgentWalletManager {
         let mut state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
         if signed.decision.decision == ApprovalDecision::Approve {
-            require_agent_spending_network(&state.network_mode)?;
+            require_agent_spending_network(
+                &state.network_mode,
+                state.trusted_mainnet_fast_pay_pilot,
+            )?;
         }
         let operation_id = OperationId::parse(signed.decision.operation_id.clone())
             .map_err(|_| AgentWalletError::ApprovalCommitmentMismatch)?;
@@ -444,6 +456,461 @@ impl AgentWalletManager {
             }
         }
         self.resume_payment(wallet_id, &operation_id, now).await
+    }
+
+    /// Returns the exact durable Agent Fast Pay bytes that the owner device
+    /// must review. Reading never changes state or consumes replay metadata.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub fn pending_fast_pay_approval(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: Option<&OperationId>,
+        mobile_device_id: &DeviceId,
+        now: u64,
+    ) -> AgentWalletResult<Option<AgentFastPayApprovalCommitment>> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let operation = if let Some(operation_id) = operation_id {
+            state
+                .fast_pay_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?
+        } else {
+            let mut pending = state
+                .fast_pay_operations
+                .values()
+                .filter(|operation| operation.status() == AgentFastPayStatus::ApprovalRequested);
+            let Some(operation) = pending.next() else {
+                return Ok(None);
+            };
+            if pending.next().is_some() {
+                return Err(AgentWalletError::InvalidOperationState);
+            }
+            operation
+        };
+        if operation.status() != AgentFastPayStatus::ApprovalRequested {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        let agent = state
+            .agents
+            .get(operation.agent_id().as_str())
+            .ok_or(AgentWalletError::AgentNotPaired)?;
+        if !matches!(
+            agent.policy.approval_mode,
+            ApprovalMode::MobileManual | ApprovalMode::EitherTrustedDevice
+        ) {
+            return Err(AgentWalletError::AgentPermissionDenied);
+        }
+        let companion = state
+            .companion_security
+            .as_ref()
+            .ok_or(AgentWalletError::CompanionAuthorizationFailed)?;
+        companion.validate(wallet_id, now)?;
+        companion
+            .device_registry
+            .require(
+                mobile_device_id,
+                wallet_id.as_str(),
+                DeviceRole::Mobile,
+                DevicePermission::ApprovePayment,
+            )
+            .map_err(map_companion_authorization_error)?;
+        let approval = operation.stored_approval_request()?.clone();
+        approval
+            .validate_at(now)
+            .map_err(map_companion_decision_error)?;
+        Ok(Some(approval))
+    }
+
+    /// Atomically records one exact mobile decision together with the replay
+    /// high-water mark. This transition performs no Hub call, L2 signature,
+    /// settlement, fallback or broadcast.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub fn apply_mobile_fast_pay_approval(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        signed: SignedAgentFastPayApprovalDecision,
+        now: u64,
+    ) -> AgentWalletResult<AgentFastPayOperationView> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let is_approval = signed.decision.decision == ApprovalDecision::Approve;
+        if is_approval {
+            require_agent_spending_network(
+                &state.network_mode,
+                state.trusted_mainnet_fast_pay_pilot,
+            )?;
+            if self
+                .emergency_controller(wallet_id)?
+                .status(state.payments_suspended)
+                .stopped
+            {
+                return Err(AgentWalletError::AgentPaymentsSuspended);
+            }
+        }
+        let operation_id = OperationId::parse(signed.decision.commitment.operation_id.clone())
+            .map_err(|_| AgentWalletError::ApprovalCommitmentMismatch)?;
+        let (expected, agent_id, status, matches_current_binding) = {
+            let operation = state
+                .fast_pay_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?;
+            (
+                operation.stored_approval_request()?.clone(),
+                operation.agent_id().clone(),
+                operation.status(),
+                state
+                    .l2_binding
+                    .as_ref()
+                    .is_some_and(|binding| operation.matches_binding(binding)),
+            )
+        };
+        if expected.desktop_device_id.as_str() != state.primary_signing_device_id {
+            return Err(AgentWalletError::ApprovalCommitmentMismatch);
+        }
+        let agent = state
+            .agents
+            .get(agent_id.as_str())
+            .ok_or(AgentWalletError::AgentNotPaired)?;
+        let approval_mode = agent.policy.approval_mode;
+        if !matches!(
+            approval_mode,
+            ApprovalMode::MobileManual | ApprovalMode::EitherTrustedDevice
+        ) {
+            return Err(AgentWalletError::AgentPermissionDenied);
+        }
+        if is_approval {
+            if agent.status != crate::policy::AgentStatus::Active {
+                return Err(AgentWalletError::AgentRevoked);
+            }
+            if expected.policy_epoch != state.policy_epoch
+                || expected.signer_epoch != state.signer_epoch
+                || expected.emergency_epoch != state.emergency_epoch
+                || !matches_current_binding
+            {
+                return Err(AgentWalletError::ApprovalCommitmentMismatch);
+            }
+        }
+        let companion = state
+            .companion_security
+            .as_mut()
+            .ok_or(AgentWalletError::CompanionAuthorizationFailed)?;
+        companion.validate(wallet_id, now)?;
+        let permission = match signed.decision.decision {
+            ApprovalDecision::Approve => DevicePermission::ApprovePayment,
+            ApprovalDecision::Reject => DevicePermission::RejectPayment,
+        };
+        let record = companion
+            .device_registry
+            .require(
+                &signed.decision.mobile_device_id,
+                wallet_id.as_str(),
+                DeviceRole::Mobile,
+                permission,
+            )
+            .map_err(map_companion_authorization_error)?;
+        if record.authorization_epoch != signed.decision.device_authorization_epoch {
+            return Err(AgentWalletError::CompanionAuthorizationFailed);
+        }
+        if status != AgentFastPayStatus::ApprovalRequested {
+            let operation = state
+                .fast_pay_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?;
+            return if operation.stored_approval_decision() == Some(&signed) {
+                Ok(operation.view())
+            } else {
+                Err(AgentWalletError::InvalidOperationState)
+            };
+        }
+        let mut replay = companion.replay_guard(now)?;
+        let permit = signed
+            .verify(&expected, &companion.device_registry, &replay, now)
+            .map_err(map_companion_decision_error)?;
+        let replay_snapshot = replay
+            .commit_and_snapshot(permit, now)
+            .map_err(map_companion_replay_error)?;
+        let decision = signed.decision.decision;
+        let mobile_device_id = signed.decision.mobile_device_id.clone();
+        state
+            .fast_pay_operations
+            .get_mut(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .record_owner_decision(signed)?;
+        if is_approval {
+            let binding = state
+                .l2_binding
+                .as_ref()
+                .ok_or(AgentWalletError::SigningBlocked)?;
+            let operation = state
+                .fast_pay_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?;
+            let agent_authorization_epoch = state
+                .agents
+                .get(operation.agent_id().as_str())
+                .ok_or(AgentWalletError::AgentNotPaired)?
+                .authorization_epoch;
+            state
+                .fast_pay_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?
+                .approved_signing_view(
+                    binding,
+                    agent_authorization_epoch,
+                    state.policy_epoch,
+                    state.signer_epoch,
+                    state.emergency_epoch,
+                    now,
+                )?;
+        }
+        state
+            .companion_security
+            .as_mut()
+            .ok_or(AgentWalletError::RecoveryRequired)?
+            .replay_guard = replay_snapshot;
+        state.updated_at = now;
+        let event = match decision {
+            ApprovalDecision::Approve => AgentJournalEventKind::ApprovalGranted,
+            ApprovalDecision::Reject => AgentJournalEventKind::ApprovalRejected,
+        };
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            event,
+            Some(operation_id.as_str().as_bytes()),
+            Some(mobile_device_id.as_str().as_bytes()),
+            now,
+        )?;
+        state
+            .fast_pay_operations
+            .get(operation_id.as_str())
+            .map(|operation| operation.view())
+            .ok_or(AgentWalletError::RecoveryRequired)
+    }
+
+    /// Returns the exact HVM deployment, lease, previous-bill and unsigned
+    /// next-bill commitment that the owner phone must review. Reading is
+    /// side-effect free and never touches the Agent key.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub fn pending_hvm_payment_approval(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: Option<&OperationId>,
+        mobile_device_id: &DeviceId,
+        now: u64,
+    ) -> AgentWalletResult<Option<AgentHvmApprovalCommitment>> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let operation = if let Some(operation_id) = operation_id {
+            state
+                .hvm_payment_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?
+        } else {
+            let mut pending = state
+                .hvm_payment_operations
+                .values()
+                .filter(|operation| operation.status() == AgentHvmPaymentStatus::ApprovalRequested);
+            let Some(operation) = pending.next() else {
+                return Ok(None);
+            };
+            if pending.next().is_some() {
+                return Err(AgentWalletError::InvalidOperationState);
+            }
+            operation
+        };
+        if operation.status() != AgentHvmPaymentStatus::ApprovalRequested {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        let agent = state
+            .agents
+            .get(operation.agent_id().as_str())
+            .ok_or(AgentWalletError::AgentNotPaired)?;
+        if !matches!(
+            agent.policy.approval_mode,
+            ApprovalMode::MobileManual | ApprovalMode::EitherTrustedDevice
+        ) {
+            return Err(AgentWalletError::AgentPermissionDenied);
+        }
+        let companion = state
+            .companion_security
+            .as_ref()
+            .ok_or(AgentWalletError::CompanionAuthorizationFailed)?;
+        companion.validate(wallet_id, now)?;
+        companion
+            .device_registry
+            .require(
+                mobile_device_id,
+                wallet_id.as_str(),
+                DeviceRole::Mobile,
+                DevicePermission::ApprovePayment,
+            )
+            .map_err(map_companion_authorization_error)?;
+        let approval = operation.stored_approval_request()?.clone();
+        approval
+            .validate_at(now)
+            .map_err(map_companion_decision_error)?;
+        Ok(Some(approval))
+    }
+
+    /// Atomically stores one verified HVM owner decision and the matching
+    /// replay high-water mark. It performs no signing and no Hub request.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub fn apply_mobile_hvm_payment_approval(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        signed: SignedAgentHvmApprovalDecision,
+        now: u64,
+    ) -> AgentWalletResult<AgentHvmPaymentOperationView> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let is_approval = signed.decision.decision == ApprovalDecision::Approve;
+        if is_approval {
+            require_agent_spending_network(
+                &state.network_mode,
+                state.trusted_mainnet_fast_pay_pilot,
+            )?;
+            if self
+                .emergency_controller(wallet_id)?
+                .status(state.payments_suspended)
+                .stopped
+            {
+                return Err(AgentWalletError::AgentPaymentsSuspended);
+            }
+        }
+        let operation_id = OperationId::parse(signed.decision.commitment.operation_id.clone())
+            .map_err(|_| AgentWalletError::ApprovalCommitmentMismatch)?;
+        let (expected, agent_id, status) = {
+            let operation = state
+                .hvm_payment_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?;
+            (
+                operation.stored_approval_request()?.clone(),
+                operation.agent_id().clone(),
+                operation.status(),
+            )
+        };
+        if expected.desktop_device_id.as_str() != state.primary_signing_device_id {
+            return Err(AgentWalletError::ApprovalCommitmentMismatch);
+        }
+        let agent = state
+            .agents
+            .get(agent_id.as_str())
+            .ok_or(AgentWalletError::AgentNotPaired)?;
+        if !matches!(
+            agent.policy.approval_mode,
+            ApprovalMode::MobileManual | ApprovalMode::EitherTrustedDevice
+        ) {
+            return Err(AgentWalletError::AgentPermissionDenied);
+        }
+        if is_approval {
+            if agent.status != crate::policy::AgentStatus::Active {
+                return Err(AgentWalletError::AgentRevoked);
+            }
+            if expected.agent_authorization_epoch != agent.authorization_epoch
+                || expected.policy_epoch != state.policy_epoch
+                || expected.signer_epoch != state.signer_epoch
+                || expected.emergency_epoch != state.emergency_epoch
+                || expected.network_binding.network_mode != state.network_mode
+            {
+                return Err(AgentWalletError::ApprovalCommitmentMismatch);
+            }
+        }
+        let companion = state
+            .companion_security
+            .as_mut()
+            .ok_or(AgentWalletError::CompanionAuthorizationFailed)?;
+        companion.validate(wallet_id, now)?;
+        let permission = match signed.decision.decision {
+            ApprovalDecision::Approve => DevicePermission::ApprovePayment,
+            ApprovalDecision::Reject => DevicePermission::RejectPayment,
+        };
+        let record = companion
+            .device_registry
+            .require(
+                &signed.decision.mobile_device_id,
+                wallet_id.as_str(),
+                DeviceRole::Mobile,
+                permission,
+            )
+            .map_err(map_companion_authorization_error)?;
+        if record.authorization_epoch != signed.decision.device_authorization_epoch {
+            return Err(AgentWalletError::CompanionAuthorizationFailed);
+        }
+        if status != AgentHvmPaymentStatus::ApprovalRequested {
+            let operation = state
+                .hvm_payment_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?;
+            return if operation.stored_approval_decision() == Some(&signed) {
+                Ok(operation.view())
+            } else {
+                Err(AgentWalletError::InvalidOperationState)
+            };
+        }
+        let mut replay = companion.replay_guard(now)?;
+        let permit = signed
+            .verify(&expected, &companion.device_registry, &replay, now)
+            .map_err(map_companion_decision_error)?;
+        let replay_snapshot = replay
+            .commit_and_snapshot(permit, now)
+            .map_err(map_companion_replay_error)?;
+        let decision = signed.decision.decision;
+        let mobile_device_id = signed.decision.mobile_device_id.clone();
+        state
+            .hvm_payment_operations
+            .get_mut(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .record_verified_owner_decision(signed)?;
+        if is_approval {
+            state
+                .hvm_payment_operations
+                .get(operation_id.as_str())
+                .ok_or(AgentWalletError::OperationNotFound)?
+                .approved_signing_view(
+                    agent.authorization_epoch,
+                    state.policy_epoch,
+                    state.signer_epoch,
+                    state.emergency_epoch,
+                    &state.network_mode,
+                    now,
+                )?;
+        }
+        state
+            .companion_security
+            .as_mut()
+            .ok_or(AgentWalletError::RecoveryRequired)?
+            .replay_guard = replay_snapshot;
+        state.updated_at = now;
+        let event = match decision {
+            ApprovalDecision::Approve => AgentJournalEventKind::ApprovalGranted,
+            ApprovalDecision::Reject => AgentJournalEventKind::ApprovalRejected,
+        };
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            event,
+            Some(operation_id.as_str().as_bytes()),
+            Some(mobile_device_id.as_str().as_bytes()),
+            now,
+        )?;
+        state
+            .hvm_payment_operations
+            .get(operation_id.as_str())
+            .map(|operation| operation.view())
+            .ok_or(AgentWalletError::RecoveryRequired)
     }
 
     /// Applies only fail-safe mobile administration. The independent emergency

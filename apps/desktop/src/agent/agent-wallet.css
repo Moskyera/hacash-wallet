@@ -72,16 +72,19 @@
 
 .wallet-space-switcher button {
   min-height: 38px;
-  border: 0;
+  /* Transparent rather than 0 so the active state can take a border without
+     the two halves of the switcher changing size. */
+  border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: #999;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .wallet-space-switcher button.active {
-  background: #ff9d00;
-  color: #000;
+  border-color: rgb(245 166 35 / 38%);
+  background: rgb(245 166 35 / 12%);
+  color: #ffbc4d;
 }
 
 .agent-sidebar nav {
@@ -122,15 +125,22 @@
   gap: 8px;
 }
 
+/*
+ * Every ordinary button in the Agent Wallet. It used to be gold text on a gold
+ * wash with a gold border at weight 700, which made an eight-button page read
+ * as eight primary actions. Neutral is the honest default; the gold is spent
+ * on .agent-primary-action, and the loudest thing on any page stays the
+ * .agent-danger control.
+ */
 .agent-sidebar-foot button,
 .agent-content button,
 .agent-center-card button {
   min-height: 40px;
-  border: 1px solid #4d3109;
+  border: 1px solid #2b2b2b;
   border-radius: 9px;
-  background: #15100a;
-  color: #ffad24;
-  font-weight: 700;
+  background: #0b0b0b;
+  color: #dcdcdc;
+  font-weight: 600;
 }
 
 .agent-content {
@@ -249,10 +259,24 @@
   color: #ff784f;
 }
 
-.agent-content button.agent-danger {
+/*
+ * DELIBERATELY LOUD. Left exactly as it was while every other button on these
+ * pages was quietened: Disable All Agent Payments, Revoke, Reject and Give up
+ * are the controls whose loudness is the point. font-weight is restated
+ * because the neutral base above dropped to 600 and these must not follow it.
+ *
+ * .agent-danger-action is the same control class the mobile companion already
+ * styles; on desktop it was used by the witness re-target confirm
+ * (WitnessRotationPanel) and had no rule at all here, so a control that makes
+ * you type a confirmation phrase drew as an ordinary grey button.
+ */
+.agent-content button.agent-danger,
+.agent-content button.agent-danger-action,
+.agent-center-card button.agent-danger-action {
   border-color: #8d2f13;
   background: #210a04;
   color: #ff805c;
+  font-weight: 700;
 }
 
 .agent-warning,
@@ -326,8 +350,9 @@
 .agent-center-card .agent-primary {
   width: 100%;
   margin-top: 20px;
-  background: #ff9d00;
-  color: #000;
+  border-color: rgb(245 166 35 / 45%);
+  background: rgb(245 166 35 / 10%);
+  color: #ffbc4d;
 }
 
 .agent-center-card button:disabled,
@@ -502,10 +527,12 @@
   font-weight: 400;
 }
 
+/* A gold outline over a gold tint. Enough to find it among neutral buttons,
+   and it no longer outshouts Disable All Agent Payments beside it. */
 .agent-content button.agent-primary-action {
-  border-color: #ff9d00;
-  background: #ff9d00;
-  color: #000;
+  border-color: rgb(245 166 35 / 45%);
+  background: rgb(245 166 35 / 10%);
+  color: #ffbc4d;
 }
 
 .agent-block-action {
@@ -873,10 +900,13 @@
   align-items: center;
   justify-content: center;
   border-radius: 8px;
-  background: #ff9d00;
-  color: #000;
+  /* Kept identical to `.wallet-space-switcher button.active` above; if the two
+     drift apart, "you are here" points at the wrong wallet again. */
+  border: 1px solid rgb(245 166 35 / 38%);
+  background: rgb(245 166 35 / 12%);
+  color: #ffbc4d;
   font-size: inherit;
-  font-weight: 700;
+  font-weight: 600;
   text-align: center;
 }
 

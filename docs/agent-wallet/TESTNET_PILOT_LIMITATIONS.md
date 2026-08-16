@@ -12,7 +12,7 @@ The current implementation is suitable only for a controlled, low-value, disposa
 |---|---|---|
 | Windows desktop signer | Implemented and automated-test covered | Real Windows runtime evidence is still required. |
 | Android companion | Implemented and contract-test covered | Real Android, biometric, Keystore, and same-LAN evidence is still required. |
-| Linux desktop | Blocked | Pilot feature build fails intentionally because of the glib 0.18.5 blocker. |
+| Linux desktop | Build-gated | The bounded Agent feature must compile in Linux CI and the immutable patched glib source must pass the Rust advisory release gate. |
 | iOS companion | Unsupported | No Pilot approval/witness claim is allowed. |
 | Hacash testnet | Required | New Agent Wallet mainnet spending is blocked. |
 | Custom fullnode 1.0.10 | Required | No automatic fallback or discovery is allowed. |

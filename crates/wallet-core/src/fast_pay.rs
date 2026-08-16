@@ -273,7 +273,11 @@ pub async fn evaluate_fast_pay(
     let channel_id = settings.channel_id_hex.clone();
 
     if let (Some(url), Some(ch_id), Some(user)) = (&hub_url, &channel_id, user_address) {
-        let hub = L2HubClient::new_for_network(url.clone(), &settings.network_mode);
+        let hub = L2HubClient::new_for_wallet_policy(
+            url.clone(),
+            &settings.network_mode,
+            settings.trusted_mainnet_fast_pay_pilot,
+        );
         match hub.health().await {
             Ok(h)
                 if h.ok
@@ -309,13 +313,41 @@ pub async fn evaluate_fast_pay(
         }
     }
 
-    if hub_url.is_some() && channel_id.is_none() {
+    if let Some(url) = hub_url.as_deref()
+        && channel_id.is_none()
+    {
+        let client = L2HubClient::new_for_wallet_policy(
+            url,
+            &settings.network_mode,
+            settings.trusted_mainnet_fast_pay_pilot,
+        );
+        let health = match client.health().await {
+            Ok(health) => health,
+            Err(_) => return Ok(FastPayStatus::hub_unreachable()),
+        };
+        if !health.ok
+            || health.version < 3
+            || !health.settlement_ready
+            || !health.cross_channel_ready
+            || !crate::l2_hub::hub_fee_is_zero(&health)
+        {
+            return Ok(FastPayStatus::provider_incompatible());
+        }
+        let deposit = if settings.network_mode == "mainnet" {
+            let readiness = match client.require_mainnet_payment_ready(None).await {
+                Ok(readiness) => readiness,
+                Err(_) => return Ok(FastPayStatus::provider_incompatible()),
+            };
+            (readiness.max_channel_funding_millimeis() as f64 / 1_000.0)
+                .min(DEFAULT_CHANNEL_DEPOSIT_MEI)
+        } else {
+            DEFAULT_CHANNEL_DEPOSIT_MEI
+        };
         return Ok(FastPayStatus::needs_channel(
-            "your provider",
-            DEFAULT_CHANNEL_DEPOSIT_MEI,
+            health.name.unwrap_or_else(|| "your provider".into()),
+            deposit,
         ));
     }
-
     if let Some(discovered) = discover_healthy_hub().await {
         return Ok(FastPayStatus::needs_channel(
             discovered.name,

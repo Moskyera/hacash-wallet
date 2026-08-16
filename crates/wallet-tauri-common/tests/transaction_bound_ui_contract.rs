@@ -96,6 +96,97 @@ fn renderer_has_no_empty_operation_id_authorization_fallback() {
 }
 
 #[test]
+fn fast_pay_channel_open_is_prepared_only_on_both_apps() {
+    for handler in [
+        "apps/desktop/src/hooks/useDesktopWallet.ts",
+        "apps/mobile/src/hooks/useWalletSession.ts",
+        "apps/mobile/src/screens/FastPayChannelScreen.tsx",
+    ] {
+        let source = read(handler);
+        assert!(
+            !source.contains("api.enableFastPay("),
+            "{handler} must never call the legacy unprepared channel-open command"
+        );
+        assert!(
+            source.contains("prepareChannelOpen"),
+            "{handler} must prepare and display the exact channel transaction"
+        );
+        assert!(
+            source.contains("executePreparedChannelOpen"),
+            "{handler} must execute only the reviewed prepared operation"
+        );
+    }
+
+    let wallet = read("crates/wallet-core/src/wallet.rs");
+    let enable = wallet
+        .split_once("    pub async fn enable_fast_pay(")
+        .expect("Fast Pay compatibility command")
+        .1
+        .split_once("    pub async fn fast_pay_status(")
+        .expect("Fast Pay method boundary")
+        .0;
+    assert!(
+        !enable.contains("self.open_channel("),
+        "the compatibility command must configure only and never sign an L1 channel open"
+    );
+}
+#[test]
+fn fast_pay_open_close_previews_are_exact_and_recoverable_on_both_apps() {
+    let service = read("crates/wallet-core/src/wallet/authorization_service.rs");
+    let open = service
+        .split_once("    pub async fn prepare_channel_open(")
+        .expect("channel-open prepare method")
+        .1
+        .split_once("    pub async fn execute_prepared_channel_open(")
+        .expect("channel-open execution boundary")
+        .0;
+    for field in [
+        "Your deposit",
+        "Hub deposit",
+        "Network fee",
+        "Wallet fee",
+        "Channel",
+    ] {
+        assert!(open.contains(field), "channel-open preview missing {field}");
+    }
+    assert!(open.contains("exact_transaction_display"));
+
+    let close = service
+        .split_once("    pub async fn prepare_channel_close(")
+        .expect("channel-close prepare method")
+        .1
+        .split_once("    pub async fn execute_prepared_channel_close(")
+        .expect("channel-close execution boundary")
+        .0;
+    for field in [
+        "Original L1 distribution",
+        "Network fee",
+        "Wallet fee",
+        "Channel",
+    ] {
+        assert!(
+            close.contains(field),
+            "channel-close preview missing {field}"
+        );
+    }
+
+    for (api, screen) in [
+        (
+            "apps/desktop/src/api.ts",
+            "apps/desktop/src/screens/FastPayScreen.tsx",
+        ),
+        (
+            "apps/mobile/src/api.ts",
+            "apps/mobile/src/screens/FastPayChannelScreen.tsx",
+        ),
+    ] {
+        assert!(read(api).contains("recoverChannelOpen"), "{api}");
+        let screen = read(screen);
+        assert!(screen.contains("Finish pending setup"), "{screen}");
+        assert!(screen.contains("recoverChannelOpen"), "{screen}");
+    }
+}
+#[test]
 fn protected_quantum_signing_is_explicitly_fail_closed() {
     for screen in [
         "apps/desktop/src/components/SendQuantumTx.tsx",

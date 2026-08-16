@@ -16,9 +16,9 @@ chmod +x install.sh fast-pay-hub
 sudo ./install.sh
 ```
 
-The installer asks for the Hub address and secrets without printing them, verifies the local full-node capability endpoint, generates a separate journal key, installs a dedicated unprivileged service account and starts the Hub on loopback only.
+The installer asks for the Hub address, signer secret, and the initial pilot-user allowlist, verifies the local full-node capability endpoint, generates separate journal and sealed-state keys, installs a dedicated unprivileged service account and starts the Hub on loopback only. Signer, journal and state keys are always different.
 
-Default limits are 0.1 HAC per payment and 0.1 HAC for a newly funded channel. The binary enforces a hard 1 HAC pilot maximum.
+Default and hard pilot limits are 1 HAC per payment, 10 HAC for a newly funded channel and 100 HAC aggregate active/reserved Hub TVL. Operators may configure lower values, never higher ones. The installer selects the explicit `mainnet-bounded-pilot` profile and refuses to start without at least one allowlisted Hacash user address.
 
 ## Verify
 
@@ -28,11 +28,11 @@ curl http://127.0.0.1:8790/v1/health
 curl http://127.0.0.1:8790/v1/readiness/mainnet
 ```
 
-`payments_enabled` becomes true only when the full node is the pinned Hacash mainnet, synchronized and compatible. A red readiness response is a safe refusal, not a reason to bypass the gate.
+In `mainnet-bounded-pilot`, `payments_enabled` may become true only when the compatible node, signer, authenticated storage, allowlist, TVL and all caps are green. This is trusted-Hub operation, not a trustless L1 exit, and every wallet remains opted out until its owner explicitly accepts that dependency. The separate `mainnet-pilot` trustless profile remains blocked until the independent rollback anchor and unilateral L1 dispute path exist. A red readiness response is a safe refusal, not a reason to bypass the gate.
 
 ## Upgrade without replacing keys or state
 
-Do not run `install.sh` over an existing installation. The installer deliberately refuses to replace the signer, journal key, or state.
+Do not run `install.sh` over an existing installation. The installer deliberately refuses to replace the signer, journal key, state key, or durable state.
 
 1. Stop the service: `sudo systemctl stop hpay-fast-pay-hub`.
 2. Make offline backups of `/etc/hpay-fast-pay-hub` and `/var/lib/hpay-fast-pay-hub`.
@@ -43,4 +43,6 @@ Do not run `install.sh` over an existing installation. The installer deliberatel
 
 This is a bounded, Hub-coordinated mainnet pilot. It uses official Hacash ChannelPay bills without changing Hacash consensus, but current mainnet does not provide unilateral L1 finality for this flow. Start with small liquidity, keep wallet fees at zero, back up `/var/lib/hpay-fast-pay-hub` while the service is stopped, and do not advertise it as trustless.
 
-Secrets live in `/etc/hpay-fast-pay-hub/hub.env`, readable only by root and the dedicated service group. Never upload that file, the Hub private key, the journal key or the full-node API token to GitHub.
+Secrets live in `/etc/hpay-fast-pay-hub/hub.env`, readable only by root and the dedicated service group. Never upload that file, the Hub private key, the journal key, the state key or the full-node API token to GitHub.
+
+The Hub ignores forwarded client-IP headers by default. If you explicitly configure `--trusted-proxy-ip`, use the one exact reverse-proxy address and make the proxy overwrite a single `X-Real-IP` value. Direct public access to port 8790 remains forbidden.

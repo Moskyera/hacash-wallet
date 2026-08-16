@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node --test tests/agent-rules-ui.test.mjs && vitest run src/agent/access.test.ts src/agent/companionPairing.test.ts src/agent/companionWaiting.test.ts src/agent/companionPairingFeedback.test.ts src/agent/approvalValidation.test.ts src/agent/recipientStanding.test.ts src/agent/policyDraft.test.ts src/agent/overviewLayout.test.ts src/agent/overviewPlacement.test.ts src/agent/desktopControls.test.ts src/agent/strandedWitness.test.ts src/agent/backupWarning.test.ts src/agent/backupGate.test.tsx src/assetTrends.test.ts src/reviewedHacSend.test.ts"
+    "test": "node --test tests/agent-rules-ui.test.mjs && vitest run src/agent/access.test.ts src/agent/companionPairing.test.ts src/agent/companionWaiting.test.ts src/agent/companionPairingFeedback.test.ts src/agent/approvalValidation.test.ts src/agent/recipientStanding.test.ts src/agent/policyDraft.test.ts src/agent/overviewLayout.test.ts src/agent/overviewPlacement.test.ts src/agent/desktopControls.test.ts src/agent/fastPayControls.test.ts src/agent/hvmFastPayControls.test.ts src/agent/strandedWitness.test.ts src/agent/backupWarning.test.ts src/agent/backupGate.test.tsx src/assetTrends.test.ts src/reviewedHacSend.test.ts src/securitySettings.test.ts"
   },
   "dependencies": {
     "@hacash/wallet-ui": "file:../../packages/wallet-ui",

@@ -16,18 +16,18 @@ The Pilot does not modify or authorize Personal Wallet signing, backup, settings
 
 | Role | Supported Pilot platform | Boundary |
 |---|---|---|
-| Agent Wallet and blockchain signer | Windows desktop | Pilot feature builds are compile-time blocked on non-Windows desktop targets. |
+| Agent Wallet and blockchain signer | Windows and Linux desktop | Both desktop release paths compile the same bounded Agent feature; platform-specific biometric availability remains explicit at runtime. |
 | Approval and rollback witness | Android | Pilot commands return unsupported outside Android. The companion identity is required to be hardware-backed, non-exportable, and protected per use. |
-| Linux desktop | Blocked | `agent-wallet-testnet-pilot` triggers a compile error until the Linux `glib 0.18.5` blocker is resolved. Linux may build without the Pilot feature. |
+| Linux desktop | Build-gated | The GTK3 glib soundness fix is pinned by immutable commit and enforced by the release advisory gate. Linux CI must compile the bounded Agent feature. |
 | iOS | Not supported | No verified Pilot approval or witness implementation is enabled. |
 
-This is therefore a Windows plus Android Pilot, not a general desktop/mobile feature.
+This is therefore a desktop signer plus Android companion Pilot, not a general mobile signer feature.
 
 ## Components
 
 1. `agent-wallet-core` owns the independent Agent Wallet vault, policies, payment state machine, authenticated state, journal, node binding, and rollback-witness state.
 2. `companion-protocol` defines canonical pairing, approvals, replay protection, rollback anchors, witness receipts, and the mobile high-water state.
-3. The Windows Tauri shell exposes the trusted Agent Wallet administration surface and the desktop companion runtime.
+3. The desktop Tauri shell exposes the trusted Agent Wallet administration surface and the desktop companion runtime.
 4. The Android Tauri shell exposes a restricted companion surface. It cannot export an Agent Wallet key or invoke generic sends.
 5. The custom Hacash fullnode exposes the network and transaction contract used by the Pilot.
 

@@ -195,17 +195,37 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
   const handleEnableFastPay = useCallback(async () => {
     setBusy(true);
     try {
-      const fp = await api.enableFastPay(fastPay?.default_deposit_mei);
-      setFastPay(fp);
+      const hubAddress = settings?.hub_right_address?.trim();
+      if (!hubAddress) {
+        throw new Error("Choose an online Fast Pay provider first.");
+      }
+      const deposit = fastPay?.default_deposit_mei;
+      if (deposit == null || !Number.isFinite(deposit) || deposit <= 0) {
+        throw new Error("Fast Pay did not publish a valid channel deposit.");
+      }
+      const prepared = await api.prepareChannelOpen(hubAddress, String(deposit), "0");
+      await authorizePreparedOperation(
+        prepared,
+        platformSec?.native_biometric_available ?? false,
+        settings?.biometric_send_enabled ?? true,
+      );
+      await api.executePreparedChannelOpen(prepared.id);
+      setFastPay(await api.fastPayStatus());
       await refresh();
-      showToast("Fast Pay enabled!", "success");
+      showToast("Fast Pay channel submitted.", "success");
     } catch (e) {
       showToast(formatInvokeError(e), "error");
     } finally {
       setBusy(false);
     }
-  }, [fastPay?.default_deposit_mei, refresh, showToast]);
-
+  }, [
+    fastPay?.default_deposit_mei,
+    platformSec?.native_biometric_available,
+    refresh,
+    settings?.biometric_send_enabled,
+    settings?.hub_right_address,
+    showToast,
+  ]);
   const handleDisableFastPay = useCallback(async () => {
     setBusy(true);
     try {

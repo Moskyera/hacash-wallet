@@ -406,6 +406,7 @@ fn a_store_that_never_restores_never_grows_a_write_ahead_record() {
                 node_url: "http://127.0.0.1:18081".into(),
                 passphrase: PASSPHRASE.into(),
                 block_one_fingerprint: Some(TESTNET_ANCHOR.into()),
+                mainnet_pilot_acknowledgement: None,
             },
             125_100,
         )

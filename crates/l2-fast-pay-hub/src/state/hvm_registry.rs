@@ -1,0 +1,578 @@
+use crate::error::{HubError, HubResult};
+use crate::hvm_ledger::HvmBillProgressionStatus;
+use crate::hvm_registry::{HvmRegistryBillV2, HvmRegistryRecoveryBundleV2};
+use crate::hvm_registry_ledger::{
+    HVM_REGISTRY_CHANNEL_STATUS_SCHEMA, HVM_REGISTRY_PAYMENT_STATUS_SCHEMA,
+    HvmRegistryChannelStatusV2, HvmRegistryPaymentRequestV2, HvmRegistryPaymentStatusV2,
+    PersistedHvmRegistryLedger, PersistedHvmRegistryProgression,
+};
+use crate::journal::{JournalEvent, JournalOperationType, JournalPhase};
+use crate::storage::{HubPersistedState, PersistedHvmRegistryActivation, validate_hvm_state};
+
+use super::{HubState, unix_timestamp};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExistingRegistryProgressionDisposition {
+    ContinueUnsigned,
+    ReturnDurableSignature,
+    RequireReconciliation,
+}
+
+fn progression_disposition(
+    status: &HvmBillProgressionStatus,
+) -> ExistingRegistryProgressionDisposition {
+    match status {
+        HvmBillProgressionStatus::UserProposalPersisted => {
+            ExistingRegistryProgressionDisposition::ContinueUnsigned
+        }
+        HvmBillProgressionStatus::FullySigned => {
+            ExistingRegistryProgressionDisposition::ReturnDurableSignature
+        }
+        HvmBillProgressionStatus::HubSignatureMayExist
+        | HvmBillProgressionStatus::RecoveryRequired => {
+            ExistingRegistryProgressionDisposition::RequireReconciliation
+        }
+    }
+}
+
+impl HubState {
+    pub async fn activate_hvm_registry_recovery(
+        &self,
+        recovery_bundle: HvmRegistryRecoveryBundleV2,
+        minimum_required_live_blocks: u64,
+        minimum_required_recover_blocks: u64,
+    ) -> HubResult<String> {
+        self.ensure_settlement_ready()?;
+        if minimum_required_live_blocks == 0 {
+            return Err(HubError::State(
+                "registry activation requires a positive live lease minimum".into(),
+            ));
+        }
+        if recovery_bundle.binding.right_hub_address != self.hub_address {
+            return Err(HubError::State(
+                "registry recovery bundle is bound to a different Hub".into(),
+            ));
+        }
+        let binding_commitment = recovery_bundle.binding.commitment()?;
+        let existing = {
+            let guard = self
+                .inner
+                .read()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            guard
+                .hvm_registry_activations
+                .get(&binding_commitment)
+                .cloned()
+        };
+        if let Some(existing) = existing {
+            if existing.recovery_bundle != recovery_bundle
+                || existing.minimum_required_live_blocks != minimum_required_live_blocks
+                || existing.minimum_required_recover_blocks != minimum_required_recover_blocks
+            {
+                return Err(HubError::State(
+                    "registry activation retry changed the persisted activation".into(),
+                ));
+            }
+            if minimum_required_recover_blocks == 0 {
+                if self
+                    .node
+                    .verify_hvm_registry_runtime_bundle(
+                        &recovery_bundle,
+                        minimum_required_live_blocks,
+                        1,
+                    )
+                    .await
+                    .is_err()
+                {
+                    self.node
+                        .verify_hvm_registry_initial_bundle(
+                            &recovery_bundle,
+                            minimum_required_live_blocks,
+                        )
+                        .await?;
+                }
+            } else {
+                self.node
+                    .verify_hvm_registry_runtime_bundle(
+                        &recovery_bundle,
+                        minimum_required_live_blocks,
+                        minimum_required_recover_blocks,
+                    )
+                    .await?;
+            }
+            return Ok(binding_commitment);
+        }
+        let activation_snapshot = if minimum_required_recover_blocks == 0 {
+            self.node
+                .verify_hvm_registry_initial_bundle(&recovery_bundle, minimum_required_live_blocks)
+                .await?
+        } else {
+            self.node
+                .verify_hvm_registry_runtime_bundle(
+                    &recovery_bundle,
+                    minimum_required_live_blocks,
+                    minimum_required_recover_blocks,
+                )
+                .await?
+        };
+        let activation = PersistedHvmRegistryActivation {
+            binding_commitment: binding_commitment.clone(),
+            recovery_bundle,
+            activation_snapshot,
+            minimum_required_live_blocks,
+            minimum_required_recover_blocks,
+            activated_unix: unix_timestamp(),
+        };
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        let mut next_state = guard.clone();
+        if !insert_registry_activation(&mut next_state, activation.clone())? {
+            return Ok(binding_commitment);
+        }
+        let binding = &activation.recovery_bundle.binding;
+        let event = JournalEvent {
+            wallet_scope: format!("hub:{}", self.hub_address.trim()),
+            hub_or_provider_identity: self.hub_address.trim().to_owned(),
+            channel_id: binding.channel_id.clone(),
+            channel_reuse_version: u64::from(binding.reuse_version),
+            operation_id: format!("hvm-registry-activate-{binding_commitment}"),
+            operation_type: JournalOperationType::HvmChannelActivation,
+            operation_phase: JournalPhase::HvmChannelActivated,
+            amount_units: binding.left_deposit_zhu,
+            sender: binding.left_address.clone(),
+            recipient: binding.right_hub_address.clone(),
+            previous_state_commitment: String::new(),
+            new_state_commitment: String::new(),
+            idempotency_key: format!("hvm-registry-activate-{binding_commitment}"),
+            request_commitment: binding_commitment.clone(),
+            expected_bill_number: Some(1),
+            unsigned_state_commitment: Some(binding_commitment.clone()),
+            created_at: activation.activated_unix,
+        };
+        self.commit_authenticated_state(&mut guard, next_state, event)?;
+        Ok(binding_commitment)
+    }
+
+    pub async fn cosign_hvm_registry_payment(
+        &self,
+        request: HvmRegistryPaymentRequestV2,
+        now_unix: u64,
+    ) -> HubResult<HvmRegistryBillV2> {
+        self.ensure_settlement_ready()?;
+        if crate::readiness::is_mainnet_pilot_profile(&self.deployment_profile) {
+            return Err(HubError::Admission(
+                "shared HVM registry execution is not enabled for mainnet".into(),
+            ));
+        }
+        let _signing_guard = self.hvm_signing_lock.lock().await;
+        let request_commitment = request.commitment()?;
+        let (activation, previous, existing) =
+            {
+                let guard = self
+                    .inner
+                    .read()
+                    .map_err(|_| HubError::State("state lock poisoned".into()))?;
+                let activation = guard
+                    .hvm_registry_activations
+                    .get(&request.binding_commitment)
+                    .cloned()
+                    .ok_or_else(|| HubError::NotFound("HVM registry activation".into()))?;
+                let ledger = guard
+                    .hvm_registry_ledgers
+                    .get(&request.binding_commitment)
+                    .ok_or_else(|| HubError::State("HVM registry ledger is missing".into()))?;
+                if guard.hvm_bill_progressions.values().any(|progression| {
+                    progression.request.idempotency_key == request.idempotency_key
+                }) {
+                    return Err(HubError::State(
+                        "HVM idempotency key is already used by the V1 profile".into(),
+                    ));
+                }
+                for progression in guard.hvm_registry_progressions.values() {
+                    if progression.request.idempotency_key == request.idempotency_key
+                        && progression.request.operation_id != request.operation_id
+                    {
+                        return Err(HubError::State(
+                            "registry idempotency key is owned by another operation".into(),
+                        ));
+                    }
+                    if progression.status.is_unresolved()
+                        && progression.request.binding_commitment == request.binding_commitment
+                        && progression.request.operation_id != request.operation_id
+                    {
+                        return Err(HubError::State(
+                            "registry channel already has an unresolved progression".into(),
+                        ));
+                    }
+                }
+                let existing = guard
+                    .hvm_registry_progressions
+                    .get(&request.operation_id)
+                    .cloned();
+                (
+                    activation,
+                    ledger.latest_fully_signed_bill.clone(),
+                    existing,
+                )
+            };
+        if let Some(existing) = existing.as_ref() {
+            if existing.request_commitment != request_commitment || existing.request != request {
+                return Err(HubError::State(
+                    "registry operation retry changed the durable request".into(),
+                ));
+            }
+            match progression_disposition(&existing.status) {
+                ExistingRegistryProgressionDisposition::ContinueUnsigned => {}
+                ExistingRegistryProgressionDisposition::ReturnDurableSignature => {
+                    return existing.fully_signed_bill.clone().ok_or_else(|| {
+                        HubError::State("completed registry operation lost its signed bill".into())
+                    });
+                }
+                ExistingRegistryProgressionDisposition::RequireReconciliation => {
+                    return Err(HubError::State(
+                        "RecoveryRequired: a registry Hub signature may already exist".into(),
+                    ));
+                }
+            }
+        }
+        let binding = &activation.recovery_bundle.binding;
+        let validation_time = now_unix.max(crate::node::now_unix());
+        request.validate_against(binding, &previous, validation_time)?;
+        let live_network = self
+            .node
+            .capabilities()
+            .await?
+            .l1_channel_network_binding()?;
+        if request.network_binding != live_network {
+            return Err(HubError::Node(
+                "registry payer authorization network witness does not match the live node".into(),
+            ));
+        }
+        let recover_floor = activation.minimum_required_recover_blocks.max(1);
+        let first_snapshot = self
+            .node
+            .verify_hvm_registry_open_bundle(
+                &activation.recovery_bundle,
+                activation.minimum_required_live_blocks,
+                recover_floor,
+            )
+            .await?;
+        if existing.is_none() {
+            self.persist_registry_progression(
+                PersistedHvmRegistryProgression {
+                    request: request.clone(),
+                    request_commitment: request_commitment.clone(),
+                    previous_bill: previous.clone(),
+                    fully_signed_bill: None,
+                    status: HvmBillProgressionStatus::UserProposalPersisted,
+                    observed_height_before_signing: Some(first_snapshot.observed_height),
+                    updated_unix: now_unix,
+                    last_error: None,
+                },
+                JournalPhase::HvmPaymentProposalPersisted,
+                now_unix,
+            )?;
+        }
+
+        let final_snapshot = self
+            .node
+            .verify_hvm_registry_open_bundle(
+                &activation.recovery_bundle,
+                activation.minimum_required_live_blocks,
+                recover_floor,
+            )
+            .await?;
+        let mut progression = {
+            let guard = self
+                .inner
+                .read()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            let current = guard
+                .hvm_registry_progressions
+                .get(&request.operation_id)
+                .cloned()
+                .ok_or_else(|| HubError::State("registry progression disappeared".into()))?;
+            let ledger = guard
+                .hvm_registry_ledgers
+                .get(&request.binding_commitment)
+                .ok_or_else(|| HubError::State("registry ledger disappeared".into()))?;
+            if current.request_commitment != request_commitment
+                || ledger.latest_fully_signed_bill != previous
+                || current.status == HvmBillProgressionStatus::RecoveryRequired
+            {
+                return Err(HubError::State(
+                    "RecoveryRequired: registry state changed during verification".into(),
+                ));
+            }
+            current
+        };
+        let final_validation_time = now_unix.max(crate::node::now_unix());
+        request.validate_against(binding, &previous, final_validation_time)?;
+        let final_network = self
+            .node
+            .capabilities()
+            .await?
+            .l1_channel_network_binding()?;
+        if request.network_binding != final_network {
+            return Err(HubError::Node(
+                "registry payer authorization network witness changed before Hub signing".into(),
+            ));
+        }
+        progression.status = HvmBillProgressionStatus::HubSignatureMayExist;
+        progression.observed_height_before_signing = Some(final_snapshot.observed_height);
+        progression.updated_unix = now_unix;
+        self.persist_registry_progression(
+            progression.clone(),
+            JournalPhase::HvmPaymentSignatureMayExist,
+            now_unix,
+        )?;
+
+        // The authenticated may-exist boundary is durable before key use.
+        // Refresh wall time after that write so a request expiring during node
+        // verification or persistence cannot receive a Hub signature.
+        let key_use_time = now_unix.max(crate::node::now_unix());
+        request.validate_against(binding, &previous, key_use_time)?;
+        let signer = self
+            .hub_signer
+            .as_ref()
+            .ok_or_else(|| HubError::State("Hub signer is unavailable".into()))?;
+        let mut signed = request.proposed_bill.clone();
+        signer.sign_hvm_registry_bill(binding, &mut signed)?;
+        progression.status = HvmBillProgressionStatus::FullySigned;
+        progression.fully_signed_bill = Some(signed.clone());
+        progression.updated_unix = now_unix;
+        self.persist_registry_progression(
+            progression,
+            JournalPhase::HvmPaymentFullySigned,
+            now_unix,
+        )?;
+        Ok(signed)
+    }
+
+    fn persist_registry_progression(
+        &self,
+        progression: PersistedHvmRegistryProgression,
+        phase: JournalPhase,
+        now_unix: u64,
+    ) -> HubResult<()> {
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        let mut next_state = guard.clone();
+        let operation_id = progression.request.operation_id.clone();
+        let binding_commitment = progression.request.binding_commitment.clone();
+        let activation = next_state
+            .hvm_registry_activations
+            .get(&binding_commitment)
+            .cloned()
+            .ok_or_else(|| HubError::State("registry activation disappeared".into()))?;
+        if let Some(current) = next_state.hvm_registry_progressions.get(&operation_id)
+            && current.request_commitment != progression.request_commitment
+        {
+            return Err(HubError::State(
+                "registry progression commitment changed".into(),
+            ));
+        }
+        if progression.status == HvmBillProgressionStatus::FullySigned {
+            let signed = progression.fully_signed_bill.clone().ok_or_else(|| {
+                HubError::State("fully signed registry progression has no bill".into())
+            })?;
+            let ledger = next_state
+                .hvm_registry_ledgers
+                .get_mut(&binding_commitment)
+                .ok_or_else(|| HubError::State("registry ledger disappeared".into()))?;
+            if ledger.latest_fully_signed_bill != progression.previous_bill {
+                return Err(HubError::State(
+                    "registry ledger head changed before commit".into(),
+                ));
+            }
+            ledger.latest_fully_signed_bill = signed;
+            ledger.updated_unix = now_unix;
+        }
+        next_state
+            .hvm_registry_progressions
+            .insert(operation_id.clone(), progression.clone());
+        validate_hvm_state(&next_state)?;
+        let binding = &activation.recovery_bundle.binding;
+        let event = JournalEvent {
+            wallet_scope: format!("hub:{}", self.hub_address.trim()),
+            hub_or_provider_identity: self.hub_address.trim().to_owned(),
+            channel_id: binding.channel_id.clone(),
+            channel_reuse_version: u64::from(binding.reuse_version),
+            operation_id,
+            operation_type: JournalOperationType::HvmPayment,
+            operation_phase: phase,
+            amount_units: progression.request.amount_zhu,
+            sender: progression.request.payer.clone(),
+            recipient: progression.request.recipient.clone(),
+            previous_state_commitment: String::new(),
+            new_state_commitment: String::new(),
+            idempotency_key: progression.request.idempotency_key.clone(),
+            request_commitment: progression.request_commitment.clone(),
+            expected_bill_number: Some(progression.request.proposed_bill.serial),
+            unsigned_state_commitment: Some(binding_commitment),
+            created_at: now_unix,
+        };
+        self.commit_authenticated_state(&mut guard, next_state, event)
+    }
+
+    pub fn hvm_registry_channel_status(
+        &self,
+        binding_commitment: &str,
+    ) -> HubResult<HvmRegistryChannelStatusV2> {
+        require_commitment(binding_commitment)?;
+        let guard = self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        let activation = guard
+            .hvm_registry_activations
+            .get(binding_commitment)
+            .ok_or_else(|| HubError::NotFound("HVM registry activation".into()))?;
+        let ledger = guard
+            .hvm_registry_ledgers
+            .get(binding_commitment)
+            .ok_or_else(|| HubError::NotFound("HVM registry ledger".into()))?;
+        if activation.binding_commitment != binding_commitment
+            || ledger.binding_commitment != binding_commitment
+            || activation.recovery_bundle.binding.commitment()? != binding_commitment
+        {
+            return Err(HubError::State(
+                "registry status does not match its authenticated binding".into(),
+            ));
+        }
+        ledger
+            .latest_fully_signed_bill
+            .validate_fully_signed(&activation.recovery_bundle.binding)?;
+        Ok(HvmRegistryChannelStatusV2 {
+            schema: HVM_REGISTRY_CHANNEL_STATUS_SCHEMA.into(),
+            binding_commitment: binding_commitment.to_owned(),
+            recovery_bundle: activation.recovery_bundle.clone(),
+            activation_snapshot_commitment: activation.activation_snapshot.commitment()?,
+            minimum_required_live_blocks: activation.minimum_required_live_blocks,
+            minimum_required_recover_blocks: activation.minimum_required_recover_blocks,
+            latest_fully_signed_bill: ledger.latest_fully_signed_bill.clone(),
+            activated_unix: activation.activated_unix,
+            updated_unix: ledger.updated_unix,
+        })
+    }
+
+    pub fn hvm_registry_payment_status(
+        &self,
+        operation_id: &str,
+    ) -> HubResult<HvmRegistryPaymentStatusV2> {
+        if operation_id.trim().is_empty() || operation_id.len() > 256 {
+            return Err(HubError::State("registry operation id is invalid".into()));
+        }
+        let guard = self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        let progression = guard
+            .hvm_registry_progressions
+            .get(operation_id)
+            .ok_or_else(|| HubError::NotFound(format!("registry payment {operation_id}")))?;
+        Ok(HvmRegistryPaymentStatusV2 {
+            schema: HVM_REGISTRY_PAYMENT_STATUS_SCHEMA.into(),
+            operation_id: operation_id.to_owned(),
+            request_commitment: progression.request_commitment.clone(),
+            status: progression.status.as_str().to_owned(),
+            request: progression.request.clone(),
+            fully_signed_bill: progression.fully_signed_bill.clone(),
+            updated_unix: progression.updated_unix,
+            recovery_required: matches!(
+                progression.status,
+                HvmBillProgressionStatus::HubSignatureMayExist
+                    | HvmBillProgressionStatus::RecoveryRequired
+            ),
+        })
+    }
+}
+
+fn insert_registry_activation(
+    state: &mut HubPersistedState,
+    activation: PersistedHvmRegistryActivation,
+) -> HubResult<bool> {
+    activation.recovery_bundle.validate_crypto()?;
+    let binding = &activation.recovery_bundle.binding;
+    if activation.binding_commitment != binding.commitment()? {
+        return Err(HubError::State(
+            "registry activation commitment does not match its bundle".into(),
+        ));
+    }
+    if let Some(existing) = state
+        .hvm_registry_activations
+        .get(&activation.binding_commitment)
+    {
+        if existing.recovery_bundle == activation.recovery_bundle {
+            return Ok(false);
+        }
+        return Err(HubError::State(
+            "registry activation is bound to different recovery material".into(),
+        ));
+    }
+    for existing in state.hvm_registry_activations.values() {
+        let existing = &existing.recovery_bundle.binding;
+        if (existing.contract_address == binding.contract_address
+            && existing.left_address == binding.left_address)
+            || (existing.contract_address == binding.contract_address
+                && existing.channel_id == binding.channel_id
+                && existing.reuse_version == binding.reuse_version)
+        {
+            return Err(HubError::State(
+                "registry left slot or channel incarnation is already active".into(),
+            ));
+        }
+    }
+    state
+        .hvm_registry_activations
+        .insert(activation.binding_commitment.clone(), activation.clone());
+    state.hvm_registry_ledgers.insert(
+        activation.binding_commitment.clone(),
+        PersistedHvmRegistryLedger {
+            binding_commitment: activation.binding_commitment,
+            latest_fully_signed_bill: activation.recovery_bundle.initial_recovery_bill,
+            updated_unix: activation.activated_unix,
+        },
+    );
+    validate_hvm_state(state)?;
+    Ok(true)
+}
+
+fn require_commitment(value: &str) -> HubResult<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(HubError::State(
+            "registry binding commitment is not canonical lowercase SHA-256 hex".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExistingRegistryProgressionDisposition, progression_disposition};
+    use crate::hvm_ledger::HvmBillProgressionStatus;
+
+    #[test]
+    fn signature_may_exist_requires_reconciliation() {
+        assert_eq!(
+            progression_disposition(&HvmBillProgressionStatus::HubSignatureMayExist),
+            ExistingRegistryProgressionDisposition::RequireReconciliation
+        );
+        assert_eq!(
+            progression_disposition(&HvmBillProgressionStatus::RecoveryRequired),
+            ExistingRegistryProgressionDisposition::RequireReconciliation
+        );
+        assert_eq!(
+            progression_disposition(&HvmBillProgressionStatus::FullySigned),
+            ExistingRegistryProgressionDisposition::ReturnDurableSignature
+        );
+    }
+}

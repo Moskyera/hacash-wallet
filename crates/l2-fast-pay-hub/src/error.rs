@@ -10,6 +10,8 @@ pub enum HubError {
     Payment(String),
     #[error("state: {0}")]
     State(String),
+    #[error("admission: {0}")]
+    Admission(String),
     #[error("not found: {0}")]
     NotFound(String),
 }

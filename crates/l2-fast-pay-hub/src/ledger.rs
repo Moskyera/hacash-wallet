@@ -65,6 +65,8 @@ mod tests {
             ret: 0,
             id: "00112233445566778899aabbccddeeff".into(),
             status: crate::node::CHANNEL_STATUS_OPENING,
+            open_height: 100,
+            close_height: 0,
             reuse_version: 1,
             left: ChannelPartyBalance {
                 address: "1Left".into(),

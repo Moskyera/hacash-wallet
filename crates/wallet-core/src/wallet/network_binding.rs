@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::error::{WalletError, WalletResult};
 use crate::node_capabilities::{CapabilitySource, NodeChain};
 use crate::node_discovery::probe_node;
-use crate::settings::is_official_node_url;
+use crate::settings::{is_official_node_url, validate_signing_node_url};
 use crate::tx_binding::CanonicalTransaction;
 
 use super::WalletService;
@@ -55,6 +55,13 @@ fn validate_reported_network(network_mode: &str, chain: &NodeChain) -> WalletRes
 }
 
 impl WalletService {
+    /// Refuse to let a remote plaintext endpoint influence online signing.
+    /// Read-only balance and discovery requests may still use the legacy
+    /// official HTTP API, but mainnet key use requires HTTPS or loopback.
+    pub(crate) fn require_online_signing_transport(&self) -> WalletResult<()> {
+        validate_signing_node_url(self.node.base_url(), &self.network_mode).map(|_| ())
+    }
+
     pub(crate) fn invalidate_network_binding(&mut self) {
         self.network_binding = None;
     }
@@ -146,6 +153,7 @@ impl WalletService {
     }
 
     pub(crate) async fn sign_tx_for_network(&mut self, body_hex: &str) -> WalletResult<String> {
+        self.require_online_signing_transport()?;
         self.ensure_transaction_network_binding(body_hex).await?;
         self.sign_tx_hex(body_hex)
     }
@@ -218,5 +226,22 @@ mod tests {
         assert!(validate_reported_network("testnet", &testnet.chain).is_ok());
         assert!(validate_reported_network("mainnet", &testnet.chain).is_err());
         assert!(validate_reported_network("testnet", &mainnet.chain).is_err());
+    }
+
+    #[test]
+    fn online_signing_transport_rejects_remote_http_mainnet() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet =
+            WalletService::new(Some(crate::settings::DEFAULT_NODE_URL.into()), None).unwrap();
+        wallet.network_mode = "mainnet".into();
+        let error = wallet.require_online_signing_transport().unwrap_err();
+        assert!(error.to_string().contains("mainnet signing requires HTTPS"));
+
+        let mut local = WalletService::new(Some("http://127.0.0.1:8080".into()), None).unwrap();
+        local.network_mode = "mainnet".into();
+        local.require_online_signing_transport().unwrap();
+
+        wallet.network_mode = "testnet".into();
+        wallet.require_online_signing_transport().unwrap();
     }
 }

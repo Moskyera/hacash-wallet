@@ -4,6 +4,7 @@ $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $android = Join-Path $mobile "src-tauri\gen\android"
 $gradle = Join-Path $android "app\build.gradle.kts"
 $manifest = Join-Path $android "app\src\main\AndroidManifest.xml"
+$strings = Join-Path $android "app\src\main\res\values\strings.xml"
 $netSrc = Join-Path $mobile "src-tauri\android-network-security.xml"
 $netDstDir = Join-Path $android "app\src\main\res\xml"
 $netDst = Join-Path $netDstDir "network_security_config.xml"
@@ -15,6 +16,16 @@ $backupRulesDst = Join-Path $netDstDir "backup_rules.xml"
 if (-not (Test-Path $gradle)) {
     throw "Missing $gradle. Run yarn tauri android init first."
 }
+
+if (-not (Test-Path $strings)) {
+    throw "Missing $strings. Run yarn tauri android init first."
+}
+
+$stringsContent = Get-Content $strings -Raw
+$stringsContent = $stringsContent -replace '<string name="app_name">[^<]*</string>', '<string name="app_name">HPAY</string>'
+$stringsContent = $stringsContent -replace '<string name="main_activity_title">[^<]*</string>', '<string name="main_activity_title">HPAY Wallet</string>'
+Set-Content -Path $strings -Value $stringsContent -NoNewline
+Write-Host "Normalized Android application labels to HPAY" -ForegroundColor Green
 
 & (Join-Path $mobile "merge-android-permissions.ps1")
 

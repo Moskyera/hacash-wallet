@@ -10,6 +10,8 @@ mod companion_signer;
 mod diagnostics;
 mod emergency;
 mod error;
+mod fast_pay_operation;
+mod hvm_payment_operation;
 mod journal;
 mod node_binding;
 mod operation;
@@ -30,20 +32,28 @@ pub use emergency::{
     AgentEmergencyController, AgentEmergencyStatus, AgentSafetyPermit, EmergencyMarkerHealth,
 };
 pub use error::{AgentWalletError, AgentWalletResult};
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use fast_pay_operation::{AgentFastPayOperationView, AgentFastPayRequest, AgentFastPayStatus};
 pub use hpay_companion_protocol::{
     ApprovalCommitment, DevicePublicRecord, SignedAdminCommand, SignedApprovalDecision,
+};
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use hvm_payment_operation::{
+    AgentHvmPaymentOperationView, AgentHvmPaymentRequest, AgentHvmPaymentStatus,
 };
 pub use node_binding::AgentNodeStatus;
 pub use operation::{AgentPaymentRequest, ApprovalMode, OperationStatus, PaymentOperationView};
 pub use pairing_outbox::PairingCompletionOutboxEntry;
 pub use policy::{AgentPermission, AgentPolicy, AgentRecord, AgentStatus};
 pub use service::{
-    AGENT_WALLET_BACKUP_WARNING, AGENT_WALLET_RESTORE_WARNING, AgentWalletBackupAcknowledgement,
-    AgentWalletBackupFile, AgentWalletBackupMetadata, AgentWalletBackupPreview,
-    AgentWalletBackupWarning, AgentWalletRestoreOutcome,
+    AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT, AGENT_WALLET_BACKUP_WARNING, AGENT_WALLET_RESTORE_WARNING,
+    AgentWalletBackupAcknowledgement, AgentWalletBackupFile, AgentWalletBackupMetadata,
+    AgentWalletBackupPreview, AgentWalletBackupWarning, AgentWalletRestoreOutcome,
 };
 pub use service::{
-    AgentCompanionPairingAttempt, AgentCompletedCompanionPairing, AgentDesktopSessionAttempt,
+    AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
+    AgentChannelSetupReview, AgentCompanionPairingAttempt, AgentCompletedCompanionPairing,
+    AgentDesktopSessionAttempt, AgentHvmChannelBinding, AgentHvmRegistryBinding, AgentL2Binding,
     AgentPairingAttemptBudget, AgentWalletManager, AgentWalletOverview, CreateAgentWallet,
     MAX_PAIRING_REQUEST_ATTEMPTS, UnlockedAgentWalletStatus,
     WITNESS_PENDING_OPERATION_STATUS_NAMES,

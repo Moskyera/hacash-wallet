@@ -64,7 +64,9 @@ dependencies = [
  "hpay-agent-connector",
  "hpay-agent-types",
  "hpay-companion-protocol",
+ "l2-fast-pay-hub",
  "libc",
+ "mint",
  "p256",
  "protocol",
  "rand 0.8.7",
@@ -76,6 +78,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
+ "vm",
  "zeroize",
 ]
 
@@ -1898,7 +1901,7 @@ version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9839ea644ed9c97a34d129ad56d38a25e6756f99f3a88e15cd39c20629caf7"
 dependencies = [
- "gio-sys",
+ "gio-sys 0.18.1",
  "glib-sys",
  "gobject-sys",
  "libc",
@@ -1913,7 +1916,7 @@ checksum = "5c2d13f38594ac1e66619e188c6d5a1adb98d11b2fcf7894fc416ad76aa2f3f7"
 dependencies = [
  "cairo-sys-rs",
  "gdk-pixbuf-sys",
- "gio-sys",
+ "gio-sys 0.18.1",
  "glib-sys",
  "gobject-sys",
  "libc",
@@ -2044,7 +2047,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-util",
- "gio-sys",
+ "gio-sys 0.18.1",
  "glib",
  "libc",
  "once_cell",
@@ -2067,10 +2070,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "gio-sys"
+version = "0.18.5"
+source = "git+https://github.com/jcfs/gtk-rs-core.git?rev=ea720152f28e293ef4362ee844ee5cc499f32d2a#ea720152f28e293ef4362ee844ee5cc499f32d2a"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "libc",
+ "system-deps",
+ "winapi",
+]
+
+[[package]]
 name = "glib"
 version = "0.18.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5"
+source = "git+https://github.com/jcfs/gtk-rs-core.git?rev=ea720152f28e293ef4362ee844ee5cc499f32d2a#ea720152f28e293ef4362ee844ee5cc499f32d2a"
 dependencies = [
  "bitflags 2.13.1",
  "futures-channel",
@@ -2078,7 +2092,7 @@ dependencies = [
  "futures-executor",
  "futures-task",
  "futures-util",
- "gio-sys",
+ "gio-sys 0.18.5",
  "glib-macros",
  "glib-sys",
  "gobject-sys",
@@ -2092,8 +2106,7 @@ dependencies = [
 [[package]]
 name = "glib-macros"
 version = "0.18.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bb0228f477c0900c880fd78c8759b95c7636dbd7842707f49e132378aa2acdc"
+source = "git+https://github.com/jcfs/gtk-rs-core.git?rev=ea720152f28e293ef4362ee844ee5cc499f32d2a#ea720152f28e293ef4362ee844ee5cc499f32d2a"
 dependencies = [
  "heck 0.4.1",
  "proc-macro-crate 2.0.2",
@@ -2105,9 +2118,8 @@ dependencies = [
 
 [[package]]
 name = "glib-sys"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "063ce2eb6a8d0ea93d2bf8ba1957e78dbab6be1c2220dd3daca57d5a9d869898"
+version = "0.18.5"
+source = "git+https://github.com/jcfs/gtk-rs-core.git?rev=ea720152f28e293ef4362ee844ee5cc499f32d2a#ea720152f28e293ef4362ee844ee5cc499f32d2a"
 dependencies = [
  "libc",
  "system-deps",
@@ -2121,9 +2133,8 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gobject-sys"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0850127b514d1c4a4654ead6dedadb18198999985908e6ffe4436f53c785ce44"
+version = "0.18.5"
+source = "git+https://github.com/jcfs/gtk-rs-core.git?rev=ea720152f28e293ef4362ee844ee5cc499f32d2a#ea720152f28e293ef4362ee844ee5cc499f32d2a"
 dependencies = [
  "glib-sys",
  "libc",
@@ -2172,7 +2183,7 @@ dependencies = [
  "cairo-sys-rs",
  "gdk-pixbuf-sys",
  "gdk-sys",
- "gio-sys",
+ "gio-sys 0.18.1",
  "glib-sys",
  "gobject-sys",
  "libc",
@@ -2934,6 +2945,7 @@ dependencies = [
 name = "l2-fast-pay-hub"
 version = "1.0.3"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "axum",
  "basis",
@@ -2943,6 +2955,9 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac 0.12.1",
+ "mint",
+ "protocol",
+ "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2956,6 +2971,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "vm",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -4991,7 +5007,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ebe8950a680a12f24f15ebe1bf70db7af98ad242d9db43596ad3108aab86c27"
 dependencies = [
- "gio-sys",
+ "gio-sys 0.18.1",
  "glib-sys",
  "gobject-sys",
  "libc",
@@ -6368,7 +6384,7 @@ dependencies = [
  "gdk",
  "gdk-sys",
  "gio",
- "gio-sys",
+ "gio-sys 0.18.1",
  "glib",
  "glib-sys",
  "gobject-sys",
@@ -6390,7 +6406,7 @@ dependencies = [
  "bitflags 1.3.2",
  "cairo-sys-rs",
  "gdk-sys",
- "gio-sys",
+ "gio-sys 0.18.1",
  "glib-sys",
  "gobject-sys",
  "gtk-sys",

@@ -59,6 +59,7 @@ export default function FastPayChannelScreen({
   );
   const [userDeposit, setUserDeposit] = useState("10");
   const [hubDeposit, setHubDeposit] = useState("0");
+  const [trustedMainnetPilot, setTrustedMainnetPilot] = useState(false);
   const [preview, setPreview] = useState<ChannelSetupPreview | null>(null);
   const [inboxProbe, setInboxProbe] = useState<AsyncProbe<FastPayInboxItem[]>>(
     () => loadingProbe([]),
@@ -68,6 +69,16 @@ export default function FastPayChannelScreen({
   const channel = channelProbe.value;
   const inbox = inboxProbe.value;
 
+  useEffect(() => {
+    const recommended = fastPay?.default_deposit_mei;
+    if (recommended != null && Number.isFinite(recommended) && recommended > 0) {
+      setUserDeposit(String(recommended));
+    }
+  }, [fastPay?.default_deposit_mei]);
+
+  useEffect(() => {
+    setTrustedMainnetPilot(settings?.trusted_mainnet_fast_pay_pilot ?? false);
+  }, [settings?.trusted_mainnet_fast_pay_pilot]);
   const loadInbox = useCallback((): Promise<void> => {
     if (inboxRequestRef.current) return inboxRequestRef.current;
     const request = (async () => {
@@ -141,7 +152,7 @@ export default function FastPayChannelScreen({
     setBusy(true);
     setPreview(null);
     try {
-      const p = await api.previewChannelOpen(hub, Number(userDeposit), Number(hubDeposit));
+      const p = await api.previewChannelOpen(hub, userDeposit, hubDeposit);
       setPreview(p);
     } catch (e) {
       onToast(formatInvokeError(e), "error");
@@ -150,23 +161,37 @@ export default function FastPayChannelScreen({
     }
   }
 
-  async function handleOpenChannel() {
+  async function openReviewedChannel(depositMei: string) {
     const hub = hubAddress.trim();
-    if (!hub) return;
+    if (!hub) {
+      throw new Error("Choose an online Fast Pay provider first.");
+    }
+    if (
+      settings?.network_mode === "mainnet"
+      && !settings.trusted_mainnet_fast_pay_pilot
+    ) {
+      throw new Error(
+        "Review and save the bounded mainnet pilot consent before opening a channel.",
+      );
+    }
+    const prepared = await api.prepareChannelOpen(hub, depositMei, "0");
+    const security = await api.platformSecurity();
+    await authorizePreparedOperation(
+      prepared,
+      security.native_biometric_available,
+      settings?.biometric_send_enabled ?? true,
+    );
+    const tx = await api.executePreparedChannelOpen(prepared.id);
+    setPreview(null);
+    onToast("Channel open submitted (" + tx.slice(0, 12) + "…)", "success");
+    await loadChannel();
+    await onRefresh();
+  }
+
+  async function handleOpenChannel() {
     setBusy(true);
     try {
-      const prepared = await api.prepareChannelOpen(hub, Number(userDeposit), Number(hubDeposit));
-      const security = await api.platformSecurity();
-      await authorizePreparedOperation(
-        prepared,
-        security.native_biometric_available,
-        settings?.biometric_send_enabled ?? true,
-      );
-      const tx = await api.executePreparedChannelOpen(prepared.id);
-      setPreview(null);
-      onToast(`Channel open submitted (${tx.slice(0, 12)}…)`, "success");
-      await loadChannel();
-      await onRefresh();
+      await openReviewedChannel(userDeposit);
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -177,10 +202,7 @@ export default function FastPayChannelScreen({
   async function handleEnableFastPay() {
     setBusy(true);
     try {
-      await api.enableFastPay(fastPay?.default_deposit_mei ?? 10);
-      onToast("Fast Pay enabled!", "success");
-      await loadChannel();
-      await onRefresh();
+      await openReviewedChannel(String(fastPay?.default_deposit_mei ?? userDeposit));
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -188,6 +210,27 @@ export default function FastPayChannelScreen({
     }
   }
 
+  async function handleSaveMainnetPilotConsent() {
+    if (!settings || settings.network_mode !== "mainnet") return;
+    setBusy(true);
+    try {
+      await api.updateSettings({
+        ...settings,
+        trusted_mainnet_fast_pay_pilot: trustedMainnetPilot,
+      });
+      await onRefresh();
+      onToast(
+        trustedMainnetPilot
+          ? "Bounded mainnet Fast Pay consent saved."
+          : "Bounded mainnet Fast Pay disabled. Channel recovery remains available.",
+        "success",
+      );
+    } catch (error) {
+      onToast(formatInvokeError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
   async function handleDisableFastPay() {
     setBusy(true);
     try {
@@ -209,6 +252,31 @@ export default function FastPayChannelScreen({
     }
   }
 
+  async function handleFinishPendingOpen() {
+    setBusy(true);
+    try {
+      const result = await api.recoverChannelOpen();
+      onToast(result, "success");
+      await Promise.all([loadChannel(), onRefresh()]);
+    } catch (error) {
+      onToast(formatInvokeError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleFinishPendingClose() {
+    setBusy(true);
+    try {
+      const result = await api.recoverChannelClose();
+      onToast(result, "success");
+      await Promise.all([loadChannel(), onRefresh()]);
+    } catch (error) {
+      onToast(formatInvokeError(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
   if (watchOnly) {
     return (
       <div className="card">
@@ -223,6 +291,36 @@ export default function FastPayChannelScreen({
       <div className="card">
         <h2>Fast Pay</h2>
         <p className="muted small">{fastPayHowItWorks()}</p>
+        {settings?.network_mode === "mainnet" ? (
+          <div className="warning-box" role="note">
+            <strong>Bounded mainnet pilot</strong>
+            <p className="muted small">
+              Fast Pay depends on the selected Hub and is not a trustless L1 exit.
+              Hard ceilings are 1 HAC per payment, 10 HAC per channel and 100 HAC
+              total Hub TVL.
+            </p>
+            <label>
+              <input
+                type="checkbox"
+                checked={trustedMainnetPilot}
+                onChange={(event) => setTrustedMainnetPilot(event.target.checked)}
+              />
+              I understand the Hub dependency and want to use the capped mainnet pilot.
+            </label>
+            <button
+              type="button"
+              style={{ marginTop: "0.75rem", width: "100%" }}
+              disabled={
+                busy
+                || trustedMainnetPilot
+                  === settings.trusted_mainnet_fast_pay_pilot
+              }
+              onClick={() => void handleSaveMainnetPilotConsent()}
+            >
+              Save mainnet choice
+            </button>
+          </div>
+        ) : null}
         <div className="toggle-row" style={{ marginTop: "0.75rem" }}>
           <strong>{fastPay ? fastPayStatusTitle(fastPay.state) : "Loading…"}</strong>
           <span
@@ -243,21 +341,47 @@ export default function FastPayChannelScreen({
                 type="button"
                 className="primary"
                 style={{ marginTop: "0.75rem", width: "100%" }}
-                disabled={busy}
+                disabled={
+                  busy
+                  || (settings?.network_mode === "mainnet"
+                    && !settings.trusted_mainnet_fast_pay_pilot)
+                }
                 onClick={() => void handleEnableFastPay()}
               >
                 Enable
               </button>
             )}
-            {fastPay.state === "ready" && (
+            {fastPay.state !== "ready" && (
               <button
                 type="button"
-                style={{ marginTop: "0.75rem", width: "100%" }}
+                style={{ marginTop: "0.5rem", width: "100%" }}
                 disabled={busy}
-                onClick={() => void handleDisableFastPay()}
+                onClick={() => void handleFinishPendingOpen()}
               >
-                Disable
+                Finish pending setup
               </button>
+            )}
+            {fastPay.state === "ready" && (
+              <>
+                <button
+                  type="button"
+                  style={{ marginTop: "0.75rem", width: "100%" }}
+                  disabled={busy}
+                  onClick={() => void handleDisableFastPay()}
+                >
+                  Disable
+                </button>
+                {channel ? (
+                  <button
+                    type="button"
+                    style={{ marginTop: "0.5rem", width: "100%" }}
+                    disabled={busy}
+                    onClick={() => void handleFinishPendingClose()}
+                  >
+                    Finish pending close
+                  </button>
+                ) : null}
+              </>
             )}
           </>
         )}
@@ -416,6 +540,7 @@ export default function FastPayChannelScreen({
               <p>
                 Channel <code>{preview.channel_id.slice(0, 16)}…</code>
               </p>
+              <p className="muted small">Hacash incarnation {preview.reuse_version}</p>
               <p className="muted small">
                 You {preview.left_deposit} HAC, hub {preview.right_deposit} HAC
               </p>

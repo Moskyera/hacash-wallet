@@ -56,7 +56,14 @@ fn wire_bytes_from_build(built: &BuildTxResponse) -> WalletResult<usize> {
 }
 
 pub fn signed_l1_wire_bytes(unsigned_wire_bytes: usize) -> usize {
-    unsigned_wire_bytes.saturating_add(L1_LEGACY_SIGNATURE_BYTES)
+    signed_l1_wire_bytes_for_signatures(unsigned_wire_bytes, 1)
+}
+
+pub fn signed_l1_wire_bytes_for_signatures(
+    unsigned_wire_bytes: usize,
+    signature_count: usize,
+) -> usize {
+    unsigned_wire_bytes.saturating_add(L1_LEGACY_SIGNATURE_BYTES.saturating_mul(signature_count))
 }
 
 pub fn minimum_l1_fee_estimate(wire_bytes: usize) -> L1FeeEstimate {
@@ -131,9 +138,13 @@ pub fn build_l1_fee_tiers(
     tiers
 }
 
-async fn base_fee_mei(node: &NodeClient, wire_bytes: usize) -> WalletResult<(f64, u64)> {
+async fn base_fee_mei(
+    node: &NodeClient,
+    wire_bytes: usize,
+    tx_type: u8,
+) -> WalletResult<(f64, u64)> {
     let wire_bytes = wire_bytes.max(1);
-    match node.query_fee_average(wire_bytes, L1_TX_TYPE).await {
+    match node.query_fee_average(wire_bytes, tx_type).await {
         Ok(resp) => {
             let base = parse_fee_mei_decimal(&resp.feasible)?;
             Ok((base, resp.purity))
@@ -150,8 +161,17 @@ pub async fn estimate_l1_fee(
     wire_bytes: usize,
     speed: L1FeeSpeed,
 ) -> WalletResult<L1FeeEstimate> {
+    estimate_l1_fee_for_type(node, wire_bytes, speed, L1_TX_TYPE).await
+}
+
+pub async fn estimate_l1_fee_for_type(
+    node: &NodeClient,
+    wire_bytes: usize,
+    speed: L1FeeSpeed,
+    tx_type: u8,
+) -> WalletResult<L1FeeEstimate> {
     let wire_bytes = wire_bytes.max(1);
-    let (base_mei, purity) = base_fee_mei(node, wire_bytes).await?;
+    let (base_mei, purity) = base_fee_mei(node, wire_bytes, tx_type).await?;
     let min_mei = minimum_l1_fee_estimate(wire_bytes).fee_mei;
     let fee_mei = l1_fee_mei_for_speed(base_mei, min_mei, speed);
     Ok(estimate_from_mei(fee_mei, wire_bytes, purity, min_mei))
@@ -204,7 +224,7 @@ pub async fn estimate_hac_l1_fee_tiers(
         Ok(resp) if resp.ret == 0 => wire_bytes_from_build(resp).unwrap_or(L1_DEFAULT_WIRE_BYTES),
         _ => L1_DEFAULT_WIRE_BYTES,
     };
-    let (base_mei, purity) = base_fee_mei(node, wire_bytes).await?;
+    let (base_mei, purity) = base_fee_mei(node, wire_bytes, L1_TX_TYPE).await?;
     let min_mei = minimum_l1_fee_estimate(wire_bytes).fee_mei;
     let tiers = build_l1_fee_tiers(base_mei, min_mei, wire_bytes, purity);
     let selected_mei = tiers
@@ -295,7 +315,7 @@ pub fn fallback_l1_fee(wire_bytes: usize) -> L1FeeEstimate {
 }
 
 pub fn format_l1_fee_label(est: &L1FeeEstimate) -> String {
-    format!("~{} HAC", est.fee_wire)
+    format!("~{} HAC", est.fee_node)
 }
 
 #[cfg(test)]
@@ -312,6 +332,7 @@ mod tests {
     #[test]
     fn signed_size_includes_legacy_signature() {
         assert_eq!(signed_l1_wire_bytes(110), 207);
+        assert_eq!(signed_l1_wire_bytes_for_signatures(110, 2), 304);
     }
 
     #[test]

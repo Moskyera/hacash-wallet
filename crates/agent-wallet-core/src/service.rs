@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use hacash_wallet_core::settings::validate_node_url;
+use hacash_wallet_core::settings::validate_signing_node_url;
 use hpay_companion_protocol::{
     DesktopChallengeSequence, DeviceId, DevicePublicRecord, SignedRollbackAnchor,
     SignedRotationCandidateAcceptance, SignedRotationPairingTicket, SignedWitnessReceipt,
@@ -16,6 +16,8 @@ use crate::amount::HacUnits;
 use crate::companion_signer::AgentDesktopCompanionSigner;
 use crate::emergency::AgentEmergencyController;
 use crate::error::{AgentWalletError, AgentWalletResult};
+use crate::fast_pay_operation::AgentFastPayOperation;
+use crate::hvm_payment_operation::AgentHvmPaymentOperation;
 use crate::journal::AgentJournalEventKind;
 use crate::node_binding::{
     AgentNodeSnapshot, AgentNodeStatus, anchor_for_new_wallet, probe_agent_node,
@@ -35,6 +37,9 @@ mod companion;
 mod connector;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod diagnostics;
+mod hvm;
+mod hvm_registry;
+mod l2;
 mod payment;
 mod state;
 
@@ -42,11 +47,12 @@ mod state;
 use payment::validate_policy_for_request;
 use payment::{agent_spending_ready, require_agent_spending_network, validate_authorization};
 use state::{
-    active_reservations, cancel_pre_signing_operations, mark_explicit_emergency_stop,
-    prune_terminal_pre_signing_for_agent, spent_in_window, validate_text,
+    active_fast_pay_reservations, active_l1_reservations, cancel_pre_signing_operations,
+    fast_pay_channel_exposure, mark_explicit_emergency_stop, prune_terminal_pre_signing_for_agent,
+    spent_in_window, validate_text,
 };
 #[cfg(test)]
-use state::{journal_path, scoped_idempotency_key};
+use state::{active_reservations, journal_path, scoped_idempotency_key};
 
 pub use backup::{
     AGENT_WALLET_BACKUP_WARNING, AGENT_WALLET_RESTORE_WARNING, AgentWalletBackupAcknowledgement,
@@ -60,6 +66,13 @@ pub use companion::{
 };
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 pub use companion::{StrandedWitnessRecovery, WitnessRotationControls};
+pub use hvm::AgentHvmChannelBinding;
+pub use hvm_registry::AgentHvmRegistryBinding;
+use l2::{AgentChannelCloseOperation, AgentChannelSetupOperation};
+pub use l2::{
+    AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
+    AgentChannelSetupReview, AgentL2Binding,
+};
 
 const STATE_SCHEMA_VERSION: u32 = 1;
 const STATE_NAME: &str = "wallet_state";
@@ -76,6 +89,11 @@ const MAX_OPERATIONS_PER_WALLET: usize = 4_096;
 // the 4,096-record cap and the authenticated 30-requests/minute rate limit.
 const MAX_REQUESTS_PER_AGENT_PER_MINUTE: usize = 30;
 const ZERO_HASH_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand Agent Fast Pay mainnet is a trusted bounded pilot and I accept its recovery limits.";
+
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +103,8 @@ pub struct CreateAgentWallet {
     pub node_url: String,
     #[serde(default)]
     pub block_one_fingerprint: Option<String>,
+    #[serde(default)]
+    pub mainnet_pilot_acknowledgement: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,9 +139,23 @@ pub struct AgentWalletOverview {
     pub unlocked: bool,
     pub payments_suspended: bool,
     pub mainnet_spending_ready: bool,
+    pub trusted_mainnet_fast_pay_pilot: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_binding: Option<AgentL2Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_channel_setup: Option<AgentChannelSetupReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_channel_close: Option<AgentChannelCloseReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hvm_channel_binding: Option<AgentHvmChannelBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hvm_registry_binding: Option<AgentHvmRegistryBinding>,
     pub confirmed_balance_units: Option<HacUnits>,
     pub reserved_units: HacUnits,
     pub available_units: Option<HacUnits>,
+    pub fast_pay_deposit_units: Option<HacUnits>,
+    pub fast_pay_reserved_units: HacUnits,
+    pub fast_pay_available_units: Option<HacUnits>,
     pub spent_today_units: HacUnits,
     pub spent_this_month_units: HacUnits,
     pub authorized_agents: u32,
@@ -154,6 +188,11 @@ impl AgentAuthorization {
     fn agent_id(&self) -> &AgentId {
         &self.agent_id
     }
+
+    #[cfg(any(test, feature = "agent-wallet-testnet-pilot"))]
+    fn capability(&self) -> AgentPermission {
+        self.capability
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +211,18 @@ struct AgentWalletState {
     emergency_epoch: u64,
     payments_suspended: bool,
     external_rollback_anchor_ready: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    trusted_mainnet_fast_pay_pilot: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_binding: Option<AgentL2Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_channel_setup: Option<AgentChannelSetupOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_channel_close: Option<AgentChannelCloseOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_channel_binding: Option<AgentHvmChannelBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_registry_binding: Option<AgentHvmRegistryBinding>,
     agents: BTreeMap<String, AgentRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pairing_completion_outbox: BTreeMap<String, PairingCompletionOutboxEntry>,
@@ -184,6 +235,10 @@ struct AgentWalletState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     witness_rotation_history: Vec<AuthenticatedWitnessRotationState>,
     operations: BTreeMap<String, AgentOperation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    fast_pay_operations: BTreeMap<String, AgentFastPayOperation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    hvm_payment_operations: BTreeMap<String, AgentHvmPaymentOperation>,
     idempotency: BTreeMap<String, IdempotencyRecord>,
     // Legacy V1 fields remain parseable only for authenticated state compatibility.
     // They are required to stay empty and are never an authorization authority.
@@ -334,9 +389,26 @@ impl AuthenticatedRollbackWitnessState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OperationRail {
+    #[default]
+    L1,
+    FastPay,
+    HvmFastPay,
+}
+
+impl OperationRail {
+    const fn is_l1(&self) -> bool {
+        matches!(self, Self::L1)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IdempotencyRecord {
+    #[serde(default, skip_serializing_if = "OperationRail::is_l1")]
+    rail: OperationRail,
     request_commitment: String,
     operation_id: OperationId,
 }
@@ -379,12 +451,12 @@ pub struct AgentWalletManager {
     /// `persist_event`, so the on-disk state is byte-for-byte what a process
     /// that died at that instant leaves behind, and the test reopens the wallet
     /// from that disk rather than from memory.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_after_witness_accepted: bool,
     /// Same, one step later: the receipt is durable AND the broadcast has
     /// already happened, and the archive that would move the payment on never
     /// runs.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_before_witness_archive: bool,
     /// The sweep's two other multi-write boundaries, injected so the claim that
     /// they are already recoverable is executed rather than read:
@@ -393,7 +465,7 @@ pub struct AgentWalletManager {
     /// `WitnessRotationBaselineAccepted` and then revokes the old phone.
     #[cfg(test)]
     pub(crate) crash_after_approval_granted: bool,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_after_rotation_baseline: bool,
     /// The two boundaries the second sweep found still open.
     ///
@@ -414,7 +486,7 @@ pub struct AgentWalletManager {
     /// mints the anchor; `create_payment_intent` journals `FundsReserved` and
     /// then builds the transaction at the node; `resume_payment` journals
     /// `TransactionSigned` and then reloads and broadcasts.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_after_witness_state_initialized: bool,
     #[cfg(test)]
     pub(crate) crash_after_funds_reserved: bool,
@@ -449,7 +521,7 @@ pub(crate) enum RestoreCrashPoint {
     AfterRegistry,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
 impl RestoreCrashPoint {
     /// Every window, so a test cannot silently cover only some of them.
     pub(crate) const ALL: [Self; 8] = [
@@ -488,19 +560,19 @@ impl AgentWalletManager {
             unlocked: BTreeMap::new(),
             emergency_controllers,
             challenge_sequences: Mutex::new(BTreeMap::new()),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_after_witness_accepted: false,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_before_witness_archive: false,
             #[cfg(test)]
             crash_after_approval_granted: false,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_after_rotation_baseline: false,
             #[cfg(test)]
             crash_after_broadcast_persisted: false,
             #[cfg(test)]
             crash_after_mobile_approval_granted: false,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_after_witness_state_initialized: false,
             #[cfg(test)]
             crash_after_funds_reserved: false,
@@ -565,23 +637,17 @@ impl AgentWalletManager {
         request: CreateAgentWallet,
         now: u64,
     ) -> AgentWalletResult<CreatedAgentWallet> {
-        // New autonomous-spending pockets are testnet-only. Legacy authenticated
-        // mainnet state remains loadable.
-        //
-        // The reason this line used to give - that there was no separately
-        // encrypted Agent Wallet backup and restore flow - is no longer the
-        // reason: that flow exists now, in `service/backup.rs`, with its
-        // consequences executed in
-        // `service/companion/tests/state_backup.rs`. The refusal stays exactly
-        // as it was, because it never rested only on the missing backup: an
-        // Agent Wallet on mainnet is a key that spends real money without a
-        // human in the loop for each payment, and nothing about being able to
-        // copy its state changes that. Lifting it is a separate, deliberate
-        // decision and not a side effect of this one.
-        if request.network_mode != "testnet" {
+        let trusted_mainnet_fast_pay_pilot = request.network_mode == "mainnet"
+            && request.mainnet_pilot_acknowledgement.as_deref()
+                == Some(AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT);
+        if !matches!(request.network_mode.as_str(), "mainnet" | "testnet")
+            || (request.network_mode == "testnet"
+                && request.mainnet_pilot_acknowledgement.is_some())
+            || !agent_spending_ready(&request.network_mode, trusted_mainnet_fast_pay_pilot)
+        {
             return Err(AgentWalletError::InvalidPaymentRequest);
         }
-        let node_url = validate_node_url(&request.node_url)
+        let node_url = validate_signing_node_url(&request.node_url, &request.network_mode)
             .map_err(|_| AgentWalletError::InvalidPaymentRequest)?;
         let block_one_fingerprint = anchor_for_new_wallet(
             &request.network_mode,
@@ -624,6 +690,12 @@ impl AgentWalletManager {
             emergency_epoch: 1,
             payments_suspended: true,
             external_rollback_anchor_ready: false,
+            trusted_mainnet_fast_pay_pilot,
+            l2_binding: None,
+            l2_channel_setup: None,
+            l2_channel_close: None,
+            hvm_channel_binding: None,
+            hvm_registry_binding: None,
             agents: BTreeMap::new(),
             pairing_completion_outbox: BTreeMap::new(),
             companion_security: None,
@@ -631,6 +703,8 @@ impl AgentWalletManager {
             witness_rotation: None,
             witness_rotation_history: Vec::new(),
             operations: BTreeMap::new(),
+            fast_pay_operations: BTreeMap::new(),
+            hvm_payment_operations: BTreeMap::new(),
             idempotency: BTreeMap::new(),
             authentication_challenges: BTreeMap::new(),
             authenticated_sessions: BTreeMap::new(),
@@ -698,7 +772,7 @@ impl AgentWalletManager {
     /// Split out so the crash-recovery suite can reopen a wallet exactly as it
     /// stood before the recovery existed, and prove that the residue really has
     /// no exit without it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) fn unlock_without_witness_recovery_for_test(
         &mut self,
         wallet_id: &AgentWalletId,
@@ -892,10 +966,19 @@ impl AgentWalletManager {
                     node_error: None,
                     unlocked: false,
                     payments_suspended: true,
-                    mainnet_spending_ready: agent_spending_ready(vault.network_mode()),
+                    mainnet_spending_ready: agent_spending_ready(vault.network_mode(), false),
+                    trusted_mainnet_fast_pay_pilot: false,
+                    l2_binding: None,
+                    l2_channel_setup: None,
+                    l2_channel_close: None,
+                    hvm_channel_binding: None,
+                    hvm_registry_binding: None,
                     confirmed_balance_units: None,
                     reserved_units: HacUnits::ZERO,
                     available_units: None,
+                    fast_pay_deposit_units: None,
+                    fast_pay_reserved_units: HacUnits::ZERO,
+                    fast_pay_available_units: None,
                     spent_today_units: HacUnits::ZERO,
                     spent_this_month_units: HacUnits::ZERO,
                     authorized_agents: 0,
@@ -948,7 +1031,17 @@ impl AgentWalletManager {
         } else {
             (None, node_probe.status, node_probe.error)
         };
-        let reserved = active_reservations(&state)?;
+        let reserved = active_l1_reservations(&state)?;
+        let fast_pay_reserved = active_fast_pay_reservations(&state)?;
+        let fast_pay_deposit = state
+            .l2_binding
+            .as_ref()
+            .filter(|binding| binding.is_active())
+            .map(AgentL2Binding::deposit_units);
+        let fast_pay_available = fast_pay_deposit
+            .map(|deposit| deposit.checked_sub(fast_pay_channel_exposure(&state)?))
+            .transpose()
+            .map_err(|_| AgentWalletError::RecoveryRequired)?;
         let payments_suspended = self
             .emergency_controller(wallet_id)?
             .status(state.payments_suspended)
@@ -971,10 +1064,28 @@ impl AgentWalletManager {
             node_error,
             unlocked: true,
             payments_suspended,
-            mainnet_spending_ready: agent_spending_ready(&state.network_mode),
+            mainnet_spending_ready: agent_spending_ready(
+                &state.network_mode,
+                state.trusted_mainnet_fast_pay_pilot,
+            ),
+            trusted_mainnet_fast_pay_pilot: state.trusted_mainnet_fast_pay_pilot,
+            l2_binding: state.l2_binding.clone(),
+            l2_channel_setup: state
+                .l2_channel_setup
+                .as_ref()
+                .map(|operation| operation.review.clone()),
+            l2_channel_close: state
+                .l2_channel_close
+                .as_ref()
+                .map(|operation| operation.review.clone()),
+            hvm_channel_binding: state.hvm_channel_binding.clone(),
+            hvm_registry_binding: state.hvm_registry_binding.clone(),
             confirmed_balance_units: confirmed,
             reserved_units: reserved,
             available_units: available,
+            fast_pay_deposit_units: fast_pay_deposit,
+            fast_pay_reserved_units: fast_pay_reserved,
+            fast_pay_available_units: fast_pay_available,
             spent_today_units: spent_in_window(&state, now, 86_400)?,
             spent_this_month_units: spent_in_window(&state, now, 31 * 86_400)?,
             authorized_agents: state
@@ -989,6 +1100,16 @@ impl AgentWalletManager {
                 .values()
                 .filter(|operation| operation.status() == OperationStatus::ApprovalRequested)
                 .count()
+                .saturating_add(
+                    state
+                        .fast_pay_operations
+                        .values()
+                        .filter(|operation| {
+                            operation.status()
+                                == crate::fast_pay_operation::AgentFastPayStatus::ApprovalRequested
+                        })
+                        .count(),
+                )
                 .try_into()
                 .map_err(|_| AgentWalletError::IntegerOverflow)?,
             pilot_enabled: cfg!(feature = "agent-wallet-testnet-pilot"),

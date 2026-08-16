@@ -1,4 +1,4 @@
-//! Durable materialized state for the HPAY Wallet Hub API v4.
+//! Durable materialized state for the HPAY Wallet Hub API v7.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -12,10 +12,232 @@ use sha2::{Digest, Sha256};
 use crate::amount::HacAmount;
 use crate::api::FastPayResponse;
 use crate::error::{HubError, HubResult};
+use crate::hvm_channel::HvmChannelRecoveryBundleV1;
+use crate::hvm_ledger::{
+    PersistedHvmBillProgression, PersistedHvmChannelLedger, validate_progression,
+};
+use crate::hvm_registry::{
+    HvmRegistryBillV2, HvmRegistryLiveSnapshotV2, HvmRegistryRecoveryBundleV2,
+};
+use crate::hvm_registry_ledger::{
+    PersistedHvmRegistryLedger, PersistedHvmRegistryProgression, validate_registry_progression,
+};
 use crate::journal::{
     AuthenticatedJournal, JournalEvent, JournalHead, JournalOperationType, JournalPhase,
 };
+use crate::node::HvmChannelLiveSnapshot;
 use crate::operation::{IdempotencyRecord, ReservationStatus};
+use crate::sealed_state::StateStore;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedHvmChannelActivation {
+    pub binding_commitment: String,
+    pub recovery_bundle: HvmChannelRecoveryBundleV1,
+    pub activation_snapshot: HvmChannelLiveSnapshot,
+    pub minimum_required_live_blocks: u64,
+    pub minimum_required_recover_blocks: u64,
+    pub activated_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedHvmRegistryActivation {
+    pub binding_commitment: String,
+    pub recovery_bundle: HvmRegistryRecoveryBundleV2,
+    pub activation_snapshot: HvmRegistryLiveSnapshotV2,
+    pub minimum_required_live_blocks: u64,
+    pub minimum_required_recover_blocks: u64,
+    pub activated_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HvmChainOperationKind {
+    Challenge,
+    Respond,
+    Finalize,
+    RenewAllLeases,
+    /// Move the settled principal out of the shared registry contract with an
+    /// Action 14 `HacFromToTrs` whose `from` is the contract. This is the only
+    /// door HAC leaves the contract through: `settle()` only rewrites the
+    /// claimable counters. Registry (V2) profile only; the V1 HVM channel
+    /// contract has no such hook.
+    Claim,
+}
+
+impl HvmChainOperationKind {
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Challenge => "challenge",
+            Self::Respond => "respond",
+            Self::Finalize => "finalize",
+            Self::RenewAllLeases => "renew_all_leases",
+            Self::Claim => "claim",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HvmChainOperationStatus {
+    IntentPersisted,
+    SignatureMayExist,
+    Signed,
+    SubmissionStarted,
+    Submitted,
+    Confirmed,
+    RecoveryRequired,
+    /// Terminal. The exact signed transaction was proven inadmissible by a
+    /// consensus rule that block verification itself applies, so it cannot be
+    /// inside any valid block, and it was read from the chain one last time
+    /// and found absent. Nothing will ever offer these bytes to a node again.
+    ///
+    /// Only the shared HVM registry table has this transition; see
+    /// [`super::inadmissible`] for the proof it requires.
+    Abandoned,
+}
+
+impl HvmChainOperationStatus {
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::IntentPersisted => "intent_persisted",
+            Self::SignatureMayExist => "signature_may_exist",
+            Self::Signed => "signed",
+            Self::SubmissionStarted => "submission_started",
+            Self::Submitted => "submitted",
+            Self::Confirmed => "confirmed",
+            Self::RecoveryRequired => "recovery_required",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    /// Does this status leave nothing outstanding against the channel?
+    ///
+    /// A resolved operation no longer blocks a new one. `Confirmed` resolves
+    /// because the transaction executed; `Abandoned` resolves because it
+    /// provably could not have. Every other status leaves a transaction whose
+    /// fate is still open, and those keep the channel occupied.
+    pub(crate) const fn is_resolved(&self) -> bool {
+        matches!(self, Self::Confirmed | Self::Abandoned)
+    }
+}
+
+/// Why a registry chain operation was abandoned, kept with the record forever.
+///
+/// This is the evidence, not a note. `validate_hvm_state` re-checks the
+/// arithmetic on every load, so a state file cannot carry an abandonment whose
+/// own numbers do not prove it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedHvmChainAbandonment {
+    /// Stable name of the consensus rule that proved the bytes inadmissible.
+    /// Must be one [`crate::inadmissible::InadmissibilityRule`] still knows.
+    pub rule: String,
+    /// The exact arithmetic in words, so the record is auditable without the
+    /// node that produced it.
+    pub detail: String,
+    /// Timestamp read out of the signed bytes themselves.
+    pub transaction_timestamp: u64,
+    /// The chain tip the proof was taken against.
+    pub chain_tip_timestamp_unix: u64,
+    pub observed_unix: u64,
+    pub proof_height: u64,
+    /// Height at which the transaction was read one last time and found
+    /// absent. The proof says it cannot be there; this says it is not.
+    pub absent_at_height: u64,
+    pub abandoned_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedHvmChainOperation {
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub request_commitment: String,
+    pub binding_commitment: String,
+    pub kind: HvmChainOperationKind,
+    pub bill_serial: Option<u64>,
+    pub expected_left_balance_zhu: Option<u64>,
+    pub expected_right_balance_zhu: Option<u64>,
+    pub lease_keys: Vec<String>,
+    pub lease_periods: Option<u64>,
+    pub pre_observed_height: u64,
+    pub pre_status: u8,
+    pub pre_serial: u64,
+    pub pre_minimum_live_blocks: u64,
+    pub network_fee_zhu: u64,
+    pub gas_max: u8,
+    pub transaction_timestamp: u64,
+    pub call_source_commitment: String,
+    pub call_source: String,
+    pub signed_transaction_hex: Option<String>,
+    pub transaction_hash: Option<String>,
+    pub status: HvmChainOperationStatus,
+    pub submitted_unix: Option<u64>,
+    pub confirmed_block_height: Option<u64>,
+    pub observed_confirmations: u64,
+    pub created_unix: u64,
+    pub updated_unix: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedHvmRegistryChainOperation {
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub request_commitment: String,
+    pub binding_commitment: String,
+    pub kind: HvmChainOperationKind,
+    pub bill: Option<HvmRegistryBillV2>,
+    pub lease_periods: Option<u64>,
+    /// Exact payee of a `Claim`. Absent for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_payee: Option<String>,
+    /// Exact zhu a `Claim` moves. The contract's `PermitHAC` hook demands this
+    /// equal `c_left_balance_` to the zhu, so it is never approximated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_amount_zhu: Option<u64>,
+    /// Observed height at which the exact payout was found already recorded on
+    /// chain by somebody else. Claims are permissionless, so a third party can
+    /// pay the payee first; that settles this operation without a second
+    /// transaction of our own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_settled_elsewhere_height: Option<u64>,
+    pub pre_observed_height: u64,
+    pub pre_status: u8,
+    pub pre_serial: u64,
+    pub pre_left_balance_zhu: u64,
+    pub pre_hub_balance_zhu: u64,
+    pub pre_deadline: u64,
+    pub pre_minimum_live_blocks: u64,
+    pub pre_minimum_recover_blocks: u64,
+    pub network_fee_zhu: u64,
+    pub gas_max: u8,
+    pub transaction_timestamp: u64,
+    pub call_source_commitment: String,
+    pub call_source: String,
+    pub signed_transaction_hex: Option<String>,
+    pub transaction_hash: Option<String>,
+    pub status: HvmChainOperationStatus,
+    pub submitted_unix: Option<u64>,
+    pub confirmed_block_height: Option<u64>,
+    /// Canonical hash of the block the transaction was observed in. Together
+    /// with `confirmed_block_height` this is the reorg anchor: an observation
+    /// that moves either half is a reorg, not a fresher reading. Records
+    /// written before anchoring existed carry `None` and are treated as legacy
+    /// unanchored, exactly as the Local Pilot journal treats them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_block_hash: Option<String>,
+    pub observed_confirmations: u64,
+    /// Present exactly when `status` is `Abandoned`, and never otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandoned: Option<PersistedHvmChainAbandonment>,
+    pub created_unix: u64,
+    pub updated_unix: u64,
+    pub last_error: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub(crate) struct ChannelLedger {
@@ -57,6 +279,193 @@ pub(crate) struct PendingSettlement {
     pub response: FastPayResponse,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum L1ChannelOpenStatus {
+    ValidatedBeforeSigning,
+    AbandonedUnsigned,
+    SignatureMayExist,
+    Signed,
+    SubmissionStarted,
+    Submitted,
+    Confirmed,
+    RecoveryRequired,
+}
+
+impl L1ChannelOpenStatus {
+    pub(crate) fn public_name(&self) -> &'static str {
+        match self {
+            Self::ValidatedBeforeSigning => "validated_before_signing",
+            Self::AbandonedUnsigned => "abandoned_unsigned",
+            Self::SignatureMayExist => "signature_may_exist",
+            Self::Signed => "signed",
+            Self::SubmissionStarted => "submission_started",
+            Self::Submitted => "submitted",
+            Self::Confirmed => "confirmed",
+            Self::RecoveryRequired => "recovery_required",
+        }
+    }
+
+    pub(crate) fn reserves_admission(&self) -> bool {
+        !matches!(self, Self::Confirmed | Self::AbandonedUnsigned)
+    }
+
+    pub(crate) fn has_durable_signature(&self) -> bool {
+        matches!(
+            self,
+            Self::Signed
+                | Self::SubmissionStarted
+                | Self::Submitted
+                | Self::Confirmed
+                | Self::RecoveryRequired
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PersistedL1ChannelOpen {
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub request_commitment: String,
+    #[serde(default)]
+    pub network: String,
+    #[serde(default)]
+    pub chain_id: u32,
+    #[serde(default)]
+    pub mainnet: bool,
+    #[serde(default)]
+    pub block_1_hash: String,
+    #[serde(default)]
+    pub node_profile_id: String,
+    #[serde(default)]
+    pub network_instance_id: String,
+    #[serde(default)]
+    pub transaction_format_version: u64,
+    pub channel_id: String,
+    #[serde(default = "default_channel_reuse_version")]
+    pub reuse_version: u64,
+    pub user_address: String,
+    pub user_deposit_zhu: u64,
+    #[serde(default)]
+    pub network_fee_zhu: u64,
+    pub partial_transaction_hex: String,
+    pub partial_transaction_commitment: String,
+    pub transaction_hash: String,
+    pub signed_transaction_hex: Option<String>,
+    pub signed_transaction_commitment: Option<String>,
+    #[serde(default)]
+    pub confirmed_block_height: Option<u64>,
+    #[serde(default)]
+    pub observed_confirmations: u64,
+    pub status: L1ChannelOpenStatus,
+    pub created_unix: u64,
+    pub expires_unix: u64,
+    #[serde(default)]
+    pub updated_unix: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ChannelLifecycleStatus {
+    FreezeIntentPersisted,
+    FrozenBeforeSigning,
+    SignatureMayExist,
+    Signed,
+    SubmissionStarted,
+    Submitted,
+    ConfirmedClosed,
+    Retired,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PersistedChannelLifecycle {
+    pub operation_id: String,
+    pub channel_id: String,
+    pub reuse_version: u64,
+    pub open_height: u64,
+    pub status: ChannelLifecycleStatus,
+    pub state_commitment: String,
+    pub updated_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum L1ChannelCloseStatus {
+    FreezeIntentPersisted,
+    FrozenBeforeSigning,
+    SignatureMayExist,
+    Signed,
+    SubmissionStarted,
+    Submitted,
+    ConfirmedClosed,
+    Retired,
+    RecoveryRequired,
+}
+
+impl L1ChannelCloseStatus {
+    pub(crate) fn public_name(&self) -> &'static str {
+        match self {
+            Self::FreezeIntentPersisted => "freeze_intent_persisted",
+            Self::FrozenBeforeSigning => "frozen_before_signing",
+            Self::SignatureMayExist => "signature_may_exist",
+            Self::Signed => "signed",
+            Self::SubmissionStarted => "submission_started",
+            Self::Submitted => "submitted",
+            Self::ConfirmedClosed => "confirmed_closed",
+            Self::Retired => "retired",
+            Self::RecoveryRequired => "recovery_required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PersistedL1ChannelClose {
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub request_commitment: String,
+    #[serde(default)]
+    pub network: String,
+    #[serde(default)]
+    pub chain_id: u32,
+    #[serde(default)]
+    pub mainnet: bool,
+    #[serde(default)]
+    pub block_1_hash: String,
+    #[serde(default)]
+    pub node_profile_id: String,
+    #[serde(default)]
+    pub network_instance_id: String,
+    #[serde(default)]
+    pub transaction_format_version: u64,
+    pub channel_id: String,
+    pub hub_address: String,
+    pub user_address: String,
+    pub reuse_version: u64,
+    pub open_height: u64,
+    pub original_ledger: ChannelLedger,
+    #[serde(default)]
+    pub final_ledger: Option<ChannelLedger>,
+    pub partial_transaction_hex: String,
+    pub partial_transaction_commitment: String,
+    pub authorization_public_key_hex: String,
+    pub authorization_signature_hex: String,
+    pub transaction_hash: Option<String>,
+    pub signed_transaction_hex: Option<String>,
+    pub signed_transaction_commitment: Option<String>,
+    #[serde(default)]
+    pub confirmed_block_height: Option<u64>,
+    #[serde(default)]
+    pub observed_confirmations: u64,
+    pub status: L1ChannelCloseStatus,
+    pub created_unix: u64,
+    pub expires_unix: u64,
+    pub updated_unix: u64,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct HubPersistedState {
     #[serde(default)]
@@ -75,6 +484,36 @@ pub(crate) struct HubPersistedState {
     pub idempotency: HashMap<String, IdempotencyRecord>,
     #[serde(default)]
     pub completed_request_commitments: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub l1_channel_opens: HashMap<String, PersistedL1ChannelOpen>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub l1_channel_open_idempotency: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub l1_channel_open_commitments: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub channel_lifecycle: HashMap<String, PersistedChannelLifecycle>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub l1_channel_closes: HashMap<String, PersistedL1ChannelClose>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub l1_channel_close_idempotency: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub l1_channel_close_commitments: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_channel_activations: HashMap<String, PersistedHvmChannelActivation>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_channel_ledgers: HashMap<String, PersistedHvmChannelLedger>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_bill_progressions: HashMap<String, PersistedHvmBillProgression>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_chain_operations: HashMap<String, PersistedHvmChainOperation>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_registry_activations: HashMap<String, PersistedHvmRegistryActivation>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_registry_ledgers: HashMap<String, PersistedHvmRegistryLedger>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_registry_progressions: HashMap<String, PersistedHvmRegistryProgression>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_registry_chain_operations: HashMap<String, PersistedHvmRegistryChainOperation>,
 }
 
 pub(crate) fn state_commitment(state: &HubPersistedState) -> HubResult<String> {
@@ -116,11 +555,12 @@ pub(crate) fn acquire_state_lock(path: &Path) -> HubResult<fs::File> {
 }
 
 pub(crate) fn initialize_authenticated_state(
-    state_path: &Path,
+    state_store: &StateStore,
     state: &mut HubPersistedState,
     journal: &AuthenticatedJournal,
     hub_address: &str,
 ) -> HubResult<()> {
+    validate_hvm_state(state)?;
     let had_authenticated_state = state.schema_version != 0
         || state.journal_sequence != 0
         || !state.journal_head.is_empty()
@@ -133,7 +573,7 @@ pub(crate) fn initialize_authenticated_state(
         }
         state.schema_version = 1;
         let current_commitment = state_commitment(state)?;
-        backup_legacy_state(state_path)?;
+        backup_legacy_state(state_store.path())?;
         let record = journal.append(JournalEvent {
             wallet_scope: format!("hub:{}", hub_address.trim()),
             hub_or_provider_identity: hub_address.trim().to_owned(),
@@ -156,7 +596,7 @@ pub(crate) fn initialize_authenticated_state(
         state.journal_sequence = record.entry_sequence;
         state.journal_head = record.entry_hash.clone();
         state.state_commitment = current_commitment.clone();
-        save_state_file(state_path, state)?;
+        state_store.save(state)?;
         journal.write_checkpoint(&JournalHead {
             sequence: record.entry_sequence,
             entry_hash: record.entry_hash,
@@ -187,7 +627,7 @@ pub(crate) fn initialize_authenticated_state(
             state.journal_sequence = last.entry_sequence;
             state.journal_head = last.entry_hash.clone();
             state.state_commitment = current_commitment.clone();
-            save_state_file(state_path, state)?;
+            state_store.save(state)?;
         } else {
             return Err(HubError::State("StateCommitmentMismatch".into()));
         }
@@ -208,7 +648,647 @@ pub(crate) fn initialize_authenticated_state(
     Ok(())
 }
 
-fn backup_legacy_state(path: &Path) -> HubResult<()> {
+pub(crate) fn validate_hvm_state(state: &HubPersistedState) -> HubResult<()> {
+    validate_hvm_channel_activations_v1(state)?;
+    validate_hvm_registry_activations_v2(state)
+}
+
+fn validate_hvm_channel_activations_v1(state: &HubPersistedState) -> HubResult<()> {
+    let activations = state.hvm_channel_activations.values().collect::<Vec<_>>();
+    for (map_key, activation) in &state.hvm_channel_activations {
+        activation.recovery_bundle.validate_crypto()?;
+        let binding = &activation.recovery_bundle.binding;
+        if map_key != &activation.binding_commitment
+            || activation.binding_commitment != binding.commitment()?
+            || activation.minimum_required_live_blocks == 0
+        {
+            return Err(HubError::State(
+                "persisted HVM activation key or commitment is inconsistent".into(),
+            ));
+        }
+        if activation.minimum_required_recover_blocks == 0 {
+            activation
+                .activation_snapshot
+                .validate_initial_open_binding(binding, activation.minimum_required_live_blocks)?;
+        } else {
+            activation.activation_snapshot.validate_open_binding(
+                binding,
+                activation.minimum_required_live_blocks,
+                activation.minimum_required_recover_blocks,
+            )?;
+        }
+    }
+    for (index, left) in activations.iter().enumerate() {
+        let left = &left.recovery_bundle.binding;
+        for right in activations.iter().skip(index + 1) {
+            let right = &right.recovery_bundle.binding;
+            if left.contract_address == right.contract_address
+                || (left.channel_id == right.channel_id
+                    && left.reuse_version == right.reuse_version)
+            {
+                return Err(HubError::State(
+                    "persisted HVM activations reuse a contract or channel incarnation".into(),
+                ));
+            }
+        }
+    }
+    if state.hvm_channel_ledgers.len() != state.hvm_channel_activations.len() {
+        return Err(HubError::State(
+            "persisted HVM activations and ledgers are not one-to-one".into(),
+        ));
+    }
+    for (commitment, ledger) in &state.hvm_channel_ledgers {
+        let activation = state
+            .hvm_channel_activations
+            .get(commitment)
+            .ok_or_else(|| {
+                HubError::State("persisted HVM ledger has no exact activation".into())
+            })?;
+        let binding = &activation.recovery_bundle.binding;
+        if ledger.binding_commitment != *commitment
+            || ledger.latest_fully_signed_bill.binding_commitment != *commitment
+        {
+            return Err(HubError::State(
+                "persisted HVM ledger commitment is inconsistent".into(),
+            ));
+        }
+        ledger
+            .latest_fully_signed_bill
+            .validate_fully_signed(binding)?;
+    }
+    for (operation_id, progression) in &state.hvm_bill_progressions {
+        if progression.request.operation_id != *operation_id {
+            return Err(HubError::State(
+                "persisted HVM progression map key is inconsistent".into(),
+            ));
+        }
+        let activation = state
+            .hvm_channel_activations
+            .get(&progression.request.binding_commitment)
+            .ok_or_else(|| HubError::State("HVM progression activation is missing".into()))?;
+        let ledger = state
+            .hvm_channel_ledgers
+            .get(&progression.request.binding_commitment)
+            .ok_or_else(|| HubError::State("HVM progression ledger is missing".into()))?;
+        validate_progression(progression, &activation.recovery_bundle.binding, ledger)?;
+    }
+    for progression in state
+        .hvm_bill_progressions
+        .values()
+        .filter(|progression| progression.status.is_unresolved())
+    {
+        let count = state
+            .hvm_bill_progressions
+            .values()
+            .filter(|other| {
+                other.status.is_unresolved()
+                    && other.request.binding_commitment == progression.request.binding_commitment
+            })
+            .count();
+        if count != 1 {
+            return Err(HubError::State(
+                "HVM channel has more than one unresolved bill progression".into(),
+            ));
+        }
+    }
+    for (operation_id, operation) in &state.hvm_chain_operations {
+        // `Claim` exists only for the shared registry (V2) profile, whose
+        // contract exposes the `PermitHAC` payout hook. The V1 HVM channel
+        // contract has no such door, so a V1 operation claiming that kind is
+        // corrupt state, not an unsupported feature.
+        if operation.kind == HvmChainOperationKind::Claim {
+            return Err(HubError::State(
+                "V1 HVM chain operation cannot be a registry claim".into(),
+            ));
+        }
+        if operation.operation_id != *operation_id
+            || operation.operation_id.trim().is_empty()
+            || operation.idempotency_key.trim().is_empty()
+            || !state
+                .hvm_channel_activations
+                .contains_key(&operation.binding_commitment)
+            || operation.network_fee_zhu == 0
+            || operation.gas_max == 0
+            || operation.transaction_timestamp == 0
+            || operation.pre_observed_height == 0
+            || !matches!(operation.pre_status, 2..=4)
+            || operation.call_source_commitment.len() != 64
+            || operation.call_source.trim().is_empty()
+            || hex::encode(Sha256::digest(operation.call_source.as_bytes()))
+                != operation.call_source_commitment
+        {
+            return Err(HubError::State(
+                "persisted HVM chain operation identity is inconsistent".into(),
+            ));
+        }
+        let expected_lease_keys = crate::hvm_watchtower::HVM_STORAGE_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>();
+        if operation.kind == HvmChainOperationKind::RenewAllLeases {
+            if operation.lease_keys != expected_lease_keys
+                || operation.lease_periods.is_none_or(|periods| {
+                    periods == 0 || periods > crate::hvm_watchtower::HVM_LEASE_RENEWAL_MAX_PERIODS
+                })
+                || operation.bill_serial.is_some()
+            {
+                return Err(HubError::State(
+                    "persisted HVM lease renewal does not cover exactly all 18 keys".into(),
+                ));
+            }
+        } else if !operation.lease_keys.is_empty() || operation.lease_periods.is_some() {
+            return Err(HubError::State(
+                "non-renewal HVM operation contains lease state".into(),
+            ));
+        }
+        let bill_state_required = matches!(
+            operation.kind,
+            HvmChainOperationKind::Challenge | HvmChainOperationKind::Respond
+        );
+        if bill_state_required
+            != (operation.bill_serial.is_some()
+                && operation.expected_left_balance_zhu.is_some()
+                && operation.expected_right_balance_zhu.is_some())
+        {
+            return Err(HubError::State(
+                "persisted HVM operation bill postcondition is incomplete".into(),
+            ));
+        }
+        // The abandonment transition belongs to the shared registry table
+        // alone, which is where the proof gate and its durable evidence live.
+        // A v1 record carrying it has no proof behind it and is refused.
+        if operation.status == HvmChainOperationStatus::Abandoned {
+            return Err(HubError::State(
+                "the v1 HVM chain operation table has no abandonment transition".into(),
+            ));
+        }
+        let signed_required = !matches!(
+            operation.status,
+            HvmChainOperationStatus::IntentPersisted | HvmChainOperationStatus::SignatureMayExist
+        );
+        if signed_required
+            && (operation
+                .signed_transaction_hex
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || operation
+                    .transaction_hash
+                    .as_deref()
+                    .is_none_or(str::is_empty))
+        {
+            return Err(HubError::State(
+                "persisted HVM chain operation lost its exact signed transaction".into(),
+            ));
+        }
+        if operation.status == HvmChainOperationStatus::Confirmed
+            && (operation.confirmed_block_height.is_none() || operation.observed_confirmations < 6)
+        {
+            return Err(HubError::State(
+                "confirmed HVM chain operation lacks finality evidence".into(),
+            ));
+        }
+        let idempotency_count = state
+            .hvm_chain_operations
+            .values()
+            .filter(|other| other.idempotency_key == operation.idempotency_key)
+            .count();
+        if idempotency_count != 1 {
+            return Err(HubError::State(
+                "persisted HVM chain operation idempotency key is not unique".into(),
+            ));
+        }
+        if operation.status != HvmChainOperationStatus::Confirmed {
+            let unresolved_for_binding = state
+                .hvm_chain_operations
+                .values()
+                .filter(|other| {
+                    other.binding_commitment == operation.binding_commitment
+                        && other.status != HvmChainOperationStatus::Confirmed
+                })
+                .count();
+            if unresolved_for_binding != 1 {
+                return Err(HubError::State(
+                    "persisted HVM channel has more than one unresolved chain operation".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_hvm_registry_activations_v2(state: &HubPersistedState) -> HubResult<()> {
+    let activations = state.hvm_registry_activations.values().collect::<Vec<_>>();
+    for (map_key, activation) in &state.hvm_registry_activations {
+        activation.recovery_bundle.validate_crypto()?;
+        let binding = &activation.recovery_bundle.binding;
+        if map_key != &activation.binding_commitment
+            || activation.binding_commitment != binding.commitment()?
+            || activation.minimum_required_live_blocks == 0
+        {
+            return Err(HubError::State(
+                "persisted HVM registry activation commitment is inconsistent".into(),
+            ));
+        }
+        if activation.minimum_required_recover_blocks == 0 {
+            activation
+                .activation_snapshot
+                .validate_initial_open_binding(binding, activation.minimum_required_live_blocks)?;
+        } else {
+            activation.activation_snapshot.validate_open_binding(
+                binding,
+                activation.minimum_required_live_blocks,
+                activation.minimum_required_recover_blocks,
+            )?;
+        }
+    }
+    for (index, left) in activations.iter().enumerate() {
+        let left = &left.recovery_bundle.binding;
+        for right in activations.iter().skip(index + 1) {
+            let right = &right.recovery_bundle.binding;
+            if (left.contract_address == right.contract_address
+                && left.left_address == right.left_address)
+                || (left.contract_address == right.contract_address
+                    && left.channel_id == right.channel_id
+                    && left.reuse_version == right.reuse_version)
+            {
+                return Err(HubError::State(
+                    "shared HVM registry reuses a left slot or channel incarnation".into(),
+                ));
+            }
+        }
+    }
+    if state.hvm_registry_ledgers.len() != state.hvm_registry_activations.len() {
+        return Err(HubError::State(
+            "registry activations and ledgers are not one-to-one".into(),
+        ));
+    }
+    for (commitment, ledger) in &state.hvm_registry_ledgers {
+        let activation = state
+            .hvm_registry_activations
+            .get(commitment)
+            .ok_or_else(|| HubError::State("registry ledger has no activation".into()))?;
+        let binding = &activation.recovery_bundle.binding;
+        if ledger.binding_commitment != *commitment
+            || ledger.latest_fully_signed_bill.binding_commitment != *commitment
+        {
+            return Err(HubError::State(
+                "registry ledger commitment is inconsistent".into(),
+            ));
+        }
+        ledger
+            .latest_fully_signed_bill
+            .validate_fully_signed(binding)?;
+    }
+    for (operation_id, progression) in &state.hvm_registry_progressions {
+        if progression.request.operation_id != *operation_id
+            || state.hvm_bill_progressions.contains_key(operation_id)
+        {
+            return Err(HubError::State(
+                "registry progression operation identity is inconsistent".into(),
+            ));
+        }
+        let activation = state
+            .hvm_registry_activations
+            .get(&progression.request.binding_commitment)
+            .ok_or_else(|| HubError::State("registry progression activation is missing".into()))?;
+        let ledger = state
+            .hvm_registry_ledgers
+            .get(&progression.request.binding_commitment)
+            .ok_or_else(|| HubError::State("registry progression ledger is missing".into()))?;
+        validate_registry_progression(progression, &activation.recovery_bundle.binding, ledger)?;
+    }
+    for progression in state
+        .hvm_registry_progressions
+        .values()
+        .filter(|progression| progression.status.is_unresolved())
+    {
+        let count = state
+            .hvm_registry_progressions
+            .values()
+            .filter(|other| {
+                other.status.is_unresolved()
+                    && other.request.binding_commitment == progression.request.binding_commitment
+            })
+            .count();
+        if count != 1 {
+            return Err(HubError::State(
+                "registry channel has more than one unresolved progression".into(),
+            ));
+        }
+    }
+    for progression in state.hvm_registry_progressions.values() {
+        let duplicate_idempotency = state
+            .hvm_registry_progressions
+            .values()
+            .filter(|other| {
+                other.request.idempotency_key == progression.request.idempotency_key
+                    && other.request.operation_id != progression.request.operation_id
+            })
+            .count();
+        let conflicts_with_v1 = state
+            .hvm_bill_progressions
+            .values()
+            .any(|other| other.request.idempotency_key == progression.request.idempotency_key);
+        if duplicate_idempotency != 0 || conflicts_with_v1 {
+            return Err(HubError::State(
+                "HVM payment idempotency key is not globally unique".into(),
+            ));
+        }
+    }
+    validate_hvm_registry_chain_operations_v2(state)?;
+    Ok(())
+}
+
+/// A block anchor is exactly 64 lower-case hex characters. Anything else is
+/// not something a later observation could be compared against.
+pub(crate) fn is_canonical_block_anchor(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_hvm_registry_chain_operations_v2(state: &HubPersistedState) -> HubResult<()> {
+    use crate::hvm_registry_watchtower::{
+        registry_challenge_call_source, registry_claim_payout_source,
+        registry_finalize_call_source, registry_renew_all_call_source,
+        registry_respond_call_source,
+    };
+
+    for (operation_id, operation) in &state.hvm_registry_chain_operations {
+        let activation = state
+            .hvm_registry_activations
+            .get(&operation.binding_commitment)
+            .ok_or_else(|| HubError::State("registry chain operation has no activation".into()))?;
+        let binding = &activation.recovery_bundle.binding;
+        if operation.operation_id != *operation_id
+            || operation.operation_id.trim().is_empty()
+            || operation.idempotency_key.trim().is_empty()
+            || operation.request_commitment.len() != 64
+            || operation.pre_observed_height == 0
+            || !matches!(operation.pre_status, 2..=4)
+            || operation.network_fee_zhu == 0
+            || operation.gas_max == 0
+            || operation.transaction_timestamp == 0
+            || operation.call_source_commitment.len() != 64
+            || operation.call_source.trim().is_empty()
+            || hex::encode(Sha256::digest(operation.call_source.as_bytes()))
+                != operation.call_source_commitment
+        {
+            return Err(HubError::State(
+                "persisted registry chain operation identity is inconsistent".into(),
+            ));
+        }
+        let expected_source = match operation.kind {
+            HvmChainOperationKind::Challenge => {
+                let bill = operation.bill.as_ref().ok_or_else(|| {
+                    HubError::State("registry challenge lost its exact bill".into())
+                })?;
+                bill.validate_fully_signed(binding)?;
+                registry_challenge_call_source(binding, bill)?
+            }
+            HvmChainOperationKind::Respond => {
+                let bill = operation.bill.as_ref().ok_or_else(|| {
+                    HubError::State("registry response lost its exact bill".into())
+                })?;
+                bill.validate_fully_signed(binding)?;
+                registry_respond_call_source(binding, bill)?
+            }
+            HvmChainOperationKind::Finalize => {
+                if operation.bill.is_some() || operation.lease_periods.is_some() {
+                    return Err(HubError::State(
+                        "registry finalize contains unrelated bill or lease state".into(),
+                    ));
+                }
+                registry_finalize_call_source(binding)?
+            }
+            HvmChainOperationKind::RenewAllLeases => {
+                if operation.bill.is_some() {
+                    return Err(HubError::State(
+                        "registry renewal contains unrelated bill state".into(),
+                    ));
+                }
+                let periods = operation.lease_periods.ok_or_else(|| {
+                    HubError::State("registry renewal lost its exact period count".into())
+                })?;
+                registry_renew_all_call_source(binding, periods)?
+            }
+            HvmChainOperationKind::Claim => {
+                if operation.bill.is_some() || operation.lease_periods.is_some() {
+                    return Err(HubError::State(
+                        "registry claim contains unrelated bill or lease state".into(),
+                    ));
+                }
+                let payee = operation
+                    .claim_payee
+                    .as_deref()
+                    .ok_or_else(|| HubError::State("registry claim lost its exact payee".into()))?;
+                let amount_zhu = operation.claim_amount_zhu.ok_or_else(|| {
+                    HubError::State("registry claim lost its exact payout amount".into())
+                })?;
+                registry_claim_payout_source(binding, payee, amount_zhu)?
+            }
+        };
+        if expected_source != operation.call_source {
+            return Err(HubError::State(
+                "persisted registry chain call source is not canonical".into(),
+            ));
+        }
+        if operation.kind != HvmChainOperationKind::RenewAllLeases
+            && operation.lease_periods.is_some()
+        {
+            return Err(HubError::State(
+                "non-renewal registry operation contains lease state".into(),
+            ));
+        }
+        if operation.kind != HvmChainOperationKind::Claim
+            && (operation.claim_payee.is_some()
+                || operation.claim_amount_zhu.is_some()
+                || operation.claim_settled_elsewhere_height.is_some())
+        {
+            return Err(HubError::State(
+                "non-claim registry operation contains payout state".into(),
+            ));
+        }
+        // A permissionless third party may pay the payee before us. When that
+        // is observed the operation resolves with the contract's own
+        // `c_left_claimed_` flag as its evidence; it never owns a block of its
+        // own, so it must not pretend to.
+        let settled_elsewhere = operation.claim_settled_elsewhere_height;
+        if let Some(height) = settled_elsewhere
+            && (operation.kind != HvmChainOperationKind::Claim
+                || height == 0
+                || operation.status != HvmChainOperationStatus::Confirmed
+                || operation.confirmed_block_height.is_some()
+                || operation.confirmed_block_hash.is_some()
+                || operation.observed_confirmations != 0)
+        {
+            return Err(HubError::State(
+                "registry claim settled elsewhere carries inconsistent evidence".into(),
+            ));
+        }
+        // A claim resolved before it was ever signed genuinely has no bytes.
+        // One that was signed first still has to keep them exactly.
+        let settled_elsewhere_before_signing = settled_elsewhere.is_some()
+            && operation.signed_transaction_hex.is_none()
+            && operation.transaction_hash.is_none()
+            && operation.submitted_unix.is_none();
+        let signed_required = !matches!(
+            operation.status,
+            HvmChainOperationStatus::IntentPersisted | HvmChainOperationStatus::SignatureMayExist
+        ) && !settled_elsewhere_before_signing;
+        if signed_required
+            && (operation
+                .signed_transaction_hex
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || operation
+                    .transaction_hash
+                    .as_deref()
+                    .is_none_or(str::is_empty))
+        {
+            return Err(HubError::State(
+                "persisted registry chain operation lost its exact signed transaction".into(),
+            ));
+        }
+        if operation.status == HvmChainOperationStatus::Confirmed
+            && settled_elsewhere.is_none()
+            && (operation.confirmed_block_height.is_none() || operation.observed_confirmations < 6)
+        {
+            return Err(HubError::State(
+                "confirmed registry chain operation lacks finality evidence".into(),
+            ));
+        }
+        if let Some(anchor) = operation.confirmed_block_hash.as_deref()
+            && (operation.confirmed_block_height.is_none() || !is_canonical_block_anchor(anchor))
+        {
+            return Err(HubError::State(
+                "registry chain operation has a malformed block anchor".into(),
+            ));
+        }
+        validate_registry_chain_abandonment(operation)?;
+        let idempotency_count = state
+            .hvm_registry_chain_operations
+            .values()
+            .filter(|other| other.idempotency_key == operation.idempotency_key)
+            .count();
+        let conflicts_with_v1 = state
+            .hvm_chain_operations
+            .values()
+            .any(|other| other.idempotency_key == operation.idempotency_key);
+        if idempotency_count != 1 || conflicts_with_v1 {
+            return Err(HubError::State(
+                "HVM chain idempotency key is not globally unique".into(),
+            ));
+        }
+        // An operation whose fate is still open keeps the channel to itself.
+        // `Abandoned` counts as resolved for exactly the same reason
+        // `Confirmed` does: there is no transaction left that could still
+        // land, so a replacement is not a second live transaction.
+        if !operation.status.is_resolved() {
+            let unresolved = state
+                .hvm_registry_chain_operations
+                .values()
+                .filter(|other| {
+                    other.binding_commitment == operation.binding_commitment
+                        && !other.status.is_resolved()
+                })
+                .count();
+            if unresolved != 1 {
+                return Err(HubError::State(
+                    "registry channel has more than one unresolved chain operation".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Re-check an abandonment from the record alone, on every load.
+///
+/// The transition is only ever taken behind
+/// [`crate::inadmissible::prove_transaction_inadmissible`] and a final chain
+/// read. This is the second line: a state file that arrives with an
+/// abandonment whose own numbers do not prove inadmissibility — a hand-edited
+/// one, a restored one, one naming a rule that no longer exists — is refused
+/// rather than trusted. There is no arm here that accepts an abandonment
+/// without arithmetic behind it.
+fn validate_registry_chain_abandonment(
+    operation: &PersistedHvmRegistryChainOperation,
+) -> HubResult<()> {
+    let abandoned = match (&operation.abandoned, &operation.status) {
+        (Some(abandoned), HvmChainOperationStatus::Abandoned) => abandoned,
+        (None, HvmChainOperationStatus::Abandoned) => {
+            return Err(HubError::State(
+                "abandoned registry chain operation carries no inadmissibility proof".into(),
+            ));
+        }
+        (Some(_), _) => {
+            return Err(HubError::State(
+                "registry chain operation carries an abandonment it is not in".into(),
+            ));
+        }
+        (None, _) => return Ok(()),
+    };
+    // An abandoned operation keeps the exact bytes the proof is about — they
+    // are the evidence — and owns no block, because it was never in one.
+    if operation
+        .signed_transaction_hex
+        .as_deref()
+        .is_none_or(str::is_empty)
+        || operation
+            .transaction_hash
+            .as_deref()
+            .is_none_or(str::is_empty)
+        || operation.confirmed_block_height.is_some()
+        || operation.confirmed_block_hash.is_some()
+        || operation.observed_confirmations != 0
+        || operation.claim_settled_elsewhere_height.is_some()
+    {
+        return Err(HubError::State(
+            "abandoned registry chain operation carries inconsistent evidence".into(),
+        ));
+    }
+    if abandoned.detail.trim().is_empty()
+        || abandoned.chain_tip_timestamp_unix == 0
+        || abandoned.observed_unix == 0
+        || abandoned.proof_height == 0
+        || abandoned.absent_at_height == 0
+        || abandoned.abandoned_unix == 0
+    {
+        return Err(HubError::State(
+            "abandoned registry chain operation has an incomplete proof".into(),
+        ));
+    }
+    // The proof is about the transaction this record actually signed.
+    if abandoned.transaction_timestamp != operation.transaction_timestamp {
+        return Err(HubError::State(
+            "abandonment proof is about a different transaction timestamp".into(),
+        ));
+    }
+    let Some(rule) = crate::inadmissible::InadmissibilityRule::from_name(&abandoned.rule) else {
+        return Err(HubError::State(
+            "abandoned registry chain operation names an unknown consensus rule".into(),
+        ));
+    };
+    match rule {
+        crate::inadmissible::InadmissibilityRule::FutureTimestamp => {
+            let ceiling = abandoned
+                .chain_tip_timestamp_unix
+                .max(abandoned.observed_unix)
+                .saturating_add(crate::inadmissible::INADMISSIBILITY_CLOCK_MARGIN_SECONDS);
+            if abandoned.transaction_timestamp <= ceiling {
+                return Err(HubError::State(
+                    "abandonment proof does not put the transaction timestamp past the chain clock"
+                        .into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn backup_legacy_state(path: &Path) -> HubResult<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -238,6 +1318,10 @@ fn backup_legacy_state(path: &Path) -> HubResult<()> {
         .map_err(|error| HubError::State(error.to_string()))
 }
 
+fn default_channel_reuse_version() -> u64 {
+    1
+}
+
 fn legacy_recovery_status() -> ReservationStatus {
     ReservationStatus::RecoveryRequired
 }
@@ -258,6 +1342,12 @@ pub(crate) fn load_state_file(path: &Path) -> HubResult<HubPersistedState> {
 }
 
 pub(crate) fn save_state_file(path: &Path, state: &HubPersistedState) -> HubResult<()> {
+    let json =
+        serde_json::to_vec_pretty(state).map_err(|error| HubError::State(error.to_string()))?;
+    save_bytes_atomic(path, &json)
+}
+
+pub(crate) fn save_bytes_atomic(path: &Path, bytes: &[u8]) -> HubResult<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -273,8 +1363,6 @@ pub(crate) fn save_state_file(path: &Path, state: &HubPersistedState) -> HubResu
             .map_err(|error| HubError::State(error.to_string()))?;
     }
 
-    let json =
-        serde_json::to_vec_pretty(state).map_err(|error| HubError::State(error.to_string()))?;
     let file_name = path
         .file_name()
         .ok_or_else(|| HubError::State("hub state path has no filename".into()))?
@@ -301,7 +1389,7 @@ pub(crate) fn save_state_file(path: &Path, state: &HubPersistedState) -> HubResu
         let mut file = options
             .open(&temp_path)
             .map_err(|error| HubError::State(error.to_string()))?;
-        file.write_all(&json)
+        file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|error| HubError::State(error.to_string()))?;
         drop(file);
@@ -326,7 +1414,7 @@ pub(crate) fn save_state_file(path: &Path, state: &HubPersistedState) -> HubResu
     result
 }
 
-fn ensure_not_symlink(path: &Path, label: &str) -> HubResult<()> {
+pub(crate) fn ensure_not_symlink(path: &Path, label: &str) -> HubResult<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             Err(HubError::State(format!("{label} must not be a symlink")))
@@ -419,5 +1507,228 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn additive_registry_maps_preserve_legacy_state_and_commitment() {
+        let baseline = HubPersistedState::default();
+        let baseline_commitment = state_commitment(&baseline).unwrap();
+        let encoded = serde_json::to_value(&baseline).unwrap();
+        assert!(encoded.get("hvm_registry_activations").is_none());
+        assert!(encoded.get("hvm_registry_ledgers").is_none());
+        assert!(encoded.get("hvm_registry_progressions").is_none());
+        assert!(encoded.get("hvm_registry_chain_operations").is_none());
+
+        let legacy: HubPersistedState =
+            serde_json::from_str(r#"{"channels":{},"payments":{}}"#).unwrap();
+        assert!(legacy.hvm_registry_activations.is_empty());
+        assert!(legacy.hvm_registry_ledgers.is_empty());
+        assert!(legacy.hvm_registry_progressions.is_empty());
+        assert!(legacy.hvm_registry_chain_operations.is_empty());
+        assert_eq!(state_commitment(&legacy).unwrap(), baseline_commitment);
+    }
+
+    /// A registry chain operation carrying nothing but the fields the
+    /// abandonment validator reads. Everything else is left at values the
+    /// validator does not look at, so each test below fails for exactly the
+    /// reason it names.
+    fn abandonable() -> PersistedHvmRegistryChainOperation {
+        PersistedHvmRegistryChainOperation {
+            operation_id: "operation".into(),
+            idempotency_key: "idempotency".into(),
+            request_commitment: "aa".repeat(32),
+            binding_commitment: "bb".repeat(32),
+            kind: HvmChainOperationKind::Finalize,
+            bill: None,
+            lease_periods: None,
+            claim_payee: None,
+            claim_amount_zhu: None,
+            claim_settled_elsewhere_height: None,
+            pre_observed_height: 2_886,
+            pre_status: 3,
+            pre_serial: 2,
+            pre_left_balance_zhu: 900_000_000,
+            pre_hub_balance_zhu: 100_000_000,
+            pre_deadline: 2_878,
+            pre_minimum_live_blocks: 20_000,
+            pre_minimum_recover_blocks: 30_000,
+            network_fee_zhu: 10_000,
+            gas_max: u8::MAX,
+            transaction_timestamp: 1_791_527_729,
+            call_source_commitment: "cc".repeat(32),
+            call_source: "source".into(),
+            signed_transaction_hex: Some("00".into()),
+            transaction_hash: Some("dd".repeat(32)),
+            status: HvmChainOperationStatus::Abandoned,
+            submitted_unix: None,
+            confirmed_block_height: None,
+            confirmed_block_hash: None,
+            observed_confirmations: 0,
+            abandoned: Some(abandonment()),
+            created_unix: 1_786_831_000,
+            updated_unix: 1_786_831_000,
+            last_error: Some("fullnode refused the transaction".into()),
+        }
+    }
+
+    /// The live case: a finalize stamped 1791527729 against a ~1786831000
+    /// chain clock.
+    fn abandonment() -> PersistedHvmChainAbandonment {
+        PersistedHvmChainAbandonment {
+            rule: "future_timestamp".into(),
+            detail: "transaction timestamp 1791527729 exceeds the chain clock ceiling".into(),
+            transaction_timestamp: 1_791_527_729,
+            chain_tip_timestamp_unix: 1_786_831_000,
+            observed_unix: 1_786_831_000,
+            proof_height: 2_886,
+            absent_at_height: 2_886,
+            abandoned_unix: 1_786_831_100,
+        }
+    }
+
+    #[test]
+    fn a_well_formed_abandonment_is_accepted() {
+        validate_registry_chain_abandonment(&abandonable()).unwrap();
+    }
+
+    /// Every operation that is not abandoned must serialise exactly as it did
+    /// before this field existed. Otherwise adding the transition would move
+    /// the state commitment of every live Hub that never uses it, and an
+    /// existing state file would stop matching its own authenticated head.
+    #[test]
+    fn the_abandonment_field_is_invisible_to_operations_without_one() {
+        let mut ordinary = abandonable();
+        ordinary.status = HvmChainOperationStatus::RecoveryRequired;
+        ordinary.abandoned = None;
+        let encoded = serde_json::to_value(&ordinary).unwrap();
+        assert!(encoded.get("abandoned").is_none());
+
+        // And a file written before the field existed still loads.
+        let mut without_key = encoded.clone();
+        without_key.as_object_mut().unwrap().remove("abandoned");
+        let decoded: PersistedHvmRegistryChainOperation =
+            serde_json::from_value(without_key).unwrap();
+        assert_eq!(decoded, ordinary);
+
+        // An abandoned one does carry it.
+        let abandoned = serde_json::to_value(abandonable()).unwrap();
+        assert!(abandoned.get("abandoned").is_some());
+    }
+
+    /// The whole point of re-checking on load: an abandonment is only worth
+    /// what its own arithmetic proves. A state file that arrives claiming one
+    /// without the numbers behind it is refused, not trusted.
+    #[test]
+    fn an_abandonment_whose_numbers_do_not_prove_it_is_refused_on_load() {
+        // The timestamp is ahead of the tip, but not past the clock ceiling:
+        // a node could still accept it, so this is no proof at all.
+        let mut inside_margin = abandonable();
+        let stamp = 1_786_831_000 + crate::inadmissible::INADMISSIBILITY_CLOCK_MARGIN_SECONDS;
+        inside_margin.transaction_timestamp = stamp;
+        inside_margin
+            .abandoned
+            .as_mut()
+            .unwrap()
+            .transaction_timestamp = stamp;
+        assert!(validate_registry_chain_abandonment(&inside_margin).is_err());
+
+        // One second past the ceiling is a proof.
+        let mut past_ceiling = inside_margin.clone();
+        past_ceiling.transaction_timestamp = stamp + 1;
+        past_ceiling
+            .abandoned
+            .as_mut()
+            .unwrap()
+            .transaction_timestamp = stamp + 1;
+        validate_registry_chain_abandonment(&past_ceiling).unwrap();
+
+        // A proof about some other transaction's timestamp is not a proof
+        // about this record's transaction.
+        let mut mismatched = abandonable();
+        mismatched.abandoned.as_mut().unwrap().transaction_timestamp = 1_791_527_728;
+        assert!(validate_registry_chain_abandonment(&mismatched).is_err());
+    }
+
+    /// There is no rule named "operator override", and a record inventing one
+    /// cannot be read back as a proof.
+    #[test]
+    fn an_abandonment_naming_an_unknown_rule_is_refused() {
+        for rule in ["operator_override", "force", "", "future_timestamp "] {
+            let mut operation = abandonable();
+            operation.abandoned.as_mut().unwrap().rule = rule.into();
+            assert!(
+                validate_registry_chain_abandonment(&operation).is_err(),
+                "rule {rule:?} must not be readable as a proof"
+            );
+        }
+    }
+
+    #[test]
+    fn the_abandoned_status_and_its_proof_must_agree() {
+        // Abandoned without a proof.
+        let mut bare = abandonable();
+        bare.abandoned = None;
+        assert!(validate_registry_chain_abandonment(&bare).is_err());
+
+        // A proof attached to a record that is not abandoned.
+        for status in [
+            HvmChainOperationStatus::RecoveryRequired,
+            HvmChainOperationStatus::Confirmed,
+            HvmChainOperationStatus::Submitted,
+        ] {
+            let mut mislabelled = abandonable();
+            mislabelled.status = status;
+            assert!(validate_registry_chain_abandonment(&mislabelled).is_err());
+        }
+
+        // Neither: the ordinary case, untouched.
+        let mut ordinary = abandonable();
+        ordinary.status = HvmChainOperationStatus::RecoveryRequired;
+        ordinary.abandoned = None;
+        validate_registry_chain_abandonment(&ordinary).unwrap();
+    }
+
+    /// An abandoned operation was never in a block, so it must not carry the
+    /// evidence of one, and it must keep the exact bytes its proof is about.
+    #[test]
+    fn an_abandoned_operation_owns_no_block_and_keeps_its_bytes() {
+        let mut anchored = abandonable();
+        anchored.confirmed_block_height = Some(2_887);
+        assert!(validate_registry_chain_abandonment(&anchored).is_err());
+
+        let mut confirmations = abandonable();
+        confirmations.observed_confirmations = 6;
+        assert!(validate_registry_chain_abandonment(&confirmations).is_err());
+
+        let mut byteless = abandonable();
+        byteless.signed_transaction_hex = None;
+        assert!(validate_registry_chain_abandonment(&byteless).is_err());
+
+        let mut hashless = abandonable();
+        hashless.transaction_hash = Some(String::new());
+        assert!(validate_registry_chain_abandonment(&hashless).is_err());
+    }
+
+    /// `Abandoned` and `Confirmed` are the two statuses that free the channel
+    /// for a new operation. Everything else leaves a transaction whose fate is
+    /// still open.
+    #[test]
+    fn only_confirmed_and_abandoned_resolve_an_operation() {
+        assert!(HvmChainOperationStatus::Confirmed.is_resolved());
+        assert!(HvmChainOperationStatus::Abandoned.is_resolved());
+        for status in [
+            HvmChainOperationStatus::IntentPersisted,
+            HvmChainOperationStatus::SignatureMayExist,
+            HvmChainOperationStatus::Signed,
+            HvmChainOperationStatus::SubmissionStarted,
+            HvmChainOperationStatus::Submitted,
+            HvmChainOperationStatus::RecoveryRequired,
+        ] {
+            assert!(
+                !status.is_resolved(),
+                "{} must not resolve",
+                status.as_str()
+            );
+        }
     }
 }

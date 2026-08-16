@@ -8,9 +8,11 @@ license.workspace = true
 [features]
 default = []
 agent-wallet-testnet-pilot = ["hpay-companion-protocol/agent-wallet-testnet-pilot"]
+agent-wallet-bounded-mainnet-pilot = ["agent-wallet-testnet-pilot"]
 
 [dependencies]
 hacash-wallet-core = { path = "../wallet-core" }
+l2-fast-pay-hub = { path = "../l2-fast-pay-hub" }
 hpay-agent-types = { path = "../agent-types" }
 hpay-agent-connector = { path = "../agent-connector" }
 hpay-companion-protocol = { path = "../companion-protocol" }
@@ -33,6 +35,7 @@ aes-gcm.workspace = true
 argon2.workspace = true
 protocol = { path = "../../../hacash-fullnodedev/protocol" }
 sys = { path = "../../../hacash-fullnodedev/sys" }
+field = { path = "../../../hacash-fullnodedev/field" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -46,5 +49,6 @@ hpay-companion-protocol = { path = "../companion-protocol", features = ["dev-sof
 # /create/transaction with a real consensus Type 2 body, because the signer
 # decodes and re-verifies whatever the node returns before it will sign it.
 # Never a runtime dependency: the crate itself must not construct transactions.
-field = { path = "../../../hacash-fullnodedev/field" }
 basis = { path = "../../../hacash-fullnodedev/basis" }
+mint = { path = "../../../hacash-fullnodedev/mint" }
+vm = { path = "../../../hacash-fullnodedev/vm" }

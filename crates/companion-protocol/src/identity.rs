@@ -98,6 +98,8 @@ pub enum DeviceSignaturePurpose {
     SessionResponse,
     SessionConfirmation,
     ApprovalDecision,
+    AgentFastPayApprovalDecision,
+    AgentHvmApprovalDecision,
     AdminCommand,
     RollbackAnchor,
     WitnessReceipt,

@@ -270,7 +270,7 @@ impl AgentWalletManager {
             || binding.network_id != node.network_kind()
             || binding.chain_id != node.chain_id()
             || binding.genesis_identifier != state.block_one_fingerprint
-            || binding.node_profile_id != node.node_profile_id()
+            || binding.node_profile_id != node.node_profile_commitment()
             || binding.transaction_format_version != node.transaction_format_version()
         {
             return Err(AgentWalletError::ApprovalCommitmentMismatch);
@@ -327,7 +327,7 @@ impl AgentWalletManager {
             mobile_authorization_epoch: mobile.authorization_epoch,
             network_id: node.network_kind().to_owned(),
             genesis_identifier: state.block_one_fingerprint.clone(),
-            node_profile_id: node.node_profile_id().to_owned(),
+            node_profile_id: node.node_profile_commitment().to_owned(),
             transaction_format_version: node.transaction_format_version(),
             signer_epoch: state.signer_epoch,
             journal_epoch: JOURNAL_EPOCH,

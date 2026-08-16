@@ -41,6 +41,18 @@ if [[ ! "${HUB_ADDRESS}" =~ ^[1-9A-HJ-NP-Za-km-z]{30,40}$ ]]; then
   echo "The Hub address does not have a valid base58 shape." >&2
   exit 1
 fi
+read -r -p "Pilot user Hacash address (comma-separated for more than one): " ALLOWED_USERS
+IFS=',' read -r -a PILOT_USERS <<< "${ALLOWED_USERS}"
+if (( ${#PILOT_USERS[@]} == 0 )); then
+  echo "At least one pilot user address is required." >&2
+  exit 1
+fi
+for user_address in "${PILOT_USERS[@]}"; do
+  if [[ ! "${user_address}" =~ ^[1-9A-HJ-NP-Za-km-z]{30,40}$ ]]; then
+    echo "Every pilot user must be a comma-separated Hacash address without spaces." >&2
+    exit 1
+  fi
+done
 read -r -s -p "Dedicated Hub private key (64 hex characters): " HUB_SECRET
 printf '\n'
 if [[ ! "${HUB_SECRET}" =~ ^[0-9a-fA-F]{64}$ ]]; then
@@ -53,16 +65,25 @@ if [[ -n "${NODE_TOKEN}" && ! "${NODE_TOKEN}" =~ ^[A-Za-z0-9._~-]{16,256}$ ]]; t
   echo "The node token must be 16-256 safe ASCII characters." >&2
   exit 1
 fi
-read -r -p "Maximum payment in Zhu [10000000 = 0.1 HAC]: " PAYMENT_CAP
-PAYMENT_CAP="${PAYMENT_CAP:-10000000}"
-read -r -p "Maximum new channel funding in Zhu [10000000 = 0.1 HAC]: " CHANNEL_CAP
-CHANNEL_CAP="${CHANNEL_CAP:-10000000}"
-for cap in "${PAYMENT_CAP}" "${CHANNEL_CAP}"; do
-  if [[ ! "${cap}" =~ ^[0-9]+$ ]] || (( cap < 100000 || cap > 100000000 )); then
-    echo "Every cap must be 100000-100000000 Zhu (0.001-1 HAC)." >&2
-    exit 1
-  fi
-done
+read -r -p "Maximum payment in Zhu [100000000 = 1 HAC]: " PAYMENT_CAP
+PAYMENT_CAP="${PAYMENT_CAP:-100000000}"
+if [[ ! "${PAYMENT_CAP}" =~ ^[0-9]+$ ]] || (( PAYMENT_CAP < 100000 || PAYMENT_CAP > 100000000 )); then
+  echo "Payment cap must be 100000-100000000 Zhu (0.001-1 HAC)." >&2
+  exit 1
+fi
+read -r -p "Maximum new channel funding in Zhu [1000000000 = 10 HAC]: " CHANNEL_CAP
+CHANNEL_CAP="${CHANNEL_CAP:-1000000000}"
+if [[ ! "${CHANNEL_CAP}" =~ ^[0-9]+$ ]] || (( CHANNEL_CAP < 100000 || CHANNEL_CAP > 1000000000 )); then
+  echo "Channel cap must be 100000-1000000000 Zhu (0.001-10 HAC)." >&2
+  exit 1
+fi
+read -r -p "Maximum aggregate Hub TVL in Zhu [10000000000 = 100 HAC]: " AGGREGATE_TVL_CAP
+AGGREGATE_TVL_CAP="${AGGREGATE_TVL_CAP:-10000000000}"
+if [[ ! "${AGGREGATE_TVL_CAP}" =~ ^[0-9]+$ ]] \
+  || (( AGGREGATE_TVL_CAP < CHANNEL_CAP || AGGREGATE_TVL_CAP > 10000000000 )); then
+  echo "Aggregate TVL must be at least the channel cap and at most 10000000000 Zhu (100 HAC)." >&2
+  exit 1
+fi
 
 if [[ -n "${NODE_TOKEN}" ]]; then
   if ! printf 'header = "x-api-token: %s"\n' "${NODE_TOKEN}" | curl --config - --fail --silent --show-error --max-time 10 "${NODE_URL}/query/capabilities" >/dev/null; then
@@ -83,6 +104,7 @@ install -o root -g root -m 0755 "${SOURCE_BINARY}" "${INSTALL_DIR}/fast-pay-hub"
 install -o root -g root -m 0644 "${SCRIPT_DIR}/README.md" "${INSTALL_DIR}/README.md"
 
 JOURNAL_KEY="$(openssl rand -hex 32)"
+STATE_KEY="$(openssl rand -hex 32)"
 TMP_ENV="$(mktemp "${CONFIG_DIR}/hub.env.XXXXXX")"
 chmod 0640 "${TMP_ENV}"
 chown root:hpayhub "${TMP_ENV}"
@@ -90,15 +112,18 @@ chown root:hpayhub "${TMP_ENV}"
   printf 'HACASH_HUB_ADDRESS=%s\n' "${HUB_ADDRESS}"
   printf 'HACASH_HUB_SECRET_HEX=%s\n' "${HUB_SECRET}"
   printf 'HACASH_HUB_JOURNAL_KEY_HEX=%s\n' "${JOURNAL_KEY}"
-  printf 'HACASH_HUB_DEPLOYMENT_PROFILE=mainnet-pilot\n'
+  printf 'HACASH_HUB_STATE_KEY_HEX=%s\n' "${STATE_KEY}"
+  printf 'HACASH_HUB_DEPLOYMENT_PROFILE=mainnet-bounded-pilot\n'
   printf 'HACASH_HUB_MAINNET_MAX_PAYMENT_HAC_ZHU=%s\n' "${PAYMENT_CAP}"
   printf 'HACASH_HUB_MAINNET_MAX_CHANNEL_FUNDING_HAC_ZHU=%s\n' "${CHANNEL_CAP}"
+  printf 'HACASH_HUB_MAINNET_ALLOWED_USERS=%s\n' "${ALLOWED_USERS}"
+  printf 'HACASH_HUB_MAINNET_MAX_AGGREGATE_TVL_HAC_ZHU=%s\n' "${AGGREGATE_TVL_CAP}"
   if [[ -n "${NODE_TOKEN}" ]]; then
     printf 'HACASH_NODE_API_TOKEN=%s\n' "${NODE_TOKEN}"
   fi
 } > "${TMP_ENV}"
 mv -f "${TMP_ENV}" "${ENV_FILE}"
-unset HUB_SECRET JOURNAL_KEY NODE_TOKEN
+unset HUB_SECRET JOURNAL_KEY STATE_KEY NODE_TOKEN ALLOWED_USERS PILOT_USERS AGGREGATE_TVL_CAP
 
 install -o root -g root -m 0644 "${SCRIPT_DIR}/hpay-fast-pay-hub.service" "${UNIT_FILE}"
 systemctl daemon-reload

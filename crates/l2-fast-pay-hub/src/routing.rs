@@ -31,8 +31,9 @@ pub async fn resolve_payee_route(
 
     for channel_id in candidates {
         let channel = match node.query_channel(&channel_id).await {
-            Ok(ch) => ch,
-            Err(_) => continue,
+            Ok(channel) => channel,
+            Err(HubError::NotFound(_)) => continue,
+            Err(error) => return Err(error),
         };
         if !channel.is_open() {
             continue;
@@ -83,6 +84,8 @@ mod tests {
             ret: 0,
             id: id.to_owned(),
             status: 0,
+            open_height: 100,
+            close_height: 0,
             reuse_version: 1,
             left: ChannelPartyBalance {
                 address: left.to_owned(),

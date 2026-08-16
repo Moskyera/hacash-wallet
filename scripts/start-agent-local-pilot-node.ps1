@@ -58,7 +58,11 @@ function AssertNoReparsePoint([string] $Path) {
     }
 }
 function IsHacashPrivateKeyAddress([string] $Address) {
-    $Address -match '^[13][1-9A-HJ-NP-Za-km-z]{33}$'
+    # Base58Check leading zeroes are not printed, so canonical Hacash
+    # private-key addresses can be either 33 or 34 readable characters.
+    # The fullnode config parser performs the authoritative checksum and
+    # address-version validation before the node can start.
+    $Address -match '^[13][1-9A-HJ-NP-Za-km-z]{32,33}$'
 }
 function StopLaunchedProcess($Process) {
     if ($Process -and -not $Process.HasExited) {
@@ -190,6 +194,7 @@ try {
         1 -notin $capabilities.actions.enabled -or
         $capabilities.api.balance_query -ne $true -or
         $capabilities.api.transaction_submit -ne $true -or
+        $capabilities.api.transaction_submit_bound -ne $true -or
         $capabilities.api.transaction_query -ne $true -or
         $capabilities.api.reconciliation_by_tx_hash -ne $true) {
         Fail "runtime identity or transaction API contract mismatch"

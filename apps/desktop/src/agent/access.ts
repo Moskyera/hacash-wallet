@@ -15,6 +15,16 @@ export const HPAY_LOCAL_PILOT = Object.freeze({
   networkInstance:
     "9ebd8657a72faed35ed4d6e309fab2ef259f054e4820684fab6c6b848e4438f3",
 });
+export const HPAY_MAINNET = Object.freeze({
+  label: "Hacash Mainnet",
+  networkKind: "mainnet",
+  profileId: "hacash-mainnet",
+  chainId: 0,
+  blockOne:
+    "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+});
+export const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT =
+  "I understand Agent Fast Pay mainnet is a trusted bounded pilot and I accept its recovery limits.";
 
 export type AgentWalletUiState =
   | "loading"
@@ -28,6 +38,7 @@ export type AgentWalletUiState =
 export type AgentWalletWriteReadiness =
   | "disabled_by_build"
   | "wrong_network"
+  | "mainnet_consent_missing"
   | "missing_block_one"
   | "node_not_ready"
   | "mobile_not_paired"
@@ -85,22 +96,28 @@ export function agentWalletPaymentBlockers(
     blockers.push("disabled_by_build");
   }
   if (!overview.block_one_fingerprint) blockers.push("missing_block_one");
+  const expectsMainnet = overview.network_mode === "mainnet";
   if (
     overview.node_status === "network_mismatch" ||
-    overview.network_mode !== "testnet" ||
-    overview.node?.mainnet
+    !["mainnet", "testnet"].includes(overview.network_mode) ||
+    (overview.node !== null && overview.node.mainnet !== expectsMainnet)
   ) {
     blockers.push("wrong_network");
   } else if (
+    expectsMainnet &&
+    (!overview.trusted_mainnet_fast_pay_pilot || !overview.mainnet_spending_ready)
+  ) {
+    blockers.push("mainnet_consent_missing");
+  } else if (
     overview.node_status !== "verified" ||
     !overview.node ||
-    overview.node.current_height < 2 ||
+    overview.node.current_height < (expectsMainnet ? 765_432 : 2) ||
     !overview.node.transaction_ready
   ) {
     blockers.push("node_not_ready");
   }
   if (
-    overview.node?.funding_confirmed === false ||
+    (!expectsMainnet && overview.node?.funding_confirmed === false) ||
     overview.confirmed_balance_units === "0"
   ) {
     blockers.push("wallet_not_funded");
@@ -154,15 +171,22 @@ export function agentWalletLocalEnableBlockers(
   // An unanchored wallet was never bound to the pilot chain. The anchor is
   // fixed at creation, so this is not something the stop can be hiding.
   if (!overview.block_one_fingerprint) blockers.push("missing_block_one");
+  const expectsMainnet = overview.network_mode === "mainnet";
   // Re-arming payments while pointed at mainnet or a mismatched chain is the
   // one environment fault where "enabled" is actively dangerous. It is fixed by
   // correcting the node configuration, which the stop does not prevent.
   if (
     overview.node_status === "network_mismatch" ||
-    overview.network_mode !== "testnet" ||
-    overview.node?.mainnet
+    !["mainnet", "testnet"].includes(overview.network_mode) ||
+    (overview.node !== null && overview.node.mainnet !== expectsMainnet)
   ) {
     blockers.push("wrong_network");
+  }
+  if (
+    expectsMainnet &&
+    (!overview.trusted_mainnet_fast_pay_pilot || !overview.mainnet_spending_ready)
+  ) {
+    blockers.push("mainnet_consent_missing");
   }
   // Mandated. Clearing the stop advances the permit generation around an
   // operation that may already be on the wire.
@@ -226,13 +250,15 @@ export function agentWalletUiState(
 
 /** Why a PAYMENT is refused. Unchanged. */
 export const WRITE_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, string> = {
-  disabled_by_build: "The Testnet Pilot backend is disabled in this build.",
-  wrong_network: "The configured node does not match this Local Pilot network.",
+  disabled_by_build: "The Agent Wallet backend is disabled in this build.",
+  wrong_network: "The configured node does not match this Agent Wallet network.",
+  mainnet_consent_missing:
+    "This wallet has no authenticated consent for the bounded mainnet Fast Pay pilot.",
   missing_block_one: "The wallet has no verified block 1 fingerprint.",
-  node_not_ready: "The Local Pilot node is not transaction-ready.",
+  node_not_ready: "The selected Hacash node is not transaction-ready.",
   mobile_not_paired: "A mobile approval device is not paired.",
   witness_not_initialized: "The rollback witness is not initialized and synchronized.",
-  wallet_not_funded: "Funding is required before a test payment.",
+  wallet_not_funded: "Funding is required before a payment.",
   payments_suspended: "Agent payments are locally suspended.",
   recovery_required: "An unresolved signed operation requires recovery.",
   rotation_in_progress:
@@ -253,9 +279,11 @@ export const WRITE_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, string> = {
  */
 export const LOCAL_ENABLE_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, string> = {
   disabled_by_build:
-    "The Testnet Pilot backend is disabled in this build, so agent payments cannot be re-enabled.",
+    "The Agent Wallet backend is disabled in this build, so agent payments cannot be re-enabled.",
   wrong_network:
-    "The configured node does not match this Local Pilot network. Correct the node before re-enabling agent payments.",
+    "The configured node does not match this Agent Wallet network. Correct the node before re-enabling agent payments.",
+  mainnet_consent_missing:
+    "This wallet was not created with authenticated bounded-mainnet consent, so mainnet payments stay blocked.",
   missing_block_one:
     "This wallet has no verified block 1 fingerprint, so it is not bound to the Local Pilot chain.",
   node_not_ready:
@@ -278,10 +306,12 @@ export const LOCAL_ENABLE_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, stri
 /** Why PAIRING A PHONE is refused. Mirrors the existing Rust refusals only. */
 export const PAIRING_BLOCKER_LABELS: Record<AgentWalletWriteReadiness, string> = {
   disabled_by_build:
-    "The Testnet Pilot backend is disabled in this build, so no phone can be paired.",
+    "The Agent Wallet backend is disabled in this build, so no phone can be paired.",
   wrong_network: "The configured node is not consulted when pairing a phone.",
+  mainnet_consent_missing:
+    "Mainnet payment consent is not consulted when pairing a phone.",
   missing_block_one: "The block 1 fingerprint is not consulted when pairing a phone.",
-  node_not_ready: "The Local Pilot node is not contacted when pairing a phone.",
+  node_not_ready: "The Hacash node is not contacted when pairing a phone.",
   mobile_not_paired: "Pairing a phone is what resolves this. It is not a prerequisite for it.",
   witness_not_initialized:
     "The rollback witness synchronizes after a phone is admitted, not before.",

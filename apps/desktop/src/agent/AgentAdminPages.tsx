@@ -11,6 +11,8 @@ import {
   type StrandedWitness,
 } from "./api";
 import { AgentBackupPanel } from "./AgentBackupPanel";
+import { AgentFastPayOperationsPanel } from "./AgentFastPayOperationsPanel";
+import { AgentHvmOperationsPanel } from "./AgentHvmOperationsPanel";
 import { PilotDiagnosticsPanel } from "./PilotDiagnosticsPanel";
 import { WitnessRotationPanel } from "./WitnessRotationPanel";
 import {
@@ -329,7 +331,7 @@ function RulesPage({ overview, busy, run, onInfo, onOpenPage }: AdminPageProps) 
   );
 }
 
-function ActivityPage({ overview, busy, onOpenPage }: AdminPageProps) {
+function ActivityPage({ overview, busy, run, onInfo, onRefreshOverview, onOpenPage }: AdminPageProps) {
   const [activity, setActivity] = useState<PaymentOperation[] | null>(null);
   const [pending, setPending] = useState<PaymentOperation[] | null>(null);
   const [error, setError] = useState("");
@@ -343,6 +345,23 @@ function ActivityPage({ overview, busy, onOpenPage }: AdminPageProps) {
     <section>
       <PageHead eyebrow="Authenticated journal" title="Activity" onRefresh={() => void load()} busy={busy} />
       <p className="agent-lead">Amounts are exact integer HAC units. Agent Wallet activity never includes My Wallet transactions.</p>
+      <AgentFastPayOperationsPanel
+        walletId={overview.wallet_id}
+        busy={busy}
+        run={run}
+        onInfo={onInfo}
+        onRefreshOverview={onRefreshOverview}
+      />
+      <AgentHvmOperationsPanel
+        walletId={overview.wallet_id}
+        networkMode={overview.network_mode}
+        channelBinding={overview.hvm_channel_binding}
+        registryBinding={overview.hvm_registry_binding}
+        busy={busy}
+        run={run}
+        onInfo={onInfo}
+        onRefreshOverview={onRefreshOverview}
+      />
       {error && <LoadFailure message={error} onRetry={() => void load()} />}
       {activity === null && !error && <LoadingState label="Loading activity" />}
       {/* The sentence named Security and gave no way to get there. */}

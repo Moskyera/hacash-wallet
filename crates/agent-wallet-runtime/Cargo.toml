@@ -14,3 +14,6 @@ agent-wallet-core = { path = "../agent-wallet-core" }
 hpay-agent-connector = { path = "../agent-connector", default-features = false }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true
+
+[dev-dependencies]
+agent-wallet-core = { path = "../agent-wallet-core", features = ["agent-wallet-testnet-pilot"] }

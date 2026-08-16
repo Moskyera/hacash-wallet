@@ -322,7 +322,7 @@
   padding: 13px 16px;
   border-radius: 12px;
   font-size: 0.92rem;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
   transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
 }
@@ -340,15 +340,23 @@
   background: rgba(245, 166, 35, 0.14);
   transform: translateY(-1px);
 }
+/*
+ * The one solid fill left in the personal wallet. This modal has exactly two
+ * buttons and Approve is the single primary, so a fill here cannot compete
+ * with anything. The gradient and the two gold drop-glows are gone: a flat
+ * accent already reads as the affirmative choice.
+ */
 .dapp-approval-btn-accept {
-  border: none;
+  border: 1px solid var(--accent, #f5a623);
   color: #1a1000;
-  background: linear-gradient(135deg, var(--accent-2, #ffb43c), var(--accent, #f5a623));
-  box-shadow: 0 8px 24px rgba(245, 166, 35, 0.28);
+  background: var(--accent, #f5a623);
 }
 .dapp-approval-btn-accept:hover:not(:disabled) {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 28px rgba(245, 166, 35, 0.38);
+  /* The generic `button:hover` rule paints white text and a dim border, which
+     on a filled button reads as a disabled control. Restated here. */
+  border-color: var(--accent-2, #ffb43c);
+  background: var(--accent-2, #ffb43c);
+  color: #1a1000;
 }
 .dapp-approval-footnote {
   margin: 14px 0 0;

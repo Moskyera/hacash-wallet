@@ -33,7 +33,12 @@ type Props = {
   onNavigate: (screen: Screen) => void;
   onEnableFastPay: (userDeposit: string) => void;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
-  onSaveL2Settings: (nodeUrl: string, hubUrl: string, hubAddress: string) => void;
+  onSaveL2Settings: (
+    nodeUrl: string,
+    hubUrl: string,
+    hubAddress: string,
+    trustedMainnetFastPayPilot: boolean,
+  ) => void;
   onHubHealth: () => void;
   onPreviewChannel: (
     hubAddress: string,
@@ -82,10 +87,17 @@ export default function FastPayScreen({
   const [nodeUrl, setNodeUrl] = useState("");
   const [hubUrl, setHubUrl] = useState("");
   const [hubAddress, setHubAddress] = useState("");
+  const [trustedMainnetPilot, setTrustedMainnetPilot] = useState(false);
   const [channelPreview, setChannelPreview] = useState<ChannelSetupPreview | null>(null);
   const [showFastPayAdvanced, setShowFastPayAdvanced] = useState(false);
   const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
   const inboxRequestRef = useRef<Promise<void> | null>(null);
+  useEffect(() => {
+    const recommended = fastPayDetail?.default_deposit_mei;
+    if (recommended != null && Number.isFinite(recommended) && recommended > 0) {
+      setUserDeposit(String(recommended));
+    }
+  }, [fastPayDetail?.default_deposit_mei]);
 
   useEffect(() => {
     if (!fastPayReady || status?.locked) {
@@ -131,12 +143,46 @@ export default function FastPayScreen({
     }
   };
 
+  const finishPendingOpen = async () => {
+    setBusy(true);
+    clearMessages();
+    try {
+      const result = await api.recoverChannelOpen();
+      onNotify(result, "success");
+      await onRefresh();
+    } catch (error) {
+      onNotify(String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const finishPendingClose = async () => {
+    setBusy(true);
+    clearMessages();
+    try {
+      const result = await api.recoverChannelClose();
+      onNotify(result, "success");
+      await onRefresh();
+    } catch (error) {
+      onNotify(String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
   useEffect(() => {
     if (!settings) return;
     setNodeUrl(settings.node_url);
     setHubUrl(settings.l2_hub_url ?? "");
     setHubAddress(settings.hub_right_address ?? "");
-  }, [settings?.node_url, settings?.l2_hub_url, settings?.hub_right_address, settings]);
+    setTrustedMainnetPilot(settings.trusted_mainnet_fast_pay_pilot);
+  }, [
+    settings?.node_url,
+    settings?.l2_hub_url,
+    settings?.hub_right_address,
+    settings?.trusted_mainnet_fast_pay_pilot,
+    settings,
+  ]);
 
   return (
     <section className="panel">
@@ -165,6 +211,25 @@ export default function FastPayScreen({
           : "payments go on-chain (standard, few minutes)."}
       </div>
 
+      {settings?.network_mode === "mainnet" && (
+        <div className="alert" role="note">
+          <strong>Bounded mainnet pilot</strong>
+          <p>
+            Fast Pay depends on the selected Hub and is not a trustless L1 exit.
+            Hard ceilings are 1 HAC per payment, 10 HAC per channel and 100 HAC
+            total Hub TVL.
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={trustedMainnetPilot}
+              onChange={(event) => setTrustedMainnetPilot(event.target.checked)}
+            />
+            I understand the Hub dependency and want to use the capped mainnet pilot.
+          </label>
+        </div>
+      )}
+
       {(fastPayNeedsSetup || fastPayDetail?.can_enable) && !status?.watch_only && (
         <div className="fast-pay-card">
           <h3>Turn Fast Pay ON</h3>
@@ -174,8 +239,8 @@ export default function FastPayScreen({
             value={userDeposit}
             onChange={(e) => setUserDeposit(e.target.value)}
             type="number"
-            min="1"
-            step="1"
+            min="0.001"
+            step="0.001"
           />
           <button className="primary" disabled={busy} onClick={() => onEnableFastPay(userDeposit)}>
             Enable Fast Pay
@@ -290,7 +355,12 @@ export default function FastPayScreen({
             placeholder="https://hub.example.com"
           />
           <div className="actions-row">
-            <button disabled={busy} onClick={() => onSaveL2Settings(nodeUrl, hubUrl, hubAddress)}>
+            <button
+              disabled={busy}
+              onClick={() =>
+                onSaveL2Settings(nodeUrl, hubUrl, hubAddress, trustedMainnetPilot)
+              }
+            >
               Save settings
             </button>
             <button disabled={busy || !hubUrl.trim()} onClick={onHubHealth}>
@@ -351,17 +421,29 @@ export default function FastPayScreen({
             >
               Sign & open channel
             </button>
+            <button disabled={busy} onClick={() => void finishPendingOpen()}>
+              Finish pending setup
+            </button>
             <button
               disabled={busy || !status?.channel_id}
               onClick={() => onCloseChannel(setChannelPreview)}
             >
               Close channel
             </button>
+            <button
+              disabled={busy || !status?.channel_id}
+              onClick={() => void finishPendingClose()}
+            >
+              Finish pending close
+            </button>
           </div>
           {channelPreview && (
             <div className="preview-card">
               <p>
                 <strong>Channel ID:</strong> <code>{channelPreview.channel_id}</code>
+              </p>
+              <p>
+                <strong>Hacash incarnation:</strong> {channelPreview.reuse_version}
               </p>
             </div>
           )}

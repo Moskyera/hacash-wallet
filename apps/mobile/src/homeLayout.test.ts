@@ -58,6 +58,13 @@ describe("mobile Home layout contract", () => {
     expect(nav).toContain('if (item === "more") return t("nav.more")');
   });
 
+  it("labels the wallet-space action for the space it actually opens", () => {
+    const spaces = read("WalletSpacesApp.tsx");
+    expect(spaces).toContain('aria-label="Open AI Agent Wallet"');
+    expect(spaces).toContain('openingAgent ? "Opening..." : "AI Agent Wallet"');
+    expect(spaces).not.toContain('openingAgent ? "Opening..." : "My Wallet"');
+  });
+
   it("lets Home scroll and gives each asset a spacious neutral panel", () => {
     const css = read("dashboard.css");
     expect(css).toMatch(/\.app-main-home\s*\{[^}]*overflow-y:\s*auto;/s);

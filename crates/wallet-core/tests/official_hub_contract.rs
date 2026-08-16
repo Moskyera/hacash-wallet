@@ -9,7 +9,7 @@ use serde_json::json;
 use sys::Account;
 
 #[tokio::test]
-async fn wallet_accepts_actual_official_hub_readiness_and_testnet_skips_it() {
+async fn wallet_rejects_unproven_mainnet_hub_and_testnet_skips_mainnet_gate() {
     let capability_calls = Arc::new(AtomicUsize::new(0));
     let node = Router::new().route(
         "/query/capabilities",
@@ -68,9 +68,10 @@ async fn wallet_accepts_actual_official_hub_readiness_and_testnet_skips_it() {
             directory.path().join("state.json"),
             hex::encode(account.secret_key().serialize()),
             &"62".repeat(32),
+            &"63".repeat(32),
             "mainnet-pilot",
-            100_000_000,
-            50_000_000,
+            1_000_000,
+            500_000,
         )
         .unwrap(),
     );
@@ -87,14 +88,33 @@ async fn wallet_accepts_actual_official_hub_readiness_and_testnet_skips_it() {
     assert_eq!(capability_calls.load(Ordering::SeqCst), 0);
 
     let mainnet = L2HubClient::new_for_network(base, "mainnet");
-    let readiness = mainnet
+    let readiness = mainnet.mainnet_readiness().await.unwrap();
+    assert!(!readiness.payments_enabled);
+    assert_eq!(readiness.max_payment_hac_zhu, 1_000_000);
+    assert_eq!(readiness.max_channel_funding_hac_zhu, 500_000);
+    assert_eq!(readiness.wallet_fee_hac, "0");
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "external_monotonic_rollback_anchor_is_not_ready")
+    );
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "unilateral_l1_dispute_path_is_not_ready")
+    );
+    let error = mainnet
         .require_mainnet_payment_ready(Some("0.5"))
         .await
-        .unwrap();
-    assert_eq!(readiness.max_payment_hac_zhu, 100_000_000);
-    assert_eq!(readiness.max_channel_funding_hac_zhu, 50_000_000);
-    assert_eq!(readiness.wallet_fee_hac, "0");
-    assert_eq!(capability_calls.load(Ordering::SeqCst), 1);
+        .unwrap_err();
+    assert!(error.to_string().contains("not green"), "{error}");
+    assert_eq!(
+        capability_calls.load(Ordering::SeqCst),
+        1,
+        "the short readiness cache must avoid a second node capability probe"
+    );
 
     hub_task.abort();
     node_task.abort();

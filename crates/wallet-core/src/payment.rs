@@ -251,8 +251,12 @@ impl PaymentRouter {
         let payer_channel = query_channel(&self.node, &channel_id).await?;
         let amount = l2_fast_pay_hub::amount::parse_amount_mei(amount_wire)
             .map_err(|error| WalletError::L2(error.to_string()))?;
-        let mut safety =
-            crate::l2_safety::ClientL2Safety::open(payer_account, &hub_address, &channel_id)?;
+        let mut safety = crate::l2_safety::ClientL2Safety::open_for_network(
+            payer_account,
+            &self.settings.network_mode,
+            &hub_address,
+            &channel_id,
+        )?;
         let operation = safety.begin_or_resume(
             from,
             to,
@@ -267,7 +271,7 @@ impl PaymentRouter {
             payee: to.to_owned(),
             amount: amount_wire.to_owned(),
             channel_id,
-            fee_payer: None,
+            fee_payer: Some("sender".to_owned()),
         };
         hub.execute_and_store_bill(
             &req,

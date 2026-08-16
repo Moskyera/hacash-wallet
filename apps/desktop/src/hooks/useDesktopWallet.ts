@@ -433,20 +433,38 @@ export function useDesktopWallet(
       setBusy(true);
       clearMessages();
       try {
-        const fp = await api.enableFastPay(Number(userDeposit) || 10);
-        setFastPayDetail(fp);
+        const hubAddress = settings?.hub_right_address?.trim();
+        if (!hubAddress) {
+          throw new Error("Choose an online Fast Pay provider first.");
+        }
+        const deposit = Number(userDeposit);
+        if (!Number.isFinite(deposit) || deposit <= 0) {
+          throw new Error("Enter a valid channel deposit.");
+        }
+        const prepared = await api.prepareChannelOpen(hubAddress, userDeposit, "0");
+        await authorizePreparedOperation(prepared, nativeBioAvailable);
+        const tx = await api.executePreparedChannelOpen(prepared.id);
         await refreshStatus();
         await Promise.all([refreshBalance(), refreshChannel(), refreshBills()]);
-        onInfo("Fast Pay is ready. your next send can be instant.");
+        onInfo("Channel open submitted (" + tx.slice(0, 12) + "…).");
       } catch (e) {
         onError(formatInvokeError(e));
       } finally {
         setBusy(false);
       }
     },
-    [clearMessages, refreshStatus, refreshBalance, refreshChannel, refreshBills, onInfo, onError],
+    [
+      clearMessages,
+      nativeBioAvailable,
+      onError,
+      onInfo,
+      refreshBalance,
+      refreshBills,
+      refreshChannel,
+      refreshStatus,
+      settings?.hub_right_address,
+    ],
   );
-
   const handleApplyHub = useCallback(
     async (entry: HubDiscoveryEntry) => {
       if (!settings || !entry.online) return;
@@ -475,7 +493,12 @@ export function useDesktopWallet(
   );
 
   const handleSaveL2Settings = useCallback(
-    async (nodeUrl: string, hubUrl: string, hubAddress: string) => {
+    async (
+      nodeUrl: string,
+      hubUrl: string,
+      hubAddress: string,
+      trustedMainnetFastPayPilot: boolean,
+    ) => {
       if (!settings) return;
       setBusy(true);
       clearMessages();
@@ -484,6 +507,7 @@ export function useDesktopWallet(
           ...settings,
           node_url: nodeUrl.trim(),
           l2_hub_url: hubUrl.trim() || null,
+          trusted_mainnet_fast_pay_pilot: trustedMainnetFastPayPilot,
           hub_right_address: hubAddress.trim() || settings.hub_right_address,
         };
         await api.updateSettings(next);
@@ -531,8 +555,8 @@ export function useDesktopWallet(
       try {
         const p = await api.previewChannelOpen(
           hubAddress.trim(),
-          Number(userDeposit),
-          Number(hubDeposit),
+          userDeposit,
+          hubDeposit,
         );
         setChannelPreview(p);
       } catch (e) {
@@ -556,8 +580,8 @@ export function useDesktopWallet(
       try {
         const prepared = await api.prepareChannelOpen(
           hubAddress.trim(),
-          Number(userDeposit),
-          Number(hubDeposit),
+          userDeposit,
+          hubDeposit,
         );
         await authorizePreparedOperation(prepared, nativeBioAvailable);
         const hash = await api.executePreparedChannelOpen(prepared.id);

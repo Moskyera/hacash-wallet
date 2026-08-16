@@ -1,8 +1,16 @@
+mod close;
+mod hvm;
+mod hvm_chain;
+mod hvm_registry;
+mod hvm_registry_chain;
+mod open;
+
 use std::fs;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::amount::{HacAmount, format_amount_mei, parse_amount_mei};
@@ -14,6 +22,11 @@ use crate::journal::{
     AuthenticatedJournal, JournalBinding, JournalEvent, JournalHead, JournalOperationType,
     JournalPhase,
 };
+use crate::l1_channel::{
+    L1_CHANNEL_OPEN_SCHEMA, L1ChannelOpenRequest, L1ChannelOpenResponse,
+    request_commitment as l1_open_request_commitment, validate_and_cosign_channel_open,
+    validate_channel_open,
+};
 use crate::ledger::{
     apply_credit, apply_debit, channel_ledger_from_l1, next_bill_auto_number, payer_available_mei,
 };
@@ -21,10 +34,15 @@ use crate::node::{NodeClient, validate_mainnet_node_url};
 use crate::operation::{
     IdempotencyRecord, ReservationStatus, request_commitment, validate_operation_identity,
 };
+use crate::readiness::{
+    MAINNET_BOUNDED_PILOT_PROFILE, MainnetPilotAdmissionPolicy, ZHU_PER_MILLIMEI,
+    is_mainnet_pilot_profile,
+};
 use crate::routing::{PayeeRoute, resolve_payee_route};
+use crate::sealed_state::StateStore;
 use crate::storage::{
-    HubPersistedState, PendingSettlement, acquire_state_lock, initialize_authenticated_state,
-    load_state_file, save_state_file, state_commitment,
+    ChannelLedger, HubPersistedState, L1ChannelOpenStatus, PendingSettlement,
+    PersistedL1ChannelOpen, acquire_state_lock, initialize_authenticated_state, state_commitment,
 };
 use crate::wire::{
     ChannelPayCompleteDocuments, ChannelWireInput, build_cross_channel_bill,
@@ -34,6 +52,69 @@ use crate::wire::{
 const PENDING_TTL_SECONDS: u64 = 300;
 const MAX_PENDING_SETTLEMENTS: usize = 1024;
 
+fn aggregate_pilot_tvl_zhu(state: &HubPersistedState) -> HubResult<u64> {
+    let mut total = 0u64;
+    for ledger in state.channels.values() {
+        let channel_millimeis = ledger
+            .left_balance_mei
+            .as_millimeis()
+            .checked_add(ledger.right_balance_mei.as_millimeis())
+            .ok_or_else(|| HubError::State("channel TVL calculation overflow".into()))?;
+        let channel_zhu = channel_millimeis
+            .checked_mul(ZHU_PER_MILLIMEI)
+            .ok_or_else(|| HubError::State("channel TVL calculation overflow".into()))?;
+        total = total
+            .checked_add(channel_zhu)
+            .ok_or_else(|| HubError::State("aggregate Hub TVL calculation overflow".into()))?;
+    }
+    for operation in state
+        .l1_channel_opens
+        .values()
+        .filter(|operation| operation.status.reserves_admission())
+    {
+        total = total
+            .checked_add(operation.user_deposit_zhu)
+            .ok_or_else(|| HubError::State("aggregate Hub TVL calculation overflow".into()))?;
+    }
+    Ok(total)
+}
+
+fn require_pilot_admission(
+    policy: &MainnetPilotAdmissionPolicy,
+    state: &HubPersistedState,
+    user_address: &str,
+    new_deposit_zhu: u64,
+) -> HubResult<()> {
+    if !policy.is_configured() || !policy.allows(user_address) {
+        return Err(HubError::Admission(
+            "mainnet pilot channel-open user is not allowlisted".into(),
+        ));
+    }
+    let current = aggregate_pilot_tvl_zhu(state)?;
+    let proposed = current.checked_add(new_deposit_zhu).ok_or_else(|| {
+        HubError::Admission("mainnet pilot aggregate TVL calculation overflow".into())
+    })?;
+    if proposed > policy.max_aggregate_tvl_hac_zhu() {
+        return Err(HubError::Admission(format!(
+            "mainnet pilot aggregate Hub TVL cap exceeded: proposed {proposed} zhu, cap {} zhu",
+            policy.max_aggregate_tvl_hac_zhu()
+        )));
+    }
+    Ok(())
+}
+
+fn require_pilot_payment_admission(
+    policy: &MainnetPilotAdmissionPolicy,
+    payer: &str,
+) -> HubResult<()> {
+    if !policy.is_configured() || !policy.allows(payer) {
+        return Err(HubError::Admission(
+            "mainnet pilot payment payer is not allowlisted".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub struct HubState {
     pub name: String,
     pub hub_address: String,
@@ -41,12 +122,16 @@ pub struct HubState {
     pub hub_fee_mei: HacAmount,
     hub_signer: Option<HubSigner>,
     inner: RwLock<HubPersistedState>,
-    state_path: Option<PathBuf>,
+    state_store: Option<StateStore>,
     journal: Option<AuthenticatedJournal>,
     recovery_required: AtomicBool,
+    open_recovery_lock: tokio::sync::Mutex<()>,
+    close_recovery_lock: tokio::sync::Mutex<()>,
+    hvm_signing_lock: tokio::sync::Mutex<()>,
     deployment_profile: String,
     mainnet_max_payment_hac_zhu: u64,
     mainnet_max_channel_funding_hac_zhu: u64,
+    mainnet_admission_policy: MainnetPilotAdmissionPolicy,
     _state_lock: Option<fs::File>,
 }
 
@@ -59,6 +144,28 @@ impl HubState {
         hub_fee_millimeis: u64,
         hub_secret_hex: Option<String>,
     ) -> HubResult<Self> {
+        let hub_signer = hub_secret_hex
+            .as_deref()
+            .map(HubSigner::from_secret_hex)
+            .transpose()?;
+        Self::new_with_signer(
+            name,
+            hub_address,
+            node_url,
+            state_path,
+            hub_fee_millimeis,
+            hub_signer,
+        )
+    }
+
+    pub fn new_with_signer(
+        name: impl Into<String>,
+        hub_address: impl Into<String>,
+        node_url: impl Into<String>,
+        state_path: Option<PathBuf>,
+        hub_fee_millimeis: u64,
+        hub_signer: Option<HubSigner>,
+    ) -> HubResult<Self> {
         Self::initialize(
             name.into(),
             hub_address.into(),
@@ -66,11 +173,13 @@ impl HubState {
             None,
             state_path,
             hub_fee_millimeis,
-            hub_secret_hex,
+            hub_signer,
             None,
             "development".into(),
             0,
             0,
+            None,
+            MainnetPilotAdmissionPolicy::default(),
         )
     }
 
@@ -83,6 +192,31 @@ impl HubState {
         hub_secret_hex: Option<String>,
         journal_storage_key_hex: &str,
     ) -> HubResult<Self> {
+        let hub_signer = hub_secret_hex
+            .as_deref()
+            .map(HubSigner::from_secret_hex)
+            .transpose()?;
+        Self::new_secure_with_signer(
+            name,
+            hub_address,
+            node_url,
+            state_path,
+            hub_fee_millimeis,
+            hub_signer,
+            journal_storage_key_hex,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_secure_with_signer(
+        name: impl Into<String>,
+        hub_address: impl Into<String>,
+        node_url: impl Into<String>,
+        state_path: PathBuf,
+        hub_fee_millimeis: u64,
+        hub_signer: Option<HubSigner>,
+        journal_storage_key_hex: &str,
+    ) -> HubResult<Self> {
         Self::initialize(
             name.into(),
             hub_address.into(),
@@ -90,11 +224,13 @@ impl HubState {
             None,
             Some(state_path),
             hub_fee_millimeis,
-            hub_secret_hex,
+            hub_signer,
             Some(journal_storage_key_hex),
             "development".into(),
             0,
             0,
+            None,
+            MainnetPilotAdmissionPolicy::default(),
         )
     }
 
@@ -107,9 +243,103 @@ impl HubState {
         state_path: PathBuf,
         hub_secret_hex: String,
         journal_storage_key_hex: &str,
+        state_encryption_key_hex: &str,
         deployment_profile: impl Into<String>,
         mainnet_max_payment_hac_zhu: u64,
         mainnet_max_channel_funding_hac_zhu: u64,
+    ) -> HubResult<Self> {
+        let hub_signer = HubSigner::from_secret_hex(&hub_secret_hex)?;
+        Self::new_secure_with_signer_policy(
+            name,
+            hub_address,
+            node_url,
+            node_api_token,
+            state_path,
+            hub_signer,
+            journal_storage_key_hex,
+            state_encryption_key_hex,
+            deployment_profile,
+            mainnet_max_payment_hac_zhu,
+            mainnet_max_channel_funding_hac_zhu,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_secure_with_signer_policy(
+        name: impl Into<String>,
+        hub_address: impl Into<String>,
+        node_url: impl Into<String>,
+        node_api_token: Option<&str>,
+        state_path: PathBuf,
+        hub_signer: HubSigner,
+        journal_storage_key_hex: &str,
+        state_encryption_key_hex: &str,
+        deployment_profile: impl Into<String>,
+        mainnet_max_payment_hac_zhu: u64,
+        mainnet_max_channel_funding_hac_zhu: u64,
+    ) -> HubResult<Self> {
+        Self::new_secure_with_mainnet_admission_signer(
+            name,
+            hub_address,
+            node_url,
+            node_api_token,
+            state_path,
+            hub_signer,
+            journal_storage_key_hex,
+            state_encryption_key_hex,
+            deployment_profile,
+            mainnet_max_payment_hac_zhu,
+            mainnet_max_channel_funding_hac_zhu,
+            MainnetPilotAdmissionPolicy::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_secure_with_mainnet_admission(
+        name: impl Into<String>,
+        hub_address: impl Into<String>,
+        node_url: impl Into<String>,
+        node_api_token: Option<&str>,
+        state_path: PathBuf,
+        hub_secret_hex: String,
+        journal_storage_key_hex: &str,
+        state_encryption_key_hex: &str,
+        deployment_profile: impl Into<String>,
+        mainnet_max_payment_hac_zhu: u64,
+        mainnet_max_channel_funding_hac_zhu: u64,
+        mainnet_admission_policy: MainnetPilotAdmissionPolicy,
+    ) -> HubResult<Self> {
+        let hub_signer = HubSigner::from_secret_hex(&hub_secret_hex)?;
+        Self::new_secure_with_mainnet_admission_signer(
+            name,
+            hub_address,
+            node_url,
+            node_api_token,
+            state_path,
+            hub_signer,
+            journal_storage_key_hex,
+            state_encryption_key_hex,
+            deployment_profile,
+            mainnet_max_payment_hac_zhu,
+            mainnet_max_channel_funding_hac_zhu,
+            mainnet_admission_policy,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_secure_with_mainnet_admission_signer(
+        name: impl Into<String>,
+        hub_address: impl Into<String>,
+        node_url: impl Into<String>,
+        node_api_token: Option<&str>,
+        state_path: PathBuf,
+        hub_signer: HubSigner,
+        journal_storage_key_hex: &str,
+        state_encryption_key_hex: &str,
+        deployment_profile: impl Into<String>,
+        mainnet_max_payment_hac_zhu: u64,
+        mainnet_max_channel_funding_hac_zhu: u64,
+        mainnet_admission_policy: MainnetPilotAdmissionPolicy,
     ) -> HubResult<Self> {
         Self::initialize(
             name.into(),
@@ -118,11 +348,13 @@ impl HubState {
             node_api_token,
             Some(state_path),
             0,
-            Some(hub_secret_hex),
+            Some(hub_signer),
             Some(journal_storage_key_hex),
             deployment_profile.into(),
             mainnet_max_payment_hac_zhu,
             mainnet_max_channel_funding_hac_zhu,
+            Some(state_encryption_key_hex),
+            mainnet_admission_policy,
         )
     }
 
@@ -134,11 +366,13 @@ impl HubState {
         node_api_token: Option<&str>,
         state_path: Option<PathBuf>,
         hub_fee_millimeis: u64,
-        hub_secret_hex: Option<String>,
+        hub_signer: Option<HubSigner>,
         journal_storage_key_hex: Option<&str>,
         deployment_profile: String,
         mainnet_max_payment_hac_zhu: u64,
         mainnet_max_channel_funding_hac_zhu: u64,
+        state_encryption_key_hex: Option<&str>,
+        mainnet_admission_policy: MainnetPilotAdmissionPolicy,
     ) -> HubResult<Self> {
         if hub_fee_millimeis != 0 {
             return Err(HubError::State(
@@ -150,20 +384,19 @@ impl HubState {
         }
         if !matches!(
             deployment_profile.as_str(),
-            "development" | "testnet" | crate::readiness::MAINNET_PILOT_PROFILE
+            "development"
+                | "testnet"
+                | "local-pilot"
+                | crate::readiness::MAINNET_PILOT_PROFILE
+                | crate::readiness::MAINNET_BOUNDED_PILOT_PROFILE
         ) {
             return Err(HubError::State(
-                "deployment profile must be development, testnet, or mainnet-pilot".into(),
+                "deployment profile must be development, testnet, local-pilot, mainnet-pilot, or mainnet-bounded-pilot".into(),
             ));
         }
-        if deployment_profile == crate::readiness::MAINNET_PILOT_PROFILE {
+        if is_mainnet_pilot_profile(&deployment_profile) {
             validate_mainnet_node_url(&node_url)?;
         }
-        let hub_signer = hub_secret_hex
-            .as_deref()
-            .filter(|secret| !secret.trim().is_empty())
-            .map(HubSigner::from_secret_hex)
-            .transpose()?;
         if let Some(signer) = &hub_signer
             && signer.address() != hub_address.trim()
         {
@@ -174,17 +407,48 @@ impl HubState {
             )));
         }
 
-        let state_lock = state_path
-            .as_ref()
-            .map(|path| acquire_state_lock(path))
+        if let (Some(journal_key), Some(state_key)) =
+            (journal_storage_key_hex, state_encryption_key_hex)
+            && journal_key.trim().eq_ignore_ascii_case(state_key.trim())
+        {
+            return Err(HubError::State(
+                "journal and state encryption keys must be independent".into(),
+            ));
+        }
+        if let Some(signer) = hub_signer.as_ref() {
+            for (label, key) in [
+                ("journal", journal_storage_key_hex),
+                ("state encryption", state_encryption_key_hex),
+            ] {
+                if key.is_some_and(|key| signer.secret_matches_hex(key)) {
+                    return Err(HubError::State(format!(
+                        "Hub signer and {label} keys must be independent"
+                    )));
+                }
+            }
+        }
+        if is_mainnet_pilot_profile(&deployment_profile) && state_encryption_key_hex.is_none() {
+            return Err(HubError::State(
+                "a mainnet profile requires an independent state encryption key".into(),
+            ));
+        }
+        let state_store = state_path
+            .map(|path| match state_encryption_key_hex {
+                Some(key) => StateStore::sealed(path, key, &hub_address),
+                None => Ok(StateStore::plaintext(path)),
+            })
             .transpose()?;
-        let mut persisted = state_path
+        let state_lock = state_store
             .as_ref()
-            .map(|path| load_state_file(path))
+            .map(|store| acquire_state_lock(store.path()))
+            .transpose()?;
+        let mut persisted = state_store
+            .as_ref()
+            .map(StateStore::load)
             .transpose()?
             .unwrap_or_default();
-        let journal = match (state_path.as_ref(), journal_storage_key_hex) {
-            (Some(path), Some(key_hex)) => {
+        let journal = match (state_store.as_ref(), journal_storage_key_hex) {
+            (Some(store), Some(key_hex)) => {
                 let mut key = hex::decode(key_hex.trim())
                     .map_err(|_| HubError::State("journal storage key must be hex".into()))?;
                 if key.len() != 32 {
@@ -194,7 +458,7 @@ impl HubState {
                     ));
                 }
                 let journal = AuthenticatedJournal::open(
-                    path.with_extension("journal.jsonl"),
+                    store.path().with_extension("journal.jsonl"),
                     &key,
                     JournalBinding {
                         wallet_scope: format!("hub:{}", hub_address.trim()),
@@ -213,18 +477,18 @@ impl HubState {
             _ => None,
         };
 
-        if let (Some(path), Some(journal)) = (state_path.as_ref(), journal.as_ref()) {
-            initialize_authenticated_state(path, &mut persisted, journal, &hub_address)?;
+        if let (Some(store), Some(journal)) = (state_store.as_ref(), journal.as_ref()) {
+            initialize_authenticated_state(store, &mut persisted, journal, &hub_address)?;
         }
-        let recovery_required = persisted
-            .pending
-            .values()
-            .any(|pending| pending.status == ReservationStatus::RecoveryRequired);
-        if deployment_profile == crate::readiness::MAINNET_PILOT_PROFILE
-            && (hub_signer.is_none() || state_path.is_none() || journal.is_none())
+        validate_terminal_l1_finality_evidence(&persisted)?;
+        let recovery_required = persisted_state_requires_recovery(&persisted);
+        if is_mainnet_pilot_profile(&deployment_profile)
+            && (hub_signer.is_none()
+                || !state_store.as_ref().is_some_and(StateStore::is_sealed)
+                || journal.is_none())
         {
             return Err(HubError::State(
-                "mainnet-pilot requires a signer and durable authenticated storage".into(),
+                "a mainnet profile requires a signer and durable authenticated storage".into(),
             ));
         }
         Ok(Self {
@@ -234,25 +498,41 @@ impl HubState {
             hub_fee_mei: HacAmount::ZERO,
             hub_signer,
             inner: RwLock::new(persisted),
-            state_path,
+            state_store,
             journal,
             recovery_required: AtomicBool::new(recovery_required),
+            open_recovery_lock: tokio::sync::Mutex::new(()),
+            close_recovery_lock: tokio::sync::Mutex::new(()),
+            hvm_signing_lock: tokio::sync::Mutex::new(()),
             deployment_profile,
             mainnet_max_payment_hac_zhu,
             mainnet_max_channel_funding_hac_zhu,
+            mainnet_admission_policy,
             _state_lock: state_lock,
         })
     }
 
     fn settlement_ready(&self) -> bool {
         self.hub_signer.is_some()
-            && self.state_path.is_some()
+            && self.state_store.is_some()
             && self.journal.is_some()
             && !self.recovery_required.load(Ordering::Acquire)
     }
 
-    pub fn health(&self) -> crate::api::HubHealth {
+    /// Publish the Hub's health, with every mainnet-grade guarantee measured
+    /// from live evidence rather than asserted.
+    ///
+    /// The fullnode is probed on each call so the flags cannot outlive the
+    /// evidence behind them. A probe failure yields `None`, which fails every
+    /// measured guarantee closed.
+    pub async fn health(&self) -> crate::api::HubHealth {
         let settlement_ready = self.settlement_ready();
+        let capabilities = self.node.capabilities().await.ok();
+        let guarantees = crate::readiness::HubHardGuarantees::measure(
+            &self.deployment_profile,
+            settlement_ready,
+            capabilities.as_ref(),
+        );
         crate::api::HubHealth {
             ok: true,
             version: crate::api::HUB_API_VERSION,
@@ -261,29 +541,504 @@ impl HubState {
             hub_fee_mei: Some(format_amount_mei(self.hub_fee_mei)),
             settlement_ready,
             cross_channel_ready: settlement_ready,
-            external_rollback_anchor_ready: false,
-            l1_dispute_path_ready: false,
+            external_rollback_anchor_ready: guarantees.external_rollback_anchor_ready,
+            l1_dispute_path_ready: guarantees.l1_dispute_path_ready,
             official_channelpay_ready: settlement_ready,
-            production_mainnet_ready: false,
+            production_mainnet_ready: guarantees.production_mainnet_ready,
+            trusted_bounded_pilot_ready: settlement_ready
+                && self.deployment_profile == MAINNET_BOUNDED_PILOT_PROFILE,
             deployment_profile: Some(self.deployment_profile.clone()),
         }
     }
 
     pub async fn mainnet_readiness(&self) -> crate::readiness::MainnetReadinessV1 {
-        crate::readiness::MainnetReadinessV1::evaluate(
+        let capabilities = self.node.capabilities().await;
+        // The same measurement that `health()` publishes, so the advertised
+        // guarantees and the enforced gate can never disagree.
+        let guarantees = crate::readiness::HubHardGuarantees::measure(
+            &self.deployment_profile,
+            self.settlement_ready(),
+            capabilities.as_ref().ok(),
+        );
+        let mut readiness = crate::readiness::MainnetReadinessV1::evaluate(
             &self.deployment_profile,
             self.mainnet_max_payment_hac_zhu,
             self.mainnet_max_channel_funding_hac_zhu,
             self.settlement_ready(),
-            self.node.capabilities().await,
+            guarantees.external_rollback_anchor_ready,
+            guarantees.l1_dispute_path_ready,
+            capabilities,
+        );
+        readiness.apply_mainnet_admission(
+            &self.mainnet_admission_policy,
+            self.aggregate_pilot_tvl_zhu(),
+        );
+        readiness
+    }
+
+    fn aggregate_pilot_tvl_zhu(&self) -> HubResult<u64> {
+        let guard = self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        aggregate_pilot_tvl_zhu(&guard)
+    }
+
+    fn require_mainnet_new_channel_admission(
+        &self,
+        state: &HubPersistedState,
+        user_address: &str,
+        new_deposit_zhu: u64,
+    ) -> HubResult<()> {
+        if !is_mainnet_pilot_profile(&self.deployment_profile) {
+            return Ok(());
+        }
+        require_pilot_admission(
+            &self.mainnet_admission_policy,
+            state,
+            user_address,
+            new_deposit_zhu,
         )
     }
 
-    async fn require_mainnet_payment_ready(&self, amount: HacAmount) -> HubResult<()> {
-        if self.deployment_profile != crate::readiness::MAINNET_PILOT_PROFILE {
+    pub(super) async fn cosign_channel_open_inner(
+        &self,
+        request: &L1ChannelOpenRequest,
+    ) -> HubResult<L1ChannelOpenResponse> {
+        self.ensure_settlement_ready()?;
+        let initial_network = self
+            .node
+            .capabilities()
+            .await?
+            .l1_channel_network_binding()?;
+        let request_commitment = l1_open_request_commitment(request)?;
+        let existing = self.existing_l1_channel_open(request, &request_commitment)?;
+        let recovering_existing = existing.is_some();
+        let validation_time = existing
+            .as_ref()
+            .map_or_else(crate::node::now_unix, |operation| operation.created_unix);
+        if let Some(existing) = existing.as_ref() {
+            validate_channel_open(
+                request,
+                &self.hub_address,
+                &initial_network,
+                self.mainnet_max_channel_funding_hac_zhu,
+                validation_time,
+            )?;
+            if existing.status.has_durable_signature() {
+                return l1_channel_open_response(existing);
+            }
+        }
+
+        let intent = validate_channel_open(
+            request,
+            &self.hub_address,
+            &initial_network,
+            self.mainnet_max_channel_funding_hac_zhu,
+            validation_time,
+        )?;
+        if intent.user_deposit_zhu % crate::readiness::ZHU_PER_MILLIMEI != 0 {
+            return Err(HubError::Payment(
+                "channel-open deposit must be aligned to an exact millimei ledger unit".into(),
+            ));
+        }
+        self.require_mainnet_channel_funding_ready(intent.user_deposit_zhu)
+            .await?;
+        self.require_open_funding(&intent).await?;
+
+        require_channel_open_target(
+            self.node.query_channel(&intent.channel_id).await,
+            &intent,
+            &self.hub_address,
+        )?;
+
+        let operation = {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            if let Some(existing) =
+                existing_l1_channel_open_from_state(&guard, request, &request_commitment)?
+            {
+                existing
+            } else {
+                open::require_new_open_admission(&guard, &intent.user_address)?;
+                self.require_mainnet_new_channel_admission(
+                    &guard,
+                    &intent.user_address,
+                    intent.user_deposit_zhu,
+                )?;
+                if guard.l1_channel_opens.values().any(|item| {
+                    item.channel_id == intent.channel_id && item.status.reserves_admission()
+                }) {
+                    return Err(HubError::Channel(
+                        "another L1 channel-open operation already owns this channel ID".into(),
+                    ));
+                }
+                let operation = PersistedL1ChannelOpen {
+                    operation_id: request.operation_id.clone(),
+                    idempotency_key: request.idempotency_key.clone(),
+                    request_commitment: request_commitment.clone(),
+                    network: initial_network.network_kind.clone(),
+                    chain_id: initial_network.chain_id,
+                    mainnet: initial_network.mainnet,
+                    block_1_hash: initial_network.block_1_hash.clone(),
+                    node_profile_id: initial_network.node_profile_id.clone(),
+                    network_instance_id: initial_network.network_instance_id.clone(),
+                    transaction_format_version: initial_network.transaction_format_version,
+                    channel_id: intent.channel_id.clone(),
+                    reuse_version: intent.expected_reuse_version,
+                    user_address: intent.user_address.clone(),
+                    user_deposit_zhu: intent.user_deposit_zhu,
+                    network_fee_zhu: intent.network_fee_zhu,
+                    partial_transaction_hex: request.partial_transaction_hex.clone(),
+                    partial_transaction_commitment: request.partial_transaction_commitment.clone(),
+                    transaction_hash: intent.transaction_hash.clone(),
+                    signed_transaction_hex: None,
+                    signed_transaction_commitment: None,
+                    confirmed_block_height: None,
+                    observed_confirmations: 0,
+                    status: L1ChannelOpenStatus::ValidatedBeforeSigning,
+                    created_unix: request.created_unix,
+                    expires_unix: request.expires_unix,
+                    updated_unix: crate::node::now_unix(),
+                    last_error: None,
+                };
+                let mut next_state = guard.clone();
+                next_state.l1_channel_open_idempotency.insert(
+                    operation.idempotency_key.clone(),
+                    operation.operation_id.clone(),
+                );
+                next_state.l1_channel_open_commitments.insert(
+                    operation.partial_transaction_commitment.clone(),
+                    operation.operation_id.clone(),
+                );
+                next_state
+                    .l1_channel_opens
+                    .insert(operation.operation_id.clone(), operation.clone());
+                self.commit_l1_channel_open_transition(
+                    &mut guard,
+                    next_state,
+                    &operation,
+                    JournalPhase::L1IntentValidated,
+                )?;
+                operation
+            }
+        };
+
+        if operation.status.has_durable_signature() {
+            return l1_channel_open_response(&operation);
+        }
+        if recovering_existing && operation.status == L1ChannelOpenStatus::ValidatedBeforeSigning {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            let mut abandoned = guard
+                .l1_channel_opens
+                .get(&operation.operation_id)
+                .cloned()
+                .ok_or_else(|| {
+                    HubError::State("durable channel-open operation disappeared".into())
+                })?;
+            if abandoned.status != L1ChannelOpenStatus::ValidatedBeforeSigning {
+                return Err(HubError::State(
+                    "RecoveryRequired: unsigned channel-open state changed during recovery".into(),
+                ));
+            }
+            abandoned.status = L1ChannelOpenStatus::AbandonedUnsigned;
+            abandoned.updated_unix = crate::node::now_unix();
+            abandoned.last_error = Some(
+                "Hub restart occurred before the durable signature-may-exist marker; create a fresh request"
+                    .into(),
+            );
+            let mut next = guard.clone();
+            next.l1_channel_opens
+                .insert(abandoned.operation_id.clone(), abandoned.clone());
+            self.commit_l1_channel_open_transition(
+                &mut guard,
+                next,
+                &abandoned,
+                JournalPhase::L1OpenAbandonedUnsigned,
+            )?;
+            return Err(HubError::State(
+                "channel-open was proven unsigned and abandoned after restart; create a fresh request"
+                    .into(),
+            ));
+        }
+        self.require_mainnet_channel_funding_ready(operation.user_deposit_zhu)
+            .await?;
+        self.require_open_funding(&intent).await?;
+        require_channel_open_target(
+            self.node.query_channel(&operation.channel_id).await,
+            &intent,
+            &self.hub_address,
+        )?;
+        let signing_network = self
+            .node
+            .capabilities()
+            .await?
+            .l1_channel_network_binding()?;
+        if signing_network != initial_network {
+            return Err(HubError::Node(
+                "fullnode network identity changed before channel-open signing".into(),
+            ));
+        }
+
+        let operation = if operation.status == L1ChannelOpenStatus::ValidatedBeforeSigning {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            let current = guard
+                .l1_channel_opens
+                .get(&operation.operation_id)
+                .cloned()
+                .ok_or_else(|| {
+                    HubError::State("durable channel-open operation disappeared".into())
+                })?;
+            if current.request_commitment != operation.request_commitment
+                || current.status != L1ChannelOpenStatus::ValidatedBeforeSigning
+            {
+                return Err(HubError::State(
+                    "RecoveryRequired: channel-open operation changed before signing marker".into(),
+                ));
+            }
+            let mut marked = current;
+            marked.status = L1ChannelOpenStatus::SignatureMayExist;
+            let mut next_state = guard.clone();
+            next_state
+                .l1_channel_opens
+                .insert(marked.operation_id.clone(), marked.clone());
+            self.commit_l1_channel_open_transition(
+                &mut guard,
+                next_state,
+                &marked,
+                JournalPhase::L1OpenSignatureMayExist,
+            )?;
+            marked
+        } else {
+            operation
+        };
+        if operation.status != L1ChannelOpenStatus::SignatureMayExist {
+            return Err(HubError::State(
+                "RecoveryRequired: channel-open is not in a signable durable state".into(),
+            ));
+        }
+        if recovering_existing && operation.signed_transaction_hex.is_none() {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            let mut blocked = guard
+                .l1_channel_opens
+                .get(&operation.operation_id)
+                .cloned()
+                .ok_or_else(|| {
+                    HubError::State("durable channel-open operation disappeared".into())
+                })?;
+            blocked.status = L1ChannelOpenStatus::RecoveryRequired;
+            blocked.updated_unix = crate::node::now_unix();
+            blocked.last_error =
+                Some("a Hub open signature may exist but its exact bytes are unavailable".into());
+            let mut next = guard.clone();
+            next.l1_channel_opens
+                .insert(blocked.operation_id.clone(), blocked.clone());
+            self.commit_l1_channel_open_transition(
+                &mut guard,
+                next,
+                &blocked,
+                JournalPhase::L1OpenRecoveryRequired,
+            )?;
+            return Err(HubError::State(
+                "RecoveryRequired: a Hub open signature may exist but cannot be recreated".into(),
+            ));
+        }
+        let signer = self
+            .hub_signer
+            .as_ref()
+            .ok_or_else(|| HubError::State("Hub L1 channel signer is not configured".into()))?;
+        let signed = validate_and_cosign_channel_open(
+            request,
+            signer.account(),
+            &signing_network,
+            self.mainnet_max_channel_funding_hac_zhu,
+            operation.created_unix,
+        )?;
+        if signed.channel_id != operation.channel_id
+            || signed.user_address != operation.user_address
+            || signed.user_deposit_zhu != operation.user_deposit_zhu
+            || signed.network_fee_zhu != intent.network_fee_zhu
+            || signed.transaction_hash != operation.transaction_hash
+        {
+            return Err(HubError::State(
+                "RecoveryRequired: channel-open intent changed before Hub signing".into(),
+            ));
+        }
+
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        let current = guard
+            .l1_channel_opens
+            .get(&operation.operation_id)
+            .cloned()
+            .ok_or_else(|| HubError::State("durable channel-open operation disappeared".into()))?;
+        if current.request_commitment != operation.request_commitment
+            || current.status != L1ChannelOpenStatus::SignatureMayExist
+        {
+            if current.status.has_durable_signature() {
+                return l1_channel_open_response(&current);
+            }
+            return Err(HubError::State(
+                "RecoveryRequired: channel-open operation changed during signing".into(),
+            ));
+        }
+        let mut completed = current;
+        completed.signed_transaction_hex = Some(signed.signed_transaction_hex);
+        completed.signed_transaction_commitment = Some(signed.signed_transaction_commitment);
+        completed.status = L1ChannelOpenStatus::Signed;
+        let mut next_state = guard.clone();
+        next_state
+            .l1_channel_opens
+            .insert(completed.operation_id.clone(), completed.clone());
+        self.commit_l1_channel_open_transition(
+            &mut guard,
+            next_state,
+            &completed,
+            JournalPhase::L1SignatureProduced,
+        )?;
+        l1_channel_open_response(&completed)
+    }
+
+    async fn require_open_funding(
+        &self,
+        intent: &crate::l1_channel::ValidatedChannelOpenIntent,
+    ) -> HubResult<()> {
+        let required_zhu = u128::from(intent.user_deposit_zhu)
+            .checked_add(u128::from(intent.network_fee_zhu))
+            .ok_or_else(|| HubError::Payment("channel-open funding requirement overflow".into()))?;
+        let available_zhu = self.node.query_balance_zhu(&intent.user_address).await?;
+        if available_zhu < required_zhu {
+            return Err(HubError::Payment(format!(
+                "channel-open requires {required_zhu} zhu including network fee, but the user address has {available_zhu} zhu"
+            )));
+        }
+        Ok(())
+    }
+    fn existing_l1_channel_open(
+        &self,
+        request: &L1ChannelOpenRequest,
+        commitment: &str,
+    ) -> HubResult<Option<PersistedL1ChannelOpen>> {
+        let guard = self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        existing_l1_channel_open_from_state(&guard, request, commitment)
+    }
+
+    fn commit_l1_channel_open_transition(
+        &self,
+        guard: &mut HubPersistedState,
+        mut next_state: HubPersistedState,
+        operation: &PersistedL1ChannelOpen,
+        phase: JournalPhase,
+    ) -> HubResult<()> {
+        self.ensure_l1_open_recovery_allowed(guard, &operation.operation_id)?;
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or_else(|| HubError::State("authenticated L2 journal is unavailable".into()))?;
+        let store = self
+            .state_store
+            .as_ref()
+            .ok_or_else(|| HubError::State("durable L2 state store is unavailable".into()))?;
+        let previous_state_commitment = state_commitment(guard)?;
+        next_state.schema_version = 1;
+        let new_state_commitment = state_commitment(&next_state)?;
+        let record = journal.append(JournalEvent {
+            wallet_scope: format!("hub:{}", self.hub_address.trim()),
+            hub_or_provider_identity: self.hub_address.trim().to_owned(),
+            channel_id: operation.channel_id.clone(),
+            channel_reuse_version: operation.reuse_version,
+            operation_id: operation.operation_id.clone(),
+            operation_type: JournalOperationType::L1ChannelOpen,
+            operation_phase: phase,
+            amount_units: operation.user_deposit_zhu,
+            sender: operation.user_address.clone(),
+            recipient: self.hub_address.clone(),
+            previous_state_commitment,
+            new_state_commitment: new_state_commitment.clone(),
+            idempotency_key: operation.idempotency_key.clone(),
+            request_commitment: operation.request_commitment.clone(),
+            expected_bill_number: None,
+            unsigned_state_commitment: Some(operation.partial_transaction_commitment.clone()),
+            created_at: unix_timestamp(),
+        })?;
+        next_state.journal_sequence = record.entry_sequence;
+        next_state.journal_head = record.entry_hash.clone();
+        next_state.state_commitment = new_state_commitment.clone();
+        if let Err(error) = store.save(&next_state) {
+            self.recovery_required.store(true, Ordering::Release);
+            return Err(HubError::State(format!(
+                "RecoveryRequired: L1 journal advanced but channel-open state was not durable: {error}"
+            )));
+        }
+        let head = JournalHead {
+            sequence: record.entry_sequence,
+            entry_hash: record.entry_hash,
+            state_commitment: new_state_commitment,
+        };
+        if let Err(error) = journal.write_checkpoint(&head) {
+            self.recovery_required.store(true, Ordering::Release);
+            return Err(HubError::State(format!(
+                "RecoveryRequired: channel-open state persisted but checkpoint did not: {error}"
+            )));
+        }
+        *guard = next_state;
+        self.refresh_recovery_gate(guard);
+        Ok(())
+    }
+    async fn require_mainnet_channel_funding_ready(&self, amount_zhu: u64) -> HubResult<()> {
+        let readiness = self.mainnet_readiness().await;
+        if readiness.mainnet_detected == Some(false)
+            && !is_mainnet_pilot_profile(&self.deployment_profile)
+        {
             return Ok(());
         }
-        self.mainnet_readiness().await.require_payment_ready(amount)
+        readiness.require_channel_funding_ready_zhu(amount_zhu)
+    }
+
+    pub(super) async fn require_mainnet_cooperative_close_ready(
+        &self,
+        requires_principal_transfer: bool,
+    ) -> HubResult<()> {
+        let readiness = self.mainnet_readiness().await;
+        if readiness.mainnet_detected == Some(false)
+            && !is_mainnet_pilot_profile(&self.deployment_profile)
+        {
+            return Ok(());
+        }
+        readiness.require_cooperative_close_ready(requires_principal_transfer)
+    }
+
+    async fn require_mainnet_payment_ready(&self, amount: HacAmount) -> HubResult<()> {
+        let readiness = self.mainnet_readiness().await;
+        if readiness.mainnet_detected == Some(false)
+            && !is_mainnet_pilot_profile(&self.deployment_profile)
+        {
+            return Ok(());
+        }
+        readiness.require_payment_ready(amount)
+    }
+
+    fn require_mainnet_payment_admission(&self, payer: &str) -> HubResult<()> {
+        if !is_mainnet_pilot_profile(&self.deployment_profile) {
+            return Ok(());
+        }
+        require_pilot_payment_admission(&self.mainnet_admission_policy, payer)
     }
 
     pub fn payment_status(&self, payment_id: &str) -> Option<FastPayResponse> {
@@ -364,6 +1119,7 @@ impl HubState {
         // This is also required on crash recovery: no old persisted reservation
         // can regain signing authority after the fullnode readiness turns red.
         self.require_mainnet_payment_ready(amount_mei).await?;
+        self.require_mainnet_payment_admission(request.payer.trim())?;
         let request_commitment = request_commitment(request);
         if let Some(response) = self
             .resume_persisted_before_signing(request, &request_commitment)
@@ -450,13 +1206,25 @@ impl HubState {
             {
                 return Ok(response);
             }
-            if guard.pending.len() >= MAX_PENDING_SETTLEMENTS {
+            let active_pending = guard
+                .pending
+                .values()
+                .filter(|pending| !pending.status.is_terminal())
+                .count();
+            if active_pending >= MAX_PENDING_SETTLEMENTS {
                 return Err(HubError::State(
-                    "too many pending settlements; retry after pending proposals expire".into(),
+                    "too many active settlements; retry after pending proposals expire".into(),
                 ));
             }
 
             let payee_channel_id = payee_channel_l1.as_ref().map(|channel| channel.id.as_str());
+            require_channels_accept_payments(
+                &guard,
+                &payer_channel,
+                payee_channel_l1.as_ref(),
+                &self.hub_address,
+                is_mainnet_pilot_profile(&self.deployment_profile),
+            )?;
             if guard.pending.values().any(|pending| {
                 if pending.status.is_terminal() {
                     return false;
@@ -643,10 +1411,15 @@ impl HubState {
         // The write guard's lexical scope ended above. Re-fetch the
         // authoritative gate immediately before creating a signature.
         self.require_mainnet_payment_ready(amount_mei).await?;
+        self.require_mainnet_payment_admission(payer)?;
         let mut guard = self
             .inner
             .write()
             .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        // A close/open recovery transition uses the same write lock when it
+        // raises the global gate. Rechecking while holding this guard closes
+        // the last race between the authoritative readiness probe and signing.
+        self.ensure_settlement_ready()?;
         let current = guard
             .pending
             .get(&payment_id)
@@ -745,6 +1518,12 @@ impl HubState {
                 "idempotency conflict: confirmation key changed".into(),
             ));
         }
+        require_persisted_channels_accept_payments(
+            &guard,
+            &pending.channel_id,
+            pending.payee_channel_id.as_deref(),
+            is_mainnet_pilot_profile(&self.deployment_profile),
+        )?;
 
         if unix_timestamp().saturating_sub(pending.created_at) > PENDING_TTL_SECONDS
             && pending.status.signature_may_exist()
@@ -934,12 +1713,120 @@ impl HubState {
         if self.recovery_required.load(Ordering::Acquire) {
             return Err(HubError::State("RecoveryRequired".into()));
         }
-        if self.state_path.is_none() || self.journal.is_none() {
+        if self.state_store.is_none() || self.journal.is_none() {
             return Err(HubError::State(
                 "durable authenticated L2 storage is required before signing".into(),
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn ensure_l1_open_recovery_allowed(
+        &self,
+        state: &HubPersistedState,
+        operation_id: &str,
+    ) -> HubResult<()> {
+        if !self.recovery_required.load(Ordering::Acquire) {
+            return self.ensure_settlement_ready();
+        }
+        let matching_open = state.l1_channel_opens.values().any(|operation| {
+            operation.operation_id == operation_id
+                && operation.status == L1ChannelOpenStatus::RecoveryRequired
+                && terminal_transaction_evidence_is_valid(
+                    operation.signed_transaction_hex.as_deref(),
+                    operation.signed_transaction_commitment.as_deref(),
+                    Some(&operation.transaction_hash),
+                )
+        });
+        let unrelated_recovery = state
+            .pending
+            .values()
+            .any(|pending| pending.status == ReservationStatus::RecoveryRequired)
+            || state.l1_channel_opens.values().any(|operation| {
+                operation.operation_id != operation_id
+                    && operation.status == L1ChannelOpenStatus::RecoveryRequired
+            })
+            || state.l1_channel_closes.values().any(|operation| {
+                operation.status == crate::storage::L1ChannelCloseStatus::RecoveryRequired
+            })
+            || state.channel_lifecycle.values().any(|lifecycle| {
+                lifecycle.status == crate::storage::ChannelLifecycleStatus::RecoveryRequired
+            });
+        if !matching_open || unrelated_recovery {
+            return Err(HubError::State("RecoveryRequired".into()));
+        }
+        self.ensure_durable_storage_ready()
+    }
+
+    pub(super) fn ensure_l1_close_recovery_allowed(
+        &self,
+        state: &HubPersistedState,
+        operation_id: &str,
+    ) -> HubResult<()> {
+        if !self.recovery_required.load(Ordering::Acquire) {
+            return self.ensure_settlement_ready();
+        }
+        let matching_close = state.l1_channel_closes.values().any(|operation| {
+            operation.operation_id == operation_id
+                && operation.status == crate::storage::L1ChannelCloseStatus::RecoveryRequired
+                && operation.final_ledger.is_some()
+                && state.channels.get(&operation.channel_id) == operation.final_ledger.as_ref()
+                && terminal_transaction_evidence_is_valid(
+                    operation.signed_transaction_hex.as_deref(),
+                    operation.signed_transaction_commitment.as_deref(),
+                    operation.transaction_hash.as_deref(),
+                )
+                && state
+                    .channel_lifecycle
+                    .get(&operation.channel_id)
+                    .is_some_and(|lifecycle| {
+                        lifecycle.operation_id == operation.operation_id
+                            && lifecycle.channel_id == operation.channel_id
+                            && lifecycle.reuse_version == operation.reuse_version
+                            && lifecycle.open_height == operation.open_height
+                            && lifecycle.status
+                                == crate::storage::ChannelLifecycleStatus::RecoveryRequired
+                            && operation.final_ledger.as_ref().is_some_and(|ledger| {
+                                close::ledger_commitment(ledger).is_ok_and(|commitment| {
+                                    lifecycle.state_commitment == commitment
+                                })
+                            })
+                    })
+        });
+        let unrelated_recovery = state
+            .pending
+            .values()
+            .any(|pending| pending.status == ReservationStatus::RecoveryRequired)
+            || state
+                .l1_channel_opens
+                .values()
+                .any(|operation| operation.status == L1ChannelOpenStatus::RecoveryRequired)
+            || state.l1_channel_closes.values().any(|operation| {
+                operation.operation_id != operation_id
+                    && operation.status == crate::storage::L1ChannelCloseStatus::RecoveryRequired
+            })
+            || state.channel_lifecycle.values().any(|lifecycle| {
+                lifecycle.status == crate::storage::ChannelLifecycleStatus::RecoveryRequired
+                    && lifecycle.operation_id != operation_id
+            });
+        if !matching_close || unrelated_recovery {
+            return Err(HubError::State("RecoveryRequired".into()));
+        }
+        self.ensure_durable_storage_ready()
+    }
+
+    fn ensure_durable_storage_ready(&self) -> HubResult<()> {
+        if self.state_store.is_none() || self.journal.is_none() {
+            return Err(HubError::State(
+                "durable authenticated L2 storage is required before recovery".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn refresh_recovery_gate(&self, state: &HubPersistedState) {
+        self.recovery_required
+            .store(persisted_state_requires_recovery(state), Ordering::Release);
     }
 
     async fn resume_persisted_before_signing(
@@ -965,6 +1852,48 @@ impl HubState {
             pending.clone()
         };
 
+        if unix_timestamp().saturating_sub(pending.created_at) > PENDING_TTL_SECONDS {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            let current = guard
+                .pending
+                .get(&pending.operation_id)
+                .cloned()
+                .ok_or_else(|| HubError::State("durable reservation disappeared".into()))?;
+            if current.status != ReservationStatus::PersistedBeforeSigning {
+                return idempotent_response_from_state(&guard, request, commitment);
+            }
+            if current.request_commitment != pending.request_commitment
+                || current.unsigned_state_commitment != pending.unsigned_state_commitment
+            {
+                return Err(HubError::State(
+                    "RecoveryRequired: expired unsigned reservation changed".into(),
+                ));
+            }
+            let response = FastPayResponse {
+                payment_id: current.operation_id.clone(),
+                status: "expired".into(),
+                bill_hex: None,
+                summary: Some("Fast Pay expired before any signature was produced".into()),
+            };
+            let mut expired = current;
+            expired.status = ReservationStatus::Expired;
+            expired.response = response.clone();
+            let mut next_state = guard.clone();
+            next_state
+                .pending
+                .insert(expired.operation_id.clone(), expired.clone());
+            self.commit_transition(
+                &mut guard,
+                next_state,
+                &expired,
+                JournalPhase::PaymentExpired,
+            )?;
+            return Ok(Some(response));
+        }
+
         let signer = self
             .hub_signer
             .as_ref()
@@ -984,6 +1913,7 @@ impl HubState {
         }
         let amount = parse_amount_mei(&pending.amount)?;
         self.require_mainnet_payment_ready(amount).await?;
+        self.require_mainnet_payment_admission(&pending.payer)?;
         signer.sign_documents(&mut documents)?;
         if !documents
             .chain_payment
@@ -1059,10 +1989,10 @@ impl HubState {
             .journal
             .as_ref()
             .ok_or_else(|| HubError::State("authenticated L2 journal is unavailable".into()))?;
-        let path = self
-            .state_path
+        let store = self
+            .state_store
             .as_ref()
-            .ok_or_else(|| HubError::State("durable L2 state path is unavailable".into()))?;
+            .ok_or_else(|| HubError::State("durable L2 state store is unavailable".into()))?;
         let previous_state_commitment = state_commitment(guard)?;
         next_state.schema_version = 1;
         let new_state_commitment = state_commitment(&next_state)?;
@@ -1089,7 +2019,7 @@ impl HubState {
         next_state.journal_sequence = record.entry_sequence;
         next_state.journal_head = record.entry_hash.clone();
         next_state.state_commitment = new_state_commitment.clone();
-        if let Err(error) = save_state_file(path, &next_state) {
+        if let Err(error) = store.save(&next_state) {
             self.recovery_required.store(true, Ordering::Release);
             return Err(HubError::State(format!(
                 "RecoveryRequired: journal advanced but materialized state was not durable: {error}"
@@ -1111,9 +2041,550 @@ impl HubState {
     }
 }
 
+fn require_channel_open_target(
+    observed: HubResult<crate::node::ChannelInfo>,
+    intent: &crate::l1_channel::ValidatedChannelOpenIntent,
+    _hub_address: &str,
+) -> HubResult<()> {
+    match observed {
+        Ok(_) => Err(HubError::Channel(
+            "mainnet pilot requires an unused deterministic channel ID; channel reuse is disabled"
+                .into(),
+        )),
+        Err(HubError::NotFound(_)) if intent.expected_reuse_version == 1 => Ok(()),
+        Err(HubError::NotFound(_)) => Err(HubError::Channel(
+            "first channel incarnation must use reuse version 1".into(),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn require_channels_accept_payments(
+    state: &HubPersistedState,
+    payer_channel: &crate::node::ChannelInfo,
+    payee_channel: Option<&crate::node::ChannelInfo>,
+    hub_address: &str,
+    enforce_finality_anchor: bool,
+) -> HubResult<()> {
+    require_channel_ids_not_frozen(
+        state,
+        &payer_channel.id,
+        payee_channel.map(|channel| channel.id.as_str()),
+    )?;
+    if enforce_finality_anchor {
+        require_confirmed_open_anchor(state, payer_channel, hub_address)?;
+        if let Some(channel) = payee_channel {
+            require_confirmed_open_anchor(state, channel, hub_address)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_persisted_channels_accept_payments(
+    state: &HubPersistedState,
+    payer_channel_id: &str,
+    payee_channel_id: Option<&str>,
+    enforce_finality_anchor: bool,
+) -> HubResult<()> {
+    require_channel_ids_not_frozen(state, payer_channel_id, payee_channel_id)?;
+    if !enforce_finality_anchor {
+        return Ok(());
+    }
+    let channel_ids = std::iter::once(payer_channel_id).chain(payee_channel_id);
+    for channel_id in channel_ids {
+        let anchored = state.l1_channel_opens.values().any(|open| {
+            open.channel_id.eq_ignore_ascii_case(channel_id)
+                && open::confirmed_open_has_finality_evidence(open)
+        });
+        if !anchored || !state.channels.contains_key(channel_id) {
+            return Err(HubError::Channel(
+                "Fast Pay confirmation requires an HPAY channel-open with exact transaction evidence and six confirmations"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_channel_ids_not_frozen(
+    state: &HubPersistedState,
+    payer_channel_id: &str,
+    payee_channel_id: Option<&str>,
+) -> HubResult<()> {
+    let frozen = state.channel_lifecycle.contains_key(payer_channel_id)
+        || payee_channel_id
+            .is_some_and(|channel_id| state.channel_lifecycle.contains_key(channel_id));
+    if frozen {
+        return Err(HubError::Channel(
+            "channel is frozen or retired and cannot accept Fast Pay mutations".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_confirmed_open_anchor(
+    state: &HubPersistedState,
+    channel: &crate::node::ChannelInfo,
+    hub_address: &str,
+) -> HubResult<()> {
+    let original = channel_ledger_from_l1(channel)?;
+    let anchored = state.l1_channel_opens.values().any(|open| {
+        open::confirmed_open_has_finality_evidence(open)
+            && open.channel_id.eq_ignore_ascii_case(&channel.id)
+            && open.reuse_version == channel.reuse_version
+            && open.confirmed_block_height == Some(channel.open_height)
+            && open.user_address == channel.left.address
+            && channel.right.address == hub_address
+            && open.user_deposit_zhu
+                == original
+                    .left_balance_mei
+                    .as_millimeis()
+                    .saturating_mul(crate::readiness::ZHU_PER_MILLIMEI)
+            && original.right_balance_mei == HacAmount::ZERO
+    });
+    if !anchored || !state.channels.contains_key(&channel.id) {
+        return Err(HubError::Channel(
+            "Fast Pay requires an HPAY channel-open with exact transaction evidence and six confirmations"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+fn existing_l1_channel_open_from_state(
+    state: &HubPersistedState,
+    request: &L1ChannelOpenRequest,
+    commitment: &str,
+) -> HubResult<Option<PersistedL1ChannelOpen>> {
+    if let Some(operation) = state.l1_channel_opens.get(&request.operation_id) {
+        if operation.request_commitment != commitment {
+            return Err(HubError::Payment(
+                "channel-open operation ID was already used for different request bytes".into(),
+            ));
+        }
+        return Ok(Some(operation.clone()));
+    }
+    if let Some(operation_id) = state
+        .l1_channel_open_idempotency
+        .get(&request.idempotency_key)
+    {
+        let operation = state.l1_channel_opens.get(operation_id).ok_or_else(|| {
+            HubError::State("channel-open idempotency index is inconsistent".into())
+        })?;
+        if operation.request_commitment != commitment {
+            return Err(HubError::Payment(
+                "idempotency key was already used for different channel-open bytes".into(),
+            ));
+        }
+        return Ok(Some(operation.clone()));
+    }
+    if let Some(operation_id) = state
+        .l1_channel_open_commitments
+        .get(&request.partial_transaction_commitment)
+    {
+        let operation = state.l1_channel_opens.get(operation_id).ok_or_else(|| {
+            HubError::State("channel-open commitment index is inconsistent".into())
+        })?;
+        if operation.request_commitment != commitment
+            || operation.partial_transaction_hex != request.partial_transaction_hex
+            || operation.channel_id != request.channel_id
+        {
+            return Err(HubError::Payment(
+                "channel-open commitment maps to different request content".into(),
+            ));
+        }
+        return Ok(Some(operation.clone()));
+    }
+    Ok(None)
+}
+
+fn l1_channel_open_response(
+    operation: &PersistedL1ChannelOpen,
+) -> HubResult<L1ChannelOpenResponse> {
+    if !operation.status.has_durable_signature() {
+        return Err(HubError::State(
+            "channel-open signature is not durably available".into(),
+        ));
+    }
+    Ok(L1ChannelOpenResponse {
+        schema: L1_CHANNEL_OPEN_SCHEMA.to_owned(),
+        operation_id: operation.operation_id.clone(),
+        channel_id: operation.channel_id.clone(),
+        status: "cosigned".to_owned(),
+        signed_transaction_hex: operation
+            .signed_transaction_hex
+            .clone()
+            .ok_or_else(|| HubError::State("durable channel-open signature is missing".into()))?,
+        signed_transaction_commitment: operation
+            .signed_transaction_commitment
+            .clone()
+            .ok_or_else(|| HubError::State("durable signed commitment is missing".into()))?,
+        transaction_hash: operation.transaction_hash.clone(),
+    })
+}
 fn unix_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn validate_terminal_l1_finality_evidence(state: &HubPersistedState) -> HubResult<()> {
+    if state.l1_channel_opens.values().any(|operation| {
+        operation.status == L1ChannelOpenStatus::Confirmed
+            && !open::confirmed_open_has_finality_evidence(operation)
+    }) {
+        return Err(HubError::State(
+            "RecoveryRequired: legacy confirmed channel-open lacks exact transaction finality evidence"
+                .into(),
+        ));
+    }
+    if state.l1_channel_closes.values().any(|operation| {
+        operation.status == crate::storage::L1ChannelCloseStatus::Retired
+            && !close::retired_close_has_finality_evidence(operation)
+    }) {
+        return Err(HubError::State(
+            "RecoveryRequired: legacy retired channel-close lacks exact transaction finality evidence"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn terminal_transaction_evidence_is_valid(
+    signed_transaction_hex: Option<&str>,
+    signed_transaction_commitment: Option<&str>,
+    transaction_hash: Option<&str>,
+) -> bool {
+    let (Some(body_hex), Some(expected_commitment), Some(expected_hash)) = (
+        signed_transaction_hex,
+        signed_transaction_commitment,
+        transaction_hash,
+    ) else {
+        return false;
+    };
+    let Ok(raw) = hex::decode(body_hex) else {
+        return false;
+    };
+    if raw.is_empty() || raw.len() > crate::l1_channel::MAX_CHANNEL_TRANSACTION_BYTES {
+        return false;
+    }
+    if !hex::encode(Sha256::digest(&raw)).eq_ignore_ascii_case(expected_commitment) {
+        return false;
+    }
+    crate::protocol_registry::ensure_hacash_protocol_setup();
+    let Ok((transaction, consumed)) = protocol::transaction::transaction_create(&raw) else {
+        return false;
+    };
+    consumed == raw.len()
+        && hex::encode(transaction.hash().as_bytes()).eq_ignore_ascii_case(expected_hash)
+        && transaction.verify_signature().is_ok()
+}
+
+fn persisted_state_requires_recovery(state: &HubPersistedState) -> bool {
+    state
+        .pending
+        .values()
+        .any(|pending| pending.status == ReservationStatus::RecoveryRequired)
+        || state
+            .l1_channel_opens
+            .values()
+            .any(|operation| operation.status == L1ChannelOpenStatus::RecoveryRequired)
+        || state.l1_channel_closes.values().any(|operation| {
+            operation.status == crate::storage::L1ChannelCloseStatus::RecoveryRequired
+        })
+        || state.channel_lifecycle.values().any(|lifecycle| {
+            lifecycle.status == crate::storage::ChannelLifecycleStatus::RecoveryRequired
+        })
+        || state.hvm_bill_progressions.values().any(|progression| {
+            matches!(
+                progression.status,
+                crate::hvm_ledger::HvmBillProgressionStatus::HubSignatureMayExist
+                    | crate::hvm_ledger::HvmBillProgressionStatus::RecoveryRequired
+            )
+        })
+        || state.hvm_registry_progressions.values().any(|progression| {
+            matches!(
+                progression.status,
+                crate::hvm_ledger::HvmBillProgressionStatus::HubSignatureMayExist
+                    | crate::hvm_ledger::HvmBillProgressionStatus::RecoveryRequired
+            )
+        })
+        || state.hvm_chain_operations.values().any(|operation| {
+            matches!(
+                operation.status,
+                crate::storage::HvmChainOperationStatus::SignatureMayExist
+                    | crate::storage::HvmChainOperationStatus::Signed
+                    | crate::storage::HvmChainOperationStatus::SubmissionStarted
+                    | crate::storage::HvmChainOperationStatus::Submitted
+                    | crate::storage::HvmChainOperationStatus::RecoveryRequired
+            )
+        })
+        // `Abandoned` is absent from this list on purpose, and it is the only
+        // status other than `Confirmed` that is. Every status listed here
+        // leaves a signed transaction whose fate is still open, which is
+        // exactly what the latch exists to protect. An abandoned operation has
+        // no such transaction: its bytes were proven inadmissible by a rule
+        // block verification itself applies, so they are in no valid block and
+        // never will be offered to a node again. Releasing the latch for it is
+        // the whole point of the transition.
+        || state
+            .hvm_registry_chain_operations
+            .values()
+            .any(|operation| {
+                matches!(
+                    operation.status,
+                    crate::storage::HvmChainOperationStatus::SignatureMayExist
+                        | crate::storage::HvmChainOperationStatus::Signed
+                        | crate::storage::HvmChainOperationStatus::SubmissionStarted
+                        | crate::storage::HvmChainOperationStatus::Submitted
+                        | crate::storage::HvmChainOperationStatus::RecoveryRequired
+                )
+            })
+}
+
+#[cfg(test)]
+mod channel_lifecycle_tests {
+    use super::*;
+    use crate::storage::{ChannelLifecycleStatus, PersistedChannelLifecycle};
+
+    fn lifecycle(channel_id: &str) -> PersistedChannelLifecycle {
+        PersistedChannelLifecycle {
+            operation_id: "close-operation".into(),
+            channel_id: channel_id.into(),
+            reuse_version: 1,
+            open_height: 100,
+            status: ChannelLifecycleStatus::FrozenBeforeSigning,
+            state_commitment: "commitment".into(),
+            updated_unix: 1_700_000_000,
+        }
+    }
+
+    #[test]
+    fn frozen_payer_or_payee_channel_rejects_every_fast_pay_mutation() {
+        let mut state = HubPersistedState::default();
+        assert!(require_channel_ids_not_frozen(&state, "payer", Some("payee")).is_ok());
+        state
+            .channel_lifecycle
+            .insert("payer".into(), lifecycle("payer"));
+        assert!(require_channel_ids_not_frozen(&state, "payer", Some("payee")).is_err());
+        state.channel_lifecycle.clear();
+        state
+            .channel_lifecycle
+            .insert("payee".into(), lifecycle("payee"));
+        assert!(require_channel_ids_not_frozen(&state, "payer", Some("payee")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod mainnet_admission_tests {
+    use super::*;
+
+    const ALLOWED_USER: &str = "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW";
+    const OTHER_USER: &str = "18fT8iUWkcsJaKrQRVVad6BtRTt3GteZHa";
+
+    fn pending_open(status: L1ChannelOpenStatus, deposit_zhu: u64) -> PersistedL1ChannelOpen {
+        PersistedL1ChannelOpen {
+            operation_id: "pending-open".into(),
+            idempotency_key: "pending-open-idempotency".into(),
+            request_commitment: "request".into(),
+            network: String::new(),
+            chain_id: 0,
+            mainnet: false,
+            block_1_hash: String::new(),
+            node_profile_id: String::new(),
+            network_instance_id: String::new(),
+            transaction_format_version: 0,
+            channel_id: "channel".into(),
+            reuse_version: 1,
+            user_address: ALLOWED_USER.into(),
+            user_deposit_zhu: deposit_zhu,
+            network_fee_zhu: 100_000,
+            partial_transaction_hex: "00".into(),
+            partial_transaction_commitment: "partial".into(),
+            transaction_hash: "hash".into(),
+            signed_transaction_hex: None,
+            signed_transaction_commitment: None,
+            confirmed_block_height: None,
+            observed_confirmations: 0,
+            status,
+            created_unix: 1,
+            expires_unix: 2,
+            updated_unix: 1,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn allowlist_and_aggregate_tvl_are_enforced_before_channel_admission() {
+        let policy = MainnetPilotAdmissionPolicy::try_new([ALLOWED_USER], 100_000_000).unwrap();
+        let mut state = HubPersistedState::default();
+        state.channels.insert(
+            "active".into(),
+            ChannelLedger {
+                left_balance_mei: HacAmount::from_millimeis(980),
+                right_balance_mei: HacAmount::ZERO,
+                bill_auto_number: 1,
+            },
+        );
+        state.l1_channel_opens.insert(
+            "pending-open".into(),
+            pending_open(L1ChannelOpenStatus::Signed, 1_000_000),
+        );
+
+        assert_eq!(aggregate_pilot_tvl_zhu(&state).unwrap(), 99_000_000);
+        require_pilot_admission(&policy, &state, ALLOWED_USER, 1_000_000).unwrap();
+        assert!(
+            require_pilot_admission(&policy, &state, ALLOWED_USER, 1_000_001)
+                .unwrap_err()
+                .to_string()
+                .contains("aggregate Hub TVL cap exceeded")
+        );
+        assert!(
+            require_pilot_admission(&policy, &state, OTHER_USER, 1_000_000)
+                .unwrap_err()
+                .to_string()
+                .contains("not allowlisted")
+        );
+        assert!(
+            require_pilot_admission(
+                &MainnetPilotAdmissionPolicy::default(),
+                &state,
+                ALLOWED_USER,
+                1_000_000,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn payment_payer_must_remain_allowlisted() {
+        let policy = MainnetPilotAdmissionPolicy::try_new([ALLOWED_USER], 100_000_000).unwrap();
+        require_pilot_payment_admission(&policy, ALLOWED_USER).unwrap();
+        assert!(
+            require_pilot_payment_admission(&policy, OTHER_USER)
+                .unwrap_err()
+                .to_string()
+                .contains("not allowlisted")
+        );
+        assert!(
+            require_pilot_payment_admission(&MainnetPilotAdmissionPolicy::default(), ALLOWED_USER,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn confirmed_open_is_not_double_counted_as_reserved_tvl() {
+        let mut state = HubPersistedState::default();
+        state.channels.insert(
+            "active".into(),
+            ChannelLedger {
+                left_balance_mei: HacAmount::from_millimeis(10),
+                right_balance_mei: HacAmount::ZERO,
+                bill_auto_number: 0,
+            },
+        );
+        state.l1_channel_opens.insert(
+            "confirmed-open".into(),
+            pending_open(L1ChannelOpenStatus::Confirmed, 1_000_000),
+        );
+        assert_eq!(aggregate_pilot_tvl_zhu(&state).unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn terminal_l1_records_without_finality_evidence_fail_closed() {
+        let mut state = HubPersistedState::default();
+        let mut confirmed_open = pending_open(L1ChannelOpenStatus::Confirmed, 1_000_000);
+        state
+            .l1_channel_opens
+            .insert("confirmed-open".into(), confirmed_open.clone());
+        assert!(
+            validate_terminal_l1_finality_evidence(&state)
+                .unwrap_err()
+                .to_string()
+                .contains("legacy confirmed channel-open")
+        );
+
+        confirmed_open.confirmed_block_height = Some(100);
+        confirmed_open.observed_confirmations = 6;
+        state
+            .l1_channel_opens
+            .insert("confirmed-open".into(), confirmed_open.clone());
+        assert!(validate_terminal_l1_finality_evidence(&state).is_err());
+        state.l1_channel_opens.clear();
+
+        let retired_close = crate::storage::PersistedL1ChannelClose {
+            operation_id: "retired-close".into(),
+            idempotency_key: "retired-close-idempotency".into(),
+            request_commitment: "close-request".into(),
+            network: String::new(),
+            chain_id: 0,
+            mainnet: false,
+            block_1_hash: String::new(),
+            node_profile_id: String::new(),
+            network_instance_id: String::new(),
+            transaction_format_version: 0,
+            channel_id: "channel".into(),
+            hub_address: "hub".into(),
+            user_address: ALLOWED_USER.into(),
+            reuse_version: 1,
+            open_height: 100,
+            original_ledger: ChannelLedger {
+                left_balance_mei: HacAmount::from_millimeis(10),
+                right_balance_mei: HacAmount::ZERO,
+                bill_auto_number: 0,
+            },
+            final_ledger: Some(ChannelLedger {
+                left_balance_mei: HacAmount::from_millimeis(10),
+                right_balance_mei: HacAmount::ZERO,
+                bill_auto_number: 0,
+            }),
+            partial_transaction_hex: "00".into(),
+            partial_transaction_commitment: "partial-close".into(),
+            authorization_public_key_hex: "11".into(),
+            authorization_signature_hex: "22".into(),
+            transaction_hash: Some("hash".into()),
+            signed_transaction_hex: Some("33".into()),
+            signed_transaction_commitment: Some("44".into()),
+            confirmed_block_height: None,
+            observed_confirmations: 0,
+            status: crate::storage::L1ChannelCloseStatus::Retired,
+            created_unix: 1,
+            expires_unix: 2,
+            updated_unix: 2,
+            last_error: None,
+        };
+        state
+            .l1_channel_closes
+            .insert("retired-close".into(), retired_close.clone());
+        assert!(
+            validate_terminal_l1_finality_evidence(&state)
+                .unwrap_err()
+                .to_string()
+                .contains("legacy retired channel-close")
+        );
+
+        let mut evidenced_close = retired_close.clone();
+        evidenced_close.confirmed_block_height = Some(120);
+        evidenced_close.observed_confirmations = 6;
+        state
+            .l1_channel_closes
+            .insert("retired-close".into(), evidenced_close);
+        assert!(validate_terminal_l1_finality_evidence(&state).is_err());
+
+        state.l1_channel_opens.clear();
+        state.l1_channel_closes.clear();
+        assert!(!persisted_state_requires_recovery(&state));
+        confirmed_open.status = L1ChannelOpenStatus::RecoveryRequired;
+        state
+            .l1_channel_opens
+            .insert("recovery-open".into(), confirmed_open);
+        assert!(persisted_state_requires_recovery(&state));
+        state.l1_channel_opens.clear();
+        let mut recovery_close = retired_close;
+        recovery_close.status = crate::storage::L1ChannelCloseStatus::RecoveryRequired;
+        state
+            .l1_channel_closes
+            .insert("recovery-close".into(), recovery_close);
+        assert!(persisted_state_requires_recovery(&state));
+    }
 }

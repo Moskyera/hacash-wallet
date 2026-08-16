@@ -96,6 +96,33 @@ async fn hub_rejects_oversized_request_bodies_before_json_processing() {
     assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
     server.abort();
 }
+
+#[tokio::test]
+async fn hvm_status_route_is_registered_and_unknown_operations_are_404() {
+    let hub = Arc::new(
+        HubState::new(
+            "HVM route test",
+            "nonempty-test-address",
+            "http://127.0.0.1:1",
+            None,
+            0,
+            None,
+        )
+        .unwrap(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, build_router(hub)).await.unwrap();
+    });
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/v1/hvm/payment/unknown-operation"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    server.abort();
+}
 #[test]
 fn hub_rejects_any_fast_pay_fee() {
     let err = match HubState::new("fee hub", "1Hub", "http://127.0.0.1:8080", None, 1, None) {
@@ -105,7 +132,10 @@ fn hub_rejects_any_fast_pay_fee() {
     assert!(err.to_string().contains("fee-free"));
 }
 
-async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandle<()>) {
+async fn spawn_mock_node_with_chain(
+    channels: HashMap<String, Value>,
+    mainnet: bool,
+) -> (String, JoinHandle<()>) {
     let store = Arc::new(RwLock::new(channels));
     let app = Router::new()
         .route(
@@ -127,8 +157,14 @@ async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandl
             }),
         )
         .route(
-            "/query/capabilities",
+            "/query/balance",
             get(|| async {
+                Json(json!({"ret": 0, "list": [{"hacash": "1:250"}]}))
+            }),
+        )
+        .route(
+            "/query/capabilities",
+            get(move || async move {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -136,16 +172,29 @@ async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandl
                 Json(json!({
                     "ret": 0,
                     "api_version": 1,
+                    "api": { "transaction_submit_bound": true },
                     "chain": {
-                        "id": 0,
+                        "id": if mainnet { 0 } else { 1 },
                         "height": 900000,
                         "next_height": 900001,
-                        "mainnet": true
+                        "mainnet": mainnet
                     },
-                    "network": {
-                        "kind": "mainnet",
-                        "block_1_hash": "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
-                        "instance_id": "11".repeat(32)
+                    "network": if mainnet {
+                        json!({
+                            "kind": "mainnet",
+                            "node_profile_id": "hacash-mainnet",
+                            "block_1_hash": "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+                            "instance_id": "11".repeat(32),
+                            "transaction_format_version": 2
+                        })
+                    } else {
+                        json!({
+                            "kind": "testnet",
+                            "node_profile_id": "test-profile",
+                            "block_1_hash": "22".repeat(32),
+                            "instance_id": "33".repeat(32),
+                            "transaction_format_version": 2
+                        })
                     },
                     "sync": {
                         "tip_timestamp_unix": now,
@@ -155,9 +204,10 @@ async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandl
                         "fresh": true
                     },
                     "actions": {
-                        "registered": [1, 2, 3],
-                        "enabled": [1, 2, 3]
-                    }
+                        "registered": [1, 2, 3, 1041],
+                        "enabled": [1, 2, 3, 1041]
+                    },
+                    "transactions": {"registered": [2], "enabled": [2]}
                 }))
             }),
         );
@@ -169,8 +219,12 @@ async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandl
     (format!("http://{addr}"), handle)
 }
 
+async fn spawn_mock_node(channels: HashMap<String, Value>) -> (String, JoinHandle<()>) {
+    spawn_mock_node_with_chain(channels, false).await
+}
+
 #[tokio::test]
-async fn mainnet_pilot_readiness_gates_official_channelpay_roundtrip() {
+async fn mainnet_pilot_blocks_new_money_without_external_anchor_but_keeps_close_ready() {
     let payer = test_account("mainnet-pilot-payer");
     let hub_account = test_account("mainnet-pilot-hub");
     let payer_address = payer.readable().to_owned();
@@ -188,7 +242,7 @@ async fn mainnet_pilot_readiness_gates_official_channelpay_roundtrip() {
             "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
         }),
     );
-    let (node_url, node_handle) = spawn_mock_node(channels).await;
+    let (node_url, node_handle) = spawn_mock_node_with_chain(channels, true).await;
     let dir = tempdir().unwrap();
     let hub = Arc::new(
         HubState::new_secure_with_policy(
@@ -199,9 +253,10 @@ async fn mainnet_pilot_readiness_gates_official_channelpay_roundtrip() {
             dir.path().join("mainnet-state.json"),
             account_secret_hex(&hub_account),
             &"52".repeat(32),
+            &"53".repeat(32),
             "mainnet-pilot",
-            100_000_000,
-            100_000_000,
+            1_000_000,
+            1_000_000,
         )
         .unwrap(),
     );
@@ -222,28 +277,119 @@ async fn mainnet_pilot_readiness_gates_official_channelpay_roundtrip() {
         .json()
         .await
         .unwrap();
-    assert_eq!(readiness["payments_enabled"], true, "{readiness}");
+    assert_eq!(readiness["payments_enabled"], false, "{readiness}");
+    assert_eq!(readiness["close_enabled"], true, "{readiness}");
     assert_eq!(readiness["wallet_fee_hac"], "0");
-    assert_eq!(readiness["max_channel_funding_hac_zhu"], 100_000_000);
+    assert_eq!(readiness["max_channel_funding_hac_zhu"], 1_000_000);
+    assert!(
+        readiness["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "external_monotonic_rollback_anchor_is_not_ready")
+    );
+    assert!(
+        readiness["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "unilateral_l1_dispute_path_is_not_ready")
+    );
 
-    let settled = prepare_and_confirm(
-        &client,
-        &base,
-        json!({
+    let response = client
+        .post(format!("{base}/v1/fast-pay"))
+        .json(&json!({
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "idempotency_key": uuid::Uuid::new_v4().to_string(),
             "payer": payer_address,
             "payee": hub_address,
             "amount": "1",
             "channel_id": channel_id
-        }),
-        &payer,
-    )
-    .await;
-    assert_eq!(settled["status"], "settled", "{settled}");
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_server_error());
+    assert_eq!(
+        response.text().await.unwrap(),
+        r#"{"error":"Fast Pay Hub is unavailable"}"#
+    );
 
     hub_handle.abort();
     node_handle.abort();
 }
 
+async fn assert_non_mainnet_profile_cannot_sign_against_mainnet(profile: &str, seed: &str) {
+    let payer = test_account(&format!("{seed}-payer"));
+    let hub_account = test_account(&format!("{seed}-hub"));
+    let payer_address = payer.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let channel_id = derive_channel_id(&payer_address, &hub_address, 1);
+    let mut channels = HashMap::new();
+    channels.insert(
+        channel_id.clone(),
+        json!({
+            "ret": 0,
+            "id": channel_id,
+            "status": 0,
+            "reuse_version": 1,
+            "left": { "address": payer_address, "hacash": "10", "satoshi": 0 },
+            "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
+        }),
+    );
+    let (node_url, node_handle) = spawn_mock_node_with_chain(channels, true).await;
+    let hub = Arc::new(
+        HubState::new_secure_with_policy(
+            format!("misconfigured {profile} hub"),
+            hub_address.clone(),
+            node_url,
+            None,
+            tempdir().unwrap().keep().join("hub-state.json"),
+            account_secret_hex(&hub_account),
+            &"42".repeat(32),
+            &"43".repeat(32),
+            profile,
+            0,
+            0,
+        )
+        .unwrap(),
+    );
+    let inspection = hub.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hub_handle = tokio::spawn(async move {
+        axum::serve(listener, build_router(hub)).await.unwrap();
+    });
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/v1/fast-pay"))
+        .json(&json!({
+            "operation_id": operation_id,
+            "idempotency_key": uuid::Uuid::new_v4().to_string(),
+            "payer": payer_address,
+            "payee": hub_address,
+            "amount": "1",
+            "channel_id": channel_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_server_error());
+    assert!(inspection.payment_status(&operation_id).is_none());
+    hub_handle.abort();
+    node_handle.abort();
+}
+
+#[tokio::test]
+async fn development_profile_cannot_sign_against_a_mainnet_node() {
+    assert_non_mainnet_profile_cannot_sign_against_mainnet("development", "development-mainnet")
+        .await;
+}
+
+#[tokio::test]
+async fn testnet_profile_cannot_sign_against_a_mainnet_node() {
+    assert_non_mainnet_profile_cannot_sign_against_mainnet("testnet", "testnet-mainnet").await;
+}
 #[tokio::test]
 async fn hub_health_and_same_channel_fast_pay() {
     let alice = test_account("alice-same-channel");
@@ -297,7 +443,7 @@ async fn hub_health_and_same_channel_fast_pay() {
         .unwrap();
     assert_eq!(health["ok"], true);
     assert_eq!(health["hub_address"], hub_address);
-    assert_eq!(health["version"], 4);
+    assert_eq!(health["version"], 7);
     assert_eq!(health["hub_fee_mei"], "0");
     assert_eq!(health["settlement_ready"], true);
     assert_eq!(health["cross_channel_ready"], true);

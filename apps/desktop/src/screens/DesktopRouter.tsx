@@ -81,7 +81,12 @@ export type DesktopActions = {
   onOpenQrPay: () => void;
   onEnableFastPay: (userDeposit: string) => void;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
-  onSaveL2Settings: (nodeUrl: string, hubUrl: string, hubAddress: string) => void;
+  onSaveL2Settings: (
+    nodeUrl: string,
+    hubUrl: string,
+    hubAddress: string,
+    trustedMainnetFastPayPilot: boolean,
+  ) => void;
   onHubHealth: () => void;
   onPreviewChannel: (
     hubAddress: string,

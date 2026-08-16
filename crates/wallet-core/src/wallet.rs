@@ -19,9 +19,7 @@ use crate::airgap::{
 pub use crate::assets::AssetSummary;
 use crate::assets::{AssetService, DiamondMetadataReader};
 use crate::bills::{BillEntry, BillStore};
-use crate::channel::{
-    ChannelInfo, build_channel_close_tx, build_channel_open_tx, derive_channel_id, query_channel,
-};
+use crate::channel::{ChannelInfo, derive_channel_id, query_channel};
 use crate::error::{WalletError, WalletResult};
 use crate::hardware::{HardwareSigningMode, SigningContext, check_signing_allowed_in_context};
 use crate::hip23::{
@@ -276,6 +274,7 @@ pub struct SendResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChannelSetupPreview {
     pub channel_id: String,
+    pub reuse_version: u64,
     pub left_address: String,
     pub right_address: String,
     pub left_deposit: String,
@@ -308,7 +307,10 @@ impl WalletService {
         settings.network_mode = network_mode.clone();
         let profile = SecurityProfile::from_name(&settings.security_profile);
         let node = NodeClient::new(settings.node_url.clone())?;
-        let bills = BillStore::load().unwrap_or_default();
+        // L2 bills are authoritative recovery/dispute evidence. A corrupt or
+        // unreadable store must stop wallet initialization instead of silently
+        // falling back to the on-chain funding distribution.
+        let bills = BillStore::load()?;
         let history = TxHistory::load().unwrap_or_default();
         let router = PaymentRouter::new(node.clone(), settings.clone(), bills.clone());
         Ok(Self {
@@ -1693,9 +1695,13 @@ impl WalletService {
             None => return Ok(None),
         };
         Ok(Some(
-            L2HubClient::new_for_network(hub_url, &self.settings.network_mode)
-                .health()
-                .await?,
+            L2HubClient::new_for_wallet_policy(
+                hub_url,
+                &self.settings.network_mode,
+                self.settings.trusted_mainnet_fast_pay_pilot,
+            )
+            .health()
+            .await?,
         ))
     }
 
@@ -1718,7 +1724,11 @@ impl WalletService {
             .l2_hub_url
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
-        let client = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
+        let client = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let health = client.health().await?;
         if !health.ok
             || health.version < 3
@@ -1734,16 +1744,17 @@ impl WalletService {
 
         if self.settings.network_mode == "mainnet" {
             // Opening a funded channel is irreversible L1 work. Bind its
-            // exposure to the same capped mainnet-pilot decision as payments.
+            // exposure to the same explicitly selected, capped mainnet policy as payments.
             let readiness = client.require_mainnet_payment_ready(None).await?;
             if deposit_mei.is_none() {
                 deposit = (readiness.max_channel_funding_millimeis() as f64 / 1_000.0)
                     .min(DEFAULT_CHANNEL_DEPOSIT_MEI);
             }
-            readiness.require_channel_funding_ready(deposit)?;
+            let deposit_wire = format_amount_mei(deposit);
+            readiness.require_channel_funding_ready(&deposit_wire)?;
         }
 
-        let hub_address = match self.settings.hub_right_address.clone() {
+        match self.settings.hub_right_address.clone() {
             Some(a) if !a.is_empty() => a,
             _ => health
                 .hub_address
@@ -1758,13 +1769,18 @@ impl WalletService {
                 })?,
         };
 
-        if self.settings.channel_id_hex.is_none() {
-            self.open_channel(&hub_address, deposit, 0.0).await?;
-        }
-
+        // Provider discovery and configuration are reversible. Opening a funded
+        // L1 channel is not, so it is only allowed through the exact prepared
+        // operation ceremony used by the mobile and desktop review screens.
         self.settings.save()?;
         self.router
             .update_settings(self.node.clone(), self.settings.clone());
+        if self.settings.channel_id_hex.is_none() {
+            return Ok(FastPayStatus::needs_channel(
+                health.name.unwrap_or_else(|| "your provider".into()),
+                deposit,
+            ));
+        }
         self.fast_pay_status().await
     }
 
@@ -1780,7 +1796,11 @@ impl WalletService {
             .l2_hub_url
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
-        let client = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
+        let client = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let health = client.health().await?;
         if !health.ok
             || health.version < 4
@@ -1887,7 +1907,11 @@ impl WalletService {
             .channel_id_hex
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay channel is not configured".into()))?;
-        let client = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
+        let client = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let health = client.health().await?;
         let hub_address = health.hub_address.clone().ok_or_else(|| {
             WalletError::L2("Fast Pay provider did not publish its hub address".into())
@@ -2154,148 +2178,57 @@ impl WalletService {
         Ok(Some(query_channel(&self.node, &channel_id).await?))
     }
 
-    pub fn preview_channel_open(
+    pub async fn preview_channel_open(
         &mut self,
         hub_address: &str,
-        user_deposit_mei: f64,
-        hub_deposit_mei: f64,
+        user_deposit_mei: &str,
+        hub_deposit_mei: &str,
     ) -> WalletResult<ChannelSetupPreview> {
         self.touch_auto_lock();
-        crate::hip23::validate_hac_amount_mei(user_deposit_mei)?;
-        if !hub_deposit_mei.is_finite() || hub_deposit_mei < 0.0 {
-            return Err(WalletError::Policy(
-                "hub channel deposit must be a finite non-negative amount".into(),
-            ));
-        }
+        let user_deposit = exact_channel_deposit(user_deposit_mei, false)?;
+        let hub_deposit = exact_channel_deposit(hub_deposit_mei, true)?;
         if !crate::hip23::is_valid_hacash_address(hub_address) {
             return Err(WalletError::Policy("invalid Fast Pay hub address".into()));
         }
 
         let user = self.require_address()?;
+        // Hacash reuses the original deterministic ID and increments the
+        // on-chain incarnation counter after an agreement close.
         let channel_id = derive_channel_id(&user, hub_address, 1);
+        let reuse_version =
+            crate::channel::next_channel_reuse_version(&self.node, &channel_id, &user, hub_address)
+                .await?;
+        if reuse_version != 1 {
+            return Err(WalletError::Policy(
+                "Mainnet Fast Pay pilot channels are one-use only. This channel was already closed and cannot be reopened. Use a different approved Hub address."
+                    .into(),
+            ));
+        }
         Ok(ChannelSetupPreview {
             channel_id,
+            reuse_version,
             left_address: user,
             right_address: hub_address.to_owned(),
-            left_deposit: format_amount_mei(user_deposit_mei),
-            right_deposit: format_amount_mei(hub_deposit_mei),
+            left_deposit: user_deposit,
+            right_deposit: hub_deposit,
         })
     }
 
     pub async fn open_channel(
         &mut self,
-        hub_address: &str,
-        user_deposit_mei: f64,
-        hub_deposit_mei: f64,
+        _hub_address: &str,
+        _user_deposit_mei: f64,
+        _hub_deposit_mei: f64,
     ) -> WalletResult<String> {
-        self.touch_auto_lock();
-        self.protected_unprepared_signing_block(
-            "direct channel open",
-            crate::hip23::policy_amount_mei_ceil(user_deposit_mei)?,
-        )?;
-        let preview = self.preview_channel_open(hub_address, user_deposit_mei, hub_deposit_mei)?;
-        let fee = crate::hip23::wire_mei_for_node("1:244");
-        let encoded_channel_id = crate::channel::encoded_channel_id(&preview.channel_id)?;
-        let built = build_channel_open_tx(
-            &self.node,
-            &preview.left_address,
-            &preview.channel_id,
-            &preview.left_address,
-            &preview.left_deposit,
-            &preview.right_address,
-            &preview.right_deposit,
-            &fee,
-        )
-        .await?;
-        let body_hex = built
-            .body
-            .ok_or_else(|| WalletError::Transaction("missing channel open body".into()))?;
-        crate::tx_binding::verify_transaction_intent(
-            &body_hex,
-            &preview.left_address,
-            &fee,
-            &[serde_json::json!({
-                "kind": 2,
-                "channel_id": encoded_channel_id,
-                "left_bill": {
-                    "address": preview.left_address,
-                    "amount": preview.left_deposit
-                },
-                "right_bill": {
-                    "address": preview.right_address,
-                    "amount": preview.right_deposit
-                }
-            })],
-        )?;
-        let signed_hex = self.sign_tx_for_network(&body_hex).await?;
-        let submitted = self.submit_signed_tx(&signed_hex).await?;
-        let hash = submitted
-            .hash
-            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-
-        self.settings.hub_right_address = Some(hub_address.to_owned());
-        self.settings.channel_id_hex = Some(preview.channel_id);
-        self.settings.save()?;
-        self.router
-            .update_settings(self.node.clone(), self.settings.clone());
-        self.append_history_if_enabled(
-            PaymentRail::L1OnChain,
-            &hash,
-            &preview.left_address,
-            &preview.right_address,
-            user_deposit_mei,
-            "Channel open",
-        )?;
-        Ok(hash)
+        Err(WalletError::Policy(
+            "direct channel open is disabled; use the reviewed prepared Hub co-sign flow".into(),
+        ))
     }
-
     pub async fn close_channel(&mut self) -> WalletResult<String> {
-        self.touch_auto_lock();
-        self.protected_unprepared_signing_block(
-            "direct channel close",
-            self.second_factor_threshold_mei(),
-        )?;
-        let from = self.require_address()?;
-        let channel_id = self
-            .settings
-            .channel_id_hex
-            .clone()
-            .ok_or_else(|| WalletError::Transaction("no active channel configured".into()))?;
-        let fee = crate::hip23::wire_mei_for_node("1:244");
-        let encoded_channel_id = crate::channel::encoded_channel_id(&channel_id)?;
-        let built = build_channel_close_tx(&self.node, &from, &channel_id, &fee).await?;
-        let body_hex = built
-            .body
-            .ok_or_else(|| WalletError::Transaction("missing channel close body".into()))?;
-        crate::tx_binding::verify_transaction_intent(
-            &body_hex,
-            &from,
-            &fee,
-            &[serde_json::json!({
-                "kind": 3,
-                "channel_id": encoded_channel_id
-            })],
-        )?;
-        let signed_hex = self.sign_tx_for_network(&body_hex).await?;
-        let submitted = self.submit_signed_tx(&signed_hex).await?;
-        let hash = submitted
-            .hash
-            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-        self.settings.channel_id_hex = None;
-        self.settings.save()?;
-        self.router
-            .update_settings(self.node.clone(), self.settings.clone());
-        self.append_history_if_enabled(
-            PaymentRail::L1OnChain,
-            &hash,
-            &from,
-            &channel_id,
-            0.0,
-            "Channel close",
-        )?;
-        Ok(hash)
+        Err(WalletError::Policy(
+            "direct channel close is disabled; use the reviewed prepared Hub co-sign flow".into(),
+        ))
     }
-
     pub async fn preview_send(
         &mut self,
         to: &str,
@@ -2808,27 +2741,30 @@ impl WalletService {
         let pending_key = self.begin_pending_history(preview.plan.rail, &from, to, amount_mei)?;
 
         let send_result: WalletResult<SendResult> = match preview.plan.rail {
-            PaymentRail::L2Fast => match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
-                SessionKey::Signing(acc) => {
-                    let execution = self
-                        .router
-                        .execute_l2(&from, to, &preview.amount_wire, acc)
-                        .await?;
-                    self.bills = self.router.bills().clone();
-                    Ok(SendResult {
-                        rail: PaymentRail::L2Fast,
-                        tx_hash: execution.payment_id,
-                        summary: execution.summary,
-                        pending: execution.status != "settled",
-                    })
+            PaymentRail::L2Fast => {
+                self.require_online_signing_transport()?;
+                match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
+                    SessionKey::Signing(acc) => {
+                        let execution = self
+                            .router
+                            .execute_l2(&from, to, &preview.amount_wire, acc)
+                            .await?;
+                        self.bills = self.router.bills().clone();
+                        Ok(SendResult {
+                            rail: PaymentRail::L2Fast,
+                            tx_hash: execution.payment_id,
+                            summary: execution.summary,
+                            pending: execution.status != "settled",
+                        })
+                    }
+                    SessionKey::WatchOnly => Err(WalletError::Policy(
+                        "watch-only wallet cannot sign L2 bills".into(),
+                    )),
+                    SessionKey::Exhausted => Err(WalletError::Policy(
+                        "cold vault signing session is exhausted; unlock again".into(),
+                    )),
                 }
-                SessionKey::WatchOnly => Err(WalletError::Policy(
-                    "watch-only wallet cannot sign L2 bills".into(),
-                )),
-                SessionKey::Exhausted => Err(WalletError::Policy(
-                    "cold vault signing session is exhausted; unlock again".into(),
-                )),
-            },
+            }
             PaymentRail::L1OnChain => {
                 let transfer_pairs = crate::send_options::hac_send_transfer_pairs(
                     to,
@@ -3322,6 +3258,36 @@ fn validate_new_passphrase(passphrase: &str) -> WalletResult<()> {
 }
 fn format_amount_mei(amount_mei: f64) -> String {
     crate::hip23::format_mei_for_node(amount_mei)
+}
+
+fn exact_channel_deposit(value: &str, allow_zero: bool) -> WalletResult<String> {
+    if value.trim() != value {
+        return Err(WalletError::Policy(
+            "channel deposit must not contain leading or trailing whitespace".into(),
+        ));
+    }
+    let amount = l2_fast_pay_hub::amount::parse_amount_mei(value)
+        .map_err(|error| WalletError::Policy(error.to_string()))?;
+    if !allow_zero && amount == l2_fast_pay_hub::amount::HacAmount::ZERO {
+        return Err(WalletError::Policy(
+            "your channel deposit must be greater than zero".into(),
+        ));
+    }
+    Ok(l2_fast_pay_hub::amount::format_amount_mei(amount))
+}
+
+#[cfg(test)]
+mod exact_channel_deposit_tests {
+    use super::exact_channel_deposit;
+
+    #[test]
+    fn canonical_channel_deposit_never_rounds_or_accepts_float_syntax() {
+        assert_eq!(exact_channel_deposit("1.230", false).unwrap(), "1.23");
+        assert_eq!(exact_channel_deposit("0", true).unwrap(), "0");
+        for invalid in ["0", " 1", "1 ", "1e3", "+1", "1.0004", "NaN"] {
+            assert!(exact_channel_deposit(invalid, false).is_err(), "{invalid}");
+        }
+    }
 }
 
 fn random_biometric_nonce() -> String {

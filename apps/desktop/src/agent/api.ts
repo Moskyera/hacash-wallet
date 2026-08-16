@@ -153,6 +153,182 @@ export type AgentWalletStatus = {
   payments_suspended: boolean;
 };
 
+export type AgentChannelSetupPhase =
+  | "prepared"
+  | "signature_may_exist"
+  | "signed"
+  | "submitted"
+  | "awaiting_confirmations"
+  | "recovery_required"
+  | "confirmed";
+
+export type AgentChannelSetupReview = {
+  wallet_id: string;
+  operation_id: string;
+  review_commitment: string;
+  expires_at: number;
+  network_mode: "mainnet" | "testnet";
+  hub_url: string;
+  hub_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  deposit_units: string;
+  network_fee_units: string;
+  wallet_fee_units: string;
+  total_debit_units: string;
+  phase: AgentChannelSetupPhase;
+};
+
+export type AgentChannelClosePhase =
+  | "prepared"
+  | "signature_may_exist"
+  | "signed"
+  | "submitted"
+  | "recovery_required"
+  | "confirmed";
+
+export type AgentChannelCloseReview = {
+  wallet_id: string;
+  operation_id: string;
+  review_commitment: string;
+  expires_at: number;
+  network_mode: "mainnet" | "testnet";
+  hub_url: string;
+  hub_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  channel_open_height: number;
+  bill_auto_number: number;
+  original_agent_units: string;
+  final_agent_units: string;
+  network_fee_units: string;
+  wallet_fee_units: string;
+  phase: AgentChannelClosePhase;
+};
+
+export type AgentL2Binding = {
+  schema_version: number;
+  wallet_id: string;
+  wallet_scope: string;
+  network_mode: "mainnet" | "testnet";
+  agent_address: string;
+  hub_url: string;
+  hub_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  channel_open_height: number;
+  confirmed_at_height: number;
+  deposit_units: string;
+  bound_at: number;
+  commitment_sha256: string;
+  closed?: {
+    transaction_hash: string;
+    close_height: number;
+    closed_at: number;
+  };
+};
+
+export type AgentHvmNetworkBinding = {
+  schema_version: number;
+  network_kind: string;
+  chain_id: number;
+  mainnet: boolean;
+  block_1_hash: string;
+  node_profile_id: string;
+  network_instance_id: string;
+  transaction_format_version: number;
+};
+
+export type AgentHvmContractBinding = {
+  schema: string;
+  settlement_profile: string;
+  network_mode: "mainnet" | "testnet";
+  chain_id: number;
+  network_instance_id: string;
+  contract_address: string;
+  deployment_tx_hash: string;
+  deployment_height: number;
+  bytecode_sha3: string;
+  channel_id: string;
+  reuse_version: number;
+  left_address: string;
+  right_hub_address: string;
+  left_deposit_zhu: number;
+  right_hub_deposit_zhu: number;
+  challenge_blocks: number;
+};
+
+export type AgentHvmChannelBinding = {
+  schema_version: number;
+  wallet_id: string;
+  network_mode: "mainnet" | "testnet";
+  network_binding: AgentHvmNetworkBinding;
+  hub_url: string;
+  hub_address: string;
+  binding_commitment: string;
+  recovery_bundle: {
+    schema: string;
+    binding: AgentHvmContractBinding;
+    initial_recovery_bill: {
+      schema: string;
+      binding_commitment: string;
+      serial: number;
+      left_balance_zhu: number;
+      right_balance_zhu: number;
+      left_signature_hex: string;
+      right_signature_hex: string;
+    };
+  };
+  activation_snapshot_commitment: string;
+  minimum_required_live_blocks: number;
+  minimum_required_recover_blocks: number;
+  adopted_at: number;
+};
+
+export type AgentHvmRegistryBinding = {
+  schema_version: 2;
+  wallet_id: string;
+  network_mode: "mainnet" | "testnet";
+  network_binding: AgentHvmNetworkBinding;
+  hub_url: string;
+  hub_address: string;
+  binding_commitment: string;
+  recovery_bundle: {
+    schema: string;
+    binding: {
+      schema: string;
+      settlement_profile: "hpay-hvm-shared-registry-v2";
+      network_mode: "mainnet" | "testnet";
+      chain_id: number;
+      network_instance_id: string;
+      contract_address: string;
+      deployment_tx_hash: string;
+      deployment_height: number;
+      bytecode_sha3: string;
+      channel_id: string;
+      reuse_version: number;
+      left_address: string;
+      right_hub_address: string;
+      left_deposit_zhu: number;
+      right_hub_deposit_zhu: number;
+      challenge_blocks: number;
+    };
+    initial_recovery_bill: {
+      schema: string;
+      binding_commitment: string;
+      serial: number;
+      left_balance_zhu: number;
+      hub_balance_zhu: number;
+      left_signature_hex: string;
+      hub_signature_hex: string;
+    };
+  };
+  activation_snapshot_commitment: string;
+  minimum_required_live_blocks: number;
+  minimum_required_recover_blocks: number;
+  adopted_at: number;
+};
+
 export type AgentWalletOverview = {
   wallet_id: string;
   address: string;
@@ -184,6 +360,12 @@ export type AgentWalletOverview = {
   unlocked: boolean;
   payments_suspended: boolean;
   mainnet_spending_ready: boolean;
+  trusted_mainnet_fast_pay_pilot: boolean;
+  l2_binding: AgentL2Binding | null;
+  hvm_channel_binding: AgentHvmChannelBinding | null;
+  hvm_registry_binding: AgentHvmRegistryBinding | null;
+  l2_channel_setup: AgentChannelSetupReview | null;
+  l2_channel_close: AgentChannelCloseReview | null;
   confirmed_balance_units: string | null;
   reserved_units: string;
   available_units: string | null;
@@ -358,6 +540,102 @@ export type PaymentOperation = {
   expires_at: number;
   tx_hash: string | null;
   final_result: string | null;
+};
+
+export type AgentFastPayStatus =
+  | "payment_intent_created"
+  | "funds_reserved"
+  | "approval_requested"
+  | "approved"
+  | "execution_prepared"
+  | "signed"
+  | "submitted"
+  | "awaiting_recipient"
+  | "exact_retry_ready"
+  | "committed"
+  | "rejected"
+  | "cancelled"
+  | "recovery_required";
+
+/** Exact, zero-fee Agent-only L2 operation. It can never fall back to L1. */
+export type AgentFastPayOperation = {
+  operation_id: string;
+  hub_operation_id: string;
+  agent_wallet_id: string;
+  agent_id: string;
+  agent_authorization_epoch: number;
+  idempotency_key: string;
+  request_commitment: string;
+  binding_commitment: string;
+  route_commitment: string;
+  network_mode: "mainnet" | "testnet";
+  payer: string;
+  recipient: string;
+  amount_units: string;
+  network_fee_units: string;
+  wallet_fee_units: string;
+  total_debit_units: string;
+  reserved_units: string;
+  status: AgentFastPayStatus;
+  policy_epoch: number;
+  signer_epoch: number;
+  emergency_epoch: number;
+  approval_commitment: string | null;
+  owner_authority_commitment: string | null;
+  created_at: number;
+  expires_at: number;
+  settled_at: number | null;
+};
+
+export type AgentHvmPaymentStatus =
+  | "payment_intent_created"
+  | "funds_reserved"
+  | "unsigned_prepared"
+  | "approval_requested"
+  | "approved"
+  | "signing_prepared"
+  | "signed"
+  | "submitted"
+  | "exact_retry_ready"
+  | "committed"
+  | "rejected"
+  | "cancelled"
+  | "recovery_required";
+
+/** Exact, zero-fee Agent HVM operation. It never exposes generic signing or an L1 fallback. */
+export type AgentHvmPaymentOperation = {
+  operation_id: string;
+  hub_operation_id: string;
+  agent_wallet_id: string;
+  agent_id: string;
+  agent_authorization_epoch: number;
+  idempotency_key: string;
+  request_commitment: string;
+  network_mode: "mainnet" | "testnet";
+  hub_url: string;
+  hub_address: string;
+  binding_commitment: string;
+  lease_snapshot_commitment: string | null;
+  previous_bill_commitment: string | null;
+  unsigned_request_commitment: string | null;
+  payer: string;
+  recipient: string;
+  amount_units: string;
+  amount_zhu: number;
+  wallet_fee_zhu: number;
+  hub_fee_zhu: number;
+  total_debit_zhu: number;
+  reserved_units: string;
+  status: AgentHvmPaymentStatus;
+  policy_epoch: number;
+  signer_epoch: number;
+  emergency_epoch: number;
+  approval_commitment: string | null;
+  approval_decision_commitment: string | null;
+  owner_authority_commitment: string | null;
+  created_at: number;
+  expires_at: number;
+  settled_at: number | null;
 };
 
 export type ApprovalCommitment = {
@@ -759,12 +1037,14 @@ export const agentWalletApi = {
     networkMode: "mainnet" | "testnet",
     nodeUrl: string,
     blockOneFingerprint: string | null,
+    mainnetPilotAcknowledgement: string | null = null,
   ) =>
     invoke<CreatedAgentWallet>("agent_wallet_create", {
       passphrase,
       networkMode,
       nodeUrl,
       blockOneFingerprint,
+      mainnetPilotAcknowledgement,
     }),
   unlock: (walletId: string, passphrase: string) =>
     invoke<AgentWalletStatus>("agent_wallet_unlock", { walletId, passphrase }),
@@ -772,6 +1052,38 @@ export const agentWalletApi = {
     invoke<void>("agent_wallet_lock", { walletId }),
   overview: (walletId: string) =>
     invoke<AgentWalletOverview>("agent_wallet_overview", { walletId }),
+  prepareFastPayChannel: (walletId: string, hubUrl: string, deposit: string) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_prepare_fast_pay_channel", {
+      walletId,
+      hubUrl,
+      deposit,
+    }),
+  confirmFastPayChannelSetup: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_confirm_fast_pay_channel_setup", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
+  recoverFastPayChannelSetup: (walletId: string) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_recover_fast_pay_channel_setup", { walletId }),
+  prepareFastPayChannelClose: (walletId: string) =>
+    invoke<AgentChannelCloseReview>("agent_wallet_prepare_fast_pay_channel_close", { walletId }),
+  confirmFastPayChannelClose: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelCloseReview>("agent_wallet_confirm_fast_pay_channel_close", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
+  recoverFastPayChannelClose: (walletId: string) =>
+    invoke<AgentChannelCloseReview>("agent_wallet_recover_fast_pay_channel_close", { walletId }),
   diagnosticsPreview: (walletId: string) =>
     invoke<AgentPilotDiagnosticsPreview>("agent_wallet_pilot_diagnostics_preview", { walletId }),
   diagnosticsExport: (
@@ -796,6 +1108,52 @@ export const agentWalletApi = {
     invoke<AgentPolicy>("agent_wallet_update_policy", { walletId, agentId, policy }),
   listActivity: (walletId: string) =>
     invoke<PaymentOperation[]>("agent_wallet_list_activity", { walletId }),
+  listFastPayActivity: (walletId: string) =>
+    invoke<AgentFastPayOperation[]>("agent_wallet_list_fast_pay_activity", { walletId }),
+  executeApprovedFastPay: (walletId: string, operationId: string) =>
+    invoke<AgentFastPayOperation>("agent_wallet_execute_approved_fast_pay", {
+      walletId,
+      operationId,
+    }),
+  reconcileFastPay: (walletId: string, operationId: string) =>
+    invoke<AgentFastPayOperation>("agent_wallet_reconcile_fast_pay", {
+      walletId,
+      operationId,
+    }),
+  retryFastPayExact: (walletId: string, operationId: string) =>
+    invoke<AgentFastPayOperation>("agent_wallet_retry_fast_pay_exact", {
+      walletId,
+      operationId,
+    }),
+  bindHvmChannel: (walletId: string, hubUrl: string, bindingCommitment: string) =>
+    invoke<AgentHvmChannelBinding>("agent_wallet_bind_hvm_channel", {
+      walletId,
+      hubUrl,
+      bindingCommitment,
+    }),
+  bindHvmRegistry: (walletId: string, hubUrl: string, bindingCommitment: string) =>
+    invoke<AgentHvmRegistryBinding>("agent_wallet_bind_hvm_registry", {
+      walletId,
+      hubUrl,
+      bindingCommitment,
+    }),
+  listHvmActivity: (walletId: string) =>
+    invoke<AgentHvmPaymentOperation[]>("agent_wallet_list_hvm_activity", { walletId }),
+  executeApprovedHvm: (walletId: string, operationId: string) =>
+    invoke<AgentHvmPaymentOperation>("agent_wallet_execute_approved_hvm", {
+      walletId,
+      operationId,
+    }),
+  reconcileHvm: (walletId: string, operationId: string) =>
+    invoke<AgentHvmPaymentOperation>("agent_wallet_reconcile_hvm", {
+      walletId,
+      operationId,
+    }),
+  retryHvmExact: (walletId: string, operationId: string) =>
+    invoke<AgentHvmPaymentOperation>("agent_wallet_retry_hvm_exact", {
+      walletId,
+      operationId,
+    }),
   listPendingApprovals: (walletId: string) =>
     invoke<PaymentOperation[]>("agent_wallet_list_pending_approvals", { walletId }),
   revokeAgent: (walletId: string, agentId: string) =>

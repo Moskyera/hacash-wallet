@@ -30,7 +30,7 @@ async fn prepare_signed_operation(
         network_id: node.network_kind().to_owned(),
         chain_id: node.chain_id(),
         genesis_identifier: TESTNET_ANCHOR.to_owned(),
-        node_profile_id: node.node_profile_id().to_owned(),
+        node_profile_id: node.node_profile_commitment().to_owned(),
         transaction_format_version: node.transaction_format_version(),
     });
 
@@ -424,8 +424,13 @@ async fn node_profile_change_between_approval_and_anchor_is_rejected() {
     register_witness_mobile(&mut manager, &wallet_id, &mobile, 702);
     let operation_id = prepare_signed_operation(&mut manager, &wallet_id, &node.url, 703).await;
     let mut changed = official_capabilities();
-    changed["actions"]["registered"] = json!([1, 2]);
-    changed["actions"]["enabled"] = json!([1, 2]);
+    // Keep every mandatory Agent payment capability enabled so the live node
+    // remains independently valid. The extra reported action changes the
+    // approval-bound node profile commitment and must therefore be rejected by
+    // the later exact-commitment comparison, rather than by the capability
+    // admission gate itself.
+    changed["actions"]["registered"] = json!([1, 2, 3, 14, 999, 1041]);
+    changed["actions"]["enabled"] = json!([1, 2, 3, 14, 999, 1041]);
     node.set_capabilities(changed).await;
 
     assert_eq!(

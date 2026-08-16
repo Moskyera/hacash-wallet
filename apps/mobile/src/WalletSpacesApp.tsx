@@ -214,12 +214,11 @@ export default function WalletSpacesApp() {
       <nav className="wallet-space-switcher" aria-label="Wallet space">
         <button
           type="button"
-          className={personalMounted ? "active" : ""}
-          aria-pressed={personalMounted}
+          aria-label="Open AI Agent Wallet"
           disabled={openingAgent || agentActive}
           onClick={() => void openAgentCompanion()}
         >
-          <span>{openingAgent ? "Opening..." : "My Wallet"}</span>
+          <span>{openingAgent ? "Opening..." : "AI Agent Wallet"}</span>
           <span aria-hidden>⌄</span>
         </button>
       </nav>

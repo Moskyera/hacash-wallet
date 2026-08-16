@@ -12,6 +12,11 @@ pub const CAPABILITIES_API_VERSION: u32 = 1;
 pub const HPAY_LOCAL_PILOT_NETWORK_KIND: &str = "local_pilot_v1";
 pub const HPAY_LOCAL_PILOT_PROFILE_ID: &str = "hpay-local-pilot-chain-v1";
 pub const HPAY_LOCAL_PILOT_CHAIN_ID: u32 = 7;
+pub const HPAY_MAINNET_NETWORK_KIND: &str = "mainnet";
+pub const HPAY_MAINNET_PROFILE_ID: &str = "hacash-mainnet";
+pub const HPAY_MAINNET_MIN_SAFE_HEIGHT: u64 = 765_432;
+const MAX_MAINNET_TIP_AGE_SECONDS: u64 = 3_600;
+const MAX_FUTURE_TIP_SKEW_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +34,8 @@ pub struct NodeCapabilities {
     pub chain: NodeChain,
     #[serde(default)]
     pub network: NodeNetworkCapabilities,
+    #[serde(default)]
+    pub sync: NodeSyncCapabilities,
     pub istanbul: IstanbulStatus,
     pub transactions: RegistrySet<u8>,
     pub actions: RegistrySet<u16>,
@@ -56,6 +63,18 @@ pub struct NodeNetworkCapabilities {
     pub transaction_format_version: u64,
 }
 
+/// Freshness evidence reported alongside the chain identity. Missing fields
+/// remain readable for legacy Personal Wallet nodes, but can never authorize
+/// Agent Wallet mainnet signing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NodeSyncCapabilities {
+    pub tip_timestamp_unix: u64,
+    pub observed_unix: u64,
+    pub tip_age_seconds: u64,
+    pub max_tip_age_seconds: u64,
+    pub fresh: bool,
+}
+
 /// Transaction API routes compiled into and registered by the reporting node.
 /// Older payloads default to an unavailable contract so sensitive callers can
 /// fail closed without breaking read-only legacy handling.
@@ -63,14 +82,17 @@ pub struct NodeNetworkCapabilities {
 pub struct NodeApiCapabilities {
     pub balance_query: bool,
     pub transaction_submit: bool,
+    #[serde(default)]
+    pub transaction_submit_bound: bool,
     pub transaction_query: bool,
     pub reconciliation_by_tx_hash: bool,
 }
 
 impl NodeApiCapabilities {
-    pub const fn supports_agent_testnet_payment(self) -> bool {
+    pub const fn supports_agent_payment(self) -> bool {
         self.balance_query
             && self.transaction_submit
+            && self.transaction_submit_bound
             && self.transaction_query
             && self.reconciliation_by_tx_hash
     }
@@ -162,6 +184,7 @@ impl NodeCapabilities {
             ));
         }
         self.validate_network_contract()?;
+        self.validate_sync_contract()?;
         validate_registry("transaction", &self.transactions)?;
         validate_registry("action", &self.actions)?;
         if self.chain.mainnet
@@ -260,6 +283,7 @@ impl NodeCapabilities {
                 mainnet: true,
             },
             network: NodeNetworkCapabilities::default(),
+            sync: NodeSyncCapabilities::default(),
             istanbul: IstanbulStatus {
                 activation_height: 0,
                 evaluation_height: 1,
@@ -302,6 +326,40 @@ impl NodeCapabilities {
             && self.chain.height >= 2
     }
 
+    /// Exact mainnet identity and freshness contract for Agent Fast Pay. This
+    /// enables only the existing Type 2/channel API path; it does not alter
+    /// Hacash consensus or claim Type 4 support.
+    pub fn supports_agent_mainnet_payment(&self, expected_block_one: &str) -> bool {
+        let expected_instance = network_instance_id(
+            &self.network.kind,
+            self.chain.id,
+            self.chain.mainnet,
+            expected_block_one,
+            &self.network.node_profile_id,
+            self.network.transaction_format_version,
+        );
+        self.source == CapabilitySource::Reported
+            && self.chain.id == 0
+            && self.chain.mainnet
+            && self.chain.height >= HPAY_MAINNET_MIN_SAFE_HEIGHT
+            && self.network.kind == HPAY_MAINNET_NETWORK_KIND
+            && self.network.node_profile_id == HPAY_MAINNET_PROFILE_ID
+            && self.network.block_1_available
+            && self.network.block_1_hash.as_deref() == Some(expected_block_one)
+            && self.network.instance_id.as_deref() == Some(expected_instance.as_str())
+            && self.network.current_height == self.chain.height
+            && self.network.transaction_format_version == 2
+            && self.network.transaction_ready
+            && self.sync.fresh
+            && self.supports_transaction(2)
+            && self.supports_action(1)
+            && self.supports_action(2)
+            && self.supports_action(3)
+            && self.supports_action(14)
+            && self.supports_action(0x0411)
+            && self.api.supports_agent_payment()
+    }
+
     /// Verify the immutable Local Pilot identity without claiming that the
     /// node, wallet funding or mobile witness is ready for a payment.
     pub fn matches_agent_local_pilot_identity(&self, expected_block_one: &str) -> bool {
@@ -326,7 +384,11 @@ impl NodeCapabilities {
             && self.network.transaction_format_version == 2
             && self.supports_transaction(2)
             && self.supports_action(1)
-            && self.api.supports_agent_testnet_payment()
+            && self.supports_action(2)
+            && self.supports_action(3)
+            && self.supports_action(14)
+            && self.supports_action(0x0411)
+            && self.api.supports_agent_payment()
     }
 
     fn validate_network_contract(&self) -> WalletResult<()> {
@@ -374,17 +436,51 @@ impl NodeCapabilities {
                 ));
             }
         }
-        if network.transaction_ready
-            && (self.chain.mainnet
-                || self.chain.id != HPAY_LOCAL_PILOT_CHAIN_ID
-                || self.chain.height < 2
-                || network.kind != HPAY_LOCAL_PILOT_NETWORK_KIND
-                || network.node_profile_id != HPAY_LOCAL_PILOT_PROFILE_ID
-                || !network.funding_confirmed
-                || network.transaction_format_version != 2)
+        if network.transaction_ready {
+            let valid_local_pilot = !self.chain.mainnet
+                && self.chain.id == HPAY_LOCAL_PILOT_CHAIN_ID
+                && self.chain.height >= 2
+                && network.kind == HPAY_LOCAL_PILOT_NETWORK_KIND
+                && network.node_profile_id == HPAY_LOCAL_PILOT_PROFILE_ID
+                && network.funding_confirmed
+                && network.transaction_format_version == 2;
+            let valid_mainnet = self.chain.mainnet
+                && self.chain.id == 0
+                && self.chain.height >= HPAY_MAINNET_MIN_SAFE_HEIGHT
+                && network.kind == HPAY_MAINNET_NETWORK_KIND
+                && network.node_profile_id == HPAY_MAINNET_PROFILE_ID
+                && network.transaction_format_version == 2
+                && self.sync.fresh;
+            if !valid_local_pilot && !valid_mainnet {
+                return Err(WalletError::Node(
+                    "node transaction readiness contradicts its reported network contract".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_sync_contract(&self) -> WalletResult<()> {
+        let sync = &self.sync;
+        if sync == &NodeSyncCapabilities::default() {
+            return Ok(());
+        }
+        let computed_age = sync.observed_unix.saturating_sub(sync.tip_timestamp_unix);
+        let computed_fresh = self.chain.height > 0
+            && sync.tip_timestamp_unix > 0
+            && sync.tip_timestamp_unix
+                <= sync
+                    .observed_unix
+                    .saturating_add(MAX_FUTURE_TIP_SKEW_SECONDS)
+            && computed_age <= sync.max_tip_age_seconds;
+        if sync.observed_unix == 0
+            || sync.max_tip_age_seconds == 0
+            || sync.max_tip_age_seconds > MAX_MAINNET_TIP_AGE_SECONDS
+            || sync.tip_age_seconds != computed_age
+            || sync.fresh != computed_fresh
         {
             return Err(WalletError::Node(
-                "node transaction readiness contradicts the HPAY local pilot contract".into(),
+                "node sync freshness capability is inconsistent".into(),
             ));
         }
         Ok(())
@@ -611,6 +707,7 @@ mod tests {
                 mainnet: true,
             },
             network: NodeNetworkCapabilities::default(),
+            sync: NodeSyncCapabilities::default(),
             istanbul: IstanbulStatus {
                 activation_height: 200,
                 evaluation_height: 100,
@@ -628,6 +725,7 @@ mod tests {
             api: NodeApiCapabilities {
                 balance_query: true,
                 transaction_submit: true,
+                transaction_submit_bound: true,
                 transaction_query: true,
                 reconciliation_by_tx_hash: true,
             },
@@ -662,8 +760,8 @@ mod tests {
             enabled: vec![2, 3],
         };
         capabilities.actions = RegistrySet {
-            registered: vec![1],
-            enabled: vec![1],
+            registered: vec![1, 2, 3, 14, 0x0411],
+            enabled: vec![1, 2, 3, 14, 0x0411],
         };
         capabilities.network = NodeNetworkCapabilities {
             kind: HPAY_LOCAL_PILOT_NETWORK_KIND.into(),
@@ -684,6 +782,86 @@ mod tests {
             transaction_format_version: 2,
         };
         capabilities
+    }
+
+    fn mainnet_agent_capabilities() -> NodeCapabilities {
+        const BLOCK_ONE: &str = "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+        let mut capabilities = valid_capabilities();
+        capabilities.chain = NodeChain {
+            id: 0,
+            height: HPAY_MAINNET_MIN_SAFE_HEIGHT,
+            next_height: HPAY_MAINNET_MIN_SAFE_HEIGHT + 1,
+            mainnet: true,
+        };
+        capabilities.istanbul = IstanbulStatus {
+            activation_height: 700_000,
+            evaluation_height: HPAY_MAINNET_MIN_SAFE_HEIGHT + 1,
+            active: true,
+        };
+        capabilities.transactions = RegistrySet {
+            registered: vec![2, 3],
+            enabled: vec![2, 3],
+        };
+        capabilities.actions = RegistrySet {
+            registered: vec![1, 2, 3, 14, 0x0411],
+            enabled: vec![1, 2, 3, 14, 0x0411],
+        };
+        capabilities.network = NodeNetworkCapabilities {
+            kind: HPAY_MAINNET_NETWORK_KIND.into(),
+            node_profile_id: HPAY_MAINNET_PROFILE_ID.into(),
+            block_1_available: true,
+            block_1_hash: Some(BLOCK_ONE.into()),
+            instance_id: Some(network_instance_id(
+                HPAY_MAINNET_NETWORK_KIND,
+                0,
+                true,
+                BLOCK_ONE,
+                HPAY_MAINNET_PROFILE_ID,
+                2,
+            )),
+            funding_confirmed: false,
+            transaction_ready: true,
+            current_height: HPAY_MAINNET_MIN_SAFE_HEIGHT,
+            transaction_format_version: 2,
+        };
+        capabilities.sync = NodeSyncCapabilities {
+            tip_timestamp_unix: 1_999_940,
+            observed_unix: 2_000_000,
+            tip_age_seconds: 60,
+            max_tip_age_seconds: MAX_MAINNET_TIP_AGE_SECONDS,
+            fresh: true,
+        };
+        capabilities
+    }
+
+    #[test]
+    fn agent_mainnet_requires_exact_identity_freshness_and_channel_actions() {
+        const BLOCK_ONE: &str = "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+        let capabilities = mainnet_agent_capabilities().validate().unwrap();
+        assert!(capabilities.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut stale = mainnet_agent_capabilities();
+        stale.sync.fresh = false;
+        assert!(stale.validate().is_err());
+
+        let mut no_close = mainnet_agent_capabilities().validate().unwrap();
+        no_close.actions.enabled.retain(|kind| *kind != 14);
+        assert!(!no_close.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut no_chain_guard = mainnet_agent_capabilities().validate().unwrap();
+        no_chain_guard
+            .actions
+            .enabled
+            .retain(|kind| *kind != 0x0411);
+        assert!(!no_chain_guard.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut no_bound_submit = mainnet_agent_capabilities().validate().unwrap();
+        no_bound_submit.api.transaction_submit_bound = false;
+        assert!(!no_bound_submit.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut wrong_anchor = mainnet_agent_capabilities().validate().unwrap();
+        wrong_anchor.network.block_1_hash = Some("11".repeat(32));
+        assert!(!wrong_anchor.supports_agent_mainnet_payment(BLOCK_ONE));
     }
 
     #[test]

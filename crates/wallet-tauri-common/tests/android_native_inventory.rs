@@ -256,7 +256,10 @@ fn windows_android_release_fallback_reuses_the_verified_native_library() {
     for contract in [
         r#""yarn.cmd""#,
         "run tauri -- android build --ci --target aarch64 --apk",
+        "--features agent-wallet-bounded-mainnet-pilot",
         "Copy-Item -LiteralPath $nativeLib",
+        "Copy-Item -Path (Join-Path $mobile \"dist\\*\")",
+        "src-tauri\\tauri.conf.json",
         "assembleUniversalRelease -x :app:rustBuildArm64Release",
         "verify-release-apk.ps1",
     ] {

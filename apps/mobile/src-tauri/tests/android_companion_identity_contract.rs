@@ -40,6 +40,9 @@ fn companion_identity_is_a_dedicated_non_exportable_keystore_key() {
         "recreateIdentity(store)",
         "destroyed.get() ||",
         "activeSignature !== pending ||",
+        "fun finishAgentActivity(invoke: Invoke)",
+        "AgentCompanionActivity.currentResumed()",
+        "agentActivity.finish()",
     ] {
         assert!(
             kotlin.contains(contract),
@@ -93,6 +96,7 @@ fn biometric_prompt_is_bound_to_the_resumed_private_agent_activity() {
         );
     }
     assert!(!plugin.contains("activity as? FragmentActivity"));
+    assert!(!plugin.contains("this.activity.finish()"));
 }
 
 #[test]
@@ -104,6 +108,8 @@ fn native_plugin_only_signs_known_domain_separated_companion_payloads() {
         "HPAY/COMPANION/PAIRING-MOBILE-PROOF/V1",
         "HPAY/COMPANION/SESSION-RESPONSE/V1",
         "HPAY/COMPANION/APPROVAL-DECISION/V2",
+        "HPAY/COMPANION/AGENT-FAST-PAY-DECISION/V1",
+        "HPAY/COMPANION/AGENT-HVM-DECISION/V1",
         "HPAY/COMPANION/WITNESS-RECEIPT/V1",
         "HPAY/COMPANION/WITNESS-ROTATION/V1",
         "HPAY/COMPANION/ROTATION-CANDIDATE-ACCEPTANCE/V1",
@@ -117,6 +123,10 @@ fn native_plugin_only_signs_known_domain_separated_companion_payloads() {
         "fun signSessionResponse(",
         "fun signApprovalDecisionApprove(",
         "fun signApprovalDecisionReject(",
+        "fun signAgentFastPayApprovalDecisionApprove(",
+        "fun signAgentFastPayApprovalDecisionReject(",
+        "fun signAgentHvmApprovalDecisionApprove(",
+        "fun signAgentHvmApprovalDecisionReject(",
         "fun signWitnessReceipt(",
         "fun signWitnessRotationAuthorization(",
         "fun signRotationCandidateAcceptance(",
@@ -150,6 +160,8 @@ fn rust_adapter_has_no_js_command_or_personal_wallet_dependency() {
     // receipt, stays behind the pilot feature.
     for purpose in [
         "ApprovalDecision",
+        "AgentFastPayApprovalDecision",
+        "AgentHvmApprovalDecision",
         "WitnessReceipt",
         "RotationCandidateAcceptance",
         "WitnessRotationBaselineReceipt",
@@ -169,6 +181,12 @@ fn rust_adapter_has_no_js_command_or_personal_wallet_dependency() {
     assert!(rust.contains("\"signApprovalDecisionApprove\""));
     assert!(rust.contains("\"signApprovalDecisionReject\""));
     assert!(rust.contains("MobileApprovalDecision::from_canonical_bytes"));
+    assert!(rust.contains("\"signAgentFastPayApprovalDecisionApprove\""));
+    assert!(rust.contains("\"signAgentFastPayApprovalDecisionReject\""));
+    assert!(rust.contains("AgentFastPayApprovalDecision::from_canonical_bytes"));
+    assert!(rust.contains(r#""signAgentHvmApprovalDecisionApprove""#));
+    assert!(rust.contains(r#""signAgentHvmApprovalDecisionReject""#));
+    assert!(rust.contains("AgentHvmApprovalDecision::from_canonical_bytes"));
     assert!(rust.contains("\"signWitnessReceipt\""));
     assert!(rust.contains("\"signWitnessRotationAuthorization\""));
     assert!(rust.contains("\"signRotationCandidateAcceptance\""));
@@ -177,9 +195,10 @@ fn rust_adapter_has_no_js_command_or_personal_wallet_dependency() {
     let purpose_gate = rust
         .find("let operation = match purpose")
         .expect("typed purpose gate");
-    let kotlin_call = rust
+    let kotlin_call = rust[purpose_gate..]
         .find("let response = handle(app)")
-        .expect("Kotlin call");
+        .map(|offset| purpose_gate + offset)
+        .expect("signing Kotlin call after typed purpose gate");
     assert!(
         purpose_gate < kotlin_call,
         "desktop-only purposes must fail before the Kotlin bridge"

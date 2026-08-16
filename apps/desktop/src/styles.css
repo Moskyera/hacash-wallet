@@ -104,7 +104,15 @@ body {
 
 
 nav { display: flex; flex-direction: column; gap: 8px; }
-nav button, .actions-row button, .panel button {
+/*
+ * .how-it-works-prompt is on this list because the shared first-run prompt
+ * sits in none of the three containers below, so Later and Do not ask me again
+ * fell through to the operating system's own button - a grey slab with a white
+ * border, on the first screen the wallet ever shows - and How this wallet
+ * works drew a gold border-color over the UA's outset border style. Mobile
+ * never had either, because there `button` itself carries the base style.
+ */
+nav button, .actions-row button, .panel button, .how-it-works-prompt button {
   border: 1px solid var(--border);
   background: var(--bg-elevated);
   color: var(--text);
@@ -112,11 +120,19 @@ nav button, .actions-row button, .panel button {
   padding: 10px 14px;
   cursor: pointer;
 }
+/*
+ * The primary action is the only gold thing on a row of buttons, which is
+ * enough to find it. It used to be a solid gold slab with black text, and
+ * several screens carry four to six of them, so the emphasis cancelled itself
+ * out and the loudest control on the screen was whichever one you looked at
+ * last. A quiet gold outline over a gold tint keeps the brand and gives the
+ * genuinely dangerous controls somewhere louder to stand.
+ */
 nav button.active, button.primary {
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--accent-dim), var(--accent));
-  color: #1a1000;
-  font-weight: 700;
+  border-color: rgb(245 166 35 / 42%);
+  background: rgb(245 166 35 / 10%);
+  color: var(--accent-2);
+  font-weight: 600;
 }
 .sidebar-foot { margin-top: auto; font-size: 11px; }
 
@@ -311,10 +327,13 @@ nav button.active, button.primary {
   margin-left: 4px;
   vertical-align: middle;
 }
-.nav-fp-on { background: rgba(7, 7, 7, 0.35); color: #070707; }
-nav button.active .nav-fp-on { background: rgba(7, 7, 7, 0.5); }
+/* These two read as near-black text, which only worked while the active nav
+   item was a solid gold slab behind them. The slab is gone, so they carry
+   their own contrast in both the active and the inactive state. */
+.nav-fp-on { background: rgb(245 166 35 / 16%); color: var(--accent); }
+nav button.active .nav-fp-on { background: rgb(245 166 35 / 22%); }
 .nav-fp-off { background: rgba(141, 141, 141, 0.25); color: var(--muted); }
-nav button.active .nav-fp-off { background: rgba(7, 7, 7, 0.25); color: #070707; }
+nav button.active .nav-fp-off { background: rgba(141, 141, 141, 0.3); color: var(--muted); }
 
 .home-fp-hint {
   margin: 12px 0 4px;
@@ -507,10 +526,10 @@ input {
   cursor: pointer;
 }
 .tab-row .tab.active {
-  border-color: transparent;
-  background: linear-gradient(135deg, var(--accent-dim), var(--accent));
-  color: #1a1000;
-  font-weight: 700;
+  border-color: rgb(245 166 35 / 42%);
+  background: rgb(245 166 35 / 10%);
+  color: var(--accent-2);
+  font-weight: 600;
 }
 
 .textarea {
@@ -816,7 +835,8 @@ input {
 }
 
 .display-toggle button.selected {
-  border-color: var(--accent);
+  border-color: rgb(245 166 35 / 45%);
+  background: rgb(245 166 35 / 8%);
   color: var(--accent);
 }
 
@@ -1079,7 +1099,7 @@ button {
 }
 
 button:not(:disabled):hover {
-  border-color: rgba(245, 166, 35, 0.62);
+  border-color: rgba(245, 166, 35, 0.34);
   color: #fff;
 }
 
@@ -1099,6 +1119,29 @@ a:focus-visible {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.46;
+}
+
+/*
+ * The loudest control the personal wallet has, and now the only solid gold
+ * fill left in it.
+ *
+ * It exists because softening `.primary` would otherwise have quietened
+ * Restore from backup along with everything else, and restoring writes over
+ * whatever is on the device. Weight is the point here, so the weight stays:
+ * the fill, the black text and 700 are exactly what `.primary` used to be.
+ * Reserve this for actions that cannot be undone.
+ */
+button.irreversible-action {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #1a1000;
+  font-weight: 700;
+}
+
+button.irreversible-action:not(:disabled):hover {
+  border-color: var(--accent-2);
+  background: var(--accent-2);
+  color: #1a1000;
 }
 
 .app {
@@ -1168,11 +1211,13 @@ button:disabled {
   background: #0d0d0d;
 }
 
+/* A nav item marks where you are. It does not need a gold slab and a glow to
+   do that; the gold edge and gold label are already unambiguous. */
 .sidebar nav button.active {
-  color: #000;
-  border-color: var(--accent);
-  background: var(--accent);
-  box-shadow: 0 0 0 1px rgba(245, 166, 35, 0.22), 0 10px 28px rgba(245, 166, 35, 0.12);
+  color: var(--accent-2);
+  border-color: rgb(245 166 35 / 34%);
+  background: rgb(245 166 35 / 9%);
+  box-shadow: none;
 }
 
 .nav-item-mark {
@@ -1183,7 +1228,7 @@ button:disabled {
 }
 
 .sidebar nav button.active .nav-item-mark {
-  color: #000;
+  color: var(--accent);
 }
 
 .nav-item-label {

@@ -628,6 +628,13 @@ export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void })
             onError={(error) => showToast(formatInvokeError(error), "error")}
           />
         )}
+        {/*
+          onScan reuses navigateToPay's openCamera branch, which already
+          existed and which nothing had ever called: reaching the scanner meant
+          Pay, then Scan QR code. It still does not switch the camera on by
+          itself - the scanner keeps its own Open camera button - and it still
+          diverts to the air-gap signer when this wallet is airgap_only.
+        */}
         {tab === "home" && (
           <HomeTab
             assets={session.assets}
@@ -647,6 +654,7 @@ export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void })
             onPullEnd={onBalanceTouchEnd}
             onSend={() => setTab("pay")}
             onReceive={() => setTab("receive")}
+            onScan={() => navigateToPay({ openCamera: true })}
             onHacd={() => setTab("hacd")}
             onOpenFastPay={() => {
               setMorePage("fastpay");

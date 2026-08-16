@@ -113,10 +113,14 @@ test("expired mobile pairing offers cannot remain actionable", () => {
 });
 
 
-test("new Agent Wallet creation remains testnet-only until backup exists", () => {
-  assert.doesNotMatch(agentAppSource, /<option value="mainnet"/);
-  assert.match(agentAppSource, /networkMode: "testnet"/);
-  assert.match(agentAppSource, /Mainnet creation, funding and payments remain blocked/);
+test("new mainnet Agent Wallet creation is explicit, bounded and fail closed", () => {
+  assert.match(agentAppSource, /<option value="mainnet"/);
+  assert.match(agentAppSource, /mainnetNodeUrl\.startsWith\("https:\/\/"\)/);
+  assert.match(agentAppSource, /AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT/);
+  assert.match(agentAppSource, /mainnetAcknowledged/);
+  assert.match(agentAppSource, /1 HAC per payment/);
+  assert.match(agentAppSource, /10 HAC per channel/);
+  assert.match(agentAppSource, /100 HAC aggregate Hub TVL/);
 });
 
 test("Agent Wallet routing never uses payment readiness as a navigation redirect", () => {
@@ -134,7 +138,7 @@ test("Agent Wallet routing never uses payment readiness as a navigation redirect
 
 test("non-pilot build shows an explicit unavailable screen without auto-switching", () => {
   assert.match(agentAppSource, /AI Agent Wallet unavailable in this build/);
-  assert.match(agentAppSource, /Use an HPAY pilot build to access Agent Wallet testing/);
+  assert.match(agentAppSource, /Use a reviewed HPAY Agent Wallet build to access this space/);
   const unavailable = agentAppSource
     .split('uiState === "unavailable_in_this_build"')[1]
     .split('uiState === "recovery_required"')[0];

@@ -19,7 +19,9 @@ import {
   type PendingPairing,
 } from "./api";
 import {
+  AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT,
   HPAY_LOCAL_PILOT,
+  HPAY_MAINNET,
   WRITE_BLOCKER_LABELS,
   agentWalletLocalEnableBlockers,
   agentWalletPairingBlockers,
@@ -199,8 +201,8 @@ export default function AgentWalletApp({
       <AgentShell onOpenPersonal={onOpenPersonal}>
         <section className="agent-center-card">
           <h1>AI Agent Wallet unavailable in this build</h1>
-          <p>AI Agent Wallet Testnet Pilot is not enabled in this build.</p>
-          <p>Use an HPAY pilot build to access Agent Wallet testing.</p>
+          <p>The AI Agent Wallet backend is not enabled in this build.</p>
+          <p>Use a reviewed HPAY Agent Wallet build to access this space.</p>
           <p className="agent-safe-note">
             Backend feature: disabled. My Wallet is unaffected.
           </p>
@@ -257,6 +259,7 @@ export default function AgentWalletApp({
                 input.networkMode,
                 input.nodeUrl,
                 input.blockOneFingerprint,
+                input.mainnetPilotAcknowledgement,
               );
               setInfo(`Agent Wallet ${created.address} was created and remains locked.`);
               await refreshRuntime();
@@ -359,7 +362,7 @@ export default function AgentWalletApp({
         </div>
       </aside>
       <main className="agent-content">
-        <PilotBanner />
+        <PilotBanner overview={overview} />
         {error && <div className="alert" role="alert">{error}</div>}
         {info && <div className="info-box">{info}</div>}
         <AgentPageContent
@@ -535,14 +538,25 @@ function AgentShell({
   );
 }
 
-function PilotBanner() {
+function PilotBanner({ overview }: { overview?: AgentWalletOverview }) {
+  if (overview?.network_mode === "mainnet") {
+    return (
+      <section className="agent-pilot-banner" role="status" aria-label="Agent Wallet network safety">
+        <strong>AI AGENT WALLET</strong>
+        <span>HACASH MAINNET</span>
+        <span>TRUSTED BOUNDED FAST PAY PILOT</span>
+        <span>0% WALLET FEE</span>
+        <code>{overview.node?.network_instance_id ?? HPAY_MAINNET.blockOne}</code>
+      </section>
+    );
+  }
   return (
     <section className="agent-pilot-banner" role="status" aria-label="Agent Wallet network safety">
       <strong>AI AGENT WALLET</strong>
-      <span>{HPAY_LOCAL_PILOT.label}</span>
-      <span>PRIVATE DEVELOPMENT NETWORK</span>
-      <span>NO MAINNET FUNDS</span>
-      <code>{HPAY_LOCAL_PILOT.networkInstance}</code>
+      <span>{overview ? HPAY_LOCAL_PILOT.label : "NETWORK VERIFIED AFTER UNLOCK"}</span>
+      <span>{overview ? "PRIVATE DEVELOPMENT NETWORK" : "PAYMENTS FAIL CLOSED"}</span>
+      <span>{overview ? "NO MAINNET FUNDS" : "SEPARATE ENCRYPTED VAULT"}</span>
+      {overview && <code>{HPAY_LOCAL_PILOT.networkInstance}</code>}
     </section>
   );
 }
@@ -555,18 +569,26 @@ function CreateAgentWallet({
   error: string;
   onCreate: (input: {
     passphrase: string;
-    networkMode: "testnet";
+    networkMode: "mainnet" | "testnet";
     nodeUrl: string;
-    blockOneFingerprint: string;
+    blockOneFingerprint: string | null;
+    mainnetPilotAcknowledgement: string | null;
   }) => void;
 }) {
   const [passphrase, setPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [networkMode, setNetworkMode] = useState<"mainnet" | "testnet">("testnet");
+  const [mainnetNodeUrl, setMainnetNodeUrl] = useState("");
+  const [mainnetAcknowledged, setMainnetAcknowledged] = useState(false);
+  const isMainnet = networkMode === "mainnet";
   const localError = useMemo(() => {
     if (passphrase && passphrase.length < 15) return "Use at least 15 characters.";
     if (confirmation && passphrase !== confirmation) return "Passphrases do not match.";
+    if (isMainnet && mainnetNodeUrl && !mainnetNodeUrl.startsWith("https://")) {
+      return "Agent mainnet requires an HTTPS HPAY-compatible full node.";
+    }
     return "";
-  }, [passphrase, confirmation]);
+  }, [passphrase, confirmation, isMainnet, mainnetNodeUrl]);
   return (
     <section className="agent-center-card agent-create">
       <span className="agent-eyebrow">Independent security boundary</span>
@@ -578,13 +600,13 @@ function CreateAgentWallet({
       {/* A before-the-fact warning. It stays visible; only the background list
           moved behind a disclosure. */}
       <div className="agent-warning">
-        Mainnet creation, funding and payments remain blocked until Agent Wallet
-        backup and recovery has been independently verified.
+        My Wallet and AI Agent Wallet use different addresses, private keys,
+        encrypted vaults and Fast Pay channels. The agent cannot access My Wallet.
       </div>
       <details className="agent-advanced-details">
         <summary>What this wallet can and cannot do</summary>
         <ul>
-          <li>Testnet foundation only in this release.</li>
+          <li>Choose Local Pilot for testing or the reviewed bounded mainnet pilot.</li>
           {/* This said "Every payment requires manual desktop approval." In a
               Testnet Pilot build the desktop cannot complete an approval at
               all, so that read as a description of a working flow. */}
@@ -593,12 +615,11 @@ function CreateAgentWallet({
             approved automatically.
           </li>
           <li>
-            Approving a payment is not available in this pilot build, on this
-            desktop or on the paired phone, so no agent payment can complete
-            yet. Requesting, reviewing and rejecting all work.
+            Every payment is bound to one exact payee, amount, Hub, channel and
+            approval. The wallet rechecks them before signing and submission.
           </li>
           <li>Agents never receive a private key or raw signing access.</li>
-          <li>Agent L2 Fast Pay is not enabled in this release.</li>
+          <li>Agent Fast Pay has no HPAY wallet fee.</li>
           <li>
             Network kind: {HPAY_LOCAL_PILOT.networkKind}. Profile:{" "}
             {HPAY_LOCAL_PILOT.profileId}. This private chain is not the official
@@ -611,11 +632,9 @@ function CreateAgentWallet({
           The only place this release stated it was inside Local Pilot health,
           which an owner reaches long after creating the wallet. */}
       <div className="agent-warning">
-        This release has no Agent Wallet backup and no recovery path. This
-        passphrase is the only thing that opens this wallet. If it is lost, the
-        wallet and anything ever sent to its address are lost for good, and
-        nothing on this desktop or on a paired phone can recover them. Write it
-        down somewhere you will still have in a year before continuing.
+        The encrypted backup and its passphrase can recreate a live spending
+        wallet. Store them separately and securely. Never run two restored
+        copies of the same Agent Wallet at the same time.
       </div>
       <label>
         Agent Wallet passphrase
@@ -639,16 +658,39 @@ function CreateAgentWallet({
         <summary>Network settings</summary>
         <label>
           Network
-          <input value={HPAY_LOCAL_PILOT.label} readOnly />
+          <select
+            value={networkMode}
+            onChange={(event) => {
+              setNetworkMode(event.target.value as "mainnet" | "testnet");
+              setMainnetAcknowledged(false);
+            }}
+          >
+            <option value="testnet">{HPAY_LOCAL_PILOT.label}</option>
+            <option value="mainnet">Hacash Mainnet bounded pilot</option>
+          </select>
         </label>
-        <label>
-          Local Pilot node API
-          <input value={HPAY_LOCAL_PILOT.nodeUrl} readOnly />
-        </label>
+        {isMainnet ? (
+          <label>
+            HPAY-compatible mainnet full node (HTTPS)
+            <input
+              value={mainnetNodeUrl}
+              placeholder="https://node.example"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => setMainnetNodeUrl(event.target.value.trim())}
+            />
+          </label>
+        ) : (
+          <label>
+            Local Pilot node API
+            <input value={HPAY_LOCAL_PILOT.nodeUrl} readOnly />
+          </label>
+        )}
         <label>
           Local Pilot block 1 fingerprint
           <input
-            value={HPAY_LOCAL_PILOT.blockOne}
+            value={isMainnet ? HPAY_MAINNET.blockOne : HPAY_LOCAL_PILOT.blockOne}
             inputMode="text"
             autoComplete="off"
             spellCheck={false}
@@ -657,24 +699,50 @@ function CreateAgentWallet({
           />
         </label>
       </details>
+      {isMainnet && (
+        <div className="agent-warning">
+          <strong>Mainnet trusted bounded pilot</strong>
+          <p>
+            Fast Pay depends on the selected Hub. Until unilateral L1 exit is
+            independently verified, hard ceilings remain 1 HAC per payment,
+            10 HAC per channel and 100 HAC aggregate Hub TVL.
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={mainnetAcknowledged}
+              onChange={(event) => setMainnetAcknowledged(event.target.checked)}
+            />
+            I understand the bounded pilot and recovery limitations.
+          </label>
+        </div>
+      )}
       <button
         type="button"
         className="agent-primary"
         disabled={
           busy ||
           passphrase.length < 15 ||
-          passphrase !== confirmation
+          passphrase !== confirmation ||
+          (isMainnet && (!mainnetAcknowledged || !mainnetNodeUrl.startsWith("https://")))
         }
         onClick={() =>
           onCreate({
             passphrase,
-            networkMode: "testnet",
-            nodeUrl: HPAY_LOCAL_PILOT.nodeUrl,
-            blockOneFingerprint: HPAY_LOCAL_PILOT.blockOne,
+            networkMode,
+            nodeUrl: isMainnet ? mainnetNodeUrl : HPAY_LOCAL_PILOT.nodeUrl,
+            blockOneFingerprint: isMainnet ? null : HPAY_LOCAL_PILOT.blockOne,
+            mainnetPilotAcknowledgement: isMainnet
+              ? AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT
+              : null,
           })
         }
       >
-        {busy ? "Creating encrypted vault..." : "Create Local Pilot Agent Wallet"}
+        {busy
+          ? "Creating encrypted vault..."
+          : isMainnet
+            ? "Create bounded mainnet Agent Wallet"
+            : "Create Local Pilot Agent Wallet"}
       </button>
     </section>
   );
@@ -1026,8 +1094,209 @@ function AgentPageContent(props: PageContentProps) {
         <span className="agent-boundary-icon" aria-hidden>!</span>
         <p><strong>Separate wallet and permission domain.</strong> The AI agent cannot access your My Wallet private key.</p>
       </div>
+      <AgentFastPayChannelPanel
+        overview={overview}
+        busy={busy}
+        run={run}
+        onInfo={onInfo}
+        onRefresh={onRefresh}
+      />
       {order.map((id) => block(id))}
     </>
+  );
+}
+
+function AgentFastPayChannelPanel({
+  overview,
+  busy,
+  run,
+  onInfo,
+  onRefresh,
+}: {
+  overview: AgentWalletOverview;
+  busy: boolean;
+  run: (work: () => Promise<void>) => Promise<void>;
+  onInfo: (message: string) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [hubUrl, setHubUrl] = useState("");
+  const [deposit, setDeposit] = useState("1");
+  const setup = overview.l2_channel_setup;
+  const close = overview.l2_channel_close;
+  const binding = overview.l2_binding;
+  const active = Boolean(binding && !binding.closed);
+
+  const finish = async (message: string) => {
+    onInfo(message);
+    await onRefresh();
+  };
+
+  return (
+    <section className="agent-panel">
+      <span className="agent-eyebrow">Owner controlled</span>
+      <h2>Agent Fast Pay channel</h2>
+      <p>
+        This channel belongs only to the Agent Wallet. It never uses the Personal Wallet channel
+        and it adds no HPAY wallet fee.
+      </p>
+
+      {!binding && !setup && (
+        <>
+          <label className="agent-field">
+            <span>Fast Pay Hub</span>
+            <input
+              value={hubUrl}
+              onChange={(event) => setHubUrl(event.target.value)}
+              placeholder="https://your-fast-pay-hub.example"
+              disabled={busy}
+            />
+          </label>
+          <label className="agent-field">
+            <span>Agent channel deposit (HAC)</span>
+            <input
+              value={deposit}
+              onChange={(event) => setDeposit(event.target.value)}
+              inputMode="decimal"
+              disabled={busy}
+            />
+          </label>
+          <button
+            type="button"
+            className="agent-primary"
+            disabled={busy || !hubUrl.trim() || !deposit.trim()}
+            onClick={() =>
+              void run(async () => {
+                await agentWalletApi.prepareFastPayChannel(
+                  overview.wallet_id,
+                  hubUrl.trim(),
+                  deposit.trim(),
+                );
+                await finish("Review the exact Agent channel deposit and network fee.");
+              })
+            }
+          >
+            Review channel setup
+          </button>
+        </>
+      )}
+
+      {setup && !binding && (
+        <>
+          <div className="agent-stats-row">
+            <span>Deposit <strong>{formatUnits(setup.deposit_units)}</strong></span>
+            <span>Network fee <strong>{formatUnits(setup.network_fee_units)}</strong></span>
+            <span>Wallet fee <strong>{formatUnits(setup.wallet_fee_units)}</strong></span>
+            <span>Status <strong>{setup.phase.replace(/_/g, " ")}</strong></span>
+          </div>
+          <p className="agent-exact-address">{setup.channel_id}</p>
+          <div className="agent-control-row">
+            {setup.phase === "prepared" ? (
+              <button
+                type="button"
+                className="agent-primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.confirmFastPayChannelSetup(
+                      overview.wallet_id,
+                      setup.operation_id,
+                      setup.review_commitment,
+                    );
+                    await finish("Agent Fast Pay channel setup advanced safely.");
+                  })
+                }
+              >
+                Confirm exact setup
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="agent-primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.recoverFastPayChannelSetup(overview.wallet_id);
+                    await finish("Agent channel recovery checked the exact saved operation.");
+                  })
+                }
+              >
+                Check or recover setup
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {binding && (
+        <div className="agent-stats-row">
+          <span>Channel <strong>{binding.channel_id}</strong></span>
+          <span>Deposit <strong>{formatUnits(binding.deposit_units)}</strong></span>
+          <span>Status <strong>{active ? "ready" : "closed"}</strong></span>
+        </div>
+      )}
+
+      {active && !close && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await agentWalletApi.prepareFastPayChannelClose(overview.wallet_id);
+              await finish("Review the final signed balance and close network fee.");
+            })
+          }
+        >
+          Review channel close
+        </button>
+      )}
+
+      {close && (
+        <>
+          <div className="agent-stats-row">
+            <span>Current Agent share <strong>{formatUnits(close.original_agent_units)}</strong></span>
+            <span>Final Agent share <strong>{formatUnits(close.final_agent_units)}</strong></span>
+            <span>Network fee <strong>{formatUnits(close.network_fee_units)}</strong></span>
+            <span>Wallet fee <strong>{formatUnits(close.wallet_fee_units)}</strong></span>
+            <span>Status <strong>{close.phase.replace(/_/g, " ")}</strong></span>
+          </div>
+          {close.phase === "prepared" ? (
+            <button
+              type="button"
+              className="agent-primary"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  await agentWalletApi.confirmFastPayChannelClose(
+                    overview.wallet_id,
+                    close.operation_id,
+                    close.review_commitment,
+                  );
+                  await finish("Agent channel close advanced safely.");
+                })
+              }
+            >
+              Confirm exact close
+            </button>
+          ) : close.phase !== "confirmed" ? (
+            <button
+              type="button"
+              className="agent-primary"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  await agentWalletApi.recoverFastPayChannelClose(overview.wallet_id);
+                  await finish("Agent close recovery checked the exact saved signature and ID.");
+                })
+              }
+            >
+              Check or recover close
+            </button>
+          ) : (
+            <p>The Agent Fast Pay channel is closed. Its signed history remains available.</p>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 

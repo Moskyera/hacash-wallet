@@ -1,8 +1,3 @@
-#[cfg(all(feature = "agent-wallet-testnet-pilot", not(target_os = "windows")))]
-compile_error!(
-    "The AI Agent Wallet testnet pilot is Windows-only until the Linux glib 0.18.5 blocker is resolved. Build Linux without agent-wallet-testnet-pilot."
-);
-
 mod platform;
 
 use hacash_wallet_core::WalletService;
@@ -124,12 +119,28 @@ pub fn run() {
             wallet_tauri_common::agent_commands::agent_wallet_unlock,
             wallet_tauri_common::agent_commands::agent_wallet_lock,
             wallet_tauri_common::agent_commands::agent_wallet_overview,
+            wallet_tauri_common::agent_commands::agent_wallet_prepare_fast_pay_channel,
+            wallet_tauri_common::agent_commands::agent_wallet_confirm_fast_pay_channel_setup,
+            wallet_tauri_common::agent_commands::agent_wallet_recover_fast_pay_channel_setup,
+            wallet_tauri_common::agent_commands::agent_wallet_prepare_fast_pay_channel_close,
+            wallet_tauri_common::agent_commands::agent_wallet_confirm_fast_pay_channel_close,
+            wallet_tauri_common::agent_commands::agent_wallet_recover_fast_pay_channel_close,
             wallet_tauri_common::agent_commands::agent_wallet_enable_payments,
             wallet_tauri_common::agent_commands::agent_wallet_emergency_stop,
             wallet_tauri_common::agent_commands::agent_wallet_list_agents,
             wallet_tauri_common::agent_commands::agent_wallet_get_policy,
             wallet_tauri_common::agent_commands::agent_wallet_update_policy,
             wallet_tauri_common::agent_commands::agent_wallet_list_activity,
+            wallet_tauri_common::agent_commands::agent_wallet_list_fast_pay_activity,
+            wallet_tauri_common::agent_commands::agent_wallet_execute_approved_fast_pay,
+            wallet_tauri_common::agent_commands::agent_wallet_reconcile_fast_pay,
+            wallet_tauri_common::agent_commands::agent_wallet_retry_fast_pay_exact,
+            wallet_tauri_common::agent_commands::agent_wallet_bind_hvm_channel,
+            wallet_tauri_common::agent_commands::agent_wallet_bind_hvm_registry,
+            wallet_tauri_common::agent_commands::agent_wallet_list_hvm_activity,
+            wallet_tauri_common::agent_commands::agent_wallet_execute_approved_hvm,
+            wallet_tauri_common::agent_commands::agent_wallet_reconcile_hvm,
+            wallet_tauri_common::agent_commands::agent_wallet_retry_hvm_exact,
             wallet_tauri_common::agent_commands::agent_wallet_list_pending_approvals,
             wallet_tauri_common::agent_commands::agent_wallet_revoke_agent,
             wallet_tauri_common::agent_commands::agent_wallet_pending_approval,

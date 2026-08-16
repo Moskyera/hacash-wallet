@@ -1,10 +1,10 @@
-//! Wallet Hub API v4. mirrors `hacash-wallet-core::l2_hub` client types.
+//! Wallet Hub API v7. mirrors `hacash-wallet-core::l2_hub` client types.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{HubError, HubResult};
 
-pub const HUB_API_VERSION: u32 = 4;
+pub const HUB_API_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubHealth {
@@ -27,12 +27,15 @@ pub struct HubHealth {
     /// True only after unilateral dispute and final-claim recovery is proven on this network.
     #[serde(default)]
     pub l1_dispute_path_ready: bool,
-    /// True only for an authenticated Official ChannelPay session, not Wallet Hub API v4.
+    /// True only for an authenticated Official ChannelPay session, not Wallet Hub API v7.
     #[serde(default)]
     pub official_channelpay_ready: bool,
     /// Aggregate operator assertion. Wallets still verify every prerequisite independently.
     #[serde(default)]
     pub production_mainnet_ready: bool,
+    /// Explicit bounded pilot that depends on Hub availability and configured caps.
+    #[serde(default)]
+    pub trusted_bounded_pilot_ready: bool,
     /// Truthful transport/deployment label for UI and diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_profile: Option<String>,

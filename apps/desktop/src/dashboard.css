@@ -92,7 +92,7 @@
 }
 
 .desktop-topbar-button:hover {
-  border-color: var(--accent);
+  border-color: rgb(245 166 35 / 40%);
   background: rgb(245 166 35 / 8%);
 }
 
@@ -891,7 +891,7 @@
 }
 
 .workspace-actions button:hover {
-  border-color: var(--accent);
+  border-color: rgb(245 166 35 / 40%);
   color: var(--accent);
 }
 
