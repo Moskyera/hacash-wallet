@@ -173,6 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(not(windows))]
         {
+            let _ = identity_path;
             return Err("--migrate-dpapi-identity-v3 is available only on Windows".into());
         }
     }
@@ -198,6 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(not(windows))]
         {
+            let _ = identity_path;
             return Err("--create-dpapi-identity is available only on Windows".into());
         }
     }
@@ -221,6 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(not(windows))]
         {
+            let _ = identity_path;
             return Err("--identity-dpapi-file is available only on Windows".into());
         }
     } else {

@@ -461,15 +461,10 @@ async fn run_online(
     node: NodeClient,
     capabilities: l2_fast_pay_hub::node::FullnodeCapabilitiesV1,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(windows)]
     match &args.command {
         Command::Status => {
-            let left_address = l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
-                &args.left_identity_dpapi_file,
-            )?;
-            let hub_address = l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
-                &args.hub_identity_dpapi_file,
-            )?;
+            let left_address = load_dpapi_public_identity(&args.left_identity_dpapi_file)?;
+            let hub_address = load_dpapi_public_identity(&args.hub_identity_dpapi_file)?;
             require_distinct_public_identities(&left_address, &hub_address)?;
             println!("HPAY SHARED HVM REGISTRY LOCAL PILOT");
             println!("Network: private chain 7 (never mainnet)");
@@ -493,12 +488,8 @@ async fn run_online(
         }
         Command::Inspect => {
             let (left_address, left_state_key) =
-                l2_fast_pay_hub::windows_identity::load_dpapi_hub_state_key(
-                    &args.left_identity_dpapi_file,
-                )?;
-            let hub_address = l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
-                &args.hub_identity_dpapi_file,
-            )?;
+                load_dpapi_state_key_identity(&args.left_identity_dpapi_file)?;
+            let hub_address = load_dpapi_public_identity(&args.hub_identity_dpapi_file)?;
             require_distinct_public_identities(&left_address, &hub_address)?;
             let store = HvmRegistryPilotStateStore::open(
                 &args.state_file,
@@ -520,12 +511,8 @@ async fn run_online(
                 return Err("lifecycle reconciliation confirmations must be positive".into());
             }
             let (left_address, left_state_key) =
-                l2_fast_pay_hub::windows_identity::load_dpapi_hub_state_key(
-                    &args.left_identity_dpapi_file,
-                )?;
-            let hub_address = l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
-                &args.hub_identity_dpapi_file,
-            )?;
+                load_dpapi_state_key_identity(&args.left_identity_dpapi_file)?;
+            let hub_address = load_dpapi_public_identity(&args.hub_identity_dpapi_file)?;
             require_distinct_public_identities(&left_address, &hub_address)?;
             let mut store = HvmRegistryPilotStateStore::open(
                 &args.state_file,
@@ -550,18 +537,10 @@ async fn run_online(
         _ => {}
     }
 
-    #[cfg(windows)]
     let (public_left_address, public_left_state_key) =
-        l2_fast_pay_hub::windows_identity::load_dpapi_hub_state_key(
-            &args.left_identity_dpapi_file,
-        )?;
-    #[cfg(windows)]
-    let public_hub_address =
-        l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(&args.hub_identity_dpapi_file)?;
-    #[cfg(windows)]
+        load_dpapi_state_key_identity(&args.left_identity_dpapi_file)?;
+    let public_hub_address = load_dpapi_public_identity(&args.hub_identity_dpapi_file)?;
     require_distinct_public_identities(&public_left_address, &public_hub_address)?;
-    #[cfg(not(windows))]
-    return Err("the registry Local Pilot requires Windows DPAPI".into());
 
     let mut store = HvmRegistryPilotStateStore::open(
         &args.state_file,
@@ -640,7 +619,6 @@ async fn run_online(
             .await?;
     }
 
-    #[cfg(windows)]
     let identities = load_identities(&args)?;
     if identities.left_address != public_left_address
         || identities.hub_address != public_hub_address
@@ -1110,7 +1088,13 @@ async fn run_registry_watch_action(
     }
 }
 
-#[cfg(windows)]
+/// The registry Local Pilot signs real value, so its identities exist only
+/// inside a Windows DPAPI v3 identity directory. Every non-Windows build
+/// refuses here instead of reaching for a weaker key source; there is
+/// deliberately no file, environment or plaintext fallback.
+#[cfg(not(windows))]
+const DPAPI_REQUIRED: &str = "the registry Local Pilot requires Windows DPAPI";
+
 struct Identities {
     left_address: String,
     left_secret: zeroize::Zeroizing<String>,
@@ -1147,6 +1131,43 @@ fn load_identities(args: &Args) -> Result<Identities, Box<dyn std::error::Error>
         hub_journal_key,
         hub_state_key,
     })
+}
+
+#[cfg(not(windows))]
+fn load_identities(_args: &Args) -> Result<Identities, Box<dyn std::error::Error>> {
+    Err(DPAPI_REQUIRED.into())
+}
+
+#[cfg(windows)]
+fn load_dpapi_public_identity(
+    path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
+        path,
+    )?)
+}
+
+#[cfg(not(windows))]
+fn load_dpapi_public_identity(
+    _path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Err(DPAPI_REQUIRED.into())
+}
+
+#[cfg(windows)]
+fn load_dpapi_state_key_identity(
+    path: &std::path::Path,
+) -> Result<(String, zeroize::Zeroizing<String>), Box<dyn std::error::Error>> {
+    Ok(l2_fast_pay_hub::windows_identity::load_dpapi_hub_state_key(
+        path,
+    )?)
+}
+
+#[cfg(not(windows))]
+fn load_dpapi_state_key_identity(
+    _path: &std::path::Path,
+) -> Result<(String, zeroize::Zeroizing<String>), Box<dyn std::error::Error>> {
+    Err(DPAPI_REQUIRED.into())
 }
 
 fn require_distinct_public_identities(

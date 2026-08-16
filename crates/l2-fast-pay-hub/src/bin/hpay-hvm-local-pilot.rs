@@ -172,15 +172,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let capabilities = node.capabilities().await?;
     network.validate_capabilities(&capabilities)?;
 
-    #[cfg(windows)]
     match &args.command {
         Command::Status => {
-            let left_address = l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
-                &args.left_identity_dpapi_file,
-            )?;
-            let hub_address = l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
-                &args.hub_identity_dpapi_file,
-            )?;
+            let left_address = load_dpapi_public_identity(&args.left_identity_dpapi_file)?;
+            let hub_address = load_dpapi_public_identity(&args.hub_identity_dpapi_file)?;
             require_distinct_public_identities(&left_address, &hub_address)?;
             let balance_zhu = node.query_balance_zhu(&left_address).await?;
             let hub_balance_zhu = node.query_balance_zhu(&hub_address).await?;
@@ -206,12 +201,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("durable HVM pilot state does not exist".into());
             }
             let (left_address, left_state_key) =
-                l2_fast_pay_hub::windows_identity::load_dpapi_hub_state_key(
-                    &args.left_identity_dpapi_file,
-                )?;
-            let hub_address = l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
-                &args.hub_identity_dpapi_file,
-            )?;
+                load_dpapi_state_key_identity(&args.left_identity_dpapi_file)?;
+            let hub_address = load_dpapi_public_identity(&args.hub_identity_dpapi_file)?;
             require_distinct_public_identities(&left_address, &hub_address)?;
             let store = HvmPilotStateStore::open(
                 state_file,
@@ -227,8 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     }
 
-    #[cfg(windows)]
-    let (
+    let Identities {
         left_address,
         left_secret,
         left_state_key,
@@ -236,38 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         hub_secret,
         hub_journal_key,
         hub_state_key,
-    ) = {
-        let (left_address, left_secret, _, left_state_key) =
-            l2_fast_pay_hub::windows_identity::load_dpapi_hub_identity(
-                &args.left_identity_dpapi_file,
-            )?
-            .into_parts();
-        let (hub_address, hub_secret, hub_journal_key, hub_state_key) =
-            l2_fast_pay_hub::windows_identity::load_dpapi_hub_identity(
-                &args.hub_identity_dpapi_file,
-            )?
-            .into_parts();
-        let left = Account::create_by(left_secret.as_str())?;
-        let hub = Account::create_by(hub_secret.as_str())?;
-        if left.readable() != left_address
-            || hub.readable() != hub_address
-            || left_address == hub_address
-            || left_secret.as_str() == hub_secret.as_str()
-        {
-            return Err("Local Pilot identities are corrupt, mismatched or reused".into());
-        }
-        (
-            left_address,
-            left_secret,
-            left_state_key,
-            hub_address,
-            hub_secret,
-            hub_journal_key,
-            hub_state_key,
-        )
-    };
-    #[cfg(not(windows))]
-    return Err("the current Local Pilot identity tool requires Windows DPAPI".into());
+    } = load_identities(&args)?;
 
     match args.command {
         Command::Status | Command::Inspect => {
@@ -1041,6 +1000,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// The Local Pilot signs real value, so its identities exist only inside a
+/// Windows DPAPI v3 identity directory. Every non-Windows build refuses here
+/// instead of reaching for a weaker key source; there is deliberately no file,
+/// environment or plaintext fallback.
+#[cfg(not(windows))]
+const DPAPI_REQUIRED: &str = "the current Local Pilot identity tool requires Windows DPAPI";
+
+struct Identities {
+    left_address: String,
+    left_secret: zeroize::Zeroizing<String>,
+    left_state_key: zeroize::Zeroizing<String>,
+    hub_address: String,
+    hub_secret: zeroize::Zeroizing<String>,
+    hub_journal_key: zeroize::Zeroizing<String>,
+    hub_state_key: zeroize::Zeroizing<String>,
+}
+
+#[cfg(windows)]
+fn load_identities(args: &Args) -> Result<Identities, Box<dyn std::error::Error>> {
+    let (left_address, left_secret, _, left_state_key) =
+        l2_fast_pay_hub::windows_identity::load_dpapi_hub_identity(&args.left_identity_dpapi_file)?
+            .into_parts();
+    let (hub_address, hub_secret, hub_journal_key, hub_state_key) =
+        l2_fast_pay_hub::windows_identity::load_dpapi_hub_identity(&args.hub_identity_dpapi_file)?
+            .into_parts();
+    let left = Account::create_by(left_secret.as_str())?;
+    let hub = Account::create_by(hub_secret.as_str())?;
+    if left.readable() != left_address
+        || hub.readable() != hub_address
+        || left_address == hub_address
+        || left_secret.as_str() == hub_secret.as_str()
+    {
+        return Err("Local Pilot identities are corrupt, mismatched or reused".into());
+    }
+    Ok(Identities {
+        left_address,
+        left_secret,
+        left_state_key,
+        hub_address,
+        hub_secret,
+        hub_journal_key,
+        hub_state_key,
+    })
+}
+
+#[cfg(not(windows))]
+fn load_identities(_args: &Args) -> Result<Identities, Box<dyn std::error::Error>> {
+    Err(DPAPI_REQUIRED.into())
+}
+
+#[cfg(windows)]
+fn load_dpapi_public_identity(
+    path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(l2_fast_pay_hub::windows_identity::load_dpapi_hub_public(
+        path,
+    )?)
+}
+
+#[cfg(not(windows))]
+fn load_dpapi_public_identity(
+    _path: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Err(DPAPI_REQUIRED.into())
+}
+
+#[cfg(windows)]
+fn load_dpapi_state_key_identity(
+    path: &std::path::Path,
+) -> Result<(String, zeroize::Zeroizing<String>), Box<dyn std::error::Error>> {
+    Ok(l2_fast_pay_hub::windows_identity::load_dpapi_hub_state_key(
+        path,
+    )?)
+}
+
+#[cfg(not(windows))]
+fn load_dpapi_state_key_identity(
+    _path: &std::path::Path,
+) -> Result<(String, zeroize::Zeroizing<String>), Box<dyn std::error::Error>> {
+    Err(DPAPI_REQUIRED.into())
 }
 
 fn require_distinct_public_identities(
