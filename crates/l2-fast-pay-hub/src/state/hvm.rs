@@ -3,9 +3,9 @@ use std::sync::atomic::Ordering;
 use crate::error::{HubError, HubResult};
 use crate::hvm_channel::{HvmChannelBillV1, HvmChannelRecoveryBundleV1};
 use crate::hvm_ledger::{
-    HVM_CHANNEL_STATUS_SCHEMA, HVM_PAYMENT_STATUS_SCHEMA, HvmBillProgressionStatus,
-    HvmChannelStatusV1, HvmPaymentRequestV1, HvmPaymentStatusV1, PersistedHvmBillProgression,
-    PersistedHvmChannelLedger,
+    HVM_CHANNEL_STATUS_SCHEMA, HVM_COSIGNED_BILL_SCHEMA, HVM_PAYMENT_STATUS_SCHEMA,
+    HvmBillProgressionStatus, HvmChannelStatusV1, HvmCosignedBillV1, HvmPaymentRequestV1,
+    HvmPaymentStatusV1, PersistedHvmBillProgression, PersistedHvmChannelLedger,
 };
 use crate::journal::{JournalEvent, JournalHead, JournalOperationType, JournalPhase};
 use crate::storage::{
@@ -168,7 +168,7 @@ impl HubState {
         &self,
         request: HvmPaymentRequestV1,
         now_unix: u64,
-    ) -> HubResult<HvmChannelBillV1> {
+    ) -> HubResult<HvmCosignedBillV1> {
         self.ensure_settlement_ready()?;
         if crate::readiness::is_mainnet_pilot_profile(&self.deployment_profile) {
             return Err(HubError::Admission(
@@ -235,9 +235,17 @@ impl HubState {
             match existing_hvm_progression_disposition(&existing.status) {
                 ExistingHvmProgressionDisposition::ContinueUnsigned => {}
                 ExistingHvmProgressionDisposition::ReturnDurableSignature => {
-                    return existing.fully_signed_bill.clone().ok_or_else(|| {
+                    // The retry answers with the durable receipts too. A bare
+                    // bill on retry is, to the counterparty, indistinguishable
+                    // from a Hub that dropped its witnesses.
+                    let bill = existing.fully_signed_bill.clone().ok_or_else(|| {
                         HubError::State("completed HVM operation lost its signed bill".into())
-                    });
+                    })?;
+                    return self.hvm_cosigned_bill(
+                        bill,
+                        existing.anchor_receipts.clone(),
+                        &request,
+                    );
                 }
                 ExistingHvmProgressionDisposition::RequireReconciliation => {
                     return Err(HubError::State(
@@ -269,6 +277,7 @@ impl HubState {
                 request_commitment: request_commitment.clone(),
                 previous_bill: previous.clone(),
                 fully_signed_bill: None,
+                anchor_receipts: Vec::new(),
                 status: HvmBillProgressionStatus::UserProposalPersisted,
                 observed_height_before_signing: Some(first_snapshot.observed_height),
                 updated_unix: now_unix,
@@ -360,11 +369,46 @@ impl HubState {
             .ok_or_else(|| HubError::State("Hub signer is unavailable".into()))?;
         let mut signed_bill = request.proposed_bill.clone();
         signer.sign_hvm_bill(binding, &mut signed_bill)?;
+        // Collected from the reservation this exact signature was made under,
+        // and made durable in the same write as the signed bill. They cannot be
+        // re-derived later: the receipt binds the payer-signed, Hub-unsigned
+        // commitment, which `signed_bill` has just stopped being.
+        let anchor_receipts: Vec<_> = anchor_receipt
+            .iter()
+            .map(|verified| verified.signed.clone())
+            .collect();
         progression.status = HvmBillProgressionStatus::FullySigned;
         progression.fully_signed_bill = Some(signed_bill.clone());
+        progression.anchor_receipts = anchor_receipts.clone();
         progression.updated_unix = now_unix;
         self.persist_hvm_progression(progression, JournalPhase::HvmPaymentFullySigned, now_unix)?;
-        Ok(signed_bill)
+        self.hvm_cosigned_bill(signed_bill, anchor_receipts, &request)
+    }
+
+    /// Assemble the response, and refuse to produce one an anchored Hub must
+    /// not serve. The single constructor of [`HvmCosignedBillV1`] in this
+    /// module, so no caller can obtain a co-signed bill that skipped the check.
+    fn hvm_cosigned_bill(
+        &self,
+        bill: HvmChannelBillV1,
+        anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
+        request: &HvmPaymentRequestV1,
+    ) -> HubResult<HvmCosignedBillV1> {
+        super::rollback_anchor::require_receipts_accompany_bill(
+            self.rollback_anchor_configured(),
+            &anchor_receipts,
+            // The payer-signed, Hub-unsigned commitment: the one the receipt
+            // binds and the one the wallet holds in its own request.
+            &request.proposed_bill.commitment()?,
+            request.proposed_bill.serial,
+            &request.binding_commitment,
+            self.hub_address.trim(),
+        )?;
+        Ok(HvmCosignedBillV1 {
+            schema: HVM_COSIGNED_BILL_SCHEMA.into(),
+            bill,
+            anchor_receipts,
+        })
     }
 
     fn persist_hvm_progression(
@@ -404,6 +448,10 @@ impl HubState {
                 ));
             }
             ledger.latest_fully_signed_bill = signed;
+            // The head and the receipts that authorised it move in one write.
+            ledger
+                .latest_anchor_receipts
+                .clone_from(&progression.anchor_receipts);
             ledger.updated_unix = now_unix;
         }
         next_state
@@ -509,6 +557,7 @@ impl HubState {
             minimum_required_live_blocks: activation.minimum_required_live_blocks,
             minimum_required_recover_blocks: activation.minimum_required_recover_blocks,
             latest_fully_signed_bill: ledger.latest_fully_signed_bill.clone(),
+            latest_anchor_receipts: ledger.latest_anchor_receipts.clone(),
             activated_unix: activation.activated_unix,
             updated_unix: ledger.updated_unix,
         })
@@ -554,6 +603,7 @@ impl HubState {
             status: progression.status.as_str().to_owned(),
             request: progression.request.clone(),
             fully_signed_bill: progression.fully_signed_bill.clone(),
+            anchor_receipts: progression.anchor_receipts.clone(),
             updated_unix: progression.updated_unix,
             recovery_required: matches!(
                 progression.status,
@@ -649,6 +699,9 @@ fn insert_hvm_activation(
         PersistedHvmChannelLedger {
             binding_commitment: activation.binding_commitment,
             latest_fully_signed_bill: activation.recovery_bundle.initial_recovery_bill,
+            // The opening bill is the on-chain recovery bill, which no witness
+            // receipted: it predates the channel's first anchored payment.
+            latest_anchor_receipts: Vec::new(),
             updated_unix: activation.activated_unix,
         },
     );

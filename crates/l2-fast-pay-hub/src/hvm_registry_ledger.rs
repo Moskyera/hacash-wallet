@@ -16,8 +16,45 @@ use crate::l1_channel::L1ChannelNetworkBinding;
 pub const HVM_REGISTRY_PAYMENT_REQUEST_SCHEMA: &str = "hpay-hvm-registry-payment-request/2";
 pub const HVM_REGISTRY_PAYMENT_STATUS_SCHEMA: &str = "hpay-hvm-registry-payment-status/2";
 pub const HVM_REGISTRY_CHANNEL_STATUS_SCHEMA: &str = "hpay-hvm-registry-channel-status/2";
+pub const HVM_REGISTRY_COSIGNED_BILL_SCHEMA: &str = "hpay-hvm-registry-cosigned-bill/2";
 pub const HVM_REGISTRY_PAYMENT_MAX_LIFETIME_SECONDS: u64 = 5 * 60;
 const HVM_REGISTRY_PAYER_AUTHORIZATION_DOMAIN: &[u8] = b"HPAY/HVM-REGISTRY/PAYER-AUTHORIZATION/V1";
+
+/// What the registry co-sign route answers with: the bill, and the witness
+/// receipts that authorised it.
+///
+/// # Why the bill is no longer served bare
+///
+/// The external rollback anchor is circular on its own: the Hub chooses which
+/// witnesses are asked, and that choice lives in the Hub's own process
+/// arguments and state file - inside the exact failure domain the anchor
+/// guards. The counterparty closes that circle, and it can only do so if it can
+/// see *which* witness signed for each bill. So the receipt rides with the
+/// bill, in the same response, verbatim.
+///
+/// Verbatim is deliberate. There is no summary here, no witness id list and no
+/// digest: a summary would be a second place for the Hub to lie, and
+/// [`SignedHubWitnessReceiptV1`] already binds the bill commitment, the serial,
+/// the channel, the Hub identity and the witness's counter, under the witness's
+/// own signature. The counterparty recovers the signing address from that
+/// signature rather than reading the `witness_id` string, which the Hub types.
+///
+/// `anchor_receipts` defaults to empty, and empty is never "skip the check" - a
+/// counterparty treats an absent field and an empty list identically, as *every
+/// remembered witness dropped*, which is the loudest prompt in the system. The
+/// Hub cannot reset a counterparty's ratchet by omission.
+///
+/// An older Hub still answering with a bare bill fails to deserialise into this
+/// envelope, which fails closed. That is the correct direction and it is why
+/// there is no version negotiation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HvmRegistryCosignedBillV2 {
+    pub schema: String,
+    pub bill: HvmRegistryBillV2,
+    #[serde(default)]
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -304,6 +341,20 @@ pub struct HvmRegistryChannelStatusV2 {
     pub minimum_required_live_blocks: u64,
     pub minimum_required_recover_blocks: u64,
     pub latest_fully_signed_bill: HvmRegistryBillV2,
+    /// The witness receipts that authorised `latest_fully_signed_bill`.
+    ///
+    /// This exists for one window and one window only: a wallet that died
+    /// between the Hub signing and its own persist. Without it that wallet can
+    /// never accept this head again - the head it is offered carries no
+    /// receipts, so its overlap ratchet reads every remembered witness as
+    /// dropped - and the channel is stuck with no honest way out. Same type,
+    /// verbatim, so the same binding checks run on read as on the payment
+    /// response.
+    ///
+    /// Empty on an unanchored Hub, and skipped when empty so an unanchored
+    /// Hub's status document is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub activated_unix: u64,
     pub updated_unix: u64,
 }
@@ -317,6 +368,10 @@ pub struct HvmRegistryPaymentStatusV2 {
     pub status: String,
     pub request: HvmRegistryPaymentRequestV2,
     pub fully_signed_bill: Option<HvmRegistryBillV2>,
+    /// The receipts for `fully_signed_bill`, for the same crash window as
+    /// [`HvmRegistryChannelStatusV2::latest_anchor_receipts`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub updated_unix: u64,
     pub recovery_required: bool,
 }
@@ -326,6 +381,11 @@ pub struct HvmRegistryPaymentStatusV2 {
 pub(crate) struct PersistedHvmRegistryLedger {
     pub binding_commitment: String,
     pub latest_fully_signed_bill: HvmRegistryBillV2,
+    /// Absent on every ledger written before the anchor carried its receipts
+    /// onward, and skipped when empty, so the state commitment of an
+    /// unanchored Hub is byte-identical to what it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub updated_unix: u64,
 }
 
@@ -336,6 +396,8 @@ pub(crate) struct PersistedHvmRegistryProgression {
     pub request_commitment: String,
     pub previous_bill: HvmRegistryBillV2,
     pub fully_signed_bill: Option<HvmRegistryBillV2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub status: HvmBillProgressionStatus,
     pub observed_height_before_signing: Option<u64>,
     pub updated_unix: u64,
@@ -535,6 +597,7 @@ mod tests {
             request,
             previous_bill: previous.clone(),
             fully_signed_bill: None,
+            anchor_receipts: Vec::new(),
             status: HvmBillProgressionStatus::UserProposalPersisted,
             observed_height_before_signing: Some(11),
             updated_unix: 10,
@@ -543,6 +606,7 @@ mod tests {
         let mut ledger = PersistedHvmRegistryLedger {
             binding_commitment: binding.commitment().unwrap(),
             latest_fully_signed_bill: previous.clone(),
+            latest_anchor_receipts: Vec::new(),
             updated_unix: 10,
         };
         assert!(validate_registry_progression(&progression, &binding, &ledger).is_ok());

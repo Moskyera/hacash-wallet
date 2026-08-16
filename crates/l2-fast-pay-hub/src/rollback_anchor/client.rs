@@ -89,10 +89,25 @@ pub struct VerifiedWitnessStatus {
 
 /// A signed reservation receipt the Hub has verified against the exact request
 /// it durably persisted before sending.
+///
+/// The **signed** form is kept, not the bare receipt. The Hub is not the only
+/// party that has to be convinced by this receipt: it travels on with the
+/// co-signed bill to the counterparty wallet, which recovers the signing
+/// address from the signature and remembers it. Discarding the signature here
+/// and keeping only `HubWitnessReceiptV1` would leave the wallet with a witness
+/// identity the Hub merely *typed* - `witness_id` is a plain `String` the Hub
+/// fills in - and an overlap rule enforced on a string the Hub controls is
+/// defeated in one line.
 #[derive(Debug, Clone)]
 pub struct VerifiedAnchorReceipt {
-    pub receipt: super::protocol::HubWitnessReceiptV1,
+    pub signed: SignedHubWitnessReceiptV1,
     pub verified_unix: u64,
+}
+
+impl VerifiedAnchorReceipt {
+    pub fn receipt(&self) -> &super::protocol::HubWitnessReceiptV1 {
+        &self.signed.receipt
+    }
 }
 
 /// What the Hub durably knows about its witness. This is the Hub's half of the
@@ -784,9 +799,17 @@ impl RollbackAnchorClient {
             )));
         }
         Ok(VerifiedAnchorReceipt {
-            receipt: receipt.clone(),
+            signed: signed.clone(),
             verified_unix: now_unix,
         })
+    }
+
+    /// The pinned online key every receipt, refusal and status must verify
+    /// against. Exposed so a receipt reloaded from this Hub's own durable state
+    /// can be re-verified before it is handed on, rather than trusted because
+    /// it came off the local disk.
+    pub fn witness_receipt_address(&self) -> &str {
+        &self.config.witness_receipt_address
     }
 
     /// Assemble the published evidence from one live probe.

@@ -10,6 +10,26 @@ use crate::hvm_channel::{HVM_CHANNEL_BILL_SCHEMA, HvmChannelBillV1, HvmChannelBi
 pub const HVM_PAYMENT_REQUEST_SCHEMA: &str = "hpay-hvm-payment-request/1";
 pub const HVM_PAYMENT_STATUS_SCHEMA: &str = "hpay-hvm-payment-status/1";
 pub const HVM_CHANNEL_STATUS_SCHEMA: &str = "hpay-hvm-channel-status/1";
+pub const HVM_COSIGNED_BILL_SCHEMA: &str = "hpay-hvm-cosigned-bill/1";
+
+/// What the per-channel V1 co-sign route answers with: the bill, and the
+/// witness receipts that authorised it.
+///
+/// The reasoning is the same as for the registry profile - see
+/// [`HvmRegistryCosignedBillV2`] - and it applies here for the same reason the
+/// anchor covers this path at all: this profile reaches the signing key exactly
+/// as the registry profile does, so a design that carried receipts only on V2
+/// would leave V1 fully exposed.
+///
+/// [`HvmRegistryCosignedBillV2`]: crate::hvm_registry_ledger::HvmRegistryCosignedBillV2
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HvmCosignedBillV1 {
+    pub schema: String,
+    pub bill: HvmChannelBillV1,
+    #[serde(default)]
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +40,10 @@ pub struct HvmPaymentStatusV1 {
     pub status: String,
     pub request: HvmPaymentRequestV1,
     pub fully_signed_bill: Option<HvmChannelBillV1>,
+    /// The receipts for `fully_signed_bill`, for the crash window between the
+    /// Hub signing and the wallet persisting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub updated_unix: u64,
     pub recovery_required: bool,
 }
@@ -39,6 +63,11 @@ pub struct HvmChannelStatusV1 {
     pub minimum_required_live_blocks: u64,
     pub minimum_required_recover_blocks: u64,
     pub latest_fully_signed_bill: HvmChannelBillV1,
+    /// The witness receipts that authorised `latest_fully_signed_bill`, for
+    /// the crash window between the Hub signing and the wallet persisting.
+    /// Empty and skipped on an unanchored Hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub activated_unix: u64,
     pub updated_unix: u64,
 }
@@ -227,6 +256,11 @@ impl HvmBillProgressionStatus {
 pub(crate) struct PersistedHvmChannelLedger {
     pub binding_commitment: String,
     pub latest_fully_signed_bill: HvmChannelBillV1,
+    /// Absent on every ledger written before the anchor carried its receipts
+    /// onward, and skipped when empty, so the state commitment of an
+    /// unanchored Hub is byte-identical to what it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latest_anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub updated_unix: u64,
 }
 
@@ -237,6 +271,8 @@ pub(crate) struct PersistedHvmBillProgression {
     pub request_commitment: String,
     pub previous_bill: HvmChannelBillV1,
     pub fully_signed_bill: Option<HvmChannelBillV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
     pub status: HvmBillProgressionStatus,
     pub observed_height_before_signing: Option<u64>,
     pub updated_unix: u64,

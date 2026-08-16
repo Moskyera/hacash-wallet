@@ -37,7 +37,7 @@ use crate::rollback_anchor::protocol::{
 };
 use crate::rollback_anchor::{
     HubAnchorRequestV1, RollbackAnchorClient, RollbackAnchorConfig, RollbackAnchorEvidenceV1,
-    SignedHubAnchorRequestV1, VerifiedAnchorReceipt,
+    SignedHubAnchorRequestV1, SignedHubWitnessReceiptV1, VerifiedAnchorReceipt,
 };
 use crate::storage::{
     PersistedRollbackAnchorReservation, PersistedRollbackAnchorState, state_commitment,
@@ -505,11 +505,30 @@ impl HubState {
                          serial and this is not it"
                     )));
                 }
-                if let Some(receipt) = existing.receipt.as_ref()
-                    && receipt.receipt_expires_at > now_unix
+                // The replay must reproduce the *signed* receipt, because the
+                // receipt travels on to the counterparty wallet, which has no
+                // reason to believe an unsigned one. A reservation persisted
+                // before the signature was kept therefore falls through and
+                // re-reserves with the witness rather than serving a bill whose
+                // anchor evidence cannot be checked by its recipient. The
+                // witness replays its own recorded receipt for a request
+                // commitment it has already answered, so this costs a round
+                // trip and moves nothing.
+                if let (Some(receipt), Some(signature_hex)) = (
+                    existing.receipt.as_ref(),
+                    existing.receipt_signature_hex.as_ref(),
+                ) && receipt.receipt_expires_at > now_unix
                 {
-                    return Ok(Some(VerifiedAnchorReceipt {
+                    let signed = SignedHubWitnessReceiptV1 {
                         receipt: receipt.clone(),
+                        signature_hex: signature_hex.clone(),
+                    };
+                    // Re-verified rather than trusted for having come off this
+                    // Hub's own disk. The disk is the thing this whole
+                    // subsystem assumes may have been tampered with.
+                    signed.verify_against_pinned_key(client.witness_receipt_address())?;
+                    return Ok(Some(VerifiedAnchorReceipt {
+                        signed,
                         verified_unix: now_unix,
                     }));
                 }
@@ -559,6 +578,7 @@ impl HubState {
                     request: request.clone(),
                     request_commitment: request_commitment.clone(),
                     receipt: None,
+                    receipt_signature_hex: None,
                     updated_unix: now_unix,
                 },
             );
@@ -585,7 +605,8 @@ impl HubState {
                 return Err(error);
             }
         };
-        let receipt = verified.receipt.clone();
+        let receipt = verified.receipt().clone();
+        let receipt_signature_hex = verified.signed.signature_hex.clone();
         let event = self.anchor_subject_event(
             &subject,
             JournalPhase::RollbackAnchorReceiptPersisted,
@@ -612,6 +633,7 @@ impl HubState {
                     )
                 })?;
             reservation.receipt = Some(receipt.clone());
+            reservation.receipt_signature_hex = Some(receipt_signature_hex.clone());
             reservation.updated_unix = now_unix;
             Ok(())
         })?;
@@ -789,19 +811,199 @@ pub(super) fn require_receipt_authorises_bill(
     let Some(verified) = receipt else {
         return Ok(());
     };
-    if verified.receipt.proposed_bill_commitment != bill_commitment
-        || verified.receipt.serial != serial
+    if verified.receipt().proposed_bill_commitment != bill_commitment
+        || verified.receipt().serial != serial
     {
         return Err(HubError::State(format!(
             "{REFUSAL_RECEIPT_NOT_BOUND}: the bill about to be signed is not the bill the witness \
              receipt authorises. Refusing to sign"
         )));
     }
-    if verified.receipt.receipt_expires_at <= now_unix {
+    if verified.receipt().receipt_expires_at <= now_unix {
         return Err(HubError::State(format!(
             "{REFUSAL_RECEIPT_NOT_BOUND}: the witness receipt expired before the signing key was \
              reached. Refusing to sign"
         )));
     }
     Ok(())
+}
+
+/// The most receipts one co-signed bill may carry.
+///
+/// The Hub's witness client is single-witness today, so the honest count is
+/// one; the cap exists so that a future multi-witness Hub, or a Hub trying to
+/// bury the one receipt that matters under a hundred it minted itself, cannot
+/// hand the counterparty an unbounded list to verify.
+pub const MAX_ANCHOR_RECEIPTS_PER_BILL: usize = 8;
+
+/// The last gate before a co-signed bill leaves this Hub.
+///
+/// # Why this exists at all
+///
+/// The counterparty's overlap rule is: every new bill must carry a receipt from
+/// at least one witness that receipted the counterparty's most recently
+/// accepted bill. That rule is what closes the circularity in the anchor - the
+/// Hub chooses its own witnesses, so every Hub-side check is asked of a party
+/// the Hub selected, but the counterparty's memory of *which* witnesses it has
+/// already seen is on a different machine under a different key, and the Hub
+/// cannot reach it.
+///
+/// None of which survives the receipt failing to leave the process. If an
+/// anchored Hub could serve a bill with an empty receipt list, the counterparty
+/// would read it as "this Hub shows me no anchor", which resets the ratchet to
+/// whatever the Hub declares next - the rollback becomes free, with no
+/// cryptography and no attack. An empty list and an absent field are the same
+/// value to the wallet precisely so that omission is loud; this check is what
+/// makes sure an honest Hub never produces that value by accident.
+///
+/// So: when an anchor is configured, a bill without its receipts is not served.
+/// This is not a bypass with the sign flipped - there is no flag, no degraded
+/// mode and no "skip if unavailable". A Hub whose witness is unreachable has
+/// already refused to sign upstream of here, so no bill exists to serve.
+pub(super) fn require_receipts_accompany_bill(
+    anchor_configured: bool,
+    receipts: &[SignedHubWitnessReceiptV1],
+    proposed_bill_commitment: &str,
+    serial: u64,
+    binding_commitment: &str,
+    hub_identity: &str,
+) -> HubResult<()> {
+    if anchor_configured && receipts.is_empty() {
+        return Err(HubError::State(format!(
+            "{REFUSAL_RECEIPT_NOT_BOUND}: this Hub has an external rollback anchor configured but \
+             produced no witness receipt to serve with the bill. A counterparty reads a bill with \
+             no receipts as a Hub with no anchor, which resets its witness ratchet. Refusing to \
+             serve the bill"
+        )));
+    }
+    if receipts.len() > MAX_ANCHOR_RECEIPTS_PER_BILL {
+        return Err(HubError::State(format!(
+            "{REFUSAL_RECEIPT_NOT_BOUND}: {} witness receipts for one bill exceeds the {} a \
+             counterparty is asked to verify",
+            receipts.len(),
+            MAX_ANCHOR_RECEIPTS_PER_BILL
+        )));
+    }
+    for signed in receipts {
+        let receipt = &signed.receipt;
+        receipt.validate_shape()?;
+        if receipt.proposed_bill_commitment != proposed_bill_commitment
+            || receipt.serial != serial
+            || receipt.binding_commitment != binding_commitment
+            || receipt.hub_identity != hub_identity
+        {
+            return Err(HubError::State(format!(
+                "{REFUSAL_RECEIPT_NOT_BOUND}: a witness receipt about to be served is not bound to \
+                 this bill, this channel and this Hub. Refusing to serve the bill"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod outbound_receipt_gate_tests {
+    use super::{MAX_ANCHOR_RECEIPTS_PER_BILL, require_receipts_accompany_bill};
+    use crate::rollback_anchor::{HubWitnessReceiptV1, SignedHubWitnessReceiptV1};
+
+    const BILL: &str = "aa";
+    const CHANNEL: &str = "bb";
+    const HUB: &str = "1HubIdentityForTest";
+
+    fn receipt() -> SignedHubWitnessReceiptV1 {
+        SignedHubWitnessReceiptV1 {
+            receipt: HubWitnessReceiptV1 {
+                receipt_version: 1,
+                request_id: "operation-1".into(),
+                request_commitment: "cc".repeat(32),
+                witness_id: "witness-1".into(),
+                witness_epoch: 1,
+                witness_instance_id: "dd".repeat(32),
+                witness_boot_id: "ee".repeat(32),
+                hub_identity: HUB.into(),
+                binding_commitment: CHANNEL.repeat(32),
+                serial: 2,
+                proposed_bill_commitment: BILL.repeat(32),
+                previous_counter_value: 0,
+                counter_value: 1,
+                accepted_at: 1_900_000_000,
+                receipt_expires_at: 1_900_000_060,
+            },
+            // The gate does not verify the signature: by the time it runs, the
+            // anchor client has already verified this receipt against the
+            // pinned witness key. What the gate checks is that the receipt
+            // exists and is bound to the bill about to be served.
+            signature_hex: String::new(),
+        }
+    }
+
+    fn check(anchored: bool, receipts: &[SignedHubWitnessReceiptV1]) -> Result<(), String> {
+        require_receipts_accompany_bill(
+            anchored,
+            receipts,
+            &BILL.repeat(32),
+            2,
+            &CHANNEL.repeat(32),
+            HUB,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// The rule this whole subsystem is for. An anchored Hub that served a
+    /// bill with no receipts would be read by the counterparty as a Hub with
+    /// no anchor, which resets its witness ratchet to whatever the Hub
+    /// declares next - the rollback becomes free, with no cryptography.
+    #[test]
+    fn an_anchored_hub_never_serves_a_bill_without_its_receipts() {
+        let error = check(true, &[]).expect_err("an anchored Hub must not serve a bare bill");
+        assert!(error.contains("rollback_anchor_receipt_not_bound_to_request"), "{error}");
+        assert!(error.contains("resets its witness ratchet"), "{error}");
+    }
+
+    /// And the honest case still passes, or the rule is just an outage.
+    #[test]
+    fn an_anchored_hub_serves_a_bill_bound_to_its_receipt() {
+        check(true, &[receipt()]).unwrap();
+    }
+
+    /// A Hub with no anchor configured has nothing to attach and says so by
+    /// attaching an empty list. That is the shipped default per ADR-001 and it
+    /// must not be turned into an outage.
+    #[test]
+    fn a_hub_with_no_anchor_serves_an_empty_list_rather_than_failing() {
+        check(false, &[]).unwrap();
+    }
+
+    /// Padding the set is how a Hub would try to bury the one receipt that
+    /// matters. The counterparty is never asked to verify an unbounded list.
+    #[test]
+    fn more_receipts_than_a_counterparty_is_asked_to_verify_are_refused() {
+        let padded = vec![receipt(); MAX_ANCHOR_RECEIPTS_PER_BILL + 1];
+        let error = check(true, &padded).expect_err("a padded set must be refused");
+        assert!(error.contains("exceeds the 8"), "{error}");
+    }
+
+    /// A receipt for some other bill, channel or Hub authorises nothing here,
+    /// and serving one would hand the counterparty evidence that looks valid
+    /// and proves nothing about this payment.
+    #[test]
+    fn a_receipt_bound_to_something_else_is_refused() {
+        for mutate in [
+            (|signed: &mut SignedHubWitnessReceiptV1| {
+                signed.receipt.proposed_bill_commitment = "ff".repeat(32);
+            }) as fn(&mut SignedHubWitnessReceiptV1),
+            |signed| signed.receipt.serial = 3,
+            |signed| signed.receipt.binding_commitment = "ff".repeat(32),
+            |signed| signed.receipt.hub_identity = "1SomeOtherHub".into(),
+        ] {
+            let mut signed = receipt();
+            mutate(&mut signed);
+            let error = check(true, std::slice::from_ref(&signed))
+                .expect_err("a receipt bound elsewhere must be refused");
+            assert!(
+                error.contains("rollback_anchor_receipt_not_bound_to_request"),
+                "{error}"
+            );
+        }
+    }
 }

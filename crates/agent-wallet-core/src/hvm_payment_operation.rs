@@ -1669,6 +1669,37 @@ impl AgentHvmPaymentOperation {
     pub(crate) fn settled_at(&self) -> Option<u64> {
         self.settled_at
     }
+
+    pub(crate) fn binding_commitment(&self) -> &str {
+        &self.binding_commitment
+    }
+
+    /// The highest channel serial this operation *proves* was reached, taken
+    /// only from bills that are fully signed and durably recorded here.
+    ///
+    /// This is the wallet's own history of the channel, held in Agent Wallet's
+    /// encrypted state under its own key and its own journal — a different
+    /// store from the L2 rollback-anchor memory, and not in the same backup
+    /// set. It is what the anchor ratchet is measured against so that deleting
+    /// or rewinding the L2 store alone does not reset it.
+    ///
+    /// A signed-but-unconfirmed proposal deliberately does not count: until a
+    /// fully signed bill came back, the wallet does not know that serial was
+    /// reached, and claiming a floor it cannot prove would refuse honest
+    /// bills.
+    pub(crate) fn committed_channel_serial(&self) -> u64 {
+        let channel = self
+            .fully_signed_bill
+            .as_ref()
+            .map(|bill| bill.serial)
+            .unwrap_or(0);
+        let registry = self
+            .fully_signed_registry_bill
+            .as_ref()
+            .map(|bill| bill.serial)
+            .unwrap_or(0);
+        channel.max(registry)
+    }
 }
 
 fn request_commitment(request: &AgentHvmPaymentRequest) -> String {

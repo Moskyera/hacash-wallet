@@ -98,6 +98,20 @@ impl VerifiedAgentHvmBinding {
     const fn is_registry_v2(&self) -> bool {
         matches!(self, Self::RegistryV2(_))
     }
+
+    fn hub_address(&self) -> &str {
+        match self {
+            Self::ChannelV1(binding) => binding.hub_address(),
+            Self::RegistryV2(binding) => binding.hub_address(),
+        }
+    }
+
+    fn binding_commitment(&self) -> &str {
+        match self {
+            Self::ChannelV1(binding) => binding.binding_commitment(),
+            Self::RegistryV2(binding) => binding.binding_commitment(),
+        }
+    }
 }
 
 // Same reasoning as ExpectedAgentHvmEvidence: a layout-only lint, on an enum
@@ -265,6 +279,50 @@ impl AgentHvmChannelBinding {
     }
 }
 
+/// The highest serial this wallet can *prove* one channel reached, from its own
+/// encrypted operation state.
+///
+/// Read in two places and computed in one: before signing, to refuse a Hub
+/// offering a head below what this wallet has already paid past, and at
+/// acceptance, as the independent floor the rollback-anchor memory is measured
+/// against. Both need the same number and neither may quietly use a different
+/// one.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn committed_channel_serial_floor(
+    state: &super::AgentWalletState,
+    binding_commitment: &str,
+) -> u64 {
+    state
+        .hvm_payment_operations
+        .values()
+        .filter(|operation| operation.binding_commitment() == binding_commitment)
+        .map(AgentHvmPaymentOperation::committed_channel_serial)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Keep the rollback-anchor verdicts apart from "something broke".
+///
+/// `RecoveryRequired` is answered by reconciling, and reconciling is how a
+/// bill becomes committed. Flattening a parked witness decision, a rolled-back
+/// Hub or a rewound anchor store into it points the owner at the one control
+/// that would commit the bill the refusal exists to stop. The prefixes matched
+/// here are public constants in `hacash_wallet_core::l2_safety`, carried on
+/// the error precisely so this mapping is possible.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn classify_anchor_error(error: hacash_wallet_core::WalletError) -> AgentWalletError {
+    let message = error.to_string();
+    if message.contains(hacash_wallet_core::l2_safety::ANCHOR_WITNESS_DECISION_REQUIRED) {
+        AgentWalletError::AnchorWitnessDecisionRequired
+    } else if message.contains(hacash_wallet_core::l2_safety::REFUSAL_ANCHOR_MEMORY_BEHIND_WALLET) {
+        AgentWalletError::AnchorMemoryBehindWallet
+    } else if message.contains(hacash_wallet_core::l2_safety::REFUSAL_WITNESS_BEHIND_HUB) {
+        AgentWalletError::RollbackDetected
+    } else {
+        AgentWalletError::RecoveryRequired
+    }
+}
+
 fn is_lower_hash(value: &str) -> bool {
     value.len() == 64
         && value
@@ -389,6 +447,27 @@ impl AgentWalletManager {
                 }
             }
         };
+        // The head this proposal will be built on is whatever the Hub says it
+        // is. A Hub restored from an older backup offers an older head, and a
+        // payer who signs onto it hands that Hub a second payer signature at a
+        // serial it has already spent. The counterparty ratchet refuses the
+        // co-signed bill afterwards — but the signature exists by then, and
+        // the Hub keeps it. So the comparison happens here, before the signer
+        // is entered, against this wallet's own record of what the channel
+        // reached.
+        let offered_head = match &prepared {
+            PreparedAgentHvmEvidence::ChannelV1 { status, .. } => {
+                status.latest_fully_signed_bill.serial
+            }
+            PreparedAgentHvmEvidence::RegistryV2 { status, .. } => {
+                status.latest_fully_signed_bill.serial
+            }
+        };
+        let known_head =
+            committed_channel_serial_floor(&original, selected_binding.binding_commitment());
+        if offered_head < known_head {
+            return Err(AgentWalletError::RollbackDetected);
+        }
         safety.checkpoint(original.payments_suspended)?;
         let amount_zhu = request.amount_zhu()?;
         let available_zhu = match &prepared {
@@ -841,10 +920,17 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
+            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let fully_signed = hub
-                .cosign_hvm_registry_payment(&signed_request)
+                .cosign_hvm_registry_payment(
+                    &signed_request,
+                    &mut anchor_safety,
+                    verified.binding.hub_address(),
+                    floor,
+                )
                 .await
-                .map_err(|_| AgentWalletError::RecoveryRequired);
+                .map_err(classify_anchor_error);
             let fully_signed = match fully_signed {
                 Ok(bill) => bill,
                 Err(error) => {
@@ -885,10 +971,17 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
+            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let fully_signed = hub
-                .cosign_hvm_payment(&signed_request)
+                .cosign_hvm_payment(
+                    &signed_request,
+                    &mut anchor_safety,
+                    verified.binding.hub_address(),
+                    floor,
+                )
                 .await
-                .map_err(|_| AgentWalletError::RecoveryRequired);
+                .map_err(classify_anchor_error);
             let fully_signed = match fully_signed {
                 Ok(bill) => bill,
                 Err(error) => {
@@ -914,6 +1007,23 @@ impl AgentWalletManager {
 
     /// Read-only reconciliation against the exact bound Hub. It never signs,
     /// submits, changes ids or falls back to L1.
+    ///
+    /// It is, however, the *second* way a bill becomes this wallet's committed
+    /// head, and that made it the hole that defeated the whole rollback-anchor
+    /// rule. A Hub that co-signs, persists, and then answers the payment POST
+    /// with a 503 or a truncated body drives the wallet here — the co-sign
+    /// error becomes `RecoveryRequired`, `RecoveryRequired` is a shipped
+    /// "Reconcile" button, and this function used to commit
+    /// `status.fully_signed_bill` having opened no anchor store and read none
+    /// of the receipts the Hub publishes right beside it. Every refusal the
+    /// design is proud of — dropped witness, counter gone backwards, serial at
+    /// or below the accepted head, a decision already parked, a channel
+    /// already closing — was one dropped TCP connection away from being
+    /// skipped.
+    ///
+    /// So the ratchet runs on this path too, inside
+    /// [`L2HubClient::reconcile_hvm_registry_payment`] and its V1 twin, which
+    /// return the status only after it has passed.
     pub async fn reconcile_hvm_payment(
         &mut self,
         wallet_id: &AgentWalletId,
@@ -948,10 +1058,19 @@ impl AgentWalletManager {
                     .signed_registry_request()?
                     .clone()
             };
+            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let status = hub
-                .hvm_registry_payment_status(&verified.view.hub_operation_id)
+                .reconcile_hvm_registry_payment(
+                    &verified.view.hub_operation_id,
+                    &signed_request,
+                    &mut anchor_safety,
+                    verified.binding.hub_address(),
+                    floor,
+                )
                 .await
-                .map_err(|_| AgentWalletError::RecoveryRequired)?;
+                .map_err(classify_anchor_error)?;
+            drop(anchor_safety);
             verified.permit.checkpoint(false)?;
             if status.request != signed_request
                 || status.request_commitment
@@ -1001,10 +1120,19 @@ impl AgentWalletManager {
                     .signed_request()?
                     .clone()
             };
+            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let status = hub
-                .hvm_payment_status(&verified.view.hub_operation_id)
+                .reconcile_hvm_payment(
+                    &verified.view.hub_operation_id,
+                    &signed_request,
+                    &mut anchor_safety,
+                    verified.binding.hub_address(),
+                    floor,
+                )
                 .await
-                .map_err(|_| AgentWalletError::RecoveryRequired)?;
+                .map_err(classify_anchor_error)?;
+            drop(anchor_safety);
             verified.permit.checkpoint(false)?;
             if status.request != signed_request
                 || status.request_commitment
@@ -1158,21 +1286,31 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
-            match hub.cosign_hvm_registry_payment(&signed_request).await {
+            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
+            match hub
+                .cosign_hvm_registry_payment(
+                    &signed_request,
+                    &mut anchor_safety,
+                    verified.binding.hub_address(),
+                    floor,
+                )
+                .await
+            {
                 Ok(fully_signed) => self.persist_hvm_transition(
                     wallet_id,
                     operation_id,
                     now,
                     HvmDurableTransition::CommittedRegistry(fully_signed),
                 ),
-                Err(_) => {
+                Err(error) => {
                     let _ = self.persist_hvm_transition(
                         wallet_id,
                         operation_id,
                         now,
                         HvmDurableTransition::RecoveryRequired,
                     );
-                    Err(AgentWalletError::RecoveryRequired)
+                    Err(classify_anchor_error(error))
                 }
             }
         } else {
@@ -1197,24 +1335,144 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
-            match hub.cosign_hvm_payment(&signed_request).await {
+            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
+            match hub
+                .cosign_hvm_payment(
+                    &signed_request,
+                    &mut anchor_safety,
+                    verified.binding.hub_address(),
+                    floor,
+                )
+                .await
+            {
                 Ok(fully_signed) => self.persist_hvm_transition(
                     wallet_id,
                     operation_id,
                     now,
                     HvmDurableTransition::Committed(fully_signed),
                 ),
-                Err(_) => {
+                Err(error) => {
                     let _ = self.persist_hvm_transition(
                         wallet_id,
                         operation_id,
                         now,
                         HvmDurableTransition::RecoveryRequired,
                     );
-                    Err(AgentWalletError::RecoveryRequired)
+                    Err(classify_anchor_error(error))
                 }
             }
         }
+    }
+
+    /// The highest serial this wallet can *prove* the channel reached, read
+    /// from Agent Wallet's own encrypted state rather than from the L2 anchor
+    /// store the ratchet lives in.
+    ///
+    /// Two stores, two keys, two journals, and only one of them is the one an
+    /// attacker deletes to reset the ratchet. Handing this number to
+    /// `accept_anchored_bill` is what turns "the counterparty remembers" into
+    /// something that survives the counterparty's own disk being rewound: a
+    /// missing or behind anchor memory is refused rather than re-baselined.
+    fn anchor_serial_floor(
+        &self,
+        wallet_id: &AgentWalletId,
+        binding_commitment: &str,
+    ) -> AgentWalletResult<u64> {
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        Ok(committed_channel_serial_floor(&state, binding_commitment))
+    }
+
+    /// The parked rollback-anchor decision for the channel this operation is
+    /// on, if a human still owes an answer.
+    ///
+    /// The evidence is durable, so a user interface that crashed mid-prompt
+    /// comes back to the same question rather than losing it.
+    pub fn pending_hvm_anchor_decision(
+        &self,
+        wallet_id: &AgentWalletId,
+        operation_id: &crate::types::OperationId,
+    ) -> AgentWalletResult<Option<hacash_wallet_core::l2_safety::AnchorWitnessChangeV1>> {
+        let (binding, safety) = self.anchor_store_for_operation(wallet_id, operation_id)?;
+        Ok(safety.pending_anchor_decision(&binding))
+    }
+
+    /// Record the owner's answer to a parked rollback-anchor decision.
+    ///
+    /// There are exactly two answers and no third. Accepting adopts the new
+    /// witness set as the baseline and retires — never erases — what was
+    /// dropped. Closing latches the channel on its last accepted bill, whose
+    /// receipt set is intact, and refuses to advance it further; the close
+    /// itself runs against that bill and needs nothing from the Hub's anchor.
+    pub fn resolve_hvm_anchor_decision(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &crate::types::OperationId,
+        decision: hacash_wallet_core::l2_safety::AnchorWitnessDecision,
+    ) -> AgentWalletResult<()> {
+        let (binding, mut safety) = self.anchor_store_for_operation(wallet_id, operation_id)?;
+        safety
+            .resolve_anchor_witness_change(&binding, decision)
+            .map_err(classify_anchor_error)
+    }
+
+    fn anchor_store_for_operation(
+        &self,
+        wallet_id: &AgentWalletId,
+        operation_id: &crate::types::OperationId,
+    ) -> AgentWalletResult<(String, hacash_wallet_core::l2_safety::ClientL2Safety)> {
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let operation = state
+            .hvm_payment_operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?;
+        let binding_commitment = operation.binding_commitment().to_owned();
+        let binding = match (
+            state.hvm_channel_binding.clone(),
+            state.hvm_registry_binding.clone(),
+        ) {
+            (Some(binding), None) => VerifiedAgentHvmBinding::ChannelV1(binding),
+            (None, Some(binding)) => VerifiedAgentHvmBinding::RegistryV2(binding),
+            _ => return Err(AgentWalletError::SigningBlocked),
+        };
+        if binding.binding_commitment() != binding_commitment {
+            return Err(AgentWalletError::ApprovalCommitmentMismatch);
+        }
+        let safety = self.open_hvm_anchor_safety(wallet_id, &binding)?;
+        Ok((binding_commitment, safety))
+    }
+
+    /// Open the per-channel authenticated store that holds this channel's
+    /// rollback-anchor witness memory.
+    ///
+    /// It is keyed by `binding_commitment` rather than by a channel id: the
+    /// binding carries the reuse version, so a new incarnation is a genuinely
+    /// new channel that legitimately starts a fresh ratchet.
+    ///
+    /// The anchored HVM paths did not open this store before. They had to
+    /// start: the memory has to live somewhere lock-guarded, journalled and
+    /// inside a state commitment, and this is that store.
+    fn open_hvm_anchor_safety(
+        &self,
+        wallet_id: &AgentWalletId,
+        binding: &VerifiedAgentHvmBinding,
+    ) -> AgentWalletResult<hacash_wallet_core::l2_safety::ClientL2Safety> {
+        let l2_root = self.storage.paths(wallet_id)?.l2_dir();
+        let session = self.session(wallet_id)?;
+        let wallet_scope = session.signer.wallet_scope().as_str().to_owned();
+        hacash_wallet_core::l2_safety::ClientL2Safety::open_scoped_with_key_provider_for_network(
+            &session.signer,
+            &l2_root,
+            &wallet_scope,
+            "testnet",
+            binding.hub_address(),
+            binding.binding_commitment(),
+        )
+        .map_err(|_| AgentWalletError::RecoveryRequired)
     }
 
     async fn verified_hvm_operation_readiness(

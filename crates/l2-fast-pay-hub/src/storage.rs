@@ -553,6 +553,23 @@ pub(crate) struct PersistedRollbackAnchorReservation {
     pub request_commitment: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<HubWitnessReceiptV1>,
+    /// The witness's signature over `receipt`, kept beside it rather than
+    /// instead of it so that a state file written before this field existed
+    /// still loads under `deny_unknown_fields`.
+    ///
+    /// It is kept because the receipt does not stop at this Hub: it rides on
+    /// with the co-signed bill to the counterparty wallet, which recovers the
+    /// witness's signing address from this signature. A retry that replayed a
+    /// receipt with the signature stripped would serve a bill the counterparty
+    /// cannot check, so [`reserve_rollback_anchor`] re-reserves rather than
+    /// replaying when this is absent.
+    ///
+    /// Absent and skipped on every reservation persisted before this field, so
+    /// the state commitment of a Hub that never reserved anything is unchanged.
+    ///
+    /// [`reserve_rollback_anchor`]: crate::state::HubState
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_signature_hex: Option<String>,
     pub updated_unix: u64,
 }
 

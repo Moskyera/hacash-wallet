@@ -540,6 +540,29 @@ exists to prevent.
 
 ---
 
+## 9b. Two refusals that are not the Hub's to fix
+
+Both of these are raised by a **counterparty wallet**, not by the Hub, and an
+operator who goes looking for them here should find them rather than assume they
+are a Hub fault.
+
+**`AnchorWitnessChangeRequiresDecision`** — the wallet has noticed that this Hub
+has stopped using a witness that receipted an earlier bill on that channel. It
+is not a bug and there is nothing to fix on the Hub: the wallet is asking its
+owner whether to accept the new witness set or close the channel. It is what a
+witness rotation looks like from the far side, and also what a rollback attempt
+looks like from the far side, which is why the wallet cannot answer it alone.
+If you rotated a witness on purpose, tell your counterparties out of band —
+nothing in the protocol carries that announcement, and without it the honest
+answer for them is to close. See §7 of `RUNNING-A-WITNESS.md` before planning a
+rotation at all.
+
+**`rollback_anchor_memory_behind_wallet`** — the wallet's own record of this
+channel's witnesses is missing or older than its own payment history. That is a
+fault on the wallet's machine (a deleted or partially restored L2 store), not on
+the Hub. The Hub side of it is: do not offer to "help" by re-signing anything,
+and do not treat a wallet in this state as evidence about your own position.
+
 ## 10. Quick reference card
 
 Print this. Tape it to something.

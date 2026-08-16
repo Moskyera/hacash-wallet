@@ -792,11 +792,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     expires,
                 )?
             };
-            let signed = hub
+            let cosigned = hub
                 .cosign_hvm_payment(request.clone(), unix_timestamp()?)
                 .await?;
+            let signed = &cosigned.bill;
             signed.validate_fully_signed(&bundle.binding)?;
-            if hub.hvm_latest_bill(&commitment)? != signed
+            if hub.hvm_latest_bill(&commitment)? != *signed
                 || signed.serial != request.proposed_bill.serial
                 || signed.left_balance_zhu != request.proposed_bill.left_balance_zhu
                 || signed.right_balance_zhu != request.proposed_bill.right_balance_zhu
@@ -812,6 +813,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Hub fee (Zhu): 0");
             println!("Left balance (Zhu): {}", signed.left_balance_zhu);
             println!("Right balance (Zhu): {}", signed.right_balance_zhu);
+            println!("Anchor receipts: {}", cosigned.anchor_receipts.len());
         }
         Command::Watchtower {
             hub_state_file,

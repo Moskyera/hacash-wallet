@@ -234,6 +234,32 @@ pub enum AgentWalletError {
     WitnessRecoveryNotAvailable,
     #[error("Agent Wallet rollback or witness chain mismatch detected")]
     RollbackDetected,
+    // The counterparty rollback-anchor ratchet found that this Hub has stopped
+    // using a witness that signed an earlier bill on this channel, and a human
+    // has to answer before the channel can advance.
+    //
+    // It is its own variant and never `RecoveryRequired`, for one blunt
+    // reason: `RecoveryRequired` is answered by reconciling, and reconciling
+    // is how the bill gets committed. Folding a decision that is waiting for a
+    // person into the value whose remedy commits the bill routes the owner
+    // into the door the refusal exists to keep shut.
+    //
+    // Shown verbatim in the desktop UI. It names the choice and does not
+    // pretend to make it: an innocent witness rotation and a Hub swapping its
+    // witness to re-sign history look identical from here, and only the owner
+    // knows whether the operator announced a change.
+    #[error(
+        "This Hub has stopped using a rollback witness that signed an earlier bill on this channel. Nothing was accepted and nothing was spent. This is what an operator changing witnesses looks like, and it is also what a Hub trying to re-use a serial it already spent looks like; from here they are the same. Review the witness change and either accept the new set, or close this channel on its last accepted bill."
+    )]
+    AnchorWitnessDecisionRequired,
+    // The wallet's own rollback-anchor memory for a channel is missing or
+    // behind the wallet's own payment history for that channel. Distinct from
+    // `RollbackDetected`, which is about the Hub: this one is about this
+    // machine's own files.
+    #[error(
+        "This wallet's record of the rollback witnesses for this channel is missing or older than its own payment history, so it cannot check whether this Hub went backwards. Nothing was accepted. Restore this wallet's L2 store from the same backup as the rest of the wallet, or close this channel."
+    )]
+    AnchorMemoryBehindWallet,
     #[error("Agent Wallet block 1 fingerprint is invalid")]
     InvalidNodeAnchor,
     #[error("secure vault operation failed")]

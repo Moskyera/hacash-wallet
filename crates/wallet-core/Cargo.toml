@@ -38,6 +38,15 @@ mint = { path = "../../../hacash-fullnodedev/mint" }
 vm = { path = "../../../hacash-fullnodedev/vm" }
 sdk = { path = "../../../hacash-fullnodedev/sdk" }
 
+[features]
+default = []
+# Builds the Hub's witness service into the dependency graph so the
+# counterparty rollback-anchor ratchet can be proven against a real witness,
+# a real Hub and real HTTP rather than against minted receipts. Test-only in
+# practice: nothing in this crate's own source is gated on it. It cannot live
+# in `[dev-dependencies]` because the feature belongs to a normal dependency.
+rollback-witness = ["l2-fast-pay-hub/rollback-witness"]
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

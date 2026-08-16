@@ -638,6 +638,40 @@ export type AgentHvmPaymentOperation = {
   settled_at: number | null;
 };
 
+/**
+ * One rollback-anchor witness, described by what the wallet actually keyed on.
+ *
+ * `signer_address` is recovered from the receipt signature and is half of the
+ * identity. `hub_supplied_label` is a name the Hub typed and is never part of
+ * it; it is shown labelled as such so a reader is not invited to trust it.
+ */
+export type AnchorWitnessRecord = {
+  signer_address: string;
+  witness_instance_id: string;
+  hub_supplied_label: string;
+  witness_epoch: number;
+  first_seen_serial: number;
+  last_seen_serial: number;
+};
+
+/**
+ * The Hub has stopped using at least one witness that signed an earlier bill
+ * on this channel, and the channel will not advance until a person answers.
+ */
+export type AnchorWitnessChange = {
+  binding_commitment: string;
+  serial: number;
+  last_accepted_serial: number;
+  zero_overlap: boolean;
+  headline: string;
+  dropped: AnchorWitnessRecord[];
+  retained: AnchorWitnessRecord[];
+  offered: AnchorWitnessRecord[];
+};
+
+/** The only two answers. There is deliberately no third. */
+export type AnchorWitnessAnswer = "accept_new_witness_set" | "close_channel";
+
 export type ApprovalCommitment = {
   approval_version: string;
   approval_id: string;
@@ -1153,6 +1187,21 @@ export const agentWalletApi = {
     invoke<AgentHvmPaymentOperation>("agent_wallet_retry_hvm_exact", {
       walletId,
       operationId,
+    }),
+  hvmAnchorDecision: (walletId: string, operationId: string) =>
+    invoke<AnchorWitnessChange | null>("agent_wallet_hvm_anchor_decision", {
+      walletId,
+      operationId,
+    }),
+  resolveHvmAnchorDecision: (
+    walletId: string,
+    operationId: string,
+    decision: AnchorWitnessAnswer,
+  ) =>
+    invoke<{ resolved: boolean }>("agent_wallet_resolve_hvm_anchor_decision", {
+      walletId,
+      operationId,
+      decision,
     }),
   listPendingApprovals: (walletId: string) =>
     invoke<PaymentOperation[]>("agent_wallet_list_pending_approvals", { walletId }),

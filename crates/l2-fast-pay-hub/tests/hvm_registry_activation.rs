@@ -451,14 +451,16 @@ async fn bootstrap_renewal_payment_and_restart_are_exact_and_fee_free() {
         signed = hub
             .cosign_hvm_registry_payment(payment.clone(), now + 1)
             .await
-            .unwrap();
+            .unwrap()
+            .bill;
         signed.validate_fully_signed(&bundle.binding).unwrap();
         assert_eq!(payment.hub_fee_zhu, 0);
         assert_eq!(signed.hub_balance_zhu, payment.amount_zhu);
         assert_eq!(
             hub.cosign_hvm_registry_payment(payment.clone(), now + 2)
                 .await
-                .unwrap(),
+                .unwrap()
+                .bill,
             signed
         );
 
@@ -588,7 +590,8 @@ async fn bootstrap_renewal_payment_and_restart_are_exact_and_fee_free() {
         reopened
             .cosign_hvm_registry_payment(payment, now + 3)
             .await
-            .unwrap(),
+            .unwrap()
+            .bill,
         signed
     );
     assert_eq!(

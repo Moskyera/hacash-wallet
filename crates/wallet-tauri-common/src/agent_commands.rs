@@ -1296,6 +1296,127 @@ pub async fn agent_wallet_reconcile_hvm(
     }
 }
 
+/// The parked rollback-anchor witness decision for one HVM operation, or
+/// `null`.
+///
+/// This is the read half of the one question in the whole L2 design that a
+/// person has to answer rather than a check. A Hub that has stopped using a
+/// witness which signed an earlier bill on this channel looks exactly like a
+/// Hub whose witness operator changed, and exactly like a Hub trying to
+/// re-spend a serial: nothing in the protocol can tell them apart, so nothing
+/// pretends to.
+#[tauri::command]
+pub async fn agent_wallet_hvm_anchor_decision(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let pending = require_manager(&state)?
+            .lock()
+            .await
+            .pending_hvm_anchor_decision(&wallet_id, &operation_id)
+            .map_err(public_error)?;
+        let Some(change) = pending else {
+            return Ok(Value::Null);
+        };
+        Ok(json!({
+            "binding_commitment": change.binding_commitment,
+            "serial": change.serial,
+            "last_accepted_serial": change.last_accepted_serial,
+            "zero_overlap": change.is_zero_overlap(),
+            "headline": change.headline(),
+            "dropped": change
+                .dropped
+                .iter()
+                .map(anchor_witness_evidence)
+                .collect::<Vec<Value>>(),
+            "retained": change
+                .retained
+                .iter()
+                .map(anchor_witness_evidence)
+                .collect::<Vec<Value>>(),
+            "offered": change
+                .offered
+                .iter()
+                .map(anchor_witness_evidence)
+                .collect::<Vec<Value>>(),
+        }))
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// The write half. Exactly two answers, and no third: `accept_new_witness_set`
+/// or `close_channel`. There is no timeout that picks one and no configuration
+/// default, because both of those are the silent accept this rule exists to
+/// prevent.
+#[tauri::command]
+pub async fn agent_wallet_resolve_hvm_anchor_decision(
+    wallet_id: String,
+    operation_id: String,
+    decision: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let decision = match decision.as_str() {
+            "accept_new_witness_set" => {
+                hacash_wallet_core::l2_safety::AnchorWitnessDecision::AcceptNewWitnessSet
+            }
+            "close_channel" => hacash_wallet_core::l2_safety::AnchorWitnessDecision::CloseChannel,
+            _ => {
+                return Err(
+                    "The answer must be either accept_new_witness_set or close_channel.".to_owned(),
+                );
+            }
+        };
+        let _transition = state.transition.lock().await;
+        require_manager(&state)?
+            .lock()
+            .await
+            .resolve_hvm_anchor_decision(&wallet_id, &operation_id, decision)
+            .map_err(public_error)?;
+        Ok(json!({ "resolved": true }))
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, decision, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// One witness, described by what the ratchet actually keyed on.
+///
+/// `signer_address` is recovered from the receipt signature and is the half
+/// that matters; `witness_id` is a label the Hub typed and is shown as such,
+/// so a reader is never invited to treat a name as an identity.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn anchor_witness_evidence(
+    record: &hacash_wallet_core::l2_safety::AnchorWitnessRecordV1,
+) -> Value {
+    json!({
+        "signer_address": record.signer_address,
+        "witness_instance_id": record.witness_instance_id,
+        "hub_supplied_label": record.witness_id,
+        "witness_epoch": record.witness_epoch,
+        "first_seen_serial": record.first_seen_serial,
+        "last_seen_serial": record.last_seen_serial,
+    })
+}
+
 #[tauri::command]
 pub async fn agent_wallet_retry_hvm_exact(
     wallet_id: String,

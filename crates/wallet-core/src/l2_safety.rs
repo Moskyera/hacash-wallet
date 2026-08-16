@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
+use field::Parse as FieldParse;
 use field::Serialize as FieldSerialize;
 use fs2::FileExt;
 use hkdf::Hkdf;
@@ -17,6 +18,7 @@ use l2_fast_pay_hub::journal::{
     AuthenticatedJournal, JournalBinding, JournalEvent, JournalHead, JournalOperationType,
     JournalPhase,
 };
+use l2_fast_pay_hub::rollback_anchor::SignedHubWitnessReceiptV1;
 use l2_fast_pay_hub::wire::ChannelPayCompleteDocuments;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +31,44 @@ use crate::l2_storage_scope::validate_scoped_l2_storage;
 use crate::paths::{secure_write, wallet_data_root};
 
 const KEY_DOMAIN: &[u8] = b"HPAY/L2/JOURNAL/AUTH/V1";
+
+/// A `field::Sign` on the wire: compressed public key plus signature.
+const ANCHOR_SIGN_WIRE_BYTES: usize = 33 + 64;
+
+/// A bill carries one receipt per witness. The Hub client is single-witness
+/// today; the cap exists so a Hub cannot make the decision prompt unreadable
+/// by padding it.
+const MAX_ANCHOR_RECEIPTS_PER_BILL: usize = 8;
+
+/// Stable prefix on the error returned when the Hub's witness set has shrunk
+/// and a human must answer before the channel can advance. Callers match on
+/// this to route the parked decision to a user interface; the evidence itself
+/// is durable and is read back with
+/// [`ClientL2Safety::pending_anchor_decision`].
+pub const ANCHOR_WITNESS_DECISION_REQUIRED: &str = "AnchorWitnessChangeRequiresDecision";
+
+/// Reused deliberately from `rollback_anchor::protocol` rather than invented
+/// here: a witness this wallet remembers has contradicted itself, and the
+/// operator procedure is the same Procedure B the Hub-side refusal indexes.
+pub const REFUSAL_WITNESS_BEHIND_HUB: &str = "rollback_anchor_witness_behind_hub";
+
+/// This wallet's own anchor memory is behind this wallet's own payment
+/// history.
+///
+/// The counterparty ratchet lives in one store. That store is a file on the
+/// counterparty's disk, and a file can be deleted or restored from an older
+/// coherent snapshot — journal, checkpoint and state together — which opens
+/// clean because nothing inside it is inconsistent. Whoever can restore the
+/// Hub's state can usually also reach this one.
+///
+/// So the ratchet is anchored a second time, outside itself: the caller states
+/// the highest serial it knows this channel reached, taken from a store this
+/// one does not own (Agent Wallet's own encrypted operation state, under a
+/// different key, with its own journal). A memory that is missing or behind
+/// that number was lost or rewound, and this refuses rather than quietly
+/// re-baselining. It is not a witness-set change, so it is not a user
+/// decision: it is an integrity failure, and the honest answer is to stop.
+pub const REFUSAL_ANCHOR_MEMORY_BEHIND_WALLET: &str = "rollback_anchor_memory_behind_wallet";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +141,22 @@ struct ClientL2State {
     journal_head: String,
     state_commitment: String,
     operations: BTreeMap<String, ClientL2Operation>,
+    /// Per-channel memory of the external rollback-anchor witnesses this
+    /// wallet has provably seen receipt a bill on this channel.
+    ///
+    /// Keyed by `binding_commitment`, not `channel_id`: the binding carries
+    /// the reuse version, and a new incarnation is a genuinely new channel
+    /// that legitimately starts a fresh ratchet.
+    ///
+    /// `skip_serializing_if` is load bearing and not cosmetic. Every existing
+    /// store on disk was written without this key; if an empty map were
+    /// emitted, `state_commitment` would change for every one of them and
+    /// [`initialize_state`] would refuse to open them with
+    /// "RecoveryRequired: L2 journal and materialized state differ". Skipping
+    /// the empty map keeps the serialized bytes byte-identical to what the
+    /// previous version wrote.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    anchor_witness_memory: BTreeMap<String, ChannelAnchorMemoryV1>,
 }
 
 pub struct RecipientOperationInput<'a> {
@@ -154,6 +210,125 @@ pub struct RestrictedSenderAuthority {
     pub wallet_fee_units: u64,
     pub hub_fee_units: u64,
     pub total_debit_units: u64,
+}
+
+/// One witness the wallet has *provably* seen sign an anchor receipt for one
+/// exact channel.
+///
+/// `signer_address` is recovered from the signature, never copied off the
+/// wire. `witness_id` is a label the Hub typed (`is_identifier` is its only
+/// validation, `rollback_anchor/protocol.rs:93-95`); it is kept as evidence
+/// for a human and is never part of the overlap key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorWitnessRecordV1 {
+    pub signer_address: String,
+    pub witness_instance_id: String,
+    pub witness_id: String,
+    pub witness_epoch: u64,
+    pub first_seen_serial: u64,
+    pub last_seen_serial: u64,
+    pub highest_counter_value: u64,
+}
+
+impl AnchorWitnessRecordV1 {
+    /// The overlap identity: the pair `(verified signer address, witness
+    /// store instance)`.
+    ///
+    /// The instance is in the key deliberately. Re-provisioning a witness
+    /// store with the same key yields the same address with a counter back at
+    /// zero — the amnesia attack. Keyed on the address alone that attack would
+    /// pass overlap silently; keyed on the pair it is a drop, and therefore
+    /// exactly as loud as a witness swap.
+    pub fn overlap_key(&self) -> String {
+        format!("{}|{}", self.signer_address, self.witness_instance_id)
+    }
+}
+
+/// The evidence shown to a human when the Hub's witness set has shrunk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorWitnessChangeV1 {
+    pub binding_commitment: String,
+    pub hub_identity: String,
+    pub serial: u64,
+    pub proposed_bill_commitment: String,
+    pub last_accepted_serial: u64,
+    pub last_accepted_bill_commitment: String,
+    pub dropped: Vec<AnchorWitnessRecordV1>,
+    pub retained: Vec<AnchorWitnessRecordV1>,
+    pub offered: Vec<AnchorWitnessRecordV1>,
+    pub raised_at: u64,
+}
+
+impl AnchorWitnessChangeV1 {
+    pub fn is_zero_overlap(&self) -> bool {
+        self.retained.is_empty()
+    }
+
+    /// The sentence a human is shown. Deliberately concrete: this is the only
+    /// moment at which the counterparty can tell a legitimate witness rotation
+    /// apart from a Hub swapping its witness in order to re-sign history, and
+    /// a warning icon does not carry enough information to decide.
+    pub fn headline(&self) -> String {
+        if self.is_zero_overlap() {
+            "this Hub no longer shares any witness with the one that signed your last bill"
+                .to_owned()
+        } else {
+            format!(
+                "this Hub has stopped using {} of the witnesses that signed your last bill; {} of {} still cover it",
+                self.dropped.len(),
+                self.retained.len(),
+                self.dropped.len() + self.retained.len()
+            )
+        }
+    }
+}
+
+/// The only two answers. There is deliberately no third: no "ask me later and
+/// proceed", no timeout that picks one, no configuration default.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorWitnessDecision {
+    /// The new set becomes the baseline. Dropped witnesses are retired, not
+    /// erased, so the event survives in the record and in the journal.
+    AcceptNewWitnessSet,
+    /// The channel is marked closing. The cooperative close runs against the
+    /// last accepted head, which keeps its intact receipt set.
+    CloseChannel,
+}
+
+/// What a human actually chose, kept durably beside the memory it changed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorWitnessResolutionV1 {
+    pub change: AnchorWitnessChangeV1,
+    pub decision: AnchorWitnessDecision,
+    pub decided_at: u64,
+}
+
+/// Everything this wallet remembers about the external rollback anchor
+/// covering one exact channel incarnation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelAnchorMemoryV1 {
+    pub schema_version: u32,
+    pub hub_identity: String,
+    pub accepted_serial: u64,
+    pub accepted_bill_commitment: String,
+    pub witnesses: BTreeMap<String, AnchorWitnessRecordV1>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retired: BTreeMap<String, AnchorWitnessRecordV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_decision: Option<AnchorWitnessChangeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_decision: Option<AnchorWitnessResolutionV1>,
+    #[serde(default, skip_serializing_if = "is_not_closing")]
+    pub closing: bool,
+}
+
+fn is_not_closing(closing: &bool) -> bool {
+    !*closing
 }
 
 pub struct ClientL2Safety {
@@ -750,6 +925,394 @@ impl ClientL2Safety {
         Ok(operation)
     }
 
+    /// Read back the parked witness-set decision for one channel, if any.
+    ///
+    /// This is the only supported way to obtain the evidence a human needs.
+    /// It is deliberately a plain read: the decision is already durable, so a
+    /// crashed or killed user interface cannot lose it, and a wallet that
+    /// restarts comes back still parked rather than silently advancing.
+    pub fn pending_anchor_decision(
+        &self,
+        binding_commitment: &str,
+    ) -> Option<AnchorWitnessChangeV1> {
+        self.state
+            .anchor_witness_memory
+            .get(binding_commitment)
+            .and_then(|memory| memory.pending_decision.clone())
+    }
+
+    pub fn anchor_memory(&self, binding_commitment: &str) -> Option<ChannelAnchorMemoryV1> {
+        self.state.anchor_witness_memory.get(binding_commitment).cloned()
+    }
+
+    /// Verify the anchor receipts riding with one anchored bill, compare the
+    /// witness set they prove against what this wallet remembers for this
+    /// channel, and advance the channel head only when nothing was dropped.
+    ///
+    /// `Ok(())` is the *only* way a caller can be told the bill may become the
+    /// new head. Returning a verdict alongside the bill was rejected: a caller
+    /// that ignores a verdict is one `let _ =` away from a silent accept.
+    ///
+    /// Three outcomes, and none of them is a bypass:
+    ///
+    /// * silent accept — nothing recorded disappeared; the memory is advanced
+    ///   in one journalled [`Self::transition`]-shaped write and `Ok(())` is
+    ///   returned;
+    /// * decision required — at least one remembered witness is absent from
+    ///   this bill. The change is parked in `pending_decision`, nothing else
+    ///   is written, and an error prefixed [`ANCHOR_WITNESS_DECISION_REQUIRED`]
+    ///   is returned. The channel does not advance and does not halt;
+    /// * hard refusal — a receipt does not verify, is bound to another bill,
+    ///   channel or Hub, a remembered witness contradicted itself, or this
+    ///   wallet's own memory is behind its own payment history. Nothing is
+    ///   written and an error is returned. This is never a user choice.
+    ///
+    /// An empty `receipts` slice is not "skip the check": it means every
+    /// remembered witness was dropped, which is the loudest prompt in the
+    /// system. An absent wire field must therefore deserialise to an empty
+    /// vector, never to "unknown".
+    ///
+    /// `independent_serial_floor` is the highest serial the caller knows this
+    /// channel reached, read from a store this one does not own. Pass `0` only
+    /// when the caller genuinely has no independent record. It is a mandatory
+    /// argument rather than an option with a default because a defaulted
+    /// hardening argument is a bypass with a nicer name: see
+    /// [`REFUSAL_ANCHOR_MEMORY_BEHIND_WALLET`].
+    pub fn accept_anchored_bill(
+        &mut self,
+        binding_commitment: &str,
+        hub_identity: &str,
+        proposed_bill_commitment: &str,
+        serial: u64,
+        receipts: &[SignedHubWitnessReceiptV1],
+        independent_serial_floor: u64,
+    ) -> WalletResult<()> {
+        require_anchor_hash(binding_commitment, "channel binding commitment")?;
+        require_anchor_hash(proposed_bill_commitment, "proposed bill commitment")?;
+        if serial == 0 {
+            return Err(WalletError::L2(
+                "anchored bill serial must be greater than zero".into(),
+            ));
+        }
+        if hub_identity != self.hub_identity {
+            return Err(WalletError::L2(
+                "anchored bill was co-signed by a different Hub than this channel store".into(),
+            ));
+        }
+        if receipts.len() > MAX_ANCHOR_RECEIPTS_PER_BILL {
+            return Err(WalletError::L2(
+                "anchored bill carries more witness receipts than the protocol allows".into(),
+            ));
+        }
+
+        // Admission runs on every receipt in the envelope. One failure refuses
+        // the whole envelope, so a Hub cannot pad with junk to obscure which
+        // receipt is the real one.
+        let mut offered: BTreeMap<String, AnchorWitnessRecordV1> = BTreeMap::new();
+        for receipt in receipts {
+            let record = admit_anchor_receipt(
+                receipt,
+                hub_identity,
+                binding_commitment,
+                proposed_bill_commitment,
+                serial,
+            )?;
+            if offered.insert(record.overlap_key(), record).is_some() {
+                return Err(WalletError::L2(
+                    "anchored bill carries two receipts from the same witness instance".into(),
+                ));
+            }
+        }
+
+        let Some(memory) = self.state.anchor_witness_memory.get(binding_commitment).cloned() else {
+            // No memory. Either this really is the first bill on this channel,
+            // or the memory was lost — the store deleted, or restored from an
+            // older snapshot that predates this channel. The caller's
+            // independent history is what tells the two apart, and it is the
+            // only thing that can: everything inside this store agrees with
+            // itself in both cases.
+            if independent_serial_floor > 0 {
+                return Err(WalletError::L2(format!(
+                    "{REFUSAL_ANCHOR_MEMORY_BEHIND_WALLET}: this wallet's own payment history \
+                     reaches serial {independent_serial_floor} on this channel, but its \
+                     rollback-anchor memory for the channel is gone. A missing memory is a lost \
+                     memory, not a new channel, and re-baselining it here would hand the Hub the \
+                     witness set of its choice. Restore the L2 store from the same backup as the \
+                     rest of this wallet, or close the channel"
+                )));
+            }
+            // First bill for this binding. No comparison is possible and none
+            // is faked: admission still ran in full, the ratchet has nothing
+            // to compare against, and the baseline is recorded silently. An
+            // empty set here is still recorded, as the durable statement
+            // "this Hub showed me no anchor at serial N" — that is what stops
+            // a later Hub resetting the ratchet by omission.
+            let memory = ChannelAnchorMemoryV1 {
+                schema_version: 1,
+                hub_identity: hub_identity.to_owned(),
+                accepted_serial: serial,
+                accepted_bill_commitment: proposed_bill_commitment.to_owned(),
+                witnesses: offered,
+                retired: BTreeMap::new(),
+                pending_decision: None,
+                last_decision: None,
+                closing: false,
+            };
+            return self.write_anchor_memory(
+                binding_commitment,
+                memory,
+                serial,
+                proposed_bill_commitment,
+                JournalPhase::RollbackAnchorReceiptPersisted,
+            );
+        };
+
+        if memory.hub_identity != hub_identity {
+            return Err(WalletError::L2(
+                "anchor memory for this channel was established under a different Hub".into(),
+            ));
+        }
+        // The second anchor, and the reason this store is not its own only
+        // witness. A coherent older triple — state, journal, checkpoint —
+        // opens clean, because nothing in it is inconsistent; it is simply
+        // behind. The caller's independent history is in a different store,
+        // under a different key, and was not in that backup set.
+        if independent_serial_floor > memory.accepted_serial {
+            return Err(WalletError::L2(format!(
+                "{REFUSAL_ANCHOR_MEMORY_BEHIND_WALLET}: this wallet's own payment history reaches \
+                 serial {independent_serial_floor} on this channel but its rollback-anchor memory \
+                 stops at serial {}. This store went backwards, which a restore from an older \
+                 backup is the usual cause of. Nothing was accepted",
+                memory.accepted_serial
+            )));
+        }
+        if memory.closing {
+            return Err(WalletError::L2(
+                "this channel is closing on its last accepted head and will not advance".into(),
+            ));
+        }
+        if let Some(pending) = &memory.pending_decision {
+            return Err(WalletError::L2(format!(
+                "{ANCHOR_WITNESS_DECISION_REQUIRED}: this channel is parked at serial {} awaiting an answer about its rollback-anchor witnesses",
+                pending.serial
+            )));
+        }
+
+        // Re-affirming the exact head already recorded is the crash window
+        // between the Hub co-signing and this wallet persisting; without a way
+        // through it a wallet that died there could never accept that head
+        // again and the channel would be stuck with no honest way out.
+        //
+        // It is a *narrower* door than it looks, and deliberately not the
+        // first thing checked. An earlier draft returned `Ok(())` here before
+        // the counter ratchet and the drop comparison had run, which made the
+        // recorded head the one place a bill was handed back as accepted with
+        // the whole rule skipped — a Hub could re-serve the head with an empty
+        // receipt list, or with a witness whose counter had gone backwards
+        // after a Hub+witness co-restore, and be told yes. Everything below
+        // therefore runs first, and re-affirmation is granted only when the
+        // offered set still covers every witness this wallet recorded.
+        let is_recorded_head = serial == memory.accepted_serial
+            && proposed_bill_commitment == memory.accepted_bill_commitment;
+        if !is_recorded_head && serial <= memory.accepted_serial {
+            return Err(WalletError::L2(format!(
+                "{REFUSAL_WITNESS_BEHIND_HUB}: anchored bill serial {serial} is at or below the accepted head {}",
+                memory.accepted_serial
+            )));
+        }
+
+        // Ratchet. A witness this wallet remembers may not go backwards. The
+        // witness counter is global per Hub identity and strictly monotone, so
+        // a decrease has no honest reading. This is the check that catches the
+        // case ADR-001 declares undetectable Hub-side: an operator restoring
+        // Hub and witness together to an earlier point cannot also restore the
+        // counterparty's memory, which was in neither backup set.
+        //
+        // On a re-affirmation of the recorded head the honest Hub replays the
+        // *same* receipts, so equality is expected there and only a genuine
+        // decrease is refused. Anywhere else the counter must have moved.
+        for (key, candidate) in &offered {
+            if let Some(known) = memory.witnesses.get(key) {
+                let went_backwards = if is_recorded_head {
+                    candidate.highest_counter_value < known.highest_counter_value
+                } else {
+                    candidate.highest_counter_value <= known.highest_counter_value
+                };
+                if went_backwards {
+                    return Err(WalletError::L2(format!(
+                        "{REFUSAL_WITNESS_BEHIND_HUB}: witness {key} presented counter {} at or below the {} this wallet already recorded",
+                        candidate.highest_counter_value, known.highest_counter_value
+                    )));
+                }
+            }
+        }
+
+        let dropped: Vec<AnchorWitnessRecordV1> = memory
+            .witnesses
+            .iter()
+            .filter(|(key, _)| !offered.contains_key(*key))
+            .map(|(_, record)| record.clone())
+            .collect();
+
+        if is_recorded_head && dropped.is_empty() {
+            // The head is unchanged and still fully covered. Nothing to write.
+            return Ok(());
+        }
+
+        if dropped.is_empty() {
+            let mut next = memory.clone();
+            merge_offered_witnesses(&mut next.witnesses, &offered, serial);
+            next.accepted_serial = serial;
+            next.accepted_bill_commitment = proposed_bill_commitment.to_owned();
+            return self.write_anchor_memory(
+                binding_commitment,
+                next,
+                serial,
+                proposed_bill_commitment,
+                JournalPhase::RollbackAnchorReceiptPersisted,
+            );
+        }
+
+        // At least one remembered witness disappeared. "At least one survives"
+        // was rejected as the predicate: a Hub running its own witness E
+        // alongside an honest W would satisfy it forever while dropping W, the
+        // only witness that actually holds the serial it wants to re-spend.
+        // Dropping one is therefore exactly as loud as dropping all.
+        let retained: Vec<AnchorWitnessRecordV1> = memory
+            .witnesses
+            .iter()
+            .filter(|(key, _)| offered.contains_key(*key))
+            .map(|(_, record)| record.clone())
+            .collect();
+        let change = AnchorWitnessChangeV1 {
+            binding_commitment: binding_commitment.to_owned(),
+            hub_identity: hub_identity.to_owned(),
+            serial,
+            proposed_bill_commitment: proposed_bill_commitment.to_owned(),
+            last_accepted_serial: memory.accepted_serial,
+            last_accepted_bill_commitment: memory.accepted_bill_commitment.clone(),
+            dropped,
+            retained,
+            offered: offered.into_values().collect(),
+            raised_at: unix_timestamp(),
+        };
+        let headline = change.headline();
+        let mut next = memory;
+        next.pending_decision = Some(change);
+        self.write_anchor_memory(
+            binding_commitment,
+            next,
+            serial,
+            proposed_bill_commitment,
+            JournalPhase::RollbackAnchorRefused,
+        )?;
+        Err(WalletError::L2(format!(
+            "{ANCHOR_WITNESS_DECISION_REQUIRED}: {headline}"
+        )))
+    }
+
+    /// Record the human's answer to a parked witness-set change.
+    ///
+    /// Both answers are durable and both are journalled. Accepting adopts the
+    /// new set as the baseline and retires — never erases — what was dropped,
+    /// so the event can still be found afterwards. Closing latches the channel
+    /// on its last accepted head, whose receipt set is intact, and never
+    /// advances the head.
+    pub fn resolve_anchor_witness_change(
+        &mut self,
+        binding_commitment: &str,
+        decision: AnchorWitnessDecision,
+    ) -> WalletResult<()> {
+        let memory = self
+            .state
+            .anchor_witness_memory
+            .get(binding_commitment)
+            .cloned()
+            .ok_or_else(|| {
+                WalletError::L2("this channel has no rollback-anchor memory to resolve".into())
+            })?;
+        let change = memory.pending_decision.clone().ok_or_else(|| {
+            WalletError::L2("this channel has no parked rollback-anchor decision".into())
+        })?;
+        let resolution = AnchorWitnessResolutionV1 {
+            change: change.clone(),
+            decision,
+            decided_at: unix_timestamp(),
+        };
+        let mut next = memory;
+        next.pending_decision = None;
+        next.last_decision = Some(resolution);
+        let phase = match decision {
+            AnchorWitnessDecision::AcceptNewWitnessSet => {
+                for record in &change.dropped {
+                    next.witnesses.remove(&record.overlap_key());
+                    next.retired.insert(record.overlap_key(), record.clone());
+                }
+                let offered: BTreeMap<String, AnchorWitnessRecordV1> = change
+                    .offered
+                    .iter()
+                    .map(|record| (record.overlap_key(), record.clone()))
+                    .collect();
+                merge_offered_witnesses(&mut next.witnesses, &offered, change.serial);
+                next.accepted_serial = change.serial;
+                next.accepted_bill_commitment = change.proposed_bill_commitment.clone();
+                JournalPhase::RollbackAnchorReceiptPersisted
+            }
+            AnchorWitnessDecision::CloseChannel => {
+                // The head is deliberately not advanced. A cooperative close
+                // runs against the last accepted bill, and must not depend on
+                // the Hub's anchor being intact or on this bill being
+                // accepted.
+                next.closing = true;
+                JournalPhase::RollbackAnchorRefused
+            }
+        };
+        self.write_anchor_memory(
+            binding_commitment,
+            next,
+            change.serial,
+            &change.proposed_bill_commitment.clone(),
+            phase,
+        )
+    }
+
+    fn write_anchor_memory(
+        &mut self,
+        binding_commitment: &str,
+        memory: ChannelAnchorMemoryV1,
+        serial: u64,
+        proposed_bill_commitment: &str,
+        phase: JournalPhase,
+    ) -> WalletResult<()> {
+        let mut next = self.state.clone();
+        next.schema_version = 1;
+        next.anchor_witness_memory
+            .insert(binding_commitment.to_owned(), memory);
+        let now = unix_timestamp();
+        self.commit(
+            next,
+            JournalEvent {
+                wallet_scope: self.wallet_scope.clone(),
+                hub_or_provider_identity: self.hub_identity.clone(),
+                channel_id: self.channel_id.clone(),
+                channel_reuse_version: 0,
+                operation_id: format!("rollback-anchor-witness:{binding_commitment}"),
+                operation_type: JournalOperationType::HvmPayment,
+                operation_phase: phase,
+                amount_units: 0,
+                sender: String::new(),
+                recipient: String::new(),
+                previous_state_commitment: String::new(),
+                new_state_commitment: String::new(),
+                idempotency_key: format!("rollback-anchor-witness:{binding_commitment}:{serial}"),
+                request_commitment: proposed_bill_commitment.to_owned(),
+                expected_bill_number: Some(serial),
+                unsigned_state_commitment: None,
+                created_at: now,
+            },
+        )
+    }
+
     pub fn mark_submitted(&mut self, operation_id: &str) -> WalletResult<()> {
         self.set_status(
             operation_id,
@@ -849,15 +1412,13 @@ impl ClientL2Safety {
         operation: ClientL2Operation,
         phase: JournalPhase,
     ) -> WalletResult<()> {
-        let previous_commitment = state_commitment(&self.state)?;
         let mut next = self.state.clone();
         next.schema_version = 1;
         next.operations
             .insert(operation.operation_id.clone(), operation.clone());
-        let new_commitment = state_commitment(&next)?;
-        let record = self
-            .journal
-            .append(JournalEvent {
+        self.commit(
+            next,
+            JournalEvent {
                 wallet_scope: operation.wallet_scope.clone(),
                 hub_or_provider_identity: operation.hub_identity.clone(),
                 channel_id: operation.channel_id.clone(),
@@ -868,15 +1429,36 @@ impl ClientL2Safety {
                 amount_units: operation.amount_units,
                 sender: operation.payer.clone(),
                 recipient: operation.payee.clone(),
-                previous_state_commitment: previous_commitment,
-                new_state_commitment: new_commitment.clone(),
+                previous_state_commitment: String::new(),
+                new_state_commitment: String::new(),
                 idempotency_key: operation.idempotency_key.clone(),
                 request_commitment: operation.request_commitment.clone(),
                 expected_bill_number: None,
                 unsigned_state_commitment: operation.unsigned_state_commitment.clone(),
                 created_at: operation.updated_at,
-            })
-            .map_err(l2_hub_error)?;
+            },
+        )
+    }
+
+    /// The single durable write for this store: commitment over the whole
+    /// next state, one authenticated journal record, one state file, one
+    /// checkpoint, under the exclusive lock this object holds for its life.
+    ///
+    /// Both callers go through here on purpose. Anything added to
+    /// [`ClientL2State`] is inside `state_commitment` by construction (it
+    /// removes exactly three keys and hashes the rest), so a record written
+    /// here cannot be blanked with a text editor without
+    /// [`initialize_state`] refusing to open the store.
+    ///
+    /// The two commitment fields on `event` are filled in here; whatever the
+    /// caller put in them is discarded, so no caller can journal a commitment
+    /// that does not match the bytes it wrote.
+    fn commit(&mut self, mut next: ClientL2State, mut event: JournalEvent) -> WalletResult<()> {
+        let previous_commitment = state_commitment(&self.state)?;
+        let new_commitment = state_commitment(&next)?;
+        event.previous_state_commitment = previous_commitment;
+        event.new_state_commitment = new_commitment.clone();
+        let record = self.journal.append(event).map_err(l2_hub_error)?;
         next.journal_sequence = record.entry_sequence;
         next.journal_head = record.entry_hash.clone();
         next.state_commitment = new_commitment.clone();
@@ -902,6 +1484,138 @@ impl ClientL2Safety {
 
     fn binding_channel_id(&self) -> WalletResult<String> {
         Ok(self.channel_id.clone())
+    }
+}
+
+fn require_anchor_hash(value: &str, label: &str) -> WalletResult<()> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(WalletError::L2(format!(
+            "{label} is not canonical lowercase hex"
+        )))
+    }
+}
+
+/// Recover the address that provably signed these exact receipt bytes.
+///
+/// Two steps, and both are needed. A Hacash `Sign` carries the compressed
+/// public key alongside the signature, so step one derives the address from
+/// the key that is actually on the wire. Step two re-encodes the receipt
+/// canonically and verifies the signature against that recovered address.
+///
+/// Step two alone, against a Hub-supplied address, proves nothing. Step one
+/// alone checks no signature. Together they answer "who provably signed these
+/// exact bytes", and that answer — never the Hub-typed `witness_id` label —
+/// is what enters the overlap set.
+fn recover_anchor_receipt_signer(receipt: &SignedHubWitnessReceiptV1) -> WalletResult<String> {
+    let bytes = hex::decode(&receipt.signature_hex)
+        .map_err(|_| WalletError::L2("anchor receipt signature is not hex".into()))?;
+    if bytes.len() != ANCHOR_SIGN_WIRE_BYTES {
+        return Err(WalletError::L2(
+            "anchor receipt signature is not a canonical Hacash signature".into(),
+        ));
+    }
+    let mut signature = field::Sign::default();
+    let used = signature
+        .parse(&bytes)
+        .map_err(|_| WalletError::L2("anchor receipt signature cannot be parsed".into()))?;
+    if used != bytes.len() {
+        return Err(WalletError::L2(
+            "anchor receipt signature has trailing bytes".into(),
+        ));
+    }
+    let signer =
+        field::Address::from(sys::Account::get_address_by_public_key(*signature.publickey))
+            .to_readable();
+    receipt.verify_against_pinned_key(&signer).map_err(|error| {
+        WalletError::L2(format!(
+            "anchor receipt signature does not verify against the key it carries: {error}"
+        ))
+    })?;
+    Ok(signer)
+}
+
+/// Admission for one receipt. Every check here runs on the first bill of a
+/// channel exactly as on the thousandth: the first bill establishes the
+/// baseline, so junk admitted there poisons every comparison after it.
+///
+/// There is deliberately no wall-clock check. `receipt_expires_at` is the
+/// Hub's own pre-signing gate, bounded to 120 seconds after `accepted_at`. A
+/// wallet that also enforced it would refuse every bill that took two minutes
+/// to arrive and would hand anyone with clock skew a denial of service on a
+/// path where no bypass is permitted — and it would buy nothing, because
+/// obtaining the receipt already advanced the witness's counter.
+fn admit_anchor_receipt(
+    receipt: &SignedHubWitnessReceiptV1,
+    hub_identity: &str,
+    binding_commitment: &str,
+    proposed_bill_commitment: &str,
+    serial: u64,
+) -> WalletResult<AnchorWitnessRecordV1> {
+    // Shape, including `receipt_version == 1`, is enforced inside
+    // `canonical_bytes` before the signature is checked at all.
+    let signer_address = recover_anchor_receipt_signer(receipt)?;
+    let inner = &receipt.receipt;
+    // The receipt commits to the PAYER-SIGNED, HUB-UNSIGNED bill: the Hub
+    // fills its own signature in afterwards and the bill commitment covers the
+    // whole struct including signatures. So this must be compared against the
+    // commitment of the proposal the wallet itself sent, never against the
+    // fully signed bill that came back.
+    if inner.proposed_bill_commitment != proposed_bill_commitment {
+        return Err(WalletError::L2(
+            "anchor receipt authorises a different bill than the one this wallet proposed".into(),
+        ));
+    }
+    if inner.serial != serial {
+        return Err(WalletError::L2(
+            "anchor receipt is bound to a different serial than this bill".into(),
+        ));
+    }
+    if inner.binding_commitment != binding_commitment {
+        return Err(WalletError::L2(
+            "anchor receipt is bound to a different channel".into(),
+        ));
+    }
+    if inner.hub_identity != hub_identity {
+        return Err(WalletError::L2(
+            "anchor receipt is bound to a different Hub".into(),
+        ));
+    }
+    Ok(AnchorWitnessRecordV1 {
+        signer_address,
+        witness_instance_id: inner.witness_instance_id.clone(),
+        witness_id: inner.witness_id.clone(),
+        witness_epoch: inner.witness_epoch,
+        first_seen_serial: serial,
+        last_seen_serial: serial,
+        highest_counter_value: inner.counter_value,
+    })
+}
+
+fn merge_offered_witnesses(
+    witnesses: &mut BTreeMap<String, AnchorWitnessRecordV1>,
+    offered: &BTreeMap<String, AnchorWitnessRecordV1>,
+    serial: u64,
+) {
+    for (key, candidate) in offered {
+        match witnesses.get_mut(key) {
+            Some(known) => {
+                known.witness_id = candidate.witness_id.clone();
+                known.witness_epoch = candidate.witness_epoch;
+                known.last_seen_serial = serial;
+                known.highest_counter_value = known
+                    .highest_counter_value
+                    .max(candidate.highest_counter_value);
+            }
+            None => {
+                witnesses.insert(key.clone(), candidate.clone());
+            }
+        }
     }
 }
 

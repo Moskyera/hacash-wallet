@@ -552,9 +552,18 @@ impl L2HubClient {
     /// Submit one exact Agent-signed HVM payment proposal for Hub co-signing.
     /// Mainnet remains explicitly unavailable until the separate HVM
     /// deployment/watchtower production gate is enabled in both wallet and Hub.
+    ///
+    /// The rollback-anchor ratchet runs inside this function, before the bill
+    /// is returned, so no caller can obtain a co-signed bill that skipped it.
+    /// The check is deliberately not reported as a verdict alongside the bill:
+    /// a caller that ignores a verdict is one `let _ =` away from a silent
+    /// accept.
     pub async fn cosign_hvm_payment(
         &self,
         request: &l2_fast_pay_hub::hvm_ledger::HvmPaymentRequestV1,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        hub_identity: &str,
+        independent_serial_floor: u64,
     ) -> WalletResult<l2_fast_pay_hub::hvm_channel::HvmChannelBillV1> {
         if self.mainnet {
             return Err(WalletError::L2(
@@ -569,10 +578,88 @@ impl L2HubClient {
             .send()
             .await
             .map_err(|error| WalletError::L2(format!("Hub HVM payment unavailable: {error}")))?;
-        Self::read_hub_json(response, "Hub HVM payment").await
+        let cosigned: l2_fast_pay_hub::hvm_ledger::HvmCosignedBillV1 =
+            Self::read_hub_json(response, "Hub HVM payment").await?;
+        // The receipt commits to the payer-signed, Hub-UNSIGNED bill: the Hub
+        // fills its own signature in afterwards and the commitment covers the
+        // whole struct including signatures. Compare against the proposal this
+        // wallet sent, never against the fully signed bill that came back.
+        let proposed_bill_commitment = request
+            .proposed_bill
+            .commitment()
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        safety.accept_anchored_bill(
+            &request.binding_commitment,
+            hub_identity,
+            &proposed_bill_commitment,
+            request.proposed_bill.serial,
+            &cosigned.anchor_receipts,
+            independent_serial_floor,
+        )?;
+        Ok(cosigned.bill)
     }
 
-    pub async fn hvm_payment_status(
+    /// Reconcile one exact HVM payment against the Hub that holds it.
+    ///
+    /// This is the *second* way a wallet learns that a bill was co-signed, and
+    /// it exists because the first one can be taken away: the Hub co-signs,
+    /// persists, and then answers the POST with a 503 or a truncated body, and
+    /// [`Self::cosign_hvm_payment`] fails closed without ever reaching the
+    /// ratchet. Whoever chooses which path the wallet takes must not be able
+    /// to choose a path with no ratchet on it, so the ratchet runs here too,
+    /// inside the function that produces the bill, against the receipts the
+    /// Hub publishes beside it.
+    ///
+    /// The status is returned only after the check has passed. A refusal
+    /// returns `Err` and the fully signed bill never reaches the caller.
+    pub async fn reconcile_hvm_payment(
+        &self,
+        operation_id: &str,
+        request: &l2_fast_pay_hub::hvm_ledger::HvmPaymentRequestV1,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        hub_identity: &str,
+        independent_serial_floor: u64,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_ledger::HvmPaymentStatusV1> {
+        let status = self.hvm_payment_status(operation_id).await?;
+        if status.fully_signed_bill.is_none() {
+            // Nothing was signed, so there is nothing to accept and nothing to
+            // ratchet. The caller still has to handle the status it got.
+            return Ok(status);
+        }
+        // The Hub answering about a different request is refused before the
+        // ratchet runs, so a mismatched status can never write anything.
+        if status.request != *request
+            || status.request_commitment
+                != request
+                    .commitment()
+                    .map_err(|error| WalletError::L2(error.to_string()))?
+        {
+            return Err(WalletError::L2(
+                "Hub HVM payment status is for a different request than this wallet signed".into(),
+            ));
+        }
+        let proposed_bill_commitment = request
+            .proposed_bill
+            .commitment()
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        safety.accept_anchored_bill(
+            &request.binding_commitment,
+            hub_identity,
+            &proposed_bill_commitment,
+            request.proposed_bill.serial,
+            &status.anchor_receipts,
+            independent_serial_floor,
+        )?;
+        Ok(status)
+    }
+
+    /// The raw status document, with no ratchet.
+    ///
+    /// Private on purpose. A wallet that reads a fully signed bill out of this
+    /// and commits it has walked around the counterparty ratchet, which is the
+    /// one check the Hub cannot satisfy by choosing its own witnesses. Callers
+    /// use [`Self::reconcile_hvm_payment`].
+    async fn hvm_payment_status(
         &self,
         operation_id: &str,
     ) -> WalletResult<l2_fast_pay_hub::hvm_ledger::HvmPaymentStatusV1> {
@@ -637,9 +724,15 @@ impl L2HubClient {
     /// Submit one exact Agent-signed payment for the shared HVM registry V2.
     /// Mainnet remains fail-closed until independently verified deployment
     /// evidence and the production watchtower gates are enabled.
+    ///
+    /// As with [`Self::cosign_hvm_payment`], the rollback-anchor ratchet runs
+    /// here, inside the function that produces the bill.
     pub async fn cosign_hvm_registry_payment(
         &self,
         request: &l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryPaymentRequestV2,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        hub_identity: &str,
+        independent_serial_floor: u64,
     ) -> WalletResult<l2_fast_pay_hub::hvm_registry::HvmRegistryBillV2> {
         if self.mainnet {
             return Err(WalletError::L2(
@@ -656,10 +749,66 @@ impl L2HubClient {
             .map_err(|error| {
                 WalletError::L2(format!("Hub registry payment unavailable: {error}"))
             })?;
-        Self::read_hub_json(response, "Hub registry payment").await
+        let cosigned: l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryCosignedBillV2 =
+            Self::read_hub_json(response, "Hub registry payment").await?;
+        let proposed_bill_commitment = request
+            .proposed_bill
+            .commitment()
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        safety.accept_anchored_bill(
+            &request.binding_commitment,
+            hub_identity,
+            &proposed_bill_commitment,
+            request.proposed_bill.serial,
+            &cosigned.anchor_receipts,
+            independent_serial_floor,
+        )?;
+        Ok(cosigned.bill)
     }
 
-    pub async fn hvm_registry_payment_status(
+    /// The registry twin of [`Self::reconcile_hvm_payment`], and the same
+    /// reasoning: the Hub must not be able to pick the path with no ratchet on
+    /// it by dropping the co-sign response.
+    pub async fn reconcile_hvm_registry_payment(
+        &self,
+        operation_id: &str,
+        request: &l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryPaymentRequestV2,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        hub_identity: &str,
+        independent_serial_floor: u64,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryPaymentStatusV2> {
+        let status = self.hvm_registry_payment_status(operation_id).await?;
+        if status.fully_signed_bill.is_none() {
+            return Ok(status);
+        }
+        if status.request != *request
+            || status.request_commitment
+                != request
+                    .commitment()
+                    .map_err(|error| WalletError::L2(error.to_string()))?
+        {
+            return Err(WalletError::L2(
+                "Hub registry payment status is for a different request than this wallet signed"
+                    .into(),
+            ));
+        }
+        let proposed_bill_commitment = request
+            .proposed_bill
+            .commitment()
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+        safety.accept_anchored_bill(
+            &request.binding_commitment,
+            hub_identity,
+            &proposed_bill_commitment,
+            request.proposed_bill.serial,
+            &status.anchor_receipts,
+            independent_serial_floor,
+        )?;
+        Ok(status)
+    }
+
+    /// Private for the same reason as [`Self::hvm_payment_status`].
+    async fn hvm_registry_payment_status(
         &self,
         operation_id: &str,
     ) -> WalletResult<l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryPaymentStatusV2> {

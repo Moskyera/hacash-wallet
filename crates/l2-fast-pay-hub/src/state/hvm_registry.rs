@@ -2,9 +2,10 @@ use crate::error::{HubError, HubResult};
 use crate::hvm_ledger::HvmBillProgressionStatus;
 use crate::hvm_registry::{HvmRegistryBillV2, HvmRegistryRecoveryBundleV2};
 use crate::hvm_registry_ledger::{
-    HVM_REGISTRY_CHANNEL_STATUS_SCHEMA, HVM_REGISTRY_PAYMENT_STATUS_SCHEMA,
-    HvmRegistryChannelStatusV2, HvmRegistryPaymentRequestV2, HvmRegistryPaymentStatusV2,
-    PersistedHvmRegistryLedger, PersistedHvmRegistryProgression,
+    HVM_REGISTRY_CHANNEL_STATUS_SCHEMA, HVM_REGISTRY_COSIGNED_BILL_SCHEMA,
+    HVM_REGISTRY_PAYMENT_STATUS_SCHEMA, HvmRegistryChannelStatusV2, HvmRegistryCosignedBillV2,
+    HvmRegistryPaymentRequestV2, HvmRegistryPaymentStatusV2, PersistedHvmRegistryLedger,
+    PersistedHvmRegistryProgression,
 };
 use crate::journal::{JournalEvent, JournalOperationType, JournalPhase};
 use crate::storage::{HubPersistedState, PersistedHvmRegistryActivation, validate_hvm_state};
@@ -159,7 +160,7 @@ impl HubState {
         &self,
         request: HvmRegistryPaymentRequestV2,
         now_unix: u64,
-    ) -> HubResult<HvmRegistryBillV2> {
+    ) -> HubResult<HvmRegistryCosignedBillV2> {
         self.ensure_settlement_ready()?;
         if crate::readiness::is_mainnet_pilot_profile(&self.deployment_profile) {
             return Err(HubError::Admission(
@@ -226,9 +227,19 @@ impl HubState {
             match progression_disposition(&existing.status) {
                 ExistingRegistryProgressionDisposition::ContinueUnsigned => {}
                 ExistingRegistryProgressionDisposition::ReturnDurableSignature => {
-                    return existing.fully_signed_bill.clone().ok_or_else(|| {
+                    // The retry answers with the durable receipts too. A retry
+                    // that returned the bill bare would be indistinguishable,
+                    // to the counterparty, from a Hub that had dropped its
+                    // witnesses - so the honest retry would fire the loudest
+                    // prompt in the system.
+                    let bill = existing.fully_signed_bill.clone().ok_or_else(|| {
                         HubError::State("completed registry operation lost its signed bill".into())
-                    });
+                    })?;
+                    return self.registry_cosigned_bill(
+                        bill,
+                        existing.anchor_receipts.clone(),
+                        &request,
+                    );
                 }
                 ExistingRegistryProgressionDisposition::RequireReconciliation => {
                     return Err(HubError::State(
@@ -266,6 +277,7 @@ impl HubState {
                     request_commitment: request_commitment.clone(),
                     previous_bill: previous.clone(),
                     fully_signed_bill: None,
+                    anchor_receipts: Vec::new(),
                     status: HvmBillProgressionStatus::UserProposalPersisted,
                     observed_height_before_signing: Some(first_snapshot.observed_height),
                     updated_unix: now_unix,
@@ -372,15 +384,60 @@ impl HubState {
             .ok_or_else(|| HubError::State("Hub signer is unavailable".into()))?;
         let mut signed = request.proposed_bill.clone();
         signer.sign_hvm_registry_bill(binding, &mut signed)?;
+        // The receipts are collected here, from the reservation this exact
+        // signature was made under, and made durable in the same write as the
+        // signed bill. They cannot be re-derived afterwards: the receipt binds
+        // the PAYER-SIGNED, HUB-UNSIGNED commitment, and `signed` above has
+        // just stopped being that bill.
+        let anchor_receipts: Vec<_> = anchor_receipt
+            .iter()
+            .map(|verified| verified.signed.clone())
+            .collect();
         progression.status = HvmBillProgressionStatus::FullySigned;
         progression.fully_signed_bill = Some(signed.clone());
+        progression.anchor_receipts = anchor_receipts.clone();
         progression.updated_unix = now_unix;
         self.persist_registry_progression(
             progression,
             JournalPhase::HvmPaymentFullySigned,
             now_unix,
         )?;
-        Ok(signed)
+        self.registry_cosigned_bill(signed, anchor_receipts, &request)
+    }
+
+    /// Assemble the response, and refuse to produce one that an anchored Hub
+    /// must not serve.
+    ///
+    /// This is the last gate before the bill leaves the state layer, and it is
+    /// deliberately on the *constructor* of the response rather than in the
+    /// HTTP handler: there is exactly one way to build an
+    /// [`HvmRegistryCosignedBillV2`] from this module, so there is no path by
+    /// which a caller obtains a co-signed bill that skipped the check.
+    fn registry_cosigned_bill(
+        &self,
+        bill: HvmRegistryBillV2,
+        anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
+        request: &HvmRegistryPaymentRequestV2,
+    ) -> HubResult<HvmRegistryCosignedBillV2> {
+        super::rollback_anchor::require_receipts_accompany_bill(
+            self.rollback_anchor_configured(),
+            &anchor_receipts,
+            // The receipt binds the payer-signed, Hub-unsigned bill, because
+            // `HvmRegistryBillV2::commitment` covers the whole struct including
+            // signatures and the Hub's own is added afterwards. This is the
+            // same commitment the wallet holds durably in its own request, and
+            // comparing against the fully signed bill instead would make every
+            // honest receipt look forged.
+            &request.proposed_bill.commitment()?,
+            request.proposed_bill.serial,
+            &request.binding_commitment,
+            self.hub_address.trim(),
+        )?;
+        Ok(HvmRegistryCosignedBillV2 {
+            schema: HVM_REGISTRY_COSIGNED_BILL_SCHEMA.into(),
+            bill,
+            anchor_receipts,
+        })
     }
 
     fn persist_registry_progression(
@@ -422,6 +479,13 @@ impl HubState {
                 ));
             }
             ledger.latest_fully_signed_bill = signed;
+            // The head and the receipts that authorised it move together, in
+            // this one write. A head whose receipts lagged behind it would be
+            // served to a recovering wallet as a bill with the wrong anchor
+            // evidence, which is worse than none.
+            ledger
+                .latest_anchor_receipts
+                .clone_from(&progression.anchor_receipts);
             ledger.updated_unix = now_unix;
         }
         next_state
@@ -487,6 +551,7 @@ impl HubState {
             minimum_required_live_blocks: activation.minimum_required_live_blocks,
             minimum_required_recover_blocks: activation.minimum_required_recover_blocks,
             latest_fully_signed_bill: ledger.latest_fully_signed_bill.clone(),
+            latest_anchor_receipts: ledger.latest_anchor_receipts.clone(),
             activated_unix: activation.activated_unix,
             updated_unix: ledger.updated_unix,
         })
@@ -514,6 +579,7 @@ impl HubState {
             status: progression.status.as_str().to_owned(),
             request: progression.request.clone(),
             fully_signed_bill: progression.fully_signed_bill.clone(),
+            anchor_receipts: progression.anchor_receipts.clone(),
             updated_unix: progression.updated_unix,
             recovery_required: matches!(
                 progression.status,
@@ -567,6 +633,9 @@ fn insert_registry_activation(
         PersistedHvmRegistryLedger {
             binding_commitment: activation.binding_commitment,
             latest_fully_signed_bill: activation.recovery_bundle.initial_recovery_bill,
+            // The opening bill is the on-chain recovery bill, which no witness
+            // receipted: it predates the channel's first anchored payment.
+            latest_anchor_receipts: Vec::new(),
             updated_unix: activation.activated_unix,
         },
     );

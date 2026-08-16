@@ -346,6 +346,23 @@ impl Witness {
         }
     }
 
+    /// The identity of the witness's durable store. Half of the pair key the
+    /// counterparty ratchets on, and the half a re-provisioned store changes.
+    fn instance_id(&self, hub_identity: &str) -> String {
+        self.service
+            .status(
+                &HubWitnessStatusRequestV1 {
+                    hub_identity: hub_identity.to_owned(),
+                    witness_id: self.service.witness_id().to_owned(),
+                    nonce: "00".repeat(32),
+                },
+                now_unix(),
+            )
+            .unwrap()
+            .status
+            .witness_instance_id
+    }
+
     fn observed_serial(&self, hub_identity: &str, binding_commitment: &str) -> Option<u64> {
         let status = self
             .service
@@ -501,7 +518,7 @@ async fn a_hub_restored_behind_the_witness_is_refused_and_the_refusal_names_the_
             .cosign_hvm_registry_payment(payment, now_unix())
             .await
             .expect("a live witness returning valid receipts must let an honest bill through");
-        assert_eq!(signed.serial, 2);
+        assert_eq!(signed.bill.serial, 2);
         signed
     };
 
@@ -558,7 +575,7 @@ async fn a_hub_restored_behind_the_witness_is_refused_and_the_refusal_names_the_
         Some(2),
         "no refused attempt may move the anchor"
     );
-    assert_eq!(signed_bill.serial, 2);
+    assert_eq!(signed_bill.bill.serial, 2);
 
     node.abort();
     witness.handle.abort();
@@ -614,7 +631,7 @@ async fn removing_the_witness_configuration_does_not_un_condemn_a_latched_channe
             .cosign_hvm_registry_payment(payment, now_unix())
             .await
             .unwrap();
-        assert_eq!(signed.serial, 2);
+        assert_eq!(signed.bill.serial, 2);
     }
     assert_eq!(
         witness.observed_serial(&hub_identity, &binding_commitment),
@@ -720,7 +737,11 @@ async fn removing_the_witness_configuration_does_not_un_condemn_a_latched_channe
         .cosign_hvm_registry_payment(control_payment, now_unix())
         .await
         .expect("a Hub that never had an anchor holds no latches and must be unaffected");
-    assert_eq!(control_signed.serial, 2);
+    assert_eq!(control_signed.bill.serial, 2);
+    assert!(
+        control_signed.anchor_receipts.is_empty(),
+        "a Hub that never had an anchor has no receipt to attach, and says so by attaching          none rather than by omitting the field"
+    );
     let control_readiness = never_anchored.mainnet_readiness().await;
     assert!(
         !control_readiness
@@ -1173,6 +1194,7 @@ async fn a_joining_witness_cannot_be_told_apart_from_an_amnesiac_one() {
             hub.cosign_hvm_registry_payment(payment, now_unix())
                 .await
                 .unwrap()
+                .bill
                 .serial,
             2
         );
@@ -1501,6 +1523,143 @@ async fn the_boot_posture_refuses_the_signature_without_refusing_the_process() {
         readiness.blockers
     );
 
+    node.abort();
+    witness.handle.abort();
+}
+
+/// The receipt has to reach the wallet, over HTTP, attached to the bill.
+///
+/// The overlap rule the counterparty enforces - "every new bill must carry a
+/// receipt from at least one witness that receipted my last accepted bill" -
+/// is worth nothing if the receipt stops at the Hub's process boundary. A
+/// field that exists in Rust and never reaches the wire is exactly the bug
+/// this design cannot afford, because the failure is silent: the wallet sees
+/// no receipts, concludes the Hub has no anchor, and the ratchet resets to
+/// whatever the Hub declares.
+///
+/// So this test is deliberately not a unit test on the state layer. It stands
+/// up the real Hub router, posts a real payment over real HTTP, and reads the
+/// bytes that come back. Every hop between `reserve_rollback_anchor` and the
+/// response body is under test at once.
+#[tokio::test]
+async fn a_cosigned_bill_carries_its_witness_receipt_all_the_way_onto_the_wire() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-wire-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x47; 20])).to_readable();
+    let (left, bundle) = signed_bundle("rollback-anchor-wire-left", &hub_account, &contract);
+    let binding_commitment = bundle.binding.commitment().unwrap();
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let witness = spawn_witness("wire").await;
+    let directory = tempfile::tempdir().unwrap();
+
+    let hub = build_hub(
+        &directory.path().join("hub-state.json"),
+        &hub_account,
+        &node_url,
+    )
+    .with_rollback_anchor(witness.config(&hub_identity, None))
+    .unwrap();
+    hub.run_rollback_anchor_startup_probe().await.unwrap();
+    hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+        .await
+        .unwrap();
+    hub.run_rollback_anchor_startup_probe().await.unwrap();
+
+    let hub = Arc::new(hub);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let served = hub.clone();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, l2_fast_pay_hub::build_router(served)).await;
+    });
+
+    let payment = left_signed_payment(&left, &bundle, "wire-payment-1", now_unix());
+    // The commitment the receipt binds to is the PAYER-SIGNED, HUB-UNSIGNED
+    // bill, because the Hub fills `hub_signature_hex` after the reservation.
+    // This is the commitment a wallet holds durably in its own request.
+    let proposed_commitment = payment.proposed_bill.commitment().unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/v2/hvm-registry/payment"))
+        .json(&payment)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "an honest bill against a live witness must be co-signed"
+    );
+    let body: Value = response.json().await.unwrap();
+
+    // 1. The bill is still there, unchanged in meaning.
+    let bill: HvmRegistryBillV2 = serde_json::from_value(
+        body.get("bill")
+            .cloned()
+            .expect("the co-signed response must carry the bill under `bill`"),
+    )
+    .expect("the `bill` field must deserialise as the registry bill");
+    assert_eq!(bill.serial, 2);
+    assert!(!bill.hub_signature_hex.is_empty());
+
+    // 2. The receipts are there, on the wire, not merely in Rust.
+    let receipts = body
+        .get("anchor_receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("the co-signed response must carry `anchor_receipts`");
+    assert_eq!(
+        receipts.len(),
+        1,
+        "a Hub with one configured witness must attach exactly its one receipt, got {receipts:?}"
+    );
+
+    // 3. The receipt is cryptographically real. A Hub that could satisfy the
+    //    overlap rule by naming a witness would have defeated it in one line,
+    //    so the wallet checks the signature and so does this test.
+    let signed: SignedHubWitnessReceiptV1 = serde_json::from_value(receipts[0].clone())
+        .expect("the attached receipt must deserialise as SignedHubWitnessReceiptV1");
+    signed
+        .verify_against_pinned_key(witness.service.receipt_address())
+        .expect("the attached receipt must verify against the witness's real signing key");
+
+    // 4. It is bound to this exact bill, this exact channel and this exact Hub.
+    assert_eq!(signed.receipt.proposed_bill_commitment, proposed_commitment);
+    assert_eq!(signed.receipt.serial, 2);
+    assert_eq!(signed.receipt.binding_commitment, binding_commitment);
+    assert_eq!(signed.receipt.hub_identity, hub_identity);
+    assert_eq!(
+        signed.receipt.witness_instance_id,
+        witness.instance_id(&hub_identity),
+        "the receipt must name the witness's durable store, which is the pair key the \
+         counterparty ratchets on"
+    );
+
+    // 5. The same receipt survives the crash window: a wallet that died between
+    //    the Hub signing and its own persist must be able to fetch the head and
+    //    its receipts back, or the channel is stuck with no honest way out.
+    let status: Value = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/v2/hvm-registry/channel/{binding_commitment}"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let latest = status
+        .get("latest_anchor_receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("the channel status must carry `latest_anchor_receipts` beside the head bill");
+    assert_eq!(latest.len(), 1, "got {latest:?}");
+    let stored: SignedHubWitnessReceiptV1 = serde_json::from_value(latest[0].clone()).unwrap();
+    assert_eq!(stored, signed, "the stored receipt must be the one served");
+
+    server.abort();
     node.abort();
     witness.handle.abort();
 }

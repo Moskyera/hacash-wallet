@@ -285,8 +285,38 @@ export HACASH_HUB_ROLLBACK_WITNESS_ATTESTATION_FILE=/etc/hpay-fast-pay-hub/witne
 scripts/START-HUB-WITH-REMOTE-WITNESS.sh https://witness.acme.example
 ```
 
-Changing witness later is a change to those five values. It is never a code
-change, a rebuild, or a conversation with anyone but the new witness operator.
+### Changing witness later is not a config edit today. Read this before you agree to run one.
+
+The paragraph that used to sit here said changing witness was "a change to those
+five values, never a code change". That was false, and it was load-bearing for
+the decision to run a witness at all, so it is corrected rather than softened.
+
+What actually happens if you point a running Hub at a different witness:
+
+1. The Hub pinned the first witness's **store identity** on first contact
+   (`rollback_anchor.rs`, the `witness_instance_id.is_empty()` branch). A
+   different store answering under a different identity is refused by name:
+   `rollback_anchor_witness_instance_changed`.
+2. The startup probe therefore never agrees, and `reserve_rollback_anchor`
+   refuses before signing anything. **Every channel on that Hub stops being
+   signable**, not just one.
+3. The pin lives inside the Hub's authenticated state commitment, so it cannot
+   be edited out with a text editor. There is no supported command that clears
+   it — witness adoption is deliberately not built.
+4. The Hub's client holds **one** witness, so there is no "run both for a bill"
+   overlap window either. Every rotation is a zero-overlap event for every live
+   channel, which means every counterparty is prompted to decide (see ADR-001,
+   "The counterparty ratchet").
+
+The only path that restores service today is removing the five values and
+running unanchored — which costs your payers exactly the same prompt a rotation
+would have cost them, and costs you the anchor permanently. That is a bad price
+on the honest path and we are not going to pretend otherwise.
+
+So: **choose a witness operator you expect to still be there in a year**, and
+treat rotation as an operational event that needs a maintenance window and a
+conversation with every counterparty, not a config edit. A witness adoption
+ceremony and multi-witness configuration are the fix; neither exists yet.
 
 ---
 

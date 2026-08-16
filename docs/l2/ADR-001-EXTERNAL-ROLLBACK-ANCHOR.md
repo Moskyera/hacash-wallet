@@ -317,6 +317,117 @@ witness is what turns the anchor from "protects the operator from their own
 infrastructure" into "protects the counterparty from the operator". Both are
 worth having. They are not the same guarantee and must never be reported as one.
 
+### The counterparty ratchet, which narrows the paragraph above
+
+Everything said above is true *Hub-side*. It stops being the whole truth once
+the receipts ride back to the counterparty with the bill.
+
+The rule is one sentence: **every new bill must carry a receipt from at least
+one witness that receipted the counterparty's most recently accepted bill** —
+enforced, more strongly, as *no witness the counterparty recorded may
+disappear without the counterparty being told*. The counterparty keys that
+memory by `binding_commitment` and stores it inside its own authenticated L2
+state commitment, on a different machine, under a different key
+(`crates/wallet-core/src/l2_safety.rs`, `accept_anchored_bill`).
+
+This closes the circularity that the rest of this document accepts. To roll
+back past serial S and re-spend, the Hub must present a bill at or below S. Any
+witness that receipted the counterparty's bill at S holds S and refuses
+anything at or below it. So the Hub must present the new bill *without* that
+witness — and the overlap rule makes the counterparty refuse it. The Hub is
+caught by the one party it cannot swap out, using memory it cannot reach.
+
+It also narrows the "undetectable" case above. An operator who stops both,
+restores Hub *and* witness together, and restarts does pass every Hub-side
+check. It does not pass the counterparty's: the counterparty holds
+`highest_counter_value` and `accepted_serial` from its last bill's receipt, in
+a store that was in neither backup set, and the restored counter going
+backwards is a hard refusal.
+
+What the ratchet does **not** do, stated plainly:
+
+- It guarantees **continuity, not honesty**. For a brand-new counterparty with
+  no history there is nothing to compare against, so the set is whatever the
+  Hub declares. A Hub malicious from the start can present a witness set it
+  fully controls and the ratchet will faithfully preserve that set forever.
+  This is irreducible without an external registry of witnesses. It matters
+  less than it sounds — a fresh channel at serial 0 has nothing to roll back
+  to, and the ratchet accrues from the first bill onward — but it is real, and
+  the counterparty's only defence against a set that was corrupt from bill one
+  is the trust decision it makes *before* bill one: who runs the witness.
+- It does not defeat a **colluding** witness: one already in the counterparty's
+  recorded set, same key, same instance, willing to fabricate monotone counters
+  and re-receipt a serial it already holds. No check here can see that. It is
+  the same residual as a same-operator witness, above.
+
+Write it as "the wallet verifies the witness set has not changed since it first
+saw one", never as "the wallet verifies the witness set".
+
+#### The counterparty's memory is not self-anchoring either
+
+The ratchet is only as durable as the store it lives in, and that store is a
+file on the counterparty's own disk. Deleting the directory is cheaper than any
+cryptographic attack and leaves nothing inconsistent behind: the next bill takes
+the first-bill branch and the set becomes whatever the Hub declares. Restoring
+it from an older *coherent* snapshot — state, journal and checkpoint together —
+opens clean for the same reason: nothing inside disagrees with anything else
+inside, it is simply behind. Whoever can restore a Hub's state can usually reach
+this store too, and always can when the Hub operator is also the wallet's owner.
+
+So the memory is anchored a second time, outside itself. `accept_anchored_bill`
+takes a mandatory `independent_serial_floor` — the highest serial the caller can
+prove the channel reached, from a store this one does not own. Agent Wallet
+supplies it from its own encrypted operation state: different key, different
+journal, different file, not in the same backup set. A memory that is missing
+while that floor is above zero, or behind it, is refused
+(`rollback_anchor_memory_behind_wallet`).
+
+That raises the bar from one file to two, and it should be described that way
+and not more grandly. An attacker holding the whole wallet's disk can rewind
+both. What it does buy: `rm -rf` on the L2 directory alone no longer resets the
+ratchet, and a partial restore is caught rather than quietly re-baselined.
+
+#### Every path that accepts a bill has to carry the check
+
+The rule is worth exactly as much as its narrowest gate, and the first build of
+it had a second gate with no lock. `HubClient::cosign_*` ran the ratchet; the
+reconciliation path did not, and it commits the Hub's `fully_signed_bill` from
+the payment status document. Reaching it needed no cryptography: co-sign,
+persist, then drop the connection. The wallet's co-sign fails closed, its remedy
+is "Reconcile", and reconciling committed the bill the ratchet had refused —
+including the counter-went-backwards refusal this ADR relies on to narrow the
+"undetectable" case above.
+
+Both paths now run the same check inside the function that produces the bill
+(`l2_hub.rs`, `cosign_hvm_*` and `reconcile_hvm_*`), and the raw status readers
+are private. The general form, worth stating because it will come up again:
+*whoever chooses which path the counterparty takes must not be able to choose a
+path with no check on it.*
+
+#### The decision has to reach a person, and closing has to stay real
+
+Zero overlap is a user decision. It is never a silent accept, and never an
+automatic halt: an innocent witness rotation and a Hub swapping witnesses in
+order to re-sign history are byte-identical from the counterparty's side, and no
+amount of protocol can tell them apart. Only the owner knows whether their
+operator announced a change.
+
+That means the parked decision must be readable and answerable by a human, or
+the rule has no "yes" at all and its refusals pile up against a wall. It is
+durable in the channel store, exposed through
+`AgentWalletManager::pending_hvm_anchor_decision` /
+`resolve_hvm_anchor_decision`, carried on the Tauri surface as
+`agent_wallet_hvm_anchor_decision` / `agent_wallet_resolve_hvm_anchor_decision`,
+and shown in the HVM operations panel with the two answers and nothing else.
+The refusal is its own error value, never `RecoveryRequired`, because
+`RecoveryRequired`'s remedy is the reconcile button and pointing a waiting owner
+at the control that commits the bill is worse than saying nothing.
+
+Choosing to close latches the channel on its last accepted bill — whose receipt
+set is intact — and refuses to advance it further. The close itself runs against
+that bill and needs nothing from the Hub's anchor, which is what keeps closing
+available no matter how the witness question is answered.
+
 ### What this means for the default that ships
 
 There is no public witness address today. Until one exists, the shipped default

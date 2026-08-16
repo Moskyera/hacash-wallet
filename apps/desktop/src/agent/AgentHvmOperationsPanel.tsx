@@ -5,6 +5,8 @@ import {
   type AgentHvmPaymentOperation,
   type AgentHvmPaymentStatus,
   type AgentHvmRegistryBinding,
+  type AnchorWitnessAnswer,
+  type AnchorWitnessChange,
 } from "./api";
 
 type Props = {
@@ -56,13 +58,32 @@ export function AgentHvmOperationsPanel({
   const [rail, setRail] = useState<HvmRail>("registry_v2");
   const [loadError, setLoadError] = useState("");
   const [retryConfirm, setRetryConfirm] = useState<string | null>(null);
+  const [anchorDecisions, setAnchorDecisions] = useState<Record<string, AnchorWitnessChange>>({});
 
   const load = useCallback(async () => {
     setLoadError("");
     try {
-      setOperations(await agentWalletApi.listHvmActivity(walletId));
+      const loaded = await agentWalletApi.listHvmActivity(walletId);
+      setOperations(loaded);
+      // A parked rollback-anchor decision is durable and per channel, so it is
+      // read back rather than remembered. This is the only place the question
+      // reaches a person, and until it is answered the channel does not
+      // advance in either direction.
+      const parked: Record<string, AnchorWitnessChange> = {};
+      for (const operation of loaded) {
+        if (!RECOVERABLE.has(operation.status)) continue;
+        try {
+          const change = await agentWalletApi.hvmAnchorDecision(walletId, operation.operation_id);
+          if (change) parked[operation.operation_id] = change;
+        } catch {
+          // A decision that cannot be read is not a decision that can be
+          // skipped: the recover path refuses on its own while one is parked.
+        }
+      }
+      setAnchorDecisions(parked);
     } catch (reason) {
       setOperations(null);
+      setAnchorDecisions({});
       setLoadError(readableError(reason));
     }
   }, [walletId]);
@@ -85,6 +106,24 @@ export function AgentHvmOperationsPanel({
         }
       }),
     [load, onInfo, onRefreshOverview, run],
+  );
+
+  const resolveAnchor = useCallback(
+    (operationId: string, answer: AnchorWitnessAnswer) =>
+      run(async () => {
+        try {
+          await agentWalletApi.resolveHvmAnchorDecision(walletId, operationId, answer);
+          onInfo(
+            answer === "close_channel"
+              ? "This channel is now closing on its last accepted bill. It will not accept another bill from this Hub."
+              : "This Hub's new witness set was recorded. The witnesses it dropped are kept in the record, not erased.",
+          );
+        } finally {
+          await load();
+          await onRefreshOverview();
+        }
+      }),
+    [load, onInfo, onRefreshOverview, run, walletId],
   );
 
   const normalizedCommitment = bindingCommitment.trim().toLowerCase();
@@ -213,7 +252,11 @@ export function AgentHvmOperationsPanel({
             && operation.hub_fee_zhu === 0
             && operation.total_debit_zhu === operation.amount_zhu;
           const canExecute = networkMode === "testnet" && zeroFee && operation.status === "approved";
-          const canRecover = RECOVERABLE.has(operation.status);
+          const anchorChange = anchorDecisions[operation.operation_id];
+          // Recovery is hidden while a witness decision is parked. Recovery is
+          // the path that commits the Hub's bill, and this refusal exists
+          // precisely to stop that bill being committed unexamined.
+          const canRecover = RECOVERABLE.has(operation.status) && !anchorChange;
           const canPrepareRetry = networkMode === "testnet" && operation.status === "exact_retry_ready";
           const confirmingRetry = retryConfirm === operation.operation_id;
           return (
@@ -245,6 +288,42 @@ export function AgentHvmOperationsPanel({
                     )}
                   >
                     Execute approved HVM payment
+                  </button>
+                </div>
+              )}
+              {anchorChange && (
+                <div className="agent-confirm-row" role="alert">
+                  <p className="agent-warning">
+                    {anchorChange.headline}. This is what an operator changing witnesses looks like, and it is also what a Hub re-using a bill number it already spent looks like. From here they are the same, so only you can answer it. Nothing was accepted and nothing was spent.
+                  </p>
+                  <dl className="agent-detail-grid">
+                    <Detail label="Last bill you accepted" value={`Serial ${anchorChange.last_accepted_serial}`} />
+                    <Detail label="Bill being offered" value={`Serial ${anchorChange.serial}`} />
+                    <Detail
+                      label="Witnesses no longer covering this channel"
+                      value={anchorChange.dropped.map((record) => record.signer_address).join(", ") || "none"}
+                      wide
+                    />
+                    <Detail
+                      label="Witnesses this Hub offers now"
+                      value={anchorChange.offered.map((record) => record.signer_address).join(", ") || "none"}
+                      wide
+                    />
+                  </dl>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void resolveAnchor(operation.operation_id, "close_channel")}
+                  >
+                    Close this channel on its last accepted bill
+                  </button>
+                  <button
+                    type="button"
+                    className="agent-primary-action"
+                    disabled={busy}
+                    onClick={() => void resolveAnchor(operation.operation_id, "accept_new_witness_set")}
+                  >
+                    Accept this Hub's new witnesses
                   </button>
                 </div>
               )}

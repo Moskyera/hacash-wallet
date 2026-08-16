@@ -14,11 +14,12 @@ use crate::api::{
     ConfirmFastPayRequest, FastPayInboxItem, FastPayRequest, FastPayResponse, HubHealth,
 };
 use crate::error::HubError;
-use crate::hvm_channel::HvmChannelBillV1;
-use crate::hvm_ledger::{HvmChannelStatusV1, HvmPaymentRequestV1, HvmPaymentStatusV1};
-use crate::hvm_registry::HvmRegistryBillV2;
+use crate::hvm_ledger::{
+    HvmChannelStatusV1, HvmCosignedBillV1, HvmPaymentRequestV1, HvmPaymentStatusV1,
+};
 use crate::hvm_registry_ledger::{
-    HvmRegistryChannelStatusV2, HvmRegistryPaymentRequestV2, HvmRegistryPaymentStatusV2,
+    HvmRegistryChannelStatusV2, HvmRegistryCosignedBillV2, HvmRegistryPaymentRequestV2,
+    HvmRegistryPaymentStatusV2,
 };
 use crate::l1_channel::{L1ChannelOpenRequest, L1ChannelOpenStatusResponse};
 use crate::l1_channel_close::{L1ChannelCloseRequest, L1ChannelCloseResponse};
@@ -366,7 +367,7 @@ async fn hvm_payment_handler(
     State(state): State<AppState>,
     PeerIp(peer): PeerIp,
     Json(request): Json<HvmPaymentRequestV1>,
-) -> Result<Json<HvmChannelBillV1>, HubHttpError> {
+) -> Result<Json<HvmCosignedBillV1>, HubHttpError> {
     let _global_permit = acquire_global_mutation_permit(&state)?;
     state
         .peer_mutation_admission
@@ -397,7 +398,7 @@ async fn hvm_registry_payment_handler(
     State(state): State<AppState>,
     PeerIp(peer): PeerIp,
     Json(request): Json<HvmRegistryPaymentRequestV2>,
-) -> Result<Json<HvmRegistryBillV2>, HubHttpError> {
+) -> Result<Json<HvmRegistryCosignedBillV2>, HubHttpError> {
     let _global_permit = acquire_global_mutation_permit(&state)?;
     state
         .peer_mutation_admission

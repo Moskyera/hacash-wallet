@@ -547,7 +547,11 @@ async fn hvm_payment_progression_is_separate_idempotent_and_restart_durable() {
         hub.activate_hvm_channel_recovery(bundle.clone(), 5_000, 5_000)
             .await
             .unwrap();
-        signed = hub.cosign_hvm_payment(request.clone(), now).await.unwrap();
+        signed = hub
+            .cosign_hvm_payment(request.clone(), now)
+            .await
+            .unwrap()
+            .bill;
         signed.validate_fully_signed(&bundle.binding).unwrap();
         assert_eq!(signed.serial, 2);
         assert_eq!(hub.hvm_latest_bill(&commitment).unwrap(), signed);
@@ -573,7 +577,8 @@ async fn hvm_payment_progression_is_separate_idempotent_and_restart_durable() {
         assert_eq!(
             hub.cosign_hvm_payment(status.request.clone(), now + 1)
                 .await
-                .unwrap(),
+                .unwrap()
+                .bill,
             signed
         );
 
@@ -605,7 +610,11 @@ async fn hvm_payment_progression_is_separate_idempotent_and_restart_durable() {
         signed
     );
     assert_eq!(
-        reopened.cosign_hvm_payment(request, now + 2).await.unwrap(),
+        reopened
+            .cosign_hvm_payment(request, now + 2)
+            .await
+            .unwrap()
+            .bill,
         signed
     );
     server.abort();

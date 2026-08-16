@@ -174,6 +174,106 @@ believed. If it reports `N+5`, five reservations happened that this Hub does not
 account for — a second live Hub, or a misconfigured shared counter namespace.
 Refuse and emit `rollback_anchor_counter_skipped`.
 
+### The receipt is also the counterparty's overlap token
+
+The same `SignedHubWitnessReceiptV1` rides back to the payer with the co-signed
+bill, verbatim, in `HvmCosignedBillV1` / `HvmRegistryCosignedBillV2`. Verbatim
+is deliberate: a Hub-supplied summary, id list or digest would be a second place
+to lie, and the receipt already binds the bill commitment, serial, channel, Hub
+identity and counter under the witness's own signature.
+
+The wallet does not read `witness_id` to decide who signed. `witness_id` is a
+`String` the Hub types, validated only as an identifier — overlapping on it is
+defeated in one line. A Hacash `Sign` carries its compressed public key, so the
+wallet recovers `signer_address` from the signature and then verifies the
+canonical receipt bytes against that recovered address. The overlap identity is
+the pair **`(recovered signer_address, witness_instance_id)`**. The instance is
+in the key because re-provisioning a store with the same key yields the same
+address with a counter at zero — the cheapest attack on this design, per §10 —
+and keyed on the pair that attack is a drop, exactly as loud as a witness swap.
+
+The wallet deliberately does **not** enforce `receipt_expires_at`. That 120-second
+window is the Hub's pre-signing gate and is enforced there. A wallet enforcing it
+would refuse every bill that took two minutes to arrive and would hand clock skew
+a denial of service on a path where no bypass is permitted — and it would buy
+nothing, since obtaining the receipt already advanced the witness's counter.
+
+An absent `anchor_receipts` field deserialises to an empty list, and empty is
+never "skip the check": it means *every remembered witness was dropped*, which
+is the loudest prompt in the system. A Hub cannot reset a counterparty's ratchet
+by omission. See ADR-001, "The counterparty ratchet", for what this buys and for
+the two residuals — a brand-new counterparty with no history, and a colluding
+witness — that it does not.
+
+Because a wallet can crash between the Hub signing and the wallet persisting,
+the payment status document carries `anchor_receipts` beside
+`fully_signed_bill`, verbatim and of the same type, and the wallet runs the same
+admission and overlap checks on it as on the co-sign response. Without that a
+wallet in the crash window could never accept that head again and the channel
+would be stuck with no honest way out.
+
+The channel status document also carries `latest_anchor_receipts` beside
+`latest_fully_signed_bill`. That one is published but **not yet read by any
+wallet**: today's crash window is closed through the payment status document,
+which the wallet reaches with the operation it already holds. Said plainly
+because a field on the wire that nothing verifies is worse than no field at
+all — it invites the reader to assume a check that is not there.
+
+Re-accepting the exact recorded head is therefore allowed, and it is the only
+door in the ratchet that leads to "yes" without advancing anything. It is a
+narrow one: the receipts offered must still cover **every** witness the wallet
+recorded, and no recorded witness may present a counter below the one already
+held. An earlier build returned early on `serial == accepted_serial &&
+commitment == accepted_commitment` *before* those two checks, which made the
+recorded head the one place a bill was accepted with the rule skipped — the Hub
+could re-serve the head with no receipts at all, or with a witness whose counter
+had gone backwards after a Hub-and-witness co-restore, and be told yes.
+
+### Both ways a bill reaches the wallet carry the check
+
+There are two, and only checking the first is the same as not checking at all.
+A Hub can co-sign, persist, and then answer the payment POST with a 503 or a
+truncated body; the wallet's co-sign call fails closed without reaching the
+ratchet, and the wallet's remedy for that is to reconcile against the payment
+status document — where the fully signed bill is waiting. If reconciliation does
+not run the ratchet, every refusal in this document is one dropped TCP
+connection away from being skipped, and the party that chooses whether to drop
+it is the Hub.
+
+So the ratchet runs inside `L2HubClient::cosign_hvm_*` **and** inside
+`L2HubClient::reconcile_hvm_*`, both of which return the bill only after it has
+passed; the raw status readers are private. `anchor_receipts` on the payment
+status document is what makes that possible, and it is not decoration.
+
+### The wallet's memory is anchored outside the wallet's memory
+
+The ratchet lives in one file on the counterparty's disk. Deleting that
+directory is cheaper than any attack in §10 and leaves nothing inconsistent
+behind: a fresh store opens clean, the next bill takes the first-bill branch,
+and the witness set becomes whatever the Hub declares. Restoring the store from
+an older *coherent* snapshot — state, journal and checkpoint together — is the
+same problem wearing a suit: everything inside agrees, it is simply behind.
+
+`accept_anchored_bill` therefore takes a mandatory `independent_serial_floor`:
+the highest serial the caller can prove the channel reached, read from a store
+this one does not own. In Agent Wallet that is its own encrypted operation
+state, under a different key, with its own journal, and not in the same backup
+set. A memory that is **missing** while the floor is above zero, or **behind**
+the floor, is refused as `rollback_anchor_memory_behind_wallet`. It is a hard
+refusal and not a user decision: it is not a claim about the Hub's witnesses at
+all, it is this machine's own files disagreeing with each other.
+
+The argument is mandatory rather than defaulted on purpose. A hardening
+parameter with a default is a bypass with a nicer name, and ADR-001 forbids
+bypasses by name.
+
+Migration note: a channel that was already paying before this ratchet existed
+has a floor above zero and no memory, so its next bill is refused rather than
+silently re-baselined at whatever serial the Hub offers. That is the intended
+answer — "I have paid on this channel but I have no record of who witnessed it"
+is not a new channel — and it costs nothing today because both anchored routes
+are still mainnet-refused and no long-lived channel exists.
+
 ### What the Hub verifies before it signs
 
 All of it, and any failure refuses:

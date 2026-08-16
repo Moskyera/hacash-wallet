@@ -952,15 +952,16 @@ async fn run_online(
             if request.recipient != recipient || request.amount_zhu != amount_zhu {
                 return Err("payment label is already bound to different terms".into());
             }
-            let bill = hub
+            let cosigned = hub
                 .cosign_hvm_registry_payment(request, unix_timestamp()?)
                 .await?;
-            bill.validate_fully_signed(&bundle.binding)?;
+            cosigned.bill.validate_fully_signed(&bundle.binding)?;
             println!("Fee-free registry payment is fully signed and durable.");
             println!("Operation: {operation_id}");
-            println!("Serial: {}", bill.serial);
+            println!("Serial: {}", cosigned.bill.serial);
             println!("Amount (Zhu): {amount_zhu}");
             println!("Hub fee (Zhu): 0");
+            println!("Anchor receipts: {}", cosigned.anchor_receipts.len());
         }
         Command::Watch {
             hub_state_file,
