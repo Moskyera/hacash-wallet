@@ -46,6 +46,13 @@ fn agent_core_is_optional_and_the_admin_surface_is_feature_gated() {
         .collect();
     let expected_dependencies = BTreeSet::from([
         "dep:agent-wallet-core",
+        // Read only, and only on the desktop admin surface: the fullnode query
+        // that reports a registry channel's remaining storage lease, and the
+        // measured readiness of the user side of the unilateral exit. No Hub
+        // is started and no Hub endpoint is called from this crate. It is
+        // listed here so that adding a *second* reason to depend on the Hub
+        // crate has to be a deliberate edit to this set.
+        "dep:l2-fast-pay-hub",
         "dep:agent-wallet-runtime",
         "dep:hpay-agent-connector",
         "dep:hpay-companion-protocol",

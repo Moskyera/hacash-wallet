@@ -15,7 +15,9 @@ use vm::action::ContractMainCall;
 
 use crate::error::{HubError, HubResult};
 use crate::hvm_channel::parse_address;
-use crate::hvm_registry::{HvmRegistryBillV2, HvmRegistryBindingV2, HvmRegistryLiveSnapshotV2};
+use crate::hvm_registry::{
+    HPAY_REGISTRY_MAX_RENT_STEP, HvmRegistryBillV2, HvmRegistryBindingV2, HvmRegistryLiveSnapshotV2,
+};
 use crate::hvm_watchtower::HVM_LEASE_RENEWAL_MAX_PERIODS;
 
 pub const HVM_REGISTRY_WATCHTOWER_REQUEST_SCHEMA: &str = "hpay-hvm-registry-watchtower-request/2";
@@ -187,6 +189,11 @@ pub struct HvmRegistryChainResponseV2 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HvmRegistryWatchtowerDecisionV2 {
     NoAction,
+    /// Start a unilateral settlement from OPEN by putting the latest
+    /// fully-signed bill on chain. Only [`decide_user_exit_action`] ever
+    /// returns this: the Hub's monitor has no reason to move an OPEN channel,
+    /// and the user does.
+    OpenChallengeWithLatestBill,
     RespondWithLatestBill,
     Finalize,
     /// The channel is FINAL and the settled principal is still sitting in the
@@ -243,6 +250,82 @@ pub fn decide_registry_watchtower_action(
         4 => Ok(HvmRegistryWatchtowerDecisionV2::RecoveryRequired),
         _ => Ok(HvmRegistryWatchtowerDecisionV2::RecoveryRequired),
     }
+}
+
+/// The same decision, taken from the *left* party's chair.
+///
+/// Exactly one situation reads differently, and it is the whole point of a
+/// unilateral exit: on status 2 (OPEN) the Hub's monitor answers `NoAction`,
+/// because an open channel that nobody has challenged is a channel doing its
+/// job. A user whose Hub has gone silent is looking at the same OPEN status
+/// and needs the opposite answer — OPEN is where an exit *starts*, by putting
+/// the latest fully-signed bill on chain with `challenge`.
+///
+/// Every other branch is delegated verbatim to
+/// [`decide_registry_watchtower_action`] rather than restated, so respond,
+/// finalize, claim and the two `RecoveryRequired` rules cannot drift apart
+/// between the two callers. In particular `chain_serial > latest.serial` stays
+/// `RecoveryRequired` here too: a chain ahead of the wallet's own head means
+/// the wallet's evidence is not the newest evidence, and challenging with it
+/// would be the user attacking themselves.
+/// The second divergence: a party acting **for the left side** never spends a
+/// fee to reduce what the left side is paid.
+///
+/// See [`registry_respond_defends_left_payout`] for why this is not a
+/// nicety. On the shipped one-directional rail it means `respond` never fires
+/// from this chair at all, and that is the correct answer rather than a
+/// disabled feature: every bill after the first pays the user strictly less,
+/// so a `respond` carrying a newer serial can only ever hand money back. The
+/// day the rail carries refunds or a Hub deposit, the same rule starts firing
+/// on its own, in the user's favour, with no edit here.
+pub fn decide_user_exit_action(
+    snapshot: &HvmRegistryLiveSnapshotV2,
+    binding: &HvmRegistryBindingV2,
+    latest: &HvmRegistryBillV2,
+) -> HubResult<HvmRegistryWatchtowerDecisionV2> {
+    let hub_view = decide_registry_watchtower_action(snapshot, binding, latest)?;
+    if hub_view == HvmRegistryWatchtowerDecisionV2::NoAction && snapshot.channel.status.value == 2 {
+        return Ok(HvmRegistryWatchtowerDecisionV2::OpenChallengeWithLatestBill);
+    }
+    if hub_view == HvmRegistryWatchtowerDecisionV2::RespondWithLatestBill
+        && !registry_respond_defends_left_payout(snapshot, latest)
+    {
+        return Ok(HvmRegistryWatchtowerDecisionV2::NoAction);
+    }
+    Ok(hub_view)
+}
+
+/// Would answering this challenge with our bill leave the left party no worse
+/// off than the chain already has them?
+///
+/// # Why this exists
+///
+/// The Hub's watchtower asks one question — is the chain carrying an older
+/// serial than mine — and answers `RespondWithLatestBill` if so. That is the
+/// right question *from the Hub's chair*, because the Hub is claiming what it
+/// earned. Taken from the left party's chair, or from a watchtower running on
+/// the left party's behalf, it is the wrong question, and on this rail it is
+/// exactly backwards.
+///
+/// Every non-initial bill is minted by one function, which subtracts from the
+/// left balance and adds to the Hub's (`hvm_registry_ledger`), and a non-zero
+/// `right_hub_deposit_zhu` is refused outright (`hvm_registry`). So a higher
+/// serial *always* means a lower left balance. A hostile Hub that challenges
+/// with a stale bill is handing money back; a watcher that dutifully answers
+/// with the newest bill takes that money away again. Measured on chain: a
+/// stale challenge left the user owed 950,000 zhu, the "protective" response
+/// installed the newest serial, and the user was paid 300,000. The watcher
+/// cost its own user 650,000 zhu and a fee.
+///
+/// So the guard is stated in terms of the *amount*, not the serial. It does
+/// not assume the rail is one-directional; it measures the direction of this
+/// particular response. Nothing here weakens a check — a party may still
+/// always respond in its own favour, and the Hub's own path is untouched.
+pub fn registry_respond_defends_left_payout(
+    snapshot: &HvmRegistryLiveSnapshotV2,
+    latest: &HvmRegistryBillV2,
+) -> bool {
+    latest.left_balance_zhu >= snapshot.channel.left_balance.value
 }
 
 /// Blocks left between the verified height and the challenge deadline.
@@ -399,6 +482,79 @@ pub fn registry_renew_all_call_source(
     )
 }
 
+/// The 12 storage keys of one channel, renewed on their own.
+///
+/// Split out of [`registry_renew_all_call_source`] because the two halves have
+/// genuinely different owners and genuinely different gas budgets. These 12
+/// keys belong to one user's channel; the 6 globals are shared by every
+/// channel in the deployment. Renewing only the channel fits far more periods
+/// under the same Type 3 storage-gas cap than renewing all 18 at once — the
+/// combined helper is capped at [`HVM_LEASE_RENEWAL_MAX_PERIODS`] = 100 for
+/// exactly that reason — so a user buying runway for their own deposit gets
+/// strictly more life per fee from this call.
+///
+/// # This number is the contract's, not ours
+///
+/// It was 200 — a gas measurement taken against an older revision of the
+/// contract — while the reviewed contract asserts `periods <= MAX_RENT_STEP`
+/// with `MAX_RENT_STEP = 150`. Nothing tied the two together, so the wallet
+/// happily signed `renew_channel(left, 200)` and the chain threw it out. That
+/// mattered more than an ordinary off-by-one: the lease is the only clock in
+/// this system that destroys a deposit outright, and the driver answers a
+/// short lease by renewing *first*, so the one rescue path a user has was a
+/// transaction that could never execute.
+///
+/// It is now [`HPAY_REGISTRY_MAX_RENT_STEP`], and
+/// `registry_rent_step_matches_the_reviewed_contract` re-reads the constant
+/// out of the contract source itself and fails if the two ever drift again.
+/// The gas headroom the old figure was chasing is still there — the contract's
+/// own comment records that 200 is the last step that executes and 250 dies
+/// with `OutOfGas`, so 150 sits under the cliff with margin.
+pub const HVM_REGISTRY_RENEW_CHANNEL_MAX_PERIODS: u64 = HPAY_REGISTRY_MAX_RENT_STEP;
+
+/// The 6 shared registry globals, renewed on their own.
+///
+/// If these lapse, *every* channel in the deployment is affected, not just
+/// one. Any address may renew them — the call takes no party argument and
+/// carries no signer check — so the shared fate is repairable by anybody, but
+/// it is a named property of the shared profile rather than a surprise.
+///
+/// Capped by the contract's own `MAX_RENT_STEP`, exactly like the channel
+/// half above and for the same reason: `renew_registry` asserts
+/// `periods <= MAX_RENT_STEP` before it touches a key, so the 400 this used to
+/// advertise was a transaction the chain refused. The gas ceiling measured for
+/// this call is higher than the channel call's — it touches 6 keys rather than
+/// 12 — but the contract's assertion binds first, so the gas headroom is not
+/// the limit that matters.
+pub const HVM_REGISTRY_RENEW_REGISTRY_MAX_PERIODS: u64 = HPAY_REGISTRY_MAX_RENT_STEP;
+
+pub fn registry_renew_channel_call_source(
+    binding: &HvmRegistryBindingV2,
+    periods: u64,
+) -> HubResult<String> {
+    if periods == 0 || periods > HVM_REGISTRY_RENEW_CHANNEL_MAX_PERIODS {
+        return Err(HubError::State(format!(
+            "HVM registry channel lease periods must be between 1 and {HVM_REGISTRY_RENEW_CHANNEL_MAX_PERIODS}"
+        )));
+    }
+    checked_registry_call(
+        binding,
+        &format!("renew_channel({}, {periods})", binding.left_address),
+    )
+}
+
+pub fn registry_renew_registry_call_source(
+    binding: &HvmRegistryBindingV2,
+    periods: u64,
+) -> HubResult<String> {
+    if periods == 0 || periods > HVM_REGISTRY_RENEW_REGISTRY_MAX_PERIODS {
+        return Err(HubError::State(format!(
+            "HVM registry global lease periods must be between 1 and {HVM_REGISTRY_RENEW_REGISTRY_MAX_PERIODS}"
+        )));
+    }
+    checked_registry_call(binding, &format!("renew_registry({periods})"))
+}
+
 /// Canonical descriptor of an Action 14 claim.
 ///
 /// A claim is not a fitsh call: it carries no Action 44 and compiles nothing.
@@ -466,25 +622,151 @@ pub struct SignedHvmRegistryCallTransactionV2 {
     pub call_source: String,
 }
 
+/// Which party of the binding is asking for a registry transaction to be
+/// built, **stated by the caller** and then verified here against the binding.
+///
+/// The builders used to open with a bare `signer.readable() !=
+/// binding.right_hub_address`. That predicate was not the chain's rule — the
+/// `hpay_channel_registry_v2` contract puts no signer check on `challenge`,
+/// `respond`, `finalize` or `renew_channel`, and the Action 14 payout is
+/// authorised by `PermitHAC` rather than by `tx.main` — it was a description
+/// of the only caller that existed. Left as-is it is the whole reason a user
+/// cannot walk out of a channel the chain would happily let them walk out of.
+///
+/// So the predicate is not removed. It is made to belong to a role the caller
+/// has to name, so that:
+///
+/// * the Hub's rule is byte-for-byte the rule it always had, and every Hub
+///   call site still passes [`HvmRegistryCallerRole::Hub`];
+/// * the user's rule is its own named, separately tested rule
+///   (`signer == binding.left_address`) rather than an absence;
+/// * a third role — a fee-paying watchtower that is neither party — cannot
+///   appear by omission. It has to be added here deliberately, with its own
+///   test, on the day somebody actually operates one.
+///
+/// That day is this one, and [`HvmRegistryCallerRole::ThirdPartyFeePayer`]
+/// below is the deliberate addition. It exists because the responder for a
+/// sleeping user cannot be either party: the Hub is the one challenging, and
+/// the user is asleep. It is used by exactly one caller,
+/// [`crate::hvm_registry_response_watch`], which can only ever ask for
+/// `respond`, `finalize` and the left-party payout, and has no way to express
+/// a `challenge`.
+///
+/// What makes the user role safe is not this check at all; it is the payee
+/// restriction that already existed and is untouched:
+/// [`registry_claim_payout_source`] refuses any payee that is not
+/// `binding.left_address`, and the contract's `PermitHAC` pins the amount to
+/// `c_left_balance_`. `tx.main` only pays the network fee. It has no authority
+/// over where the coin goes, which is precisely why widening who may build
+/// these bytes cannot widen who gets paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HvmRegistryCallerRole {
+    /// The Hub's own settlement key. Today's exact rule, unchanged.
+    Hub,
+    /// The channel's left party — the user whose deposit is inside.
+    ChannelLeft,
+    /// Neither party: a key that does nothing but pay the network fee for a
+    /// step the contract already lets anybody take.
+    ///
+    /// This role names no address, and that is not a hole. There is no
+    /// address it *could* name: the whole point of a responder is that it
+    /// stands in for a user who is not there, so it is by construction
+    /// somebody else. What keeps it safe is that `tx.main` on these
+    /// transactions buys nothing but inclusion:
+    ///
+    /// * `respond` and `finalize` carry no signer check in the contract at
+    ///   all; the bill's own two signatures are the authority, and a
+    ///   responder that has not been handed a valid fully-signed bill cannot
+    ///   build a `respond` in the first place.
+    /// * the Action 14 payout is authorised by `PermitHAC`, which pins the
+    ///   destination to the channel's left party and the amount to
+    ///   `c_left_balance_` to the zhu. A third party that tries to pay itself
+    ///   gets `Nil` for `c_status_` and the payout aborts; a third party that
+    ///   tries a different number gets `HPAY_LEFT_PAYOUT_MISMATCH`. Both were
+    ///   measured on a real chain, not reasoned about.
+    ///
+    /// So the only thing this role can spend is its own fees, and the only
+    /// thing it can leak is the channel balance it was already given. The one
+    /// rule enforced here is the one that is actually checkable: the signer
+    /// must be a spendable key, not a contract, because a contract address
+    /// cannot sign a Type 3 and a transaction built for one would be dead
+    /// bytes that still looked like protection.
+    ThirdPartyFeePayer,
+}
+
+impl HvmRegistryCallerRole {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::Hub => "hub",
+            Self::ChannelLeft => "channel left party",
+            Self::ThirdPartyFeePayer => "fee-paying responder",
+        }
+    }
+
+    const fn parse_label(self) -> &'static str {
+        match self {
+            Self::Hub => "registry watchtower",
+            Self::ChannelLeft => "registry channel left party",
+            Self::ThirdPartyFeePayer => "registry response watch",
+        }
+    }
+}
+
+/// Verify a caller-stated role against the binding.
+///
+/// The role is an assertion the caller makes about itself; this is where the
+/// assertion is checked. A caller that names the wrong role is refused with
+/// the word "signer" in the message, because that is what is wrong.
+pub fn require_registry_caller(
+    signer: &Account,
+    binding: &HvmRegistryBindingV2,
+    role: HvmRegistryCallerRole,
+) -> HubResult<()> {
+    let expected = match role {
+        HvmRegistryCallerRole::Hub => &binding.right_hub_address,
+        HvmRegistryCallerRole::ChannelLeft => &binding.left_address,
+        // No address to compare against, by construction. What is checkable
+        // is that the signer is a key that can actually sign, and that it is
+        // not the registry contract itself — a contract address is not a
+        // privakey, so bytes built for one would never be admitted.
+        HvmRegistryCallerRole::ThirdPartyFeePayer => {
+            let main = parse_address(signer.readable(), role.parse_label())?;
+            if ContractAddress::from_addr(main).is_ok()
+                || signer.readable() == binding.contract_address
+            {
+                return Err(HubError::State(
+                    "registry call signer is a contract address, not a fee-paying key".into(),
+                ));
+            }
+            return Ok(());
+        }
+    };
+    if signer.readable() != *expected {
+        return Err(HubError::State(format!(
+            "registry call signer is not the {} of this binding",
+            role.noun()
+        )));
+    }
+    Ok(())
+}
+
 pub fn build_signed_hvm_registry_call_transaction(
     signer: &Account,
     binding: &HvmRegistryBindingV2,
+    role: HvmRegistryCallerRole,
     call_source: String,
     network_fee_zhu: u64,
     timestamp: u64,
     gas_max: u8,
 ) -> HubResult<SignedHvmRegistryCallTransactionV2> {
     binding.validate()?;
-    if signer.readable() != binding.right_hub_address
-        || network_fee_zhu == 0
-        || timestamp == 0
-        || gas_max == 0
-    {
+    require_registry_caller(signer, binding, role)?;
+    if network_fee_zhu == 0 || timestamp == 0 || gas_max == 0 {
         return Err(HubError::State(
-            "registry call signer, fee, timestamp or gas limit is invalid".into(),
+            "registry call fee, timestamp or gas limit is invalid".into(),
         ));
     }
-    let main = parse_address(signer.readable(), "registry watchtower")?;
+    let main = parse_address(signer.readable(), role.parse_label())?;
     let contract = parse_address(&binding.contract_address, "registry contract")?;
     ContractAddress::from_addr(contract)
         .map_err(|_| HubError::State("registry target is not an HVM contract".into()))?;
@@ -532,9 +814,14 @@ pub fn build_signed_hvm_registry_call_transaction(
 /// contract address is not. So the contract never signs: its consent *is* the
 /// `PermitHAC` hook. The signer here is only `tx.main`, and `tx.main` only
 /// pays the fee — it has no authority over where the coin goes.
+// Every argument here is a distinct fact the signed bytes commit to, and
+// bundling them into a struct would only move the same list somewhere the
+// caller has to fill in by name instead of by position.
+#[allow(clippy::too_many_arguments)]
 pub fn build_signed_hvm_registry_claim_transaction(
     signer: &Account,
     binding: &HvmRegistryBindingV2,
+    role: HvmRegistryCallerRole,
     payee: &str,
     amount_zhu: u64,
     network_fee_zhu: u64,
@@ -542,16 +829,13 @@ pub fn build_signed_hvm_registry_claim_transaction(
     gas_max: u8,
 ) -> HubResult<SignedHvmRegistryCallTransactionV2> {
     let call_source = registry_claim_payout_source(binding, payee, amount_zhu)?;
-    if signer.readable() != binding.right_hub_address
-        || network_fee_zhu == 0
-        || timestamp == 0
-        || gas_max == 0
-    {
+    require_registry_caller(signer, binding, role)?;
+    if network_fee_zhu == 0 || timestamp == 0 || gas_max == 0 {
         return Err(HubError::State(
-            "registry claim signer, fee, timestamp or gas limit is invalid".into(),
+            "registry claim fee, timestamp or gas limit is invalid".into(),
         ));
     }
-    let main = parse_address(signer.readable(), "registry watchtower")?;
+    let main = parse_address(signer.readable(), role.parse_label())?;
     let contract = parse_address(&binding.contract_address, "registry contract")?;
     ContractAddress::from_addr(contract)
         .map_err(|_| HubError::State("registry target is not an HVM contract".into()))?;
@@ -596,6 +880,106 @@ pub fn build_signed_hvm_registry_claim_transaction(
         signed_transaction_hex,
         call_source,
     })
+}
+
+/// Can a key that is **not** the Hub's own key build the registry exit
+/// transactions at all?
+///
+/// This is the question a unilateral exit actually turns on, and until this
+/// function was written nothing in either repository asked it. The
+/// `hpay_channel_registry_v2` contract is permissionless where it matters —
+/// `finalize` carries no signer check, and the Action 14 payout needs no
+/// signature from the contract because a contract address is not a privakey,
+/// so `TransactionType3::intrinsic_req_sign` never demands one. A user holding
+/// a Hub-countersigned bill is therefore *permitted* by the chain to walk out
+/// alone.
+///
+/// Being permitted is not the same as being able. The only code in this
+/// workspace that can construct those transactions is
+/// [`build_signed_hvm_registry_call_transaction`] and
+/// [`build_signed_hvm_registry_claim_transaction`], and both open with
+/// `signer.readable() != binding.right_hub_address` — every signer that is not
+/// the Hub is refused before a byte is built. No crate under `crates/wallet-core`,
+/// `crates/agent-wallet-core`, `apps/desktop` or `apps/mobile` constructs a
+/// challenge, respond, finalize or claim transaction by any other route. The
+/// door is open and there is no handle on the user's side of it.
+///
+/// So this probes the builders rather than reading a flag: it synthesises a
+/// reviewed-profile binding, then asks the two builders to work for the
+/// channel's *left* party — the user — and reports whether they will. It is
+/// pure computation against a throwaway key, touches no chain and no network,
+/// and cannot be satisfied by configuration, by an operator assertion, or by
+/// editing a literal. The day someone makes the builders signer-aware rather
+/// than Hub-only, this starts reporting `true` on its own and for the right
+/// reason.
+///
+/// A `false` here means: whatever the chain would allow, this software cannot
+/// put an exit transaction in a user's hands.
+pub fn user_key_can_build_registry_exit_transactions() -> bool {
+    // The builders serialise real actions through the consensus codec
+    // registry, which panics if it was never installed. This measurement must
+    // be safe to call from anywhere, including a process that has not touched
+    // the chain yet, so install it here; the call is idempotent.
+    crate::protocol_registry::ensure_hacash_protocol_setup();
+    let Ok(left) = Account::create_by("registry-user-side-exit-probe-left") else {
+        return false;
+    };
+    let Ok(hub) = Account::create_by("registry-user-side-exit-probe-hub") else {
+        return false;
+    };
+    let left_address = Address::from(*left.address()).to_readable();
+    let binding = HvmRegistryBindingV2 {
+        schema: crate::hvm_registry::HVM_REGISTRY_BINDING_SCHEMA.into(),
+        settlement_profile: crate::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE.into(),
+        network_mode: "testnet".into(),
+        chain_id: 7,
+        network_instance_id: "11".repeat(32),
+        contract_address: ContractAddress::from_unchecked(Address::create_contract([9; 20]))
+            .to_readable(),
+        deployment_tx_hash: "22".repeat(32),
+        deployment_height: 2,
+        bytecode_sha3: crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3.into(),
+        channel_id: "33".repeat(16),
+        reuse_version: 0,
+        left_address: left_address.clone(),
+        right_hub_address: Address::from(*hub.address()).to_readable(),
+        left_deposit_zhu: 1_000_000,
+        right_hub_deposit_zhu: 0,
+        challenge_blocks: 12,
+    };
+    // If the synthetic binding itself stops matching the reviewed profile the
+    // probe has lost its subject, and an answer it cannot stand behind must be
+    // the closed one.
+    if binding.validate().is_err() {
+        return false;
+    }
+    let Ok(finalize) = registry_finalize_call_source(&binding) else {
+        return false;
+    };
+    // `finalize` is the permissionless step the contract grants to anybody,
+    // and the Action 14 claim is the only door HAC leaves the contract by. A
+    // user who cannot build both cannot complete an exit alone.
+    build_signed_hvm_registry_call_transaction(
+        &left,
+        &binding,
+        HvmRegistryCallerRole::ChannelLeft,
+        finalize,
+        1,
+        1,
+        1,
+    )
+    .is_ok()
+        && build_signed_hvm_registry_claim_transaction(
+            &left,
+            &binding,
+            HvmRegistryCallerRole::ChannelLeft,
+            &left_address,
+            binding.left_deposit_zhu,
+            1,
+            1,
+            1,
+        )
+        .is_ok()
 }
 
 /// Read side of the claim: decode signed bytes and prove they are exactly the
@@ -851,6 +1235,7 @@ mod tests {
         let signed = build_signed_hvm_registry_claim_transaction(
             &hub,
             &binding,
+            HvmRegistryCallerRole::Hub,
             &binding.left_address,
             amount_zhu,
             10_000,
@@ -913,7 +1298,14 @@ mod tests {
             );
             assert!(
                 build_signed_hvm_registry_claim_transaction(
-                    &hub, &binding, &payee, 800_000, 10_000, 123, 250
+                    &hub,
+                    &binding,
+                    HvmRegistryCallerRole::Hub,
+                    &payee,
+                    800_000,
+                    10_000,
+                    123,
+                    250
                 )
                 .is_err(),
                 "payee {payee} must never be signed for"
@@ -932,6 +1324,7 @@ mod tests {
             build_signed_hvm_registry_claim_transaction(
                 &hub,
                 &binding,
+                HvmRegistryCallerRole::Hub,
                 &binding.left_address,
                 0,
                 10_000,
@@ -1079,6 +1472,7 @@ mod tests {
             build_signed_hvm_registry_claim_transaction(
                 &wrong,
                 &binding,
+                HvmRegistryCallerRole::Hub,
                 &binding.left_address,
                 800_000,
                 10_000,
@@ -1092,6 +1486,7 @@ mod tests {
                 build_signed_hvm_registry_claim_transaction(
                     &hub,
                     &binding,
+                    HvmRegistryCallerRole::Hub,
                     &binding.left_address,
                     800_000,
                     fee,
@@ -1105,6 +1500,7 @@ mod tests {
         let signed = build_signed_hvm_registry_claim_transaction(
             &hub,
             &binding,
+            HvmRegistryCallerRole::Hub,
             &binding.left_address,
             800_000,
             10_000,
@@ -1135,9 +1531,16 @@ mod tests {
             registry_finalize_call_source(&binding).unwrap(),
             registry_renew_all_call_source(&binding, 100).unwrap(),
         ] {
-            let signed =
-                build_signed_hvm_registry_call_transaction(&hub, &binding, source, 1, 123, 250)
-                    .unwrap();
+            let signed = build_signed_hvm_registry_call_transaction(
+                &hub,
+                &binding,
+                HvmRegistryCallerRole::Hub,
+                source,
+                1,
+                123,
+                250,
+            )
+            .unwrap();
             let raw = hex::decode(&signed.signed_transaction_hex).unwrap();
             let (tx, consumed) = protocol::transaction::transaction_create(&raw).unwrap();
             assert_eq!(consumed, raw.len());
@@ -1156,7 +1559,16 @@ mod tests {
         let wrong = Account::create_by("registry-watchtower-wrong").unwrap();
         let source = registry_challenge_call_source(&binding, &bill).unwrap();
         assert!(
-            build_signed_hvm_registry_call_transaction(&wrong, &binding, source, 1, 1, 1).is_err()
+            build_signed_hvm_registry_call_transaction(
+                &wrong,
+                &binding,
+                HvmRegistryCallerRole::Hub,
+                source,
+                1,
+                1,
+                1
+            )
+            .is_err()
         );
         assert!(registry_renew_all_call_source(&binding, 0).is_err());
         assert!(
@@ -1418,6 +1830,156 @@ mod tests {
         assert_eq!(
             decide_registry_watchtower_action(&settled, &binding, &latest).unwrap(),
             HvmRegistryWatchtowerDecisionV2::NoAction
+        );
+    }
+
+    /// The probe must be measuring a real capability, not merely succeeding.
+    ///
+    /// It used to record the opposite finding: that the Hub could build both
+    /// halves of an exit and the user could build neither, over the identical
+    /// binding. The builders are now role-aware, so the finding has changed,
+    /// and this test changed with it rather than being deleted — the shape is
+    /// the same and the asymmetry it looks for is the one that still matters.
+    ///
+    /// Both parties can now build their own half. What no party can do is
+    /// claim to be the other one: a signer that states the wrong role is
+    /// refused, so the widening is one named role and not an open door.
+    #[test]
+    fn the_builders_work_for_both_parties_in_their_own_role_and_for_neither_in_the_other() {
+        crate::protocol_registry::ensure_hacash_protocol_setup();
+        let left = Account::create_by("registry-user-side-exit-probe-left").unwrap();
+        let hub = Account::create_by("registry-user-side-exit-probe-hub").unwrap();
+        let left_address = Address::from(*left.address()).to_readable();
+        let binding = HvmRegistryBindingV2 {
+            schema: HVM_REGISTRY_BINDING_SCHEMA.into(),
+            settlement_profile: HPAY_REGISTRY_SETTLEMENT_PROFILE.into(),
+            network_mode: "testnet".into(),
+            chain_id: 7,
+            network_instance_id: "11".repeat(32),
+            contract_address: ContractAddress::from_unchecked(Address::create_contract([9; 20]))
+                .to_readable(),
+            deployment_tx_hash: "22".repeat(32),
+            deployment_height: 2,
+            bytecode_sha3: HPAY_REGISTRY_BYTECODE_SHA3.into(),
+            channel_id: "33".repeat(16),
+            reuse_version: 0,
+            left_address: left_address.clone(),
+            right_hub_address: Address::from(*hub.address()).to_readable(),
+            left_deposit_zhu: 1_000_000,
+            right_hub_deposit_zhu: 0,
+            challenge_blocks: 12,
+        };
+        binding.validate().expect("probe binding must be reviewed");
+        let finalize = registry_finalize_call_source(&binding).unwrap();
+
+        // The Hub, in the Hub's role, builds both halves. This is byte for
+        // byte the rule it had before roles existed.
+        build_signed_hvm_registry_call_transaction(
+            &hub,
+            &binding,
+            HvmRegistryCallerRole::Hub,
+            finalize.clone(),
+            1,
+            1,
+            1,
+        )
+        .expect("the Hub must be able to build finalize");
+        build_signed_hvm_registry_claim_transaction(
+            &hub,
+            &binding,
+            HvmRegistryCallerRole::Hub,
+            &left_address,
+            binding.left_deposit_zhu,
+            1,
+            1,
+            1,
+        )
+        .expect("the Hub must be able to build the payout");
+
+        // The user, in the user's role, builds both halves over the identical
+        // binding. This is the capability that did not exist.
+        build_signed_hvm_registry_call_transaction(
+            &left,
+            &binding,
+            HvmRegistryCallerRole::ChannelLeft,
+            finalize.clone(),
+            1,
+            1,
+            1,
+        )
+        .expect("the channel left party must be able to build finalize");
+        build_signed_hvm_registry_claim_transaction(
+            &left,
+            &binding,
+            HvmRegistryCallerRole::ChannelLeft,
+            &left_address,
+            binding.left_deposit_zhu,
+            1,
+            1,
+            1,
+        )
+        .expect("the channel left party must be able to build the payout");
+
+        // Neither party may borrow the other's role, and a third key has no
+        // role to state at all. The predicate was not removed; it was named.
+        let stranger = Account::create_by("registry-user-side-exit-probe-stranger").unwrap();
+        for (signer, role, who) in [
+            (
+                &left,
+                HvmRegistryCallerRole::Hub,
+                "the user posing as the Hub",
+            ),
+            (
+                &hub,
+                HvmRegistryCallerRole::ChannelLeft,
+                "the Hub posing as the user",
+            ),
+            (
+                &stranger,
+                HvmRegistryCallerRole::ChannelLeft,
+                "a stranger posing as the user",
+            ),
+            (
+                &stranger,
+                HvmRegistryCallerRole::Hub,
+                "a stranger posing as the Hub",
+            ),
+        ] {
+            let call_refusal = build_signed_hvm_registry_call_transaction(
+                signer,
+                &binding,
+                role,
+                finalize.clone(),
+                1,
+                1,
+                1,
+            )
+            .expect_err("{who} must be refused finalize");
+            let claim_refusal = build_signed_hvm_registry_claim_transaction(
+                signer,
+                &binding,
+                role,
+                &left_address,
+                binding.left_deposit_zhu,
+                1,
+                1,
+                1,
+            )
+            .expect_err("{who} must be refused the payout");
+            assert!(
+                call_refusal.to_string().contains("signer"),
+                "{who}: the refusal must be about the signer, not incidental input: {call_refusal}"
+            );
+            assert!(
+                claim_refusal.to_string().contains("signer"),
+                "{who}: the refusal must be about the signer, not incidental input: {claim_refusal}"
+            );
+        }
+
+        // Which is exactly what the probe reports, now, on its own.
+        assert!(
+            user_key_can_build_registry_exit_transactions(),
+            "the builders are role-aware, so the probe must report true"
         );
     }
 }

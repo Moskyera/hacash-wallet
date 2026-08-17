@@ -22,6 +22,7 @@ pub mod hvm_registry_ledger;
 pub mod hvm_registry_pilot;
 #[cfg(feature = "local-pilot-tools")]
 pub mod hvm_registry_pilot_state;
+pub mod hvm_registry_response_watch;
 pub mod hvm_registry_watchtower;
 pub mod hvm_scheduler;
 pub mod hvm_watchtower;

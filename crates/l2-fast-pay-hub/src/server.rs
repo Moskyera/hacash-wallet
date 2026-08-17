@@ -17,9 +17,10 @@ use crate::error::HubError;
 use crate::hvm_ledger::{
     HvmChannelStatusV1, HvmCosignedBillV1, HvmPaymentRequestV1, HvmPaymentStatusV1,
 };
+use crate::hvm_registry::HvmRegistryRefundCountersignRequestV2;
 use crate::hvm_registry_ledger::{
     HvmRegistryChannelStatusV2, HvmRegistryCosignedBillV2, HvmRegistryPaymentRequestV2,
-    HvmRegistryPaymentStatusV2,
+    HvmRegistryPaymentStatusV2, HvmRegistryRefundCountersignResponseV2,
 };
 use crate::l1_channel::{L1ChannelOpenRequest, L1ChannelOpenStatusResponse};
 use crate::l1_channel_close::{L1ChannelCloseRequest, L1ChannelCloseResponse};
@@ -171,6 +172,13 @@ pub fn build_router_with_trusted_proxy(
         .route(
             "/v2/hvm-registry/payment",
             post(hvm_registry_payment_handler),
+        )
+        // The one thing a user must get from a Hub before they part with a
+        // deposit: the Hub's signature on the serial-1 full refund. A channel
+        // opened without it is a channel whose deposit a silent Hub can strand.
+        .route(
+            "/v2/hvm-registry/channel/open-countersign",
+            post(hvm_registry_open_countersign_handler),
         )
         .route(
             "/v2/hvm-registry/payment/{operation_id}",
@@ -415,6 +423,26 @@ async fn hvm_registry_payment_handler(
         state
             .hub
             .cosign_hvm_registry_payment(request, crate::node::now_unix())
+            .await?,
+    ))
+}
+
+/// Admitted as a mutation, exactly like `hvm_registry_payment_handler`: it
+/// drives a durable authenticated write and an outbound witness round trip, and
+/// an unauthenticated caller must not be able to drive either without limit.
+async fn hvm_registry_open_countersign_handler(
+    State(state): State<AppState>,
+    PeerIp(peer): PeerIp,
+    Json(request): Json<HvmRegistryRefundCountersignRequestV2>,
+) -> Result<Json<HvmRegistryRefundCountersignResponseV2>, HubHttpError> {
+    let _global_permit = acquire_global_mutation_permit(&state)?;
+    state
+        .peer_mutation_admission
+        .check(peer, MAX_MUTATION_REQUESTS_PER_PEER_WINDOW)?;
+    Ok(Json(
+        state
+            .hub
+            .countersign_hvm_registry_initial_refund(request, crate::node::now_unix())
             .await?,
     ))
 }

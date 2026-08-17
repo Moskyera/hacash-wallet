@@ -22,13 +22,19 @@ use crate::hvm_pilot::{
     HvmLocalPilotNetwork, HvmPilotDeploymentTransaction, HvmPilotSignedTransaction,
     HvmPilotTransactionPhase, build_hvm_pilot_exact_transfer, validate_durable_pilot_transaction,
 };
-use crate::hvm_registry::HvmRegistryRecoveryBundleV2;
+use crate::hvm_registry::{
+    HVM_REGISTRY_REFUND_COUNTERSIGN_MAX_LIFETIME_SECONDS, HvmRegistryRecoveryBundleV2,
+    HvmRegistryRefundCountersignRequestV2,
+};
+use crate::hvm_registry_ledger::{
+    HVM_REGISTRY_REFUND_COUNTERSIGN_RESPONSE_SCHEMA, HvmRegistryRefundCountersignResponseV2,
+};
 use crate::hvm_registry_pilot::{
     HVM_REGISTRY_DEPLOY_PROTOCOL_COST_ZHU, HvmRegistryPilotChannelParameters,
     HvmRegistryPilotFundingPreview, HvmRegistryPilotInitializationPreview,
     HvmRegistryPilotPrefundPreview, build_hvm_registry_pilot_channel_init,
     build_hvm_registry_pilot_deployment, build_hvm_registry_pilot_exact_funding,
-    build_hvm_registry_pilot_recovery_bundle, preview_hvm_registry_pilot_deployment,
+    build_hvm_registry_pilot_refund_countersign_request, preview_hvm_registry_pilot_deployment,
     preview_hvm_registry_pilot_funding, preview_hvm_registry_pilot_initialization,
     preview_hvm_registry_pilot_prefund, validate_hvm_registry_pilot_deployment_transaction,
     validate_hvm_registry_pilot_funding_transaction,
@@ -135,6 +141,23 @@ struct TransactionRecord<T> {
     confirmation_history: Vec<HvmRegistryConfirmationEvidence>,
 }
 
+/// Where the Hub's 97 bytes came from.
+///
+/// The point of recording this is not audit decoration. A "bundle is present"
+/// boolean would prove nothing, because the same process could have written it;
+/// the gate has to be able to say that a Hub signature arrived from somewhere
+/// this process could not have manufactured. The endpoint and the response
+/// digest are what a reviewer checks that against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HvmRegistryCountersignProvenance {
+    pub hub_endpoint: String,
+    pub response_sha256: String,
+    pub hub_refund_signature_hex: String,
+    pub anchor_receipt_count: u64,
+    pub received_unix: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct HvmRegistryPilotDurableState {
@@ -152,8 +175,15 @@ struct HvmRegistryPilotDurableState {
     deployment: Option<TransactionRecord<HvmPilotDeploymentTransaction>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     channel_parameters: Option<HvmRegistryPilotChannelParameters>,
+    /// The left-signed ASK. Built locally, worth nothing on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refund_countersign_request: Option<HvmRegistryRefundCountersignRequestV2>,
+    /// The ANSWER, spliced into the wallet's own bill. A Hub signature can only
+    /// get in here over the wire: nothing in this crate can mint one locally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery_bundle: Option<HvmRegistryRecoveryBundleV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_bundle_provenance: Option<HvmRegistryCountersignProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     initialization_preview: Option<HvmRegistryPilotInitializationPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,7 +209,9 @@ struct StateBody<'a> {
     hub_prefunding_preview: &'a Option<HvmRegistryPilotPrefundPreview>,
     deployment: &'a Option<TransactionRecord<HvmPilotDeploymentTransaction>>,
     channel_parameters: &'a Option<HvmRegistryPilotChannelParameters>,
+    refund_countersign_request: &'a Option<HvmRegistryRefundCountersignRequestV2>,
     recovery_bundle: &'a Option<HvmRegistryRecoveryBundleV2>,
+    recovery_bundle_provenance: &'a Option<HvmRegistryCountersignProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     initialization_preview: &'a Option<HvmRegistryPilotInitializationPreview>,
     initialization: &'a Option<TransactionRecord<HvmPilotSignedTransaction>>,
@@ -262,7 +294,9 @@ impl HvmRegistryPilotStateStore {
                 hub_prefunding_preview: None,
                 deployment: None,
                 channel_parameters: None,
+                refund_countersign_request: None,
                 recovery_bundle: None,
+                recovery_bundle_provenance: None,
                 initialization_preview: None,
                 initialization: None,
                 funding_preview: None,
@@ -400,7 +434,7 @@ impl HvmRegistryPilotStateStore {
         &HvmPilotSignedTransaction,
         Option<u64>,
         &HvmRegistryPilotChannelParameters,
-        &HvmRegistryRecoveryBundleV2,
+        &HvmRegistryRefundCountersignRequestV2,
     )> {
         let record = self.state.initialization.as_ref()?;
         Some((
@@ -408,7 +442,7 @@ impl HvmRegistryPilotStateStore {
             &record.transaction,
             record.confirmed_height,
             self.state.channel_parameters.as_ref()?,
-            self.state.recovery_bundle.as_ref()?,
+            self.state.refund_countersign_request.as_ref()?,
         ))
     }
 
@@ -507,6 +541,7 @@ impl HvmRegistryPilotStateStore {
         timestamp: u64,
         gas_max: u8,
         expected_preview_commitment: &str,
+        now_unix: u64,
     ) -> HubResult<HvmRegistryPrepared<HvmPilotSignedTransaction>> {
         let deployment = require_confirmed_deployment(&self.state)?;
         if left.readable() != self.state.left_address || hub.readable() != self.state.hub_address {
@@ -553,17 +588,27 @@ impl HvmRegistryPilotStateStore {
             gas_max,
         )?;
         validate_hvm_registry_pilot_initialization_transaction(&transaction, &preview)?;
-        let bundle = build_hvm_registry_pilot_recovery_bundle(
+        // The ASK is built and made durable in the same write as the `init`
+        // bytes, and neither is broadcast yet. That ordering is the whole
+        // difference between a Hub refusal costing the user a sunk deploy and a
+        // Hub refusal permanently burning this `(contract, left)` slot: `init`
+        // on a non-Nil status requires the old channel to be FINAL and claimed,
+        // and a channel stranded in FUNDING is neither.
+        let request = build_hvm_registry_pilot_refund_countersign_request(
             left,
-            hub,
+            &self.state.hub_address,
             &deployment.transaction,
             deployment.confirmed_height.ok_or_else(|| {
                 HubError::State("confirmed registry deployment lost its height".into())
             })?,
             &parameters,
+            now_unix,
+            now_unix
+                .checked_add(HVM_REGISTRY_REFUND_COUNTERSIGN_MAX_LIFETIME_SECONDS)
+                .ok_or_else(|| HubError::State("registry countersign deadline overflow".into()))?,
         )?;
         self.state.channel_parameters = Some(parameters);
-        self.state.recovery_bundle = Some(bundle);
+        self.state.refund_countersign_request = Some(request);
         self.state.initialization_preview = Some(preview);
         self.state.initialization = Some(TransactionRecord {
             phase: HvmPilotTransactionPhase::Signed,
@@ -579,6 +624,77 @@ impl HvmRegistryPilotStateStore {
         Ok(self.prepared_created(HvmRegistryLifecycleStage::Initialization, transaction))
     }
 
+    pub fn refund_countersign_request(&self) -> Option<&HvmRegistryRefundCountersignRequestV2> {
+        self.state.refund_countersign_request.as_ref()
+    }
+
+    pub fn recovery_bundle_provenance(&self) -> Option<&HvmRegistryCountersignProvenance> {
+        self.state.recovery_bundle_provenance.as_ref()
+    }
+
+    /// Take the Hub's answer, keep 97 bytes of it, and make the completed
+    /// bundle durable.
+    ///
+    /// The Hub's copies of the binding and the bill are not accepted, because
+    /// they are not sent: [`HvmRegistryRefundCountersignResponseV2`] carries
+    /// only a signature. What is spliced here is the bill this store already
+    /// wrote, so a Hub cannot substitute a channel id, deposit, reuse version
+    /// or challenge window - and the re-derivation below then checks that the
+    /// stored ask still matches the durable deployment record and channel
+    /// parameters, so nothing can have drifted underneath it either.
+    pub fn record_hub_countersignature(
+        &mut self,
+        response: &HvmRegistryRefundCountersignResponseV2,
+        hub_endpoint: &str,
+        received_unix: u64,
+    ) -> HubResult<()> {
+        if response.schema != HVM_REGISTRY_REFUND_COUNTERSIGN_RESPONSE_SCHEMA {
+            return Err(HubError::State(
+                "registry countersign response schema is unsupported".into(),
+            ));
+        }
+        if hub_endpoint.trim().is_empty() || hub_endpoint.len() > 512 {
+            return Err(HubError::State(
+                "registry countersign endpoint is missing".into(),
+            ));
+        }
+        let request = self
+            .state
+            .refund_countersign_request
+            .clone()
+            .ok_or_else(|| HubError::State("registry refund countersign ask is missing".into()))?;
+        let bundle = request.attach_hub_countersignature(&response.hub_refund_signature_hex)?;
+        require_binding_matches_durable_evidence(&self.state, &bundle.binding)?;
+        let provenance = HvmRegistryCountersignProvenance {
+            hub_endpoint: hub_endpoint.trim().to_owned(),
+            response_sha256: hex::encode(Sha256::digest(serde_json::to_vec(response).map_err(
+                |error| {
+                    HubError::State(format!(
+                        "registry countersign response encode failed: {error}"
+                    ))
+                },
+            )?)),
+            hub_refund_signature_hex: bundle.initial_recovery_bill.hub_signature_hex.clone(),
+            anchor_receipt_count: response.anchor_receipts.len() as u64,
+            received_unix,
+        };
+        if let Some(existing) = self.state.recovery_bundle.as_ref() {
+            // Re-asking is fine; being answered differently is not. A second
+            // valid Hub signature over the same bill would still be the same
+            // bill, but a store that silently accepted a replacement would let
+            // a Hub rewrite the provenance of a bundle already relied on.
+            if existing != &bundle {
+                return Err(HubError::State(
+                    "registry countersign retry returned a different refund bundle".into(),
+                ));
+            }
+            return Ok(());
+        }
+        self.state.recovery_bundle = Some(bundle);
+        self.state.recovery_bundle_provenance = Some(provenance);
+        self.save()
+    }
+
     pub fn prepare_funding(
         &mut self,
         left: &Account,
@@ -588,6 +704,7 @@ impl HvmRegistryPilotStateStore {
         expected_preview_commitment: &str,
     ) -> HubResult<HvmRegistryPrepared<HvmPilotSignedTransaction>> {
         require_confirmed_initialization(&self.state)?;
+        require_hub_countersigned_refund(&self.state)?;
         if left.readable() != self.state.left_address {
             return Err(HubError::State("registry funding signer changed".into()));
         }
@@ -626,12 +743,11 @@ impl HvmRegistryPilotStateStore {
                 self.prepared_existing(HvmRegistryLifecycleStage::Funding, transaction.clone())
             );
         }
+        let bundle = require_hub_countersigned_refund(&self.state)?;
         let transaction = build_hvm_registry_pilot_exact_funding(
             left,
-            &self.state.hub_address,
-            &deployment.transaction.contract_address,
+            bundle,
             &self.state.network,
-            parameters.left_deposit_zhu,
             network_fee_zhu,
             timestamp,
             gas_max,
@@ -843,6 +959,7 @@ impl HvmRegistryPilotStateStore {
             expected_transaction_hash,
             expected_request_commitment,
         )?;
+        require_countersigned_refund_before_dispatch(&self.state, stage)?;
         if stage == HvmRegistryLifecycleStage::HubPrefunding {
             self.state
                 .hub_prefunding_preview
@@ -894,6 +1011,13 @@ impl HvmRegistryPilotStateStore {
             expected_transaction_hash,
             expected_request_commitment,
         )?;
+        // The second door. `begin_initial_submission` is partly self-protecting
+        // because `created_this_invocation` forces the record to have been made
+        // by `prepare_funding` in this same process; this one has no such guard
+        // and reaches the identical bytes from a state file an older build
+        // wrote. A gate placed only in `prepare_funding` is bypassed here the
+        // first time a pre-gate state file hits the RecoveryRequired branch.
+        require_countersigned_refund_before_dispatch(&self.state, stage)?;
         let transaction = match stage {
             HvmRegistryLifecycleStage::HubPrefunding => begin_resubmit(
                 self.state.hub_prefunding.as_mut(),
@@ -1194,6 +1318,102 @@ fn require_confirmed_initialization(state: &HvmRegistryPilotDurableState) -> Hub
         ));
     }
     Ok(())
+}
+
+/// Re-derive the binding from the durable deployment record plus the durable
+/// channel parameters and compare it field for field.
+///
+/// Presence of a bundle is not the check. This is: the binding a Hub signature
+/// covers has to be the binding this store can rebuild from evidence it already
+/// confirmed on chain, not one that merely arrived alongside a signature.
+fn require_binding_matches_durable_evidence(
+    state: &HvmRegistryPilotDurableState,
+    binding: &crate::hvm_registry::HvmRegistryBindingV2,
+) -> HubResult<()> {
+    let deployment = state
+        .deployment
+        .as_ref()
+        .ok_or_else(|| HubError::State("registry deployment is missing".into()))?;
+    let parameters = state
+        .channel_parameters
+        .as_ref()
+        .ok_or_else(|| HubError::State("registry channel parameters are missing".into()))?;
+    if binding.network_instance_id != state.network.network_instance_id
+        || binding.chain_id != state.network.chain_id
+        || binding.left_address != state.left_address
+        || binding.right_hub_address != state.hub_address
+        || binding.contract_address != deployment.transaction.contract_address
+        || binding.deployment_tx_hash != deployment.transaction.transaction.transaction_hash
+        || binding.deployment_height != deployment.confirmed_height.unwrap_or_default()
+        || binding.channel_id != parameters.channel_id
+        || binding.reuse_version != parameters.reuse_version
+        || binding.left_deposit_zhu != parameters.left_deposit_zhu
+        || binding.right_hub_deposit_zhu != parameters.right_hub_deposit_zhu
+        || binding.challenge_blocks != parameters.challenge_blocks
+    {
+        return Err(HubError::State(
+            "registry refund binding does not match the durable deployment evidence".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Applied at BOTH broadcast doors, for both stages that can strand a deposit.
+///
+/// Funding is the obvious one. `init` is here too because a Hub that refuses to
+/// countersign after `init` has confirmed permanently burns that
+/// `(contract, left)` slot (re-`init` is only reachable from FINAL-and-claimed)
+/// so the cheapest moment to discover a refusal is before the `init` bytes
+/// leave this process.
+fn require_countersigned_refund_before_dispatch(
+    state: &HvmRegistryPilotDurableState,
+    stage: HvmRegistryLifecycleStage,
+) -> HubResult<()> {
+    match stage {
+        HvmRegistryLifecycleStage::Initialization | HvmRegistryLifecycleStage::Funding => {
+            require_hub_countersigned_refund(state).map(|_| ())
+        }
+        HvmRegistryLifecycleStage::HubPrefunding | HvmRegistryLifecycleStage::Deployment => Ok(()),
+    }
+}
+
+/// THE GATE. No countersigned refund, no funding - and not as a policy, as a
+/// precondition every road to the funding bytes has to pass through.
+fn require_hub_countersigned_refund(
+    state: &HvmRegistryPilotDurableState,
+) -> HubResult<&HvmRegistryRecoveryBundleV2> {
+    let request = state.refund_countersign_request.as_ref().ok_or_else(|| {
+        HubError::State(
+            "registry funding requires a Hub-countersigned refund: no ask was ever made".into(),
+        )
+    })?;
+    let bundle = state.recovery_bundle.as_ref().ok_or_else(|| {
+        HubError::State(
+            "registry funding requires a Hub-countersigned refund: the Hub has not countersigned"
+                .into(),
+        )
+    })?;
+    if state.recovery_bundle_provenance.is_none() {
+        return Err(HubError::State(
+            "registry refund bundle has no countersign provenance".into(),
+        ));
+    }
+    bundle.validate_crypto()?;
+    require_binding_matches_durable_evidence(state, &bundle.binding)?;
+    if bundle.binding != request.binding
+        || bundle.initial_recovery_bill.left_signature_hex
+            != request.left_signed_refund_bill.left_signature_hex
+        || bundle.initial_recovery_bill.serial != request.left_signed_refund_bill.serial
+        || bundle.initial_recovery_bill.left_balance_zhu
+            != request.left_signed_refund_bill.left_balance_zhu
+        || bundle.initial_recovery_bill.hub_balance_zhu
+            != request.left_signed_refund_bill.hub_balance_zhu
+    {
+        return Err(HubError::State(
+            "registry refund bundle is not the ask this wallet signed".into(),
+        ));
+    }
+    Ok(bundle)
 }
 
 fn begin_initial<T: ExactTransaction>(
@@ -1540,7 +1760,7 @@ fn validate_state(
     }
     let lifecycle = [
         state.channel_parameters.is_some(),
-        state.recovery_bundle.is_some(),
+        state.refund_countersign_request.is_some(),
         state.initialization.is_some(),
     ];
     if lifecycle.iter().any(|value| *value) && !lifecycle.iter().all(|value| *value) {
@@ -1553,27 +1773,49 @@ fn validate_state(
             "registry funding exists without initialization".into(),
         ));
     }
+    // The structural half of the gate, and the reason it is not merely
+    // conventional: this file is HMAC-tagged on the way out and verified on the
+    // way in under an exclusive lock, and `validate_state` runs in both `open`
+    // and `save`. A funding record without a countersigned refund therefore
+    // cannot exist on disk at all - the store refuses to open, let alone fund.
+    if state.recovery_bundle.is_some() != state.recovery_bundle_provenance.is_some()
+        || state.recovery_bundle.is_some() && state.refund_countersign_request.is_none()
+    {
+        return Err(HubError::State(
+            "registry refund countersignature evidence is incomplete".into(),
+        ));
+    }
+    if state.funding.is_some() {
+        require_hub_countersigned_refund(state).map_err(|error| {
+            HubError::State(format!(
+                "registry funding exists without a Hub-countersigned refund: {error}"
+            ))
+        })?;
+    }
+    if let Some(request) = state.refund_countersign_request.as_ref() {
+        request.validate_shape()?;
+        require_binding_matches_durable_evidence(state, &request.binding)?;
+    }
     if let (
         Some(deployment),
         Some(parameters),
-        Some(bundle),
+        Some(request),
         Some(initialization_preview),
         Some(initialization),
     ) = (
         state.deployment.as_ref(),
         state.channel_parameters.as_ref(),
-        state.recovery_bundle.as_ref(),
+        state.refund_countersign_request.as_ref(),
         state.initialization_preview.as_ref(),
         state.initialization.as_ref(),
     ) {
         parameters.validate()?;
-        bundle.validate_crypto()?;
         initialization_preview.validate()?;
         validate_hvm_registry_pilot_initialization_transaction(
             &initialization.transaction,
             initialization_preview,
         )?;
-        let binding = &bundle.binding;
+        let binding = &request.binding;
         if binding.network_instance_id != network.network_instance_id
             || binding.chain_id != network.chain_id
             || binding.left_address != left
@@ -1720,7 +1962,9 @@ fn state_body(state: &HvmRegistryPilotDurableState) -> StateBody<'_> {
         hub_prefunding_preview: &state.hub_prefunding_preview,
         deployment: &state.deployment,
         channel_parameters: &state.channel_parameters,
+        refund_countersign_request: &state.refund_countersign_request,
         recovery_bundle: &state.recovery_bundle,
+        recovery_bundle_provenance: &state.recovery_bundle_provenance,
         initialization_preview: &state.initialization_preview,
         initialization: &state.initialization,
         funding_preview: &state.funding_preview,
@@ -1806,6 +2050,26 @@ mod tests {
             hub.readable(),
         )
         .unwrap()
+    }
+
+    /// Stand in for the Hub's answer to the durable ask.
+    ///
+    /// A test may hold both keys; the library may not, which is the whole
+    /// point. There is no library function that can produce this.
+    fn hub_countersign_answer(
+        store: &HvmRegistryPilotStateStore,
+        hub: &Account,
+    ) -> HvmRegistryRefundCountersignResponseV2 {
+        let request = store.refund_countersign_request().expect("durable ask");
+        let hash = request
+            .left_signed_refund_bill
+            .signing_hash(&request.binding)
+            .unwrap();
+        HvmRegistryRefundCountersignResponseV2 {
+            schema: HVM_REGISTRY_REFUND_COUNTERSIGN_RESPONSE_SCHEMA.into(),
+            hub_refund_signature_hex: hex::encode(field::Sign::create_by(hub, &hash).serialize()),
+            anchor_receipts: Vec::new(),
+        }
     }
 
     fn prepare_prefund(
@@ -1947,6 +2211,7 @@ mod tests {
                     101,
                     u8::MAX,
                     &"00".repeat(32),
+                    1_700_000_000,
                 )
                 .is_err()
         );
@@ -1959,6 +2224,7 @@ mod tests {
                 101,
                 u8::MAX,
                 &initialization_preview.unsigned_commitment,
+                1_700_000_000,
             )
             .unwrap();
         assert!(
@@ -1971,10 +2237,31 @@ mod tests {
                     102,
                     u8::MAX,
                     &initialization_preview.unsigned_commitment,
+                    1_700_000_000,
                 )
                 .is_err(),
             "initialization retry cannot change its reviewed fee"
         );
+        // The ask exists and is unanswered, so nothing may be broadcast yet.
+        assert!(store.refund_countersign_request().is_some());
+        assert!(store.recovery_bundle().is_none());
+        assert!(
+            store
+                .begin_initial_submission(
+                    HvmRegistryLifecycleStage::Initialization,
+                    &initialization.transaction.transaction_hash,
+                    &initialization.request_commitment,
+                    1_700_000_001,
+                )
+                .is_err(),
+            "init must not be broadcast before the Hub countersigns the refund"
+        );
+        let answer = hub_countersign_answer(&store, &hub);
+        store
+            .record_hub_countersignature(&answer, "http://127.0.0.1:8197", 1_700_000_002)
+            .unwrap();
+        assert!(store.recovery_bundle().is_some());
+        assert!(store.recovery_bundle_provenance().is_some());
         initial_submit_and_confirm(
             &mut store,
             HvmRegistryLifecycleStage::Initialization,
@@ -2125,6 +2412,228 @@ mod tests {
                 .reconcile_observation(HvmRegistryLifecycleStage::HubPrefunding, None, 6)
                 .unwrap(),
             HvmRegistryObservationOutcome::RecoveryRequired
+        );
+    }
+
+    /// EVERY ROUTE TO FUNDING, and each one hitting the gate.
+    ///
+    /// A gate on one of two doors is this project's recurring defect, so the
+    /// doors are enumerated here rather than assumed: `prepare_funding` builds
+    /// the bytes, and two different functions ship them -
+    /// `begin_initial_submission` (which has a `created_this_invocation` guard)
+    /// and `begin_exact_resubmit` (which has none, and reaches the identical
+    /// bytes from a state file an older build wrote). Plus the durable one:
+    /// `validate_state` runs in `open` and in `save`, so a funding record
+    /// without a countersigned refund cannot exist on disk at all.
+    #[test]
+    fn every_route_to_funding_refuses_without_a_hub_countersigned_refund() {
+        crate::protocol_registry::ensure_hacash_protocol_setup();
+        let dir = tempdir().unwrap();
+        let network = HvmLocalPilotNetwork::canonical();
+        let left = Account::create_by("registry-gate-left").unwrap();
+        let hub = Account::create_by("registry-gate-hub").unwrap();
+        let key = state_key();
+        let mut store = open_store(&dir, &key, &network, &left, &hub);
+        let prefunding = prepare_prefund(&mut store, &left, &hub, &network);
+        initial_submit_and_confirm(
+            &mut store,
+            HvmRegistryLifecycleStage::HubPrefunding,
+            &prefunding,
+            9,
+            &"11".repeat(32),
+        );
+        let deployment_preview =
+            preview_hvm_registry_pilot_deployment(hub.readable(), &network, FEE, u8::MAX)
+                .unwrap()
+                .unsigned_commitment;
+        let deployment = store
+            .prepare_deployment(&hub, FEE, 100, u8::MAX, &deployment_preview)
+            .unwrap();
+        initial_submit_and_confirm(
+            &mut store,
+            HvmRegistryLifecycleStage::Deployment,
+            &deployment,
+            10,
+            &"22".repeat(32),
+        );
+        let parameters = HvmRegistryPilotChannelParameters {
+            channel_id: "77".repeat(16),
+            reuse_version: 0,
+            left_deposit_zhu: 1_000_000,
+            right_hub_deposit_zhu: 0,
+            challenge_blocks: 12,
+        };
+        let initialization_preview = preview_hvm_registry_pilot_initialization(
+            left.readable(),
+            hub.readable(),
+            &deployment.transaction.contract_address,
+            &network,
+            &parameters,
+            FEE,
+            u8::MAX,
+        )
+        .unwrap();
+        let initialization = store
+            .prepare_initialization(
+                &left,
+                &hub,
+                parameters.clone(),
+                FEE,
+                101,
+                u8::MAX,
+                &initialization_preview.unsigned_commitment,
+                1_700_000_000,
+            )
+            .unwrap();
+
+        // DOOR 0 - the `init` bytes themselves. A Hub that refuses after `init`
+        // confirms burns this (contract, left) slot forever, so the refusal has
+        // to be discovered before these bytes leave the process.
+        assert!(
+            store
+                .begin_initial_submission(
+                    HvmRegistryLifecycleStage::Initialization,
+                    &initialization.transaction.transaction_hash,
+                    &initialization.request_commitment,
+                    1_700_000_001,
+                )
+                .is_err()
+        );
+        let answer = hub_countersign_answer(&store, &hub);
+        store
+            .record_hub_countersignature(&answer, "http://127.0.0.1:8197", 1_700_000_002)
+            .unwrap();
+        initial_submit_and_confirm(
+            &mut store,
+            HvmRegistryLifecycleStage::Initialization,
+            &initialization,
+            11,
+            &"33".repeat(32),
+        );
+
+        let funding_preview = preview_hvm_registry_pilot_funding(
+            left.readable(),
+            hub.readable(),
+            &deployment.transaction.contract_address,
+            &network,
+            parameters.left_deposit_zhu,
+            FEE,
+            u8::MAX,
+        )
+        .unwrap();
+        let funding = store
+            .prepare_funding(
+                &left,
+                FEE,
+                102,
+                u8::MAX,
+                &funding_preview.unsigned_commitment,
+            )
+            .unwrap();
+
+        // Now become the state file an older build wrote: funding bytes are
+        // durable, the countersigned refund is not.
+        let network_snapshot = store.state.network.clone();
+        let left_address = store.state.left_address.clone();
+        let hub_address = store.state.hub_address.clone();
+        let saved_bundle = store.state.recovery_bundle.clone();
+        let saved_provenance = store.state.recovery_bundle_provenance.clone();
+        store.state.recovery_bundle = None;
+        store.state.recovery_bundle_provenance = None;
+
+        // DOOR 1 - the builder.
+        let door1 = store
+            .prepare_funding(
+                &left,
+                FEE,
+                103,
+                u8::MAX,
+                &funding_preview.unsigned_commitment,
+            )
+            .expect_err("prepare_funding must refuse without a countersigned refund");
+        assert!(
+            format!("{door1}").contains("Hub-countersigned refund"),
+            "door 1 must refuse by name, got: {door1}"
+        );
+        // DOOR 2 - the initial-submit dispatcher. This record WAS created by
+        // this invocation, so `created_this_invocation` lets it through and the
+        // only thing standing between it and the network is the gate.
+        let door2 = store
+            .begin_initial_submission(
+                HvmRegistryLifecycleStage::Funding,
+                &funding.transaction.transaction_hash,
+                &funding.request_commitment,
+                1_700_000_003,
+            )
+            .expect_err("begin_initial_submission must refuse to ship funding bytes");
+        assert!(
+            format!("{door2}").contains("Hub-countersigned refund"),
+            "door 2 must refuse by name, got: {door2}"
+        );
+
+        // DOOR 3 - the exact-resubmit dispatcher: no `created_this_invocation`
+        // guard, and reachable from a state file this process did not write.
+        // Reproduce that exactly - restart, then drive the record into the
+        // RecoveryRequired branch that is the only way here - so the refusal
+        // cannot be mistaken for some unrelated phase check.
+        store.state.recovery_bundle = saved_bundle;
+        store.state.recovery_bundle_provenance = saved_provenance;
+        drop(store);
+        let mut restarted = open_store(&dir, &key, &network, &left, &hub);
+        assert_eq!(
+            restarted
+                .reconcile_observation(HvmRegistryLifecycleStage::Funding, None, 6)
+                .unwrap(),
+            HvmRegistryObservationOutcome::RecoveryRequired
+        );
+        // Sanity: with the refund present this door is open, so the refusal
+        // below is the gate and nothing else.
+        assert_eq!(
+            restarted
+                .begin_exact_resubmit(
+                    HvmRegistryLifecycleStage::Funding,
+                    &funding.transaction.transaction_hash,
+                    &funding.request_commitment,
+                )
+                .unwrap()
+                .transaction_hash,
+            funding.transaction.transaction_hash
+        );
+        drop(restarted);
+        let mut older_build = open_store(&dir, &key, &network, &left, &hub);
+        assert_eq!(
+            older_build
+                .reconcile_observation(HvmRegistryLifecycleStage::Funding, None, 6)
+                .unwrap(),
+            HvmRegistryObservationOutcome::RecoveryRequired
+        );
+        older_build.state.recovery_bundle = None;
+        older_build.state.recovery_bundle_provenance = None;
+        let door3 = older_build
+            .begin_exact_resubmit(
+                HvmRegistryLifecycleStage::Funding,
+                &funding.transaction.transaction_hash,
+                &funding.request_commitment,
+            )
+            .expect_err("begin_exact_resubmit must refuse to ship funding bytes");
+        assert!(
+            format!("{door3}").contains("Hub-countersigned refund"),
+            "door 3 must refuse by name, got: {door3}"
+        );
+
+        // DOOR 4 - the disk. This shape cannot be written or reopened, which is
+        // what makes the gate structural rather than conventional.
+        let error = validate_state(
+            &older_build.state,
+            &network_snapshot,
+            &left_address,
+            &hub_address,
+        )
+        .expect_err("a funding record without a countersigned refund must not validate");
+        assert!(format!("{error}").contains("without a Hub-countersigned refund"));
+        assert!(
+            older_build.save().is_err(),
+            "the store must refuse to persist funding without a countersigned refund"
         );
     }
 

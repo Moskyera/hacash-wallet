@@ -15,22 +15,26 @@ use vm::action::{ContractDeploy, ContractMainCall};
 use crate::error::{HubError, HubResult};
 use crate::hvm_pilot::{
     HvmLocalPilotNetwork, HvmPilotDeploymentTransaction, HvmPilotSignedTransaction,
-    build_exact_pilot_type3, contract_call_source, parse_contract_address, readable_address,
+    build_exact_pilot_type3, contract_call_source, parse_contract_address,
     validate_durable_pilot_transaction,
 };
 use crate::hvm_registry::{
     HPAY_REGISTRY_BYTECODE_SHA3, HPAY_REGISTRY_SETTLEMENT_PROFILE, HVM_REGISTRY_BILL_SCHEMA,
-    HVM_REGISTRY_BINDING_SCHEMA, HVM_REGISTRY_RECOVERY_BUNDLE_SCHEMA, HvmRegistryBillV2,
-    HvmRegistryBindingV2, HvmRegistryRecoveryBundleV2,
+    HVM_REGISTRY_BINDING_SCHEMA, HVM_REGISTRY_REFUND_COUNTERSIGN_REQUEST_SCHEMA, HvmRegistryBillV2,
+    HvmRegistryBindingV2, HvmRegistryRecoveryBundleV2, HvmRegistryRefundCountersignRequestV2,
 };
 use crate::hvm_registry_ledger::HvmRegistryPaymentRequestV2;
 use crate::l1_channel::L1ChannelNetworkBinding;
 
 pub const HPAY_REGISTRY_SOURCE_SHA256: &str =
-    "58ab4ba8931190a5b83f5b30a96d842281adf9d7e7069cbf8bf79a68945ae8a8";
+    "37fabe6b8ab54431864715530c0f16c89fed3b609c23c227e592cec24e2ab8b5";
 const CONTRACT_SOURCE: &str =
     include_str!("../../../../hacash-fullnodedev/vm/contracts/hpay_channel_registry_v2.fitsh");
-const CONTRACT_PROTOCOL_COST_238: u64 = 2_000_000_000_000;
+/// The reviewed V2 registry grew when its storage-lease handling was fixed, and
+/// the chain now charges by size: a deploy at the old figure is refused with
+/// "protocol fee must be at least 21745:246 (bytes=4349, periods=10000)". This
+/// is the same figure the fullnode's own v2 contract tests pay.
+const CONTRACT_PROTOCOL_COST_238: u64 = 20_000_000_000_000;
 pub const HVM_REGISTRY_DEPLOY_PROTOCOL_COST_ZHU: u64 = CONTRACT_PROTOCOL_COST_238 / 100;
 pub const HVM_REGISTRY_DEPLOYMENT_PREVIEW_SCHEMA: &str = "hpay-hvm-registry-deployment-preview/2";
 const HVM_REGISTRY_DEPLOYMENT_PREVIEW_DOMAIN: &[u8] = b"HPAY/HVM-REGISTRY-DEPLOYMENT-PREVIEW/V2";
@@ -868,23 +872,41 @@ pub fn build_hvm_registry_pilot_channel_init(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The only way to spell "registry funding transaction" in this codebase.
+///
+/// It takes the countersigned refund bundle instead of a Hub address, a
+/// contract address and an amount, and it derives all three from the bundle.
+/// The first statement of the body is `bundle.validate_crypto()`, so the
+/// refusal is not a policy a caller can forget to apply: there is no longer a
+/// way to obtain funding bytes without already holding a fully countersigned
+/// serial-1 refund for the exact channel being funded.
+///
+/// The residual is worth stating plainly rather than implying the chain covers
+/// it. `PayableHAC` accepts any correctly-sized HAC transfer from the left
+/// address while the channel is in FUNDING and has no view of an off-chain
+/// signature, so the chain cannot enforce this. What changed is that nothing in
+/// this repository will build those bytes for you.
 pub fn build_hvm_registry_pilot_exact_funding(
     left: &Account,
-    hub_address: &str,
-    contract_address: &str,
+    bundle: &HvmRegistryRecoveryBundleV2,
     network: &HvmLocalPilotNetwork,
-    amount_zhu: u64,
     network_fee_zhu: u64,
     timestamp: u64,
     gas_max: u8,
 ) -> HubResult<HvmPilotSignedTransaction> {
+    bundle.validate_crypto()?;
+    let binding = &bundle.binding;
+    if left.readable() != binding.left_address {
+        return Err(HubError::State(
+            "registry funding signer is not the left party the refund bill pays".into(),
+        ));
+    }
     let plan = build_hvm_registry_funding_plan(
         left.readable(),
-        hub_address,
-        contract_address,
+        &binding.right_hub_address,
+        &binding.contract_address,
         network,
-        amount_zhu,
+        binding.left_deposit_zhu,
         network_fee_zhu,
         gas_max,
     )?;
@@ -952,16 +974,28 @@ pub(crate) fn validate_hvm_registry_pilot_funding_transaction(
     Ok(())
 }
 
-pub fn build_hvm_registry_pilot_recovery_bundle(
+/// Build the serial-1 full-refund ASK: the binding, and the bill signed on the
+/// LEFT line only.
+///
+/// This function used to take `hub: &Account` and finish the job locally. That
+/// was the serial-0 trap wearing a disguise - a single process holding both
+/// keys can always produce a refund bill, so a stored refund bill proved
+/// nothing about whether the Hub had ever agreed to anything. The Hub's half
+/// now has to arrive over the wire, and there is no longer any code path in
+/// this repository that can mint it locally.
+pub fn build_hvm_registry_pilot_refund_countersign_request(
     left: &Account,
-    hub: &Account,
+    hub_address: &str,
     deployment: &HvmPilotDeploymentTransaction,
     deployment_height: u64,
     parameters: &HvmRegistryPilotChannelParameters,
-) -> HubResult<HvmRegistryRecoveryBundleV2> {
+    created_unix: u64,
+    expires_unix: u64,
+) -> HubResult<HvmRegistryRefundCountersignRequestV2> {
     parameters.validate()?;
     let network = HvmLocalPilotNetwork::canonical();
-    validate_registry_deployment(deployment, hub, &network)?;
+    let hub_address = canonical_private_address(hub_address, "Hub")?.to_readable();
+    validate_registry_deployment(deployment, &hub_address, &network)?;
     if deployment_height == 0 {
         return Err(HubError::State(
             "registry deployment evidence is incomplete".into(),
@@ -980,7 +1014,7 @@ pub fn build_hvm_registry_pilot_recovery_bundle(
         channel_id: parameters.channel_id.clone(),
         reuse_version: parameters.reuse_version,
         left_address: left.readable().to_owned(),
-        right_hub_address: hub.readable().to_owned(),
+        right_hub_address: hub_address,
         left_deposit_zhu: parameters.left_deposit_zhu,
         right_hub_deposit_zhu: parameters.right_hub_deposit_zhu,
         challenge_blocks: parameters.challenge_blocks,
@@ -996,19 +1030,20 @@ pub fn build_hvm_registry_pilot_recovery_bundle(
     };
     let hash = bill.signing_hash(&binding)?;
     bill.left_signature_hex = hex::encode(Sign::create_by(left, &hash).serialize());
-    bill.hub_signature_hex = hex::encode(Sign::create_by(hub, &hash).serialize());
-    let bundle = HvmRegistryRecoveryBundleV2 {
-        schema: HVM_REGISTRY_RECOVERY_BUNDLE_SCHEMA.into(),
+    let request = HvmRegistryRefundCountersignRequestV2 {
+        schema: HVM_REGISTRY_REFUND_COUNTERSIGN_REQUEST_SCHEMA.into(),
         binding,
-        initial_recovery_bill: bill,
+        left_signed_refund_bill: bill,
+        created_unix,
+        expires_unix,
     };
-    bundle.validate_crypto()?;
-    Ok(bundle)
+    request.validate_shape()?;
+    Ok(request)
 }
 
 fn validate_registry_deployment(
     deployment: &HvmPilotDeploymentTransaction,
-    hub: &Account,
+    hub: &str,
     network: &HvmLocalPilotNetwork,
 ) -> HubResult<()> {
     use protocol::action::ChainAllow;
@@ -1025,7 +1060,7 @@ fn validate_registry_deployment(
         .map_err(|_| HubError::State("registry deployment bytes are invalid".into()))?;
     let (transaction, used) = protocol::transaction::transaction_create(&raw)
         .map_err(|_| HubError::State("registry deployment cannot be decoded".into()))?;
-    let hub_address = readable_address(hub)?;
+    let hub_address = canonical_private_address(hub, "Hub")?;
     if used != raw.len()
         || transaction.ty() != 3
         || transaction.actions().len() != 2
@@ -1119,6 +1154,63 @@ mod tests {
 
     const FEE: u64 = 500_000;
 
+    /// The wallet's lease-renewal caps must be the contract's own
+    /// `MAX_RENT_STEP`, re-read from the contract rather than remembered.
+    ///
+    /// This is the test that would have caught the drift that mattered most.
+    /// The contract moved `MAX_RENT_STEP` to 150; the wallet went on asking
+    /// for 200 channel periods and 400 registry periods, and both aborted on
+    /// chain. Because the driver answers a short lease by renewing *before* it
+    /// will start an exit, and because a lapsed lease is the only path here
+    /// that destroys a deposit for everybody, the single rescue a user had was
+    /// a transaction that could never run.
+    ///
+    /// It lives in this module because this is where the contract source
+    /// itself is embedded. Parsing the constant back out of that source is the
+    /// point: a cap the wallet merely *remembers* is a cap that can drift
+    /// again, silently, the next time the contract is revised.
+    #[test]
+    fn registry_rent_step_matches_the_reviewed_contract() {
+        let declared = CONTRACT_SOURCE
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("const MAX_RENT_STEP = "))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .expect("the reviewed registry contract must declare MAX_RENT_STEP");
+
+        assert_eq!(
+            crate::hvm_registry::HPAY_REGISTRY_MAX_RENT_STEP,
+            declared,
+            "HPAY_REGISTRY_MAX_RENT_STEP mirrors the contract's MAX_RENT_STEP and has drifted \
+             from it; every lease renewal this workspace builds is now refused on chain"
+        );
+
+        // Both renewal callers are bounded by that same figure. `renew_channel`
+        // and `renew_registry` each assert `periods <= MAX_RENT_STEP` before
+        // touching a key, so anything above it is not merely wasteful, it is
+        // unexecutable.
+        for (name, cap) in [
+            (
+                "HVM_REGISTRY_RENEW_CHANNEL_MAX_PERIODS",
+                crate::hvm_registry_watchtower::HVM_REGISTRY_RENEW_CHANNEL_MAX_PERIODS,
+            ),
+            (
+                "HVM_REGISTRY_RENEW_REGISTRY_MAX_PERIODS",
+                crate::hvm_registry_watchtower::HVM_REGISTRY_RENEW_REGISTRY_MAX_PERIODS,
+            ),
+            (
+                "HVM_LEASE_RENEWAL_MAX_PERIODS",
+                crate::hvm_watchtower::HVM_LEASE_RENEWAL_MAX_PERIODS,
+            ),
+        ] {
+            assert!(
+                cap > 0 && cap <= declared,
+                "{name} = {cap} exceeds the contract's MAX_RENT_STEP = {declared}; a lease \
+                 renewal built at that size aborts on chain and renews nothing"
+            );
+        }
+    }
+
     #[test]
     fn exact_registry_deploy_init_fund_and_bundle_are_chain_bound() {
         crate::protocol_registry::ensure_hacash_protocol_setup();
@@ -1206,17 +1298,36 @@ mod tests {
             u8::MAX,
         )
         .unwrap();
-        let funding = build_hvm_registry_pilot_exact_funding(
+        let request = build_hvm_registry_pilot_refund_countersign_request(
             &left,
             hub.readable(),
-            &deploy.contract_address,
-            &network,
-            parameters.left_deposit_zhu,
-            FEE,
-            102,
-            u8::MAX,
+            &deploy,
+            10,
+            &parameters,
+            1_000,
+            1_060,
         )
         .unwrap();
+        // No bundle, no funding bytes. This is the gate, and it is a type.
+        let unsigned = HvmRegistryRecoveryBundleV2 {
+            schema: crate::hvm_registry::HVM_REGISTRY_RECOVERY_BUNDLE_SCHEMA.into(),
+            binding: request.binding.clone(),
+            initial_recovery_bill: request.left_signed_refund_bill.clone(),
+        };
+        assert!(
+            build_hvm_registry_pilot_exact_funding(&left, &unsigned, &network, FEE, 102, u8::MAX)
+                .is_err()
+        );
+        let hash = request
+            .left_signed_refund_bill
+            .signing_hash(&request.binding)
+            .unwrap();
+        let bundle = request
+            .attach_hub_countersignature(&hex::encode(Sign::create_by(&hub, &hash).serialize()))
+            .unwrap();
+        let funding =
+            build_hvm_registry_pilot_exact_funding(&left, &bundle, &network, FEE, 102, u8::MAX)
+                .unwrap();
         validate_hvm_registry_pilot_funding_transaction(&funding, &funding_preview).unwrap();
         for signed in [&deploy.transaction, &init, &funding] {
             let raw = hex::decode(&signed.signed_transaction_hex).unwrap();
@@ -1227,9 +1338,6 @@ mod tests {
             tx.verify_signature().unwrap();
             assert_eq!(hex::encode(tx.hash()), signed.transaction_hash);
         }
-        let bundle =
-            build_hvm_registry_pilot_recovery_bundle(&left, &hub, &deploy, 10, &parameters)
-                .unwrap();
         bundle.validate_crypto().unwrap();
         assert_eq!(bundle.binding.right_hub_deposit_zhu, 0);
         assert_eq!(bundle.binding.reuse_version, 0);
@@ -1490,8 +1598,48 @@ mod tests {
         parameters.right_hub_deposit_zhu = 0;
         let wrong_hub = Account::create_by("registry-pilot-wrong-hub").unwrap();
         assert!(
-            build_hvm_registry_pilot_recovery_bundle(&left, &wrong_hub, &deploy, 10, &parameters)
+            build_hvm_registry_pilot_refund_countersign_request(
+                &left,
+                wrong_hub.readable(),
+                &deploy,
+                10,
+                &parameters,
+                1_000,
+                1_060,
+            )
+            .is_err()
+        );
+        // The honest ask succeeds and is worthless on its own: it carries no
+        // Hub signature, and nothing in this crate can add one.
+        let request = build_hvm_registry_pilot_refund_countersign_request(
+            &left,
+            hub.readable(),
+            &deploy,
+            10,
+            &parameters,
+            1_000,
+            1_060,
+        )
+        .unwrap();
+        assert!(request.left_signed_refund_bill.hub_signature_hex.is_empty());
+        let hash = request
+            .left_signed_refund_bill
+            .signing_hash(&request.binding)
+            .unwrap();
+        // A well-formed signature from any other key is refused, because the
+        // check is against `binding.right_hub_address` and not against the
+        // public key riding in the wire signature.
+        assert!(
+            request
+                .attach_hub_countersignature(&hex::encode(
+                    Sign::create_by(&wrong_hub, &hash).serialize()
+                ))
                 .is_err()
+        );
+        assert!(
+            request
+                .attach_hub_countersignature(&hex::encode(Sign::create_by(&hub, &hash).serialize()))
+                .is_ok()
         );
     }
 }

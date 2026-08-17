@@ -18,6 +18,7 @@ use crate::hvm_ledger::{
 };
 use crate::hvm_registry::{
     HvmRegistryBillV2, HvmRegistryLiveSnapshotV2, HvmRegistryRecoveryBundleV2,
+    HvmRegistryRefundCountersignRequestV2,
 };
 use crate::hvm_registry_ledger::{
     PersistedHvmRegistryLedger, PersistedHvmRegistryProgression, validate_registry_progression,
@@ -50,6 +51,23 @@ pub(crate) struct PersistedHvmRegistryActivation {
     pub minimum_required_live_blocks: u64,
     pub minimum_required_recover_blocks: u64,
     pub activated_unix: u64,
+}
+
+/// The Hub's durable record of one serial-1 refund it countersigned at channel
+/// open, keyed on the binding commitment.
+///
+/// One binding, one refund signature, forever. Re-asking returns the identical
+/// bytes; asking with a different serial-1 bill for the same binding is
+/// refused. That is what stops a Hub being walked into signing two different
+/// refunds for one channel, and it is why this is durable rather than derived.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedHvmRegistryOpenCountersignature {
+    pub binding_commitment: String,
+    pub request: HvmRegistryRefundCountersignRequestV2,
+    pub hub_refund_signature_hex: String,
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
+    pub countersigned_unix: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -515,6 +533,11 @@ pub(crate) struct HubPersistedState {
     pub hvm_registry_progressions: HashMap<String, PersistedHvmRegistryProgression>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hvm_registry_chain_operations: HashMap<String, PersistedHvmRegistryChainOperation>,
+    /// Serial-1 refunds this Hub has countersigned at channel open, before the
+    /// channel exists on chain and before it holds any coin.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hvm_registry_open_countersignatures:
+        HashMap<String, PersistedHvmRegistryOpenCountersignature>,
     /// The Hub's half of the external monotonic rollback anchor: the pinned
     /// witness store, the highest counter this Hub has durably recorded, and
     /// the exact reservation for each in-flight signature.
@@ -1002,7 +1025,34 @@ fn validate_hvm_channel_activations_v1(state: &HubPersistedState) -> HubResult<(
     Ok(())
 }
 
+fn validate_hvm_registry_open_countersignatures_v2(state: &HubPersistedState) -> HubResult<()> {
+    for (map_key, record) in &state.hvm_registry_open_countersignatures {
+        record.request.validate_shape()?;
+        let binding_commitment = record.request.binding.commitment()?;
+        if map_key != &record.binding_commitment
+            || record.binding_commitment != binding_commitment
+            || record.countersigned_unix == 0
+        {
+            return Err(HubError::State(
+                "persisted registry open countersignature commitment is inconsistent".into(),
+            ));
+        }
+        // Re-derive the whole answer from the stored ask. A record that no
+        // longer verifies is a record this Hub must not serve again.
+        let bundle = record
+            .request
+            .attach_hub_countersignature(&record.hub_refund_signature_hex)?;
+        if bundle.binding != record.request.binding {
+            return Err(HubError::State(
+                "persisted registry open countersignature drifted from its binding".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_hvm_registry_activations_v2(state: &HubPersistedState) -> HubResult<()> {
+    validate_hvm_registry_open_countersignatures_v2(state)?;
     let activations = state.hvm_registry_activations.values().collect::<Vec<_>>();
     for (map_key, activation) in &state.hvm_registry_activations {
         activation.recovery_bundle.validate_crypto()?;

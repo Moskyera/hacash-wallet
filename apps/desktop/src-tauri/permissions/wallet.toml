@@ -52,6 +52,8 @@ commands.allow = [
   "agent_wallet_hvm_anchor_decision",
   "agent_wallet_refresh_hvm_anchor_continuity",
   "agent_wallet_resolve_hvm_anchor_decision",
+  "agent_wallet_hvm_registry_exit_status",
+  "agent_wallet_start_hvm_registry_exit",
   "agent_wallet_list_pending_approvals",
   "agent_wallet_revoke_agent",
   "agent_wallet_pending_approval",

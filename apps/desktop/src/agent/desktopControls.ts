@@ -75,6 +75,14 @@ export const DESKTOP_CONTROLS = {
    * It is named by the stranded-payment copy, which has to point somewhere real.
    */
   replace_the_paired_phone: "Replace the paired phone",
+  /**
+   * Starts a unilateral close of the HVM registry channel: challenge, then
+   * finalize, then the Action 14 payout, all signed by the owner's own key and
+   * sent through the owner's own fullnode. The provider is not asked and
+   * cannot refuse. The label says "without the provider" rather than "close
+   * channel" because that is the only reason an owner would ever look for it.
+   */
+  start_exit_without_provider: "Take my money out without the provider",
   review_exact_transaction: "Review exact transaction",
   approve_exact_transaction: "Approve exact transaction",
   reject_payment: "Reject",

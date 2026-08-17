@@ -30,6 +30,14 @@ import {
   heldConsentExplanation,
   heldConsentFacts,
 } from "./companionHeldConsent";
+import {
+  REGISTRY_EXIT_COST,
+  REGISTRY_EXIT_LEASE,
+  REGISTRY_EXIT_PHONE_CANNOT,
+  REGISTRY_EXIT_REASSURANCE,
+  REGISTRY_EXIT_ROUTE,
+  REGISTRY_EXIT_TITLE,
+} from "./registryExitRoute";
 import type {
   AgentCompanionIdentityStatus,
   CompanionStoredStateView,
@@ -210,6 +218,27 @@ export function CompanionSecurity({
             {COMPANION_RECHECK_IDENTITY_ACTION}
           </button>
         )}
+      </section>
+
+      {/* The day the provider stops answering, this phone is the device the
+          owner has in their hand, and it used to say nothing about it at all.
+
+          Unconditional: every build, paired or not, read-only or not. A
+          read-only companion is the build an owner is most likely to be
+          holding and the one with nothing else on this subject anywhere. No
+          control is added, because this handset holds an approval identity and
+          not a Hacash key, so none could exist here - the route to the one
+          that does exist is named exactly instead, and a test reads the
+          desktop's own control table to keep it named exactly. */}
+      <section className="agent-panel">
+        <h2>{REGISTRY_EXIT_TITLE}</h2>
+        <p>{REGISTRY_EXIT_REASSURANCE}</p>
+        <p className="agent-muted">{REGISTRY_EXIT_COST}</p>
+        {/* Never behind a disclosure: this is the only clock in the system
+            that destroys the money instead of delaying it. */}
+        <p className="agent-warning-copy" role="status">{REGISTRY_EXIT_LEASE}</p>
+        <p className="agent-muted">{REGISTRY_EXIT_PHONE_CANNOT}</p>
+        <p>{REGISTRY_EXIT_ROUTE}</p>
       </section>
 
       {/* The desktop can refuse this phone forever, and until now the phone

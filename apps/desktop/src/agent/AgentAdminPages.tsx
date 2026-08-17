@@ -7,6 +7,7 @@ import {
   type AgentWalletOverview,
   type ApprovalCommitment,
   type ApprovalMode,
+  type AgentHvmPaymentOperation,
   type PaymentOperation,
   type StrandedWitness,
 } from "./api";
@@ -27,9 +28,14 @@ import {
   ABANDON_STRANDED_PAYMENT_WARNING,
   APPROVE_TRANSACTION_WARNING,
   EMERGENCY_STOP_WARNING,
+  EXIT_WITHOUT_PROVIDER_WARNING,
   REJECT_PAYMENT_WARNING,
   REVOKE_AGENT_WARNING,
 } from "./irreversibleActions";
+import {
+  registryExitView,
+  type AgentHvmRegistryExitStatus,
+} from "./registryExit";
 import { strandedWitnessView } from "./strandedWitness";
 
 export type AgentAdminPage = "agents" | "rules" | "activity" | "providers" | "security";
@@ -396,12 +402,31 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
   // give-up control may be offered at all.
   const [stranded, setStranded] = useState<StrandedWitness | null>(null);
   const [confirmGiveUp, setConfirmGiveUp] = useState<string | null>(null);
+  // What the owner's own fullnode says about walking out of the registry
+  // channel alone, and this wallet's own record of what it has already spent
+  // out of that channel. Neither read touches the Hub, which is the whole
+  // point: this section has to render identically when the provider is gone.
+  const [exitStatus, setExitStatus] = useState<AgentHvmRegistryExitStatus | null>(null);
+  const [exitReadError, setExitReadError] = useState("");
+  const [exitOperations, setExitOperations] = useState<AgentHvmPaymentOperation[]>([]);
+  const [confirmExit, setConfirmExit] = useState(false);
   const load = useCallback(async () => {
     setError("");
     try { setPending(await agentWalletApi.listPendingApprovals(overview.wallet_id)); } catch (reason) { setPending(null); setError(readableError(reason)); }
     // A failure to read this must never invent a stranded payment, and must
     // never hide the approvals that did load.
     try { setStranded(await agentWalletApi.strandedWitness(overview.wallet_id)); } catch { setStranded(null); }
+    // A failure here is reported rather than swallowed. An owner whose channel
+    // is stuck is entitled to know that the check itself did not run, instead
+    // of reading a section that quietly disappeared.
+    try {
+      setExitStatus(await agentWalletApi.hvmRegistryExitStatus(overview.wallet_id));
+      setExitReadError("");
+    } catch (reason) {
+      setExitStatus(null);
+      setExitReadError(readableError(reason));
+    }
+    try { setExitOperations(await agentWalletApi.listHvmActivity(overview.wallet_id)); } catch { setExitOperations([]); }
   }, [overview.wallet_id]);
   useEffect(() => { void load(); }, [load]);
   // Same predicate and same view helper as the Overview page. Before this,
@@ -425,6 +450,9 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
     ? pending?.find((operation) => operation.operation_id === approval.operation_id) ?? null
     : null;
   const strandedView = strandedWitnessView(stranded, formatUnits);
+  const exitView = exitStatus
+    ? registryExitView(overview.hvm_registry_binding, exitStatus, exitOperations, formatZhu)
+    : null;
   const rotationPhase = overview.witness_rotation_phase;
   const rotationNeedsAttention = Boolean(rotationPhase && rotationPhase !== "stable");
   return (
@@ -506,6 +534,91 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
             </>
           ) : (
             <p role="status">{strandedView.abandonWithheldReason}</p>
+          )}
+        </section>
+      )}
+      {/* Getting out of a channel whose provider has stopped answering.
+          It lives on Security rather than Activity because it has to be
+          findable when everything else on the wallet is failing, and it is
+          built entirely from this wallet's own state and the owner's own
+          fullnode: no read on this section goes anywhere near the Hub, so a
+          vanished provider cannot change a word of it.
+
+          Nothing here is behind a <details>. The amount, the lease and the
+          cost of the press are the three facts an owner needs before they
+          decide, and a disclosure they never open is the same as not saying
+          it. */}
+      {overview.hvm_registry_binding && (
+        <section className="agent-panel" aria-label="Getting your money out without the provider">
+          <span className="agent-eyebrow">Your money, without your provider</span>
+          <h2>{exitView ? exitView.heading : "Getting your money out without the provider"}</h2>
+          {exitView ? (
+            <>
+              <p>{exitView.depositLine}</p>
+              <p className="agent-exact-address">{exitView.yourMoneyLine}</p>
+              {/* The one clock in this system that destroys money rather than
+                  delaying it. Never collapsible, never rounded away, and never
+                  a number this screen made up: when the chain could not be
+                  asked, it says so instead. */}
+              <p className="agent-warning" role="status">{exitView.leaseLine}</p>
+              <p>{exitView.windowLine}</p>
+              <p>{exitView.feeLine}</p>
+              <h3>What happens after you press it</h3>
+              <ol className="agent-security-list">
+                {exitView.steps.map((step) => <li key={step}>{step}</li>)}
+              </ol>
+              {/* Stated, never a silent gate. An owner who is refused is owed
+                  the reason, and the reason is what tells them what to fix. */}
+              <dl className="agent-detail-grid">
+                {exitView.preconditions.map((entry) => (
+                  <Detail
+                    key={entry.label}
+                    label={`${entry.label}: ${entry.met ? "ready" : "not ready"}`}
+                    value={entry.detail}
+                    wide
+                  />
+                ))}
+              </dl>
+              <div className="agent-warning">{EXIT_WITHOUT_PROVIDER_WARNING}</div>
+              {exitView.canStart ? (
+                <div className="agent-confirm-row">
+                  {confirmExit ? (
+                    <>
+                      <button type="button" disabled={busy} onClick={() => setConfirmExit(false)}>Cancel</button>
+                      <button type="button" className="agent-danger" disabled={busy} onClick={() => void run(async () => {
+                        await agentWalletApi.startHvmRegistryExit(overview.wallet_id);
+                        setConfirmExit(false);
+                        // Do not promise resumption. There is no durable
+                        // per-step record in the wallet yet - no peer of the
+                        // Hub's PersistedHvmRegistryChainOperation - so a crash
+                        // between steps leaves nothing that knows which step was
+                        // already signed. Saying otherwise would be a guarantee
+                        // the code does not keep, on the screen where that
+                        // matters most.
+                        onInfo("The exit has started. It runs in the four steps above, and each one has to be sent from this wallet, so leave it open until the last step is done.");
+                        await Promise.all([load(), onRefreshOverview()]);
+                      })}>Confirm, close this channel</button>
+                    </>
+                  ) : (
+                    <button type="button" className="agent-danger" disabled={busy} onClick={() => setConfirmExit(true)}>
+                      {DESKTOP_CONTROLS.start_exit_without_provider}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="agent-warning" role="status">
+                  {DESKTOP_CONTROLS.start_exit_without_provider} is not available yet. {exitView.startWithheldReason}
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="alert" role="alert">
+              <span>
+                This wallet has a channel with a provider, and whether you can walk out of it alone could not be
+                checked just now. Nothing has changed and no money has moved. {exitReadError}
+              </span>
+              <button type="button" disabled={busy} onClick={() => void load()}>Check again</button>
+            </div>
           )}
         </section>
       )}
@@ -750,6 +863,20 @@ function parseSafeUnixSeconds(raw: string | number): number | null {
 }
 function formatUnits(raw: string): string { const value = unitsToDecimal(raw); return value ? value + " HAC" : "Invalid amount"; }
 function formatDate(raw: string | number): string { const unix = parseSafeUnixSeconds(raw); if (unix === null || unix > Number.MAX_SAFE_INTEGER / 1_000) return "Invalid time"; const date = new Date(unix * 1_000); return Number.isNaN(date.getTime()) ? "Invalid time" : date.toLocaleString(); }
+/**
+ * An exact zhu amount as HAC. The registry rail counts in zhu, at 1_000_000 to
+ * one HAC, and this is the same conversion `AgentHvmOperationsPanel` uses.
+ */
+function formatZhu(raw: string): string {
+  try {
+    const zhu = BigInt(raw);
+    const whole = zhu / 1_000_000n;
+    const fraction = (zhu % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+    return fraction ? `${whole}.${fraction} HAC` : `${whole} HAC`;
+  } catch {
+    return "Invalid amount";
+  }
+}
 function shortId(value: string): string { return value.length > 20 ? value.slice(0, 10) + "..." + value.slice(-6) : value; }
 function shortAddress(value: string): string { return value.length > 22 ? value.slice(0, 10) + "..." + value.slice(-8) : value; }
 function readableError(reason: unknown): string { return reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "Agent Wallet operation failed."; }

@@ -210,6 +210,16 @@ impl MainnetReadinessV1 {
         }
         if !l1_dispute_path_ready && !is_bounded_pilot {
             blockers.push("unilateral_l1_dispute_path_is_not_ready".into());
+            // Say which half is missing, because the two fail for very
+            // different reasons and the reader deserves the one that is
+            // actually true. The line above reads like "the chain is not
+            // ready yet". This one says the chain is not the obstruction: no
+            // wallet on any platform can build a challenge, respond, finalize
+            // or claim transaction, so a user holding a perfectly valid
+            // countersigned bill still has no instrument to present it with.
+            if !measure_user_side_unilateral_exit_ready() {
+                blockers.push("wallet_cannot_build_a_unilateral_exit_without_the_hub".into());
+            }
         }
         let is_mainnet_pilot = is_mainnet_pilot_profile(profile);
         if is_mainnet_pilot {
@@ -248,13 +258,7 @@ impl MainnetReadinessV1 {
                             .push("fullnode_missing_required_cooperative_close_action_3".into());
                     }
                     if profile == MAINNET_PILOT_PROFILE
-                        && (!capabilities.channel_unilateral_exit
-                            || !capabilities
-                                .channel_unilateral_exit_evidence
-                                .as_ref()
-                                .is_some_and(
-                                    crate::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment,
-                                ))
+                        && !measure_node_reported_unilateral_exit(Some(&capabilities))
                     {
                         blockers.push(
                             "fullnode_does_not_report_verified_channel_unilateral_exit".into(),
@@ -284,6 +288,7 @@ impl MainnetReadinessV1 {
                     && blocker.as_str() != ADMISSION_NOT_EVALUATED
                     && blocker.as_str() != "external_monotonic_rollback_anchor_is_not_ready"
                     && blocker.as_str() != "unilateral_l1_dispute_path_is_not_ready"
+                    && blocker.as_str() != "wallet_cannot_build_a_unilateral_exit_without_the_hub"
                     && blocker.as_str()
                         != "fullnode_does_not_report_verified_channel_unilateral_exit"
                     && !blocker.starts_with("mainnet payment cap")
@@ -750,14 +755,138 @@ pub fn measure_external_rollback_anchor_ready(
     })
 }
 
+/// Whether this software ships a way for a *user* to drive a unilateral exit.
+///
+/// Set by a human, never by configuration, and deliberately separate from the
+/// probe below so that neither alone can turn the guarantee green.
+///
+/// It is `false`, and here is exactly what has to become true before anyone
+/// may change it. All three, together:
+///
+/// 1. **A signer-agnostic builder.** ✅ **Met.**
+///    [`crate::hvm_registry_watchtower::build_signed_hvm_registry_call_transaction`]
+///    and its claim sibling are role aware: the Hub's rule is unchanged and the
+///    channel's left party has its own. The whole sequence is proven on a real
+///    chain against a real deployed contract, with the Hub's process aborted
+///    and its socket verified closed, in
+///    `crates/wallet-core/tests/dead_hub_user_exit_on_chain.rs` — the user
+///    signs challenge, finalize and the Action 14 payout with their own key and
+///    ends up richer by exactly the balance they were owed.
+/// 2. **A user surface that reaches it.** ❌ **Not met, and this is the one
+///    that is holding the flag down.** `agent_wallet_start_hvm_registry_exit`
+///    renders the section, reads the chain and then refuses:
+///    [`crate::hvm_registry_watchtower`] can build the bytes but nothing in
+///    `agent-wallet-core` can *sign* them. `AgentWalletSigner` exposes
+///    `sign_exact_channel_open`, `sign_exact_channel_close` and the two payment
+///    signers, each with its own transaction-intent verification, safety permit
+///    and approval commitment; there is no `sign_exact_registry_exit`. A driver
+///    nobody can call is still not an exit.
+/// 3. **The evidence in the user's hands.** Partly met. The wallet now keeps an
+///    explicit monotone `hvm_registry_exit_head`, seeded at adoption from the
+///    binding's own serial-1 refund bill and falling back to it when absent, so
+///    the evidence cannot be lost with a pruned operation map; and funding is
+///    unbuildable without a Hub-countersigned refund, so the serial-0 trap is
+///    closed. What is missing is the export: `hvm_registry_exit_kit` has no
+///    command and no CLI behind it, so a user cannot hand the kit to anyone.
+///
+/// Two further conditions decide whether an exit that can be *started* is
+/// actually *survivable*, and they are named here so nobody flips this flag
+/// believing 1–3 are the whole list.
+///
+/// * **The challenge window.** Fixed per channel, and a missed one settles
+///   whatever split is standing. On the shipped one-directional rail a missed
+///   window cannot cost a sleeping user principal, because every later bill
+///   pays them *less* — but that is a property of two checks, not of this
+///   code: `right_hub_deposit_zhu != 0` is refused in
+///   [`crate::hvm_registry`], and the bill ledger only ever subtracts from the
+///   left balance. Change either and this stops being true.
+/// * **The storage lease.** Still the only path here that destroys a deposit
+///   outright, though the cliff is further out than it looks: funding buys
+///   every channel key a recovery buffer, so an expired record goes dormant and
+///   restorable for months before it is destroyed. The driver renews before it
+///   will start an exit, and renews *the half that is short* — the six shared
+///   globals and the twelve channel keys are separate calls, and renewing the
+///   wrong one is a fee spent to stand still.
+pub const USER_SIDE_UNILATERAL_EXIT_DRIVER_READY: bool = false;
+
+#[cfg(test)]
+mod user_side_exit_readiness_tests {
+    /// The flag stays down until a user can actually reach the driver.
+    ///
+    /// Condition 1 is met and measurably so — the probe below flips itself, and
+    /// the on-chain proof exists. That is exactly the situation in which a flag
+    /// is most likely to be flipped for the wrong reason, so this test states
+    /// the remaining gap in a place that fails if the flag moves without it.
+    #[test]
+    fn the_flag_is_down_because_no_surface_can_sign_an_exit() {
+        if !super::USER_SIDE_UNILATERAL_EXIT_DRIVER_READY {
+            return;
+        }
+        let signer = include_str!("../../agent-wallet-core/src/signer.rs");
+        assert!(
+            signer.contains("sign_exact_registry_exit"),
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the wallet still has no \
+             way to sign an exit. The builders work and the chain accepts them, but a user \
+             cannot reach either, and a flag that reads true while a user is trapped is worse \
+             than red forever."
+        );
+    }
+}
+
+/// Measured readiness of the *user's* side of the unilateral exit: not whether
+/// the chain would permit an exit, but whether this software can put one in a
+/// user's hands.
+///
+/// Both terms must hold. The constant is the human judgement that the surface,
+/// the driver and the bill custody all exist. The probe is the machine check
+/// that the exit transactions can actually be built by someone who is not the
+/// Hub — it drives the real builders with a real non-Hub key and cannot be
+/// satisfied by editing a literal, by configuration, or by an operator saying
+/// so. Neither is sufficient alone, which is the point: this is the term that
+/// makes a wrong guarantee take more than one careless edit.
+pub fn measure_user_side_unilateral_exit_ready() -> bool {
+    USER_SIDE_UNILATERAL_EXIT_DRIVER_READY
+        && crate::hvm_registry_watchtower::user_key_can_build_registry_exit_transactions()
+}
+
 /// Measured readiness of the unilateral L1 dispute path.
 ///
 /// True only when the connected fullnode both advertises the native
 /// unilateral-exit capability *and* carries evidence of an exactly verified
-/// mainnet deployment of the reviewed exit contract. Missing capabilities (an
+/// mainnet deployment of the reviewed exit contract, *and* this software can
+/// actually hand a user the exit transactions. Missing capabilities (an
 /// unreachable or unparseable node), a `false` capability flag, or evidence
 /// that fails `validate_candidate` each read `false`.
+///
+/// **Why the third term exists.** The first two are both statements made by
+/// the fullnode about itself, in a different repository. Until this term was
+/// added, `unilateral_l1_enforceable` — the guarantee a wallet reads before it
+/// trusts this Hub with mainnet funds — could be published `true` by deploying
+/// a contract and flipping one hardcoded literal in that other repository,
+/// while every user still had no means whatsoever to build an exit
+/// transaction. That is precisely the wrong guarantee this project ranks worse
+/// than no guarantee: telling users they hold a claim on chain when what they
+/// hold is a promise from the Hub. A node advertising a contract is evidence
+/// about a node. It is not evidence that a user can get their money out, and
+/// only the third term is about the user at all.
 pub fn measure_l1_dispute_path_ready(capabilities: Option<&FullnodeCapabilitiesV1>) -> bool {
+    measure_node_reported_unilateral_exit(capabilities) && measure_user_side_unilateral_exit_ready()
+}
+
+/// The fullnode half of the dispute-path measurement, on its own.
+///
+/// True when the connected node advertises the unilateral-exit capability and
+/// carries evidence of an exactly verified mainnet deployment of the reviewed
+/// exit contract. Missing capabilities (an unreachable or unparseable node), a
+/// `false` capability flag, or evidence that fails `validate_candidate` each
+/// read `false`.
+///
+/// Named and exported separately because it is exactly the part of the claim
+/// that a node can speak to, and keeping it distinct is what stops it being
+/// mistaken for the whole. On its own it never gates anything.
+pub fn measure_node_reported_unilateral_exit(
+    capabilities: Option<&FullnodeCapabilitiesV1>,
+) -> bool {
     capabilities.is_some_and(|capabilities| {
         capabilities.channel_unilateral_exit
             && capabilities
@@ -1036,6 +1165,57 @@ mod tests {
         }));
     }
 
+    /// A fullnode that reports everything perfectly is still not a user
+    /// getting their money out.
+    ///
+    /// `capabilities()` is the fully green fixture: `channel_unilateral_exit`
+    /// true, an independently verified mainnet deployment, confirmed
+    /// deployment transaction, matching code hash. Before the user-side term
+    /// existed that combination alone published
+    /// `unilateral_l1_enforceable: true`. It must not, because no wallet can
+    /// build the exit transaction, and this test is what stops that
+    /// combination from ever being enough again.
+    #[test]
+    fn a_perfect_fullnode_report_is_not_a_unilateral_exit() {
+        let node = capabilities();
+        assert!(
+            node.channel_unilateral_exit
+                && node.channel_unilateral_exit_evidence.as_ref().is_some_and(
+                    crate::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment
+                ),
+            "the fixture must be the fully green fullnode report, or this proves nothing"
+        );
+        assert!(
+            !measure_user_side_unilateral_exit_ready(),
+            "no user-side exit driver ships today"
+        );
+        assert!(
+            !measure_l1_dispute_path_ready(Some(&node)),
+            "a node's report about itself must never be enough to publish the guarantee"
+        );
+
+        let readiness = MainnetReadinessV1::evaluate(
+            MAINNET_PILOT_PROFILE,
+            1_000_000,
+            1_000_000,
+            true,
+            true,
+            None,
+            measure_l1_dispute_path_ready(Some(&node)),
+            Ok(node),
+        );
+        assert!(!readiness.unilateral_l1_enforceable);
+        assert!(
+            readiness.blockers.iter().any(|blocker| {
+                blocker == "wallet_cannot_build_a_unilateral_exit_without_the_hub"
+            }),
+            "the document must name the real reason, not only the generic one"
+        );
+        // Cooperative close is a different question and stays available: this
+        // blocker is about getting out *without* the Hub.
+        assert!(readiness.close_enabled);
+    }
+
     #[test]
     fn explicit_bounded_profile_allows_only_capped_allowlisted_hub_trust() {
         let mut readiness = MainnetReadinessV1::evaluate(
@@ -1071,34 +1251,46 @@ mod tests {
         );
     }
 
-    /// The dispute-path flag must follow the node's evidence in both
-    /// directions, otherwise it is not a measurement.
+    /// The node half of the dispute-path measurement must follow the node's
+    /// evidence in both directions, otherwise it is not a measurement.
+    ///
+    /// Both directions are still exercised here, against
+    /// [`measure_node_reported_unilateral_exit`], because that is the term the
+    /// node's evidence actually decides. The full
+    /// [`measure_l1_dispute_path_ready`] cannot reach `true` from node
+    /// evidence alone by design, and the last assertion pins that.
     #[test]
     fn the_dispute_path_flag_tracks_node_evidence_in_both_directions() {
         assert!(
-            measure_l1_dispute_path_ready(Some(&capabilities())),
-            "verified evidence is present, so the measurement must be true"
+            measure_node_reported_unilateral_exit(Some(&capabilities())),
+            "verified evidence is present, so the node half must be true"
         );
         assert!(
-            !measure_l1_dispute_path_ready(None),
+            !measure_node_reported_unilateral_exit(None),
             "an unprobeable fullnode proves nothing"
         );
 
         let mut withdrawn = capabilities();
         withdrawn.channel_unilateral_exit = false;
-        assert!(!measure_l1_dispute_path_ready(Some(&withdrawn)));
+        assert!(!measure_node_reported_unilateral_exit(Some(&withdrawn)));
 
         let mut no_evidence = capabilities();
         no_evidence.channel_unilateral_exit_evidence = None;
-        assert!(!measure_l1_dispute_path_ready(Some(&no_evidence)));
+        assert!(!measure_node_reported_unilateral_exit(Some(&no_evidence)));
 
         let mut unverified = capabilities();
         if let Some(evidence) = unverified.channel_unilateral_exit_evidence.as_mut() {
             evidence.deployment_verified = false;
         }
         assert!(
-            !measure_l1_dispute_path_ready(Some(&unverified)),
+            !measure_node_reported_unilateral_exit(Some(&unverified)),
             "evidence that fails validation must not count"
+        );
+
+        assert!(
+            !measure_l1_dispute_path_ready(Some(&capabilities())),
+            "the node half is necessary but never sufficient: a user must also \
+             be able to build the exit, and today none can"
         );
     }
 
@@ -1201,23 +1393,41 @@ mod tests {
             None,
             now,
         );
-        assert!(best_available.l1_dispute_path_ready);
+        assert!(measure_node_reported_unilateral_exit(Some(&capabilities())));
+        assert!(
+            !best_available.l1_dispute_path_ready,
+            "the node reports a verified deployment, but no user can build the \
+             exit, so the dispute path is not ready"
+        );
         assert!(!best_available.external_rollback_anchor_ready);
         assert!(
             !best_available.production_mainnet_ready,
             "the missing anchor alone must hold the strongest claim false"
         );
 
+        // Everything this Hub can obtain is present here: a live witness, a
+        // settling Hub, the mainnet-pilot profile, and a fullnode reporting a
+        // verified mainnet deployment of the reviewed exit contract. The
+        // strongest claim is still false, and the part that holds it false is
+        // the one no Hub and no node can supply — a user who can get out
+        // alone. That is the honest state of this system, and if this
+        // assertion ever needs inverting it must be because
+        // `USER_SIDE_UNILATERAL_EXIT_DRIVER_READY` was earned, not edited.
+        let everything_a_hub_can_have = HubHardGuarantees::measure(
+            MAINNET_PILOT_PROFILE,
+            true,
+            Some(&capabilities()),
+            Some(&anchor),
+            now,
+        );
+        assert!(everything_a_hub_can_have.external_rollback_anchor_ready);
         assert!(
-            HubHardGuarantees::measure(
-                MAINNET_PILOT_PROFILE,
-                true,
-                Some(&capabilities()),
-                Some(&anchor),
-                now
-            )
-            .production_mainnet_ready,
-            "with every part present, including a live witness, the claim must be reachable"
+            !everything_a_hub_can_have.production_mainnet_ready,
+            "trustless finality must not be claimed while the user has no exit"
+        );
+        assert!(
+            !measure_user_side_unilateral_exit_ready(),
+            "and this is the part that is missing"
         );
 
         assert!(

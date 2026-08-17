@@ -46,6 +46,13 @@ default = []
 # practice: nothing in this crate's own source is gated on it. It cannot live
 # in `[dev-dependencies]` because the feature belongs to a normal dependency.
 rollback-witness = ["l2-fast-pay-hub/rollback-witness"]
+# Brings the Hub crate's registry deployment / init / funding builders into the
+# graph so the user-side exit driver can be proven against a real deployed
+# contract in real blocks, rather than against a hand-built snapshot. Test-only
+# in practice - nothing in this crate's own source is gated on it - and it
+# cannot live in `[dev-dependencies]` for the same reason `rollback-witness`
+# cannot: the feature belongs to a normal dependency.
+on-chain-exit-proof = ["l2-fast-pay-hub/local-pilot-tools"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -64,3 +71,10 @@ proptest = { workspace = true }
 tempfile = { workspace = true }
 axum = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
+hex = { workspace = true }
+# The fullnode's own in-memory chain, exactly as the Hub crate uses it and for
+# exactly the same reason: it is how the wallet's own signed exit bytes get
+# executed by the real block executor against real HVM contract state instead
+# of being asserted about in a unit test.
+testkit = { path = "../../../hacash-fullnodedev/testkit" }

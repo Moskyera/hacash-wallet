@@ -3,6 +3,7 @@ import {
   requireSealedAcknowledgement,
   type SealedAcknowledgement,
 } from "./backupWarning";
+import type { AgentHvmRegistryExitStatus } from "./registryExit";
 
 export type AgentWalletRegistryEntry = {
   wallet_id: string;
@@ -1212,6 +1213,23 @@ export const agentWalletApi = {
       walletId,
       operationId,
       decision,
+    }),
+  /**
+   * What the owner's own fullnode says about walking out of the registry
+   * channel alone. It never contacts the Hub, so it answers the same whether
+   * the provider is healthy, unreachable or hostile.
+   */
+  hvmRegistryExitStatus: (walletId: string) =>
+    invoke<AgentHvmRegistryExitStatus>("agent_wallet_hvm_registry_exit_status", {
+      walletId,
+    }),
+  /**
+   * Starts the unilateral close. It is the owner's key that signs and the
+   * owner's fullnode that carries it; the provider is not asked.
+   */
+  startHvmRegistryExit: (walletId: string) =>
+    invoke<AgentHvmRegistryExitStatus>("agent_wallet_start_hvm_registry_exit", {
+      walletId,
     }),
   listPendingApprovals: (walletId: string) =>
     invoke<PaymentOperation[]>("agent_wallet_list_pending_approvals", { walletId }),

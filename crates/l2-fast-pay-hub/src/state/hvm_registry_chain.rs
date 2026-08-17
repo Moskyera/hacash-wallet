@@ -357,6 +357,19 @@ impl HubState {
                     HvmRegistryWatchtowerDecisionV2::NoAction => {
                         return Ok(no_registry_action_response(&request.operation_id));
                     }
+                    // Only `decide_user_exit_action` ever produces this, and
+                    // the Hub's Monitor mode is not that caller. A Hub that
+                    // wants to settle an OPEN channel asks for it explicitly
+                    // through `BeginChallenge` above, where the operator's own
+                    // intent is on the record. Reaching here would mean the
+                    // shared decision function changed under the Hub, so it is
+                    // an error rather than a silently-taken action.
+                    HvmRegistryWatchtowerDecisionV2::OpenChallengeWithLatestBill => {
+                        return Err(HubError::State(
+                            "registry monitor must not open a challenge without BeginChallenge"
+                                .into(),
+                        ));
+                    }
                     HvmRegistryWatchtowerDecisionV2::RecoveryRequired => {
                         return Err(HubError::State(
                             "RecoveryRequired: registry chain state is newer or invalid".into(),
@@ -1201,6 +1214,9 @@ impl HubState {
             let signed = build_signed_hvm_registry_claim_transaction(
                 signer,
                 binding,
+                // The Hub signing as the Hub: today's exact rule, restated as
+                // the role it always was.
+                crate::hvm_registry_watchtower::HvmRegistryCallerRole::Hub,
                 payee,
                 amount_zhu,
                 operation.network_fee_zhu,
@@ -1218,6 +1234,7 @@ impl HubState {
         build_signed_hvm_registry_call_transaction(
             signer,
             binding,
+            crate::hvm_registry_watchtower::HvmRegistryCallerRole::Hub,
             operation.call_source.clone(),
             operation.network_fee_zhu,
             operation.transaction_timestamp,

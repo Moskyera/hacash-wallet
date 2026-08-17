@@ -17,6 +17,7 @@ pub mod hardware;
 pub mod hip23;
 pub mod history;
 mod http_client;
+pub mod hvm_registry_exit;
 pub mod kdf;
 pub mod l1_channel_close_safety;
 pub mod l1_channel_flow;

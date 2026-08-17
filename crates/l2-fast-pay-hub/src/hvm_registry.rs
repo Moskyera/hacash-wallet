@@ -17,15 +17,38 @@ use crate::node::{HACASH_MAINNET_MIN_SAFE_HEIGHT, HvmStorageEntry};
 pub const HPAY_REGISTRY_SETTLEMENT_PROFILE: &str = "hpay-hvm-shared-registry-v2";
 pub const HPAY_REGISTRY_PROTOCOL_DOMAIN: &str = "HPAY/HVM-CHANNEL-REGISTRY/V2";
 pub const HPAY_REGISTRY_BYTECODE_SHA3: &str =
-    "276d8c205296cc50d06244c84d52c5a9f6f4711e0abae67f416e4fc79c9294be";
+    "2fa7429d9e686dd2457eeb1b4476f972c7ddd9be6a0371c9765eff2910209b04";
 pub const HVM_REGISTRY_BINDING_SCHEMA: &str = "hpay-hvm-registry-binding/2";
 pub const HVM_REGISTRY_BILL_SCHEMA: &str = "hpay-hvm-registry-bill/2";
 pub const HVM_REGISTRY_RECOVERY_BUNDLE_SCHEMA: &str = "hpay-hvm-registry-recovery-bundle/2";
+pub const HVM_REGISTRY_REFUND_COUNTERSIGN_REQUEST_SCHEMA: &str =
+    "hpay-hvm-registry-refund-countersign-request/2";
+/// The ASK expires; the ANSWER never does. Same five minutes the payment path
+/// uses (`HVM_REGISTRY_PAYMENT_MAX_LIFETIME_SECONDS`).
+pub const HVM_REGISTRY_REFUND_COUNTERSIGN_MAX_LIFETIME_SECONDS: u64 = 5 * 60;
 const HVM_REGISTRY_BINDING_DOMAIN: &[u8] = b"HPAY/HVM-REGISTRY-BINDING/V2";
 const HVM_REGISTRY_BILL_DOMAIN: &[u8] = b"HPAY/HVM-CHANNEL-REGISTRY/V2";
 pub const HVM_REGISTRY_LIVE_SNAPSHOT_SCHEMA: &str = "hpay-hvm-channel-registry-live-snapshot/2";
 pub const HVM_REGISTRY_STORAGE_KEY_COUNT: u64 = 6;
 pub const HVM_REGISTRY_CHANNEL_KEY_COUNT: u64 = 12;
+
+/// `MAX_RENT_STEP` as the reviewed registry contract declares it.
+///
+/// Both `renew_registry` and `renew_channel` open with
+/// `assert periods <= MAX_RENT_STEP`, so a lease renewal above this figure is
+/// not "a bit greedy" — it aborts, changes nothing, and costs a fee. Since an
+/// expired lease is the only way this system destroys a deposit outright, a
+/// renewal that cannot execute is the worst kind of dead code: it fails in the
+/// exact situation it was written for.
+///
+/// This is a mirror of a number that lives in another repository, which is
+/// exactly the shape that drifted last time — the wallet asked for 200 and 400
+/// against a contract that had moved to 150. It is not left to be kept in step
+/// by hand: `registry_rent_step_matches_the_reviewed_contract`, in the module
+/// that already embeds the contract source, parses `const MAX_RENT_STEP` back
+/// out of the contract and fails the build's tests if this constant is not
+/// exactly it.
+pub const HPAY_REGISTRY_MAX_RENT_STEP: u64 = 150;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -242,6 +265,110 @@ impl HvmRegistryRecoveryBundleV2 {
     }
 }
 
+/// What the wallet ASKS the Hub for, before it has parted with anything.
+///
+/// The wallet builds the whole thing from its own confirmed deployment record:
+/// the binding, and the serial-1 full-refund bill signed on the left line only.
+/// The Hub is asked for one thing and returns one thing - 97 bytes.
+///
+/// # Why this is asked for at `init` time and not after funding
+///
+/// `verify_bill` in the contract refuses while `c_paid_ != c_deposit_`, so a
+/// serial-1 refund bill is INERT until the user themselves funds. The Hub risks
+/// nothing by signing it early. Asking later is strictly worse: a Hub that
+/// refuses after `init` has confirmed permanently burns that `(contract, left)`
+/// slot, because re-`init` requires the old channel to be FINAL and claimed and
+/// a channel stranded in FUNDING is neither.
+///
+/// # Why the REQUEST expires and the ANSWER does not
+///
+/// The lifetime here stops a captured request being replayed at the Hub. The
+/// bill itself carries no time field at all, and must not: an expiring refund
+/// is a Hub-shaped weapon - wait it out and the user is back to holding
+/// nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HvmRegistryRefundCountersignRequestV2 {
+    pub schema: String,
+    pub binding: HvmRegistryBindingV2,
+    pub left_signed_refund_bill: HvmRegistryBillV2,
+    pub created_unix: u64,
+    pub expires_unix: u64,
+}
+
+impl HvmRegistryRefundCountersignRequestV2 {
+    /// Everything about the ask that does not depend on wall time.
+    ///
+    /// Deliberately separate from the lifetime check: the wallet keeps this
+    /// request durably long after the ask expires, and re-validating a stored
+    /// request must not fail merely because five minutes went by.
+    pub fn validate_shape(&self) -> HubResult<()> {
+        if self.schema != HVM_REGISTRY_REFUND_COUNTERSIGN_REQUEST_SCHEMA {
+            return Err(HubError::Node(
+                "HVM registry refund countersign request schema is unsupported".into(),
+            ));
+        }
+        self.binding.validate()?;
+        let bill = &self.left_signed_refund_bill;
+        if bill.serial != 1
+            || bill.left_balance_zhu != self.binding.left_deposit_zhu
+            || bill.hub_balance_zhu != 0
+            || !bill.hub_signature_hex.is_empty()
+        {
+            return Err(HubError::Node(
+                "HVM registry refund countersign request is not the exact serial-1 full refund"
+                    .into(),
+            ));
+        }
+        bill.validate_left_signed(&self.binding)
+    }
+
+    pub fn validate(&self, now_unix: u64) -> HubResult<()> {
+        self.validate_shape()?;
+        if self.created_unix == 0
+            || self.expires_unix <= self.created_unix
+            || self.expires_unix.saturating_sub(self.created_unix)
+                > HVM_REGISTRY_REFUND_COUNTERSIGN_MAX_LIFETIME_SECONDS
+            || now_unix >= self.expires_unix
+        {
+            return Err(HubError::Node(
+                "HVM registry refund countersign request is expired or has an invalid lifetime"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Splice the Hub's 97 bytes into the bill the WALLET built, and refuse
+    /// unless the result verifies against the WALLET's binding.
+    ///
+    /// This is the whole point of the exchange, and it is not a courtesy check.
+    /// The Hub's own copy of the binding and the bill are discarded by the
+    /// caller before this is ever reached, so a Hub cannot express a different
+    /// channel id, deposit, reuse version or challenge window - those bytes
+    /// never leave the response parser. What is left for it to get wrong is the
+    /// signature itself, and [`HvmRegistryBillV2::validate_fully_signed`]
+    /// verifies that against `binding.right_hub_address` rather than against
+    /// the public key riding inside the wire signature, so a well-formed
+    /// signature from any other key fails here too.
+    pub fn attach_hub_countersignature(
+        &self,
+        hub_refund_signature_hex: &str,
+    ) -> HubResult<HvmRegistryRecoveryBundleV2> {
+        self.validate_shape()?;
+        parse_signature(hub_refund_signature_hex)?;
+        let mut bill = self.left_signed_refund_bill.clone();
+        bill.hub_signature_hex = hub_refund_signature_hex.trim().to_ascii_lowercase();
+        let bundle = HvmRegistryRecoveryBundleV2 {
+            schema: HVM_REGISTRY_RECOVERY_BUNDLE_SCHEMA.into(),
+            binding: self.binding.clone(),
+            initial_recovery_bill: bill,
+        };
+        bundle.validate_crypto()?;
+        Ok(bundle)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HvmRegistryGlobalStorageV2 {
@@ -327,7 +454,14 @@ impl HvmRegistryLiveSnapshotV2 {
         ]
     }
 
-    pub fn validate_runtime_binding(
+    /// The identity, deployment and lease half of the snapshot check.
+    ///
+    /// Split out of [`Self::validate_runtime_binding`] so the pre-funding check
+    /// can reuse it verbatim. Every field compared here is true of a channel at
+    /// any point in its life, including before the deposit is paid in; the
+    /// runtime-only assertions (status 2..=4, `paid == deposit`) stay in the
+    /// caller.
+    fn validate_snapshot_identity(
         &self,
         binding: &HvmRegistryBindingV2,
         minimum_required_live_blocks: u64,
@@ -373,6 +507,20 @@ impl HvmRegistryLiveSnapshotV2 {
                 "one or more shared HVM registry leases are not safely active".into(),
             ));
         }
+        Ok(())
+    }
+
+    pub fn validate_runtime_binding(
+        &self,
+        binding: &HvmRegistryBindingV2,
+        minimum_required_live_blocks: u64,
+        minimum_required_recover_blocks: u64,
+    ) -> HubResult<()> {
+        self.validate_snapshot_identity(
+            binding,
+            minimum_required_live_blocks,
+            minimum_required_recover_blocks,
+        )?;
         let total = binding
             .left_deposit_zhu
             .checked_add(binding.right_hub_deposit_zhu)
@@ -415,6 +563,60 @@ impl HvmRegistryLiveSnapshotV2 {
         if self.channel.status.value == 3 && self.channel.deadline.value == 0 {
             return Err(HubError::Node(
                 "challenging shared HVM channel has no deadline".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The on-chain re-check the wallet runs after `init` confirms and BEFORE
+    /// it parts with the deposit.
+    ///
+    /// This is load-bearing, not decoration. `PayableHAC` in the contract
+    /// checks only status, prior payment and deposit size - it does not look at
+    /// the channel id, the reuse version or the challenge window. So a Hub that
+    /// co-signs an `init` whose parameters differ from the binding hands over a
+    /// refund bill that is cryptographically perfect and permanently
+    /// unpresentable: funding would succeed, and `verify_bill` would then
+    /// compute its hash from the contract's own `c_challenge_` and refuse the
+    /// signature. Catching that here is the difference between a countersigned
+    /// refund and a countersigned souvenir.
+    ///
+    /// Every existing validator on this type requires a channel that is already
+    /// funded, so none of them can be reused: `validate_runtime_binding`
+    /// rejects status 1 outright and demands `paid == left_deposit_zhu`.
+    pub fn validate_prefunding_binding(
+        &self,
+        binding: &HvmRegistryBindingV2,
+        minimum_required_live_blocks: u64,
+        minimum_required_recover_blocks: u64,
+    ) -> HubResult<()> {
+        self.validate_snapshot_identity(
+            binding,
+            minimum_required_live_blocks,
+            minimum_required_recover_blocks,
+        )?;
+        let total = binding
+            .left_deposit_zhu
+            .checked_add(binding.right_hub_deposit_zhu)
+            .ok_or_else(|| HubError::Node("HVM registry deposit overflow".into()))?;
+        if self.channel.status.value != 1
+            || self.channel.paid.value != 0
+            || self.channel.serial.value != 0
+            || self.channel.deadline.value != 0
+            || self.channel.left_claimed.value
+            || self.registry.g_network.value != binding.network_instance_id
+            || self.registry.g_hub.value != binding.right_hub_address
+            || self.channel.channel_id.value != binding.channel_id
+            || self.channel.reuse.value != binding.reuse_version
+            || self.channel.deposit.value != binding.left_deposit_zhu
+            || self.channel.total.value != total
+            || self.channel.left_balance.value != binding.left_deposit_zhu
+            || self.channel.hub_balance.value != 0
+            || self.channel.challenge_blocks.value != binding.challenge_blocks
+        {
+            return Err(HubError::Node(
+                "shared HVM contract state is not the exact unfunded channel this binding names"
+                    .into(),
             ));
         }
         Ok(())
@@ -602,6 +804,54 @@ mod tests {
         let mut value = serde_json::to_value(fixture().2).unwrap();
         value["future"] = serde_json::json!(true);
         assert!(serde_json::from_value::<HvmRegistryBindingV2>(value).is_err());
+    }
+
+    /// The pre-funding re-check catches the one substitution a perfect Hub
+    /// signature cannot: an `init` whose on-chain parameters differ from the
+    /// binding the refund bill was signed over.
+    #[test]
+    fn prefunding_snapshot_catches_an_init_that_does_not_match_the_signed_binding() {
+        let (_, _, binding) = fixture();
+        let mut unfunded = snapshot(&binding, 10);
+        unfunded.channel.status.value = 1;
+        unfunded.channel.paid.value = 0;
+        assert!(unfunded.validate_prefunding_binding(&binding, 1, 1).is_ok());
+        // Every existing validator requires a channel that is already funded,
+        // which is exactly why this one had to exist.
+        assert!(unfunded.validate_runtime_binding(&binding, 1, 1).is_err());
+        assert!(unfunded.validate_open_binding(&binding, 1, 1).is_err());
+
+        // THE TRAP. `PayableHAC` checks only status, prior payment and deposit
+        // size, so a channel opened with a different challenge window would
+        // take the deposit and then refuse the refund bill for ever.
+        let mut wrong_window = unfunded.clone();
+        wrong_window.channel.challenge_blocks.value = binding.challenge_blocks + 1;
+        assert!(
+            wrong_window
+                .validate_prefunding_binding(&binding, 1, 1)
+                .is_err()
+        );
+        for mutate in [
+            (|s: &mut HvmRegistryLiveSnapshotV2| s.channel.channel_id.value = "44".repeat(16))
+                as fn(&mut HvmRegistryLiveSnapshotV2),
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.reuse.value = 1,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.deposit.value = 999_999,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.total.value = 999_999,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.left_balance.value = 999_999,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.hub_balance.value = 1,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.paid.value = 1,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.serial.value = 1,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.deadline.value = 1,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.left_claimed.value = true,
+            |s: &mut HvmRegistryLiveSnapshotV2| s.channel.status.value = 2,
+        ] {
+            let mut mutated = unfunded.clone();
+            mutate(&mut mutated);
+            assert!(
+                mutated.validate_prefunding_binding(&binding, 1, 1).is_err(),
+                "a mutated pre-funding channel must not validate"
+            );
+        }
     }
 
     #[test]

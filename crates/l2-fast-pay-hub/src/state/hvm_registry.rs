@@ -1,10 +1,13 @@
 use crate::error::{HubError, HubResult};
 use crate::hvm_ledger::HvmBillProgressionStatus;
-use crate::hvm_registry::{HvmRegistryBillV2, HvmRegistryRecoveryBundleV2};
+use crate::hvm_registry::{
+    HvmRegistryBillV2, HvmRegistryRecoveryBundleV2, HvmRegistryRefundCountersignRequestV2,
+};
 use crate::hvm_registry_ledger::{
     HVM_REGISTRY_CHANNEL_STATUS_SCHEMA, HVM_REGISTRY_COSIGNED_BILL_SCHEMA,
-    HVM_REGISTRY_PAYMENT_STATUS_SCHEMA, HvmRegistryChannelStatusV2, HvmRegistryCosignedBillV2,
-    HvmRegistryPaymentRequestV2, HvmRegistryPaymentStatusV2, PersistedHvmRegistryLedger,
+    HVM_REGISTRY_PAYMENT_STATUS_SCHEMA, HVM_REGISTRY_REFUND_COUNTERSIGN_RESPONSE_SCHEMA,
+    HvmRegistryChannelStatusV2, HvmRegistryCosignedBillV2, HvmRegistryPaymentRequestV2,
+    HvmRegistryPaymentStatusV2, HvmRegistryRefundCountersignResponseV2, PersistedHvmRegistryLedger,
     PersistedHvmRegistryProgression,
 };
 use crate::journal::{JournalEvent, JournalOperationType, JournalPhase};
@@ -154,6 +157,205 @@ impl HubState {
         };
         self.commit_authenticated_state(&mut guard, next_state, event)?;
         Ok(binding_commitment)
+    }
+
+    /// Countersign the serial-1 full-refund bill for a channel that does not
+    /// exist on chain yet.
+    ///
+    /// # Why the Hub can afford to say yes
+    ///
+    /// `verify_bill` in the contract refuses while `c_paid_ != c_deposit_`, so
+    /// this bill is inert until the user funds with their own money. Signing it
+    /// early costs the Hub nothing it was not already going to owe, and it is
+    /// the difference between a user who can always leave and a user whose
+    /// deposit is stranded the moment this Hub stops answering.
+    ///
+    /// # What is deliberately NOT checked here
+    ///
+    /// There is no node call and no chain snapshot. The channel has not been
+    /// `init`ed yet - that is the point of asking now - so there is nothing on
+    /// chain to look at. Everything this refuses on is in the request itself.
+    ///
+    /// # Why there is no "signature may exist" boundary before key use
+    ///
+    /// The payment path writes that boundary durably before it signs, because
+    /// a Hub that forgot a signature could be walked into signing a *different*
+    /// bill at the same serial. That cannot happen here. For one binding there
+    /// is exactly one signable hash: `validate_shape` pins serial to 1, the
+    /// left balance to the whole deposit and the Hub balance to zero, and
+    /// `signing_hash` covers the binding and those three numbers and nothing
+    /// else - not the signatures, not the request timestamps. So a crash
+    /// between signing and persisting loses a signature the caller never saw,
+    /// and the re-ask can only ever be over the identical hash.
+    pub async fn countersign_hvm_registry_initial_refund(
+        &self,
+        request: HvmRegistryRefundCountersignRequestV2,
+        now_unix: u64,
+    ) -> HubResult<HvmRegistryRefundCountersignResponseV2> {
+        self.ensure_settlement_ready()?;
+        if crate::readiness::is_mainnet_pilot_profile(&self.deployment_profile) {
+            return Err(HubError::Admission(
+                "shared HVM registry execution is not enabled for mainnet".into(),
+            ));
+        }
+        if request.binding.right_hub_address != self.hub_address {
+            return Err(HubError::State(
+                "registry refund countersign request is bound to a different Hub".into(),
+            ));
+        }
+        // The ASK expires. A captured request must not be replayable at this
+        // Hub five hours later; the ANSWER, once given, never expires.
+        let validation_time = now_unix.max(crate::node::now_unix());
+        request.validate(validation_time)?;
+        let _signing_guard = self.hvm_signing_lock.lock().await;
+        // Re-derived here rather than taken from the caller: a supplied
+        // commitment is a supplied opinion.
+        let binding_commitment = request.binding.commitment()?;
+        let existing = {
+            let guard = self
+                .inner
+                .read()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            guard
+                .hvm_registry_open_countersignatures
+                .get(&binding_commitment)
+                .cloned()
+        };
+        if let Some(existing) = existing {
+            // One binding, one refund. Re-asking with the identical bill gets
+            // the identical signature back; asking with a different serial-1
+            // bill for the same binding is refused outright, so this Hub can
+            // never be walked into having countersigned two different refunds
+            // for one channel.
+            if existing.request.binding != request.binding
+                || existing.request.left_signed_refund_bill != request.left_signed_refund_bill
+            {
+                return Err(HubError::State(
+                    "registry refund countersign retry changed the durable request".into(),
+                ));
+            }
+            return self.registry_refund_countersign_response(
+                existing.hub_refund_signature_hex,
+                existing.anchor_receipts,
+                &binding_commitment,
+                &request,
+            );
+        }
+        let anchor_receipt = self
+            .reserve_rollback_anchor(
+                super::rollback_anchor::RollbackAnchorSubject {
+                    operation_id: &format!("hvm-registry-open-refund-{binding_commitment}"),
+                    settlement_profile: &request.binding.settlement_profile,
+                    network_instance_id: &request.binding.network_instance_id,
+                    binding_commitment: &binding_commitment,
+                    channel_id: &request.binding.channel_id,
+                    reuse_version: request.binding.reuse_version,
+                    serial: request.left_signed_refund_bill.serial,
+                    previous_bill_commitment: String::new(),
+                    proposed_bill_commitment: request.left_signed_refund_bill.commitment()?,
+                    payer: &request.binding.left_address,
+                    recipient: &request.binding.right_hub_address,
+                    amount_units: request.binding.left_deposit_zhu,
+                    idempotency_key: &format!("hvm-registry-open-refund-{binding_commitment}"),
+                },
+                now_unix,
+            )
+            .await?;
+        let signer = self
+            .hub_signer
+            .as_ref()
+            .ok_or_else(|| HubError::State("Hub signer is unavailable".into()))?;
+        let mut signed = request.left_signed_refund_bill.clone();
+        signer.sign_hvm_registry_bill(&request.binding, &mut signed)?;
+        if !signed.is_initial_recovery_bill(&request.binding) {
+            return Err(HubError::State(
+                "registry refund countersignature did not produce the exact initial bill".into(),
+            ));
+        }
+        let anchor_receipts: Vec<_> = anchor_receipt
+            .iter()
+            .map(|verified| verified.signed.clone())
+            .collect();
+        let record = crate::storage::PersistedHvmRegistryOpenCountersignature {
+            binding_commitment: binding_commitment.clone(),
+            request: request.clone(),
+            hub_refund_signature_hex: signed.hub_signature_hex.clone(),
+            anchor_receipts: anchor_receipts.clone(),
+            countersigned_unix: now_unix,
+        };
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        let mut next_state = guard.clone();
+        if let Some(current) = next_state
+            .hvm_registry_open_countersignatures
+            .get(&binding_commitment)
+            && current != &record
+        {
+            return Err(HubError::State(
+                "registry refund countersignature already exists for this binding".into(),
+            ));
+        }
+        next_state
+            .hvm_registry_open_countersignatures
+            .insert(binding_commitment.clone(), record);
+        validate_hvm_state(&next_state)?;
+        let event = JournalEvent {
+            wallet_scope: format!("hub:{}", self.hub_address.trim()),
+            hub_or_provider_identity: self.hub_address.trim().to_owned(),
+            channel_id: request.binding.channel_id.clone(),
+            channel_reuse_version: u64::from(request.binding.reuse_version),
+            operation_id: format!("hvm-registry-open-refund-{binding_commitment}"),
+            operation_type: JournalOperationType::HvmChannelActivation,
+            operation_phase: JournalPhase::HvmPaymentFullySigned,
+            amount_units: request.binding.left_deposit_zhu,
+            sender: request.binding.left_address.clone(),
+            recipient: request.binding.right_hub_address.clone(),
+            previous_state_commitment: String::new(),
+            new_state_commitment: String::new(),
+            idempotency_key: format!("hvm-registry-open-refund-{binding_commitment}"),
+            request_commitment: binding_commitment.clone(),
+            expected_bill_number: Some(1),
+            unsigned_state_commitment: Some(binding_commitment.clone()),
+            created_at: now_unix,
+        };
+        self.commit_authenticated_state(&mut guard, next_state, event)?;
+        drop(guard);
+        self.registry_refund_countersign_response(
+            signed.hub_signature_hex,
+            anchor_receipts,
+            &binding_commitment,
+            &request,
+        )
+    }
+
+    /// The single constructor for the countersign response, so there is no path
+    /// by which a caller obtains a refund signature that skipped the receipt
+    /// check.
+    ///
+    /// This is the most important bill in the channel's life. A Hub that has
+    /// lost its witness must not be able to hide that on exactly this one.
+    fn registry_refund_countersign_response(
+        &self,
+        hub_refund_signature_hex: String,
+        anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
+        binding_commitment: &str,
+        request: &HvmRegistryRefundCountersignRequestV2,
+    ) -> HubResult<HvmRegistryRefundCountersignResponseV2> {
+        super::rollback_anchor::require_receipts_accompany_bill(
+            self.rollback_anchor_configured(),
+            &anchor_receipts,
+            &request.left_signed_refund_bill.commitment()?,
+            request.left_signed_refund_bill.serial,
+            binding_commitment,
+            self.hub_address.trim(),
+        )?;
+        Ok(HvmRegistryRefundCountersignResponseV2 {
+            schema: HVM_REGISTRY_REFUND_COUNTERSIGN_RESPONSE_SCHEMA.into(),
+            hub_refund_signature_hex,
+            anchor_receipts,
+        })
     }
 
     pub async fn cosign_hvm_registry_payment(

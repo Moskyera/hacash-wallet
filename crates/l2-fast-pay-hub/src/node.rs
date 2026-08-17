@@ -1095,6 +1095,39 @@ impl NodeClient {
         Ok(snapshot)
     }
 
+    /// The last look before the deposit leaves the wallet.
+    ///
+    /// `init` has confirmed; the contract holds no coin yet. This re-reads the
+    /// channel the countersigned bundle names and refuses unless the chain
+    /// agrees with the binding the Hub signed over - which is the one thing the
+    /// signature itself cannot tell you, because `PayableHAC` never looks at
+    /// the channel id, the reuse version or the challenge window and would
+    /// happily accept the deposit into a channel whose refund bill hashes to
+    /// something `verify_bill` rejects.
+    ///
+    /// Deliberately not routed through `verify_hvm_registry_initial_bundle`,
+    /// whose name suggests it would do: that one requires a channel that is
+    /// already funded.
+    pub async fn verify_hvm_registry_prefunding_bundle(
+        &self,
+        bundle: &HvmRegistryRecoveryBundleV2,
+        minimum_required_live_blocks: u64,
+        minimum_required_recover_blocks: u64,
+    ) -> HubResult<HvmRegistryLiveSnapshotV2> {
+        bundle.validate_crypto()?;
+        let capabilities = self.capabilities().await?;
+        validate_hvm_registry_capabilities_for_binding(&capabilities, &bundle.binding)?;
+        let snapshot = self
+            .hvm_registry_snapshot_unchecked(&bundle.binding)
+            .await?;
+        snapshot.validate_prefunding_binding(
+            &bundle.binding,
+            minimum_required_live_blocks,
+            minimum_required_recover_blocks,
+        )?;
+        Ok(snapshot)
+    }
+
     pub async fn verify_hvm_registry_runtime_bundle(
         &self,
         bundle: &HvmRegistryRecoveryBundleV2,

@@ -26,6 +26,13 @@ rand.workspace = true
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 agent-wallet-core = { path = "../agent-wallet-core", optional = true }
+# Read only, and only two things: the fullnode query that reports a registry
+# channel's own storage lease, and the measured readiness of the user side of
+# the unilateral exit. No Hub is started, no Hub state is touched, and no Hub
+# endpoint is called from this crate. agent-wallet-core already depends on it,
+# so this adds no compilation unit; it exists so the exit gate the desktop
+# renders is the project's own measurement rather than a literal typed here.
+l2-fast-pay-hub = { path = "../l2-fast-pay-hub", optional = true }
 agent-wallet-runtime = { path = "../agent-wallet-runtime", optional = true, features = ["listener"] }
 hpay-agent-connector = { path = "../agent-connector", optional = true, default-features = false }
 hpay-companion-protocol = { path = "../companion-protocol", optional = true }
@@ -48,6 +55,7 @@ agent-wallet-bounded-mainnet-pilot = [
     "agent-wallet-core/agent-wallet-bounded-mainnet-pilot",
 ]
 agent-wallet-admin = [    "dep:agent-wallet-core",
+    "dep:l2-fast-pay-hub",
     "dep:agent-wallet-runtime",
     "dep:hpay-agent-connector",
     "dep:hpay-companion-protocol",

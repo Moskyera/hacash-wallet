@@ -29,6 +29,35 @@ use super::AgentWalletManager;
 
 const AGENT_HVM_BINDING_SCHEMA: u32 = 1;
 
+/// Move the wallet's own monotone exit head onto a freshly committed bill.
+///
+/// Silent about wallets that hold no registry binding — a committed HVM V1
+/// bill has no registry head to advance. Loud about a head that refuses the
+/// bill: `advance` returns `RecoveryRequired` only for a *different* bill at a
+/// serial already held, which is two histories at one serial and must never be
+/// resolved by overwriting one of them.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn advance_registry_exit_head(
+    state: &mut super::AgentWalletState,
+    bill: &l2_fast_pay_hub::hvm_registry::HvmRegistryBillV2,
+    now: u64,
+) -> AgentWalletResult<()> {
+    let Some(binding) = state.hvm_registry_binding.clone() else {
+        return Ok(());
+    };
+    if let Some(head) = state.hvm_registry_exit_head.as_mut() {
+        head.advance(&binding, bill, now)?;
+        return Ok(());
+    }
+    // A binding adopted before this field existed. Seed it from the binding's
+    // own initial recovery bill, then take the committed one, so the upgrade
+    // path never leaves a bound channel with no exit evidence.
+    let mut head = super::AgentHvmRegistryExitHead::seed(&binding, now);
+    head.advance(&binding, bill, now)?;
+    state.hvm_registry_exit_head = Some(head);
+    Ok(())
+}
+
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 #[derive(Clone, Copy)]
 enum HvmReadinessPhase {
@@ -1832,6 +1861,15 @@ impl AgentWalletManager {
             HvmDurableTransition::UnsignedSigningAbandoned => operation.mark_signing_abandoned()?,
         }
         let view = operation.view();
+        // Advance the wallet's own exit head inside the same journalled
+        // transition that commits the bill, and before the event is written.
+        // There must be no window in which a bill is durably committed while
+        // the user's only route out of the channel still points at an older
+        // one, and no way for the head to move without the journal recording
+        // that it did.
+        if let HvmDurableTransition::CommittedRegistry(bill) = &transition {
+            advance_registry_exit_head(&mut state, bill, now)?;
+        }
         state.updated_at = now;
         let event = match transition {
             HvmDurableTransition::SigningPrepared => {

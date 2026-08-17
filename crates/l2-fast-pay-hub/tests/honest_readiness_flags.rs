@@ -236,17 +236,32 @@ async fn l1_dispute_path_flag_is_true_only_when_the_node_proves_a_verified_exit(
     let hub = build_hub(&node_url, "dispute-present-hub");
 
     let readiness = hub.mainnet_readiness().await;
+    // The node's half of the evidence is present and is measured as present.
     assert!(
-        readiness.unilateral_l1_enforceable,
-        "the node reports a verified unilateral-exit deployment, so the measured \
-         dispute-path flag must be true"
+        l2_fast_pay_hub::readiness::measure_node_reported_unilateral_exit(
+            readiness.fullnode_capabilities.as_ref()
+        ),
+        "the node reports a verified unilateral-exit deployment, so the node \
+         half of the measurement must be true"
+    );
+    // And it is still not a guarantee. A node describing a deployed contract
+    // is evidence about a node; the guarantee is about a user, and no wallet
+    // in this workspace can build a challenge, respond, finalize or claim
+    // transaction. Publishing `true` here would tell wallets they hold a claim
+    // on chain when what they hold is a promise from this Hub, which is the
+    // one outcome this project ranks worse than never going green at all.
+    assert!(
+        !readiness.unilateral_l1_enforceable,
+        "a node's report about itself must never be enough to publish the \
+         guarantee, got {:?}",
+        readiness.blockers
     );
     assert!(
-        !readiness
+        readiness
             .blockers
             .iter()
-            .any(|blocker| blocker == "unilateral_l1_dispute_path_is_not_ready"),
-        "a verified exit path must clear its own blocker, got {:?}",
+            .any(|blocker| blocker == "wallet_cannot_build_a_unilateral_exit_without_the_hub"),
+        "and the document must say which half is missing, got {:?}",
         readiness.blockers
     );
     server.abort();
@@ -285,8 +300,10 @@ async fn l1_dispute_path_flag_is_false_when_the_node_reports_no_verified_exit() 
 ///   on a caller's behalf, whatever network the caller is on. It is checked
 ///   against the serialized payload, so a flag cannot creep back in under a
 ///   different name and be read by a client.
-/// * `mainnet_readiness()` must report the guarantee `true`, because it probed
-///   and the evidence holds. That is property B.
+/// * `mainnet_readiness()` must be the endpoint that probes and then reports
+///   whatever the evidence actually supports. That is property B. Here it
+///   reports `false`: the node's half holds, and the user-side half - a wallet
+///   that can build the exit transaction - does not exist.
 ///
 /// A guarantee flag on the liveness payload could only ever be an unmeasured
 /// constant. When it read `false` it bricked every gate that trusted it; were
@@ -325,8 +342,11 @@ async fn health_carries_no_guarantee_flag_while_readiness_measures() {
         1,
         "mainnet_readiness() is the endpoint that pays for the evidence"
     );
+    // The subject of this test is which endpoint pays for the evidence, not
+    // what the evidence says. It reports the measured truth either way, and
+    // the measured truth is that the user-side exit does not exist.
     assert!(
-        readiness.unilateral_l1_enforceable,
+        !readiness.unilateral_l1_enforceable,
         "the authority for the guarantee must report the measured truth"
     );
     server.abort();
@@ -610,13 +630,29 @@ mod anchor {
             "a live witness must clear the anchor blocker, got {:?}",
             readiness.blockers
         );
+        // `trustless_finality` is `external_rollback_anchor_ready &&
+        // l1_dispute_path_ready`. The anchor half is now genuinely true - that
+        // is this test's subject and it is proved above. The composite stays
+        // false on the other half, because no user can build a unilateral exit
+        // transaction, and a Hub must not claim trustless finality while the
+        // only way out of a channel runs through the Hub.
         assert!(
-            readiness.trustless_finality,
-            "with a verified exit path and a live anchor, this must be true"
+            !readiness.trustless_finality,
+            "a live anchor is one half; trustless finality also needs an exit \
+             the user can drive, got {:?}",
+            readiness.blockers
+        );
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|it| it == "wallet_cannot_build_a_unilateral_exit_without_the_hub"),
+            "and the document must say so, got {:?}",
+            readiness.blockers
         );
 
-        // And the same Hub reads false the moment the witness goes away, which
-        // is what makes the true above mean something.
+        // And the same Hub loses the anchor half the moment the witness goes
+        // away, which is what makes the true above mean something.
         witness.handle.abort();
         tokio::time::sleep(Duration::from_millis(50)).await;
         let readiness = hub.mainnet_readiness().await;

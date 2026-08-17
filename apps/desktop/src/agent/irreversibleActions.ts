@@ -19,7 +19,8 @@ export type DesktopIrreversibleAction = {
     | "emergency_stop"
     | "approve_exact_transaction"
     | "reject_payment"
-    | "abandon_stranded_payment";
+    | "abandon_stranded_payment"
+    | "start_exit_without_provider";
   /** The control this warning belongs beside. */
   control: DesktopControlId;
   /** Rendered before the first press, never behind a disclosure. */
@@ -91,6 +92,22 @@ export const REJECT_PAYMENT_WARNING =
 export const ABANDON_STRANDED_PAYMENT_WARNING =
   "Giving up this payment is final. It cannot be resumed and the agent has to ask for it again. No money moves and nothing is taken back from the network, because this payment was signed but never sent: the reserved funds return to your spendable balance.";
 
+/**
+ * What starting a unilateral close actually costs, said before the first press.
+ *
+ * Four separate facts, and every one of them has to survive the press being
+ * made by somebody who is frightened and in a hurry:
+ *  - the channel is finished afterwards, and reopening means a new deposit;
+ *  - the money is not immediate, because the objection window has to close and
+ *    a final claim has to be sent after it;
+ *  - the fees are spent even in the case the owner is most afraid of, which is
+ *    the provider never coming back at all;
+ *  - the exact amount is named beside this by `yourMoneyLine`, which knows the
+ *    channel; this sentence does not repeat a number it cannot check.
+ */
+export const EXIT_WITHOUT_PROVIDER_WARNING =
+  "This closes the channel for good. It cannot be reopened without a new deposit, and no further payments can be made through it. Your money does not arrive straight away: the chain holds an objection window open first, and a final claim is sent after it closes. It costs three network fees from your main balance, and those fees are spent whether or not the provider ever comes back.";
+
 export const DESKTOP_IRREVERSIBLE_ACTIONS: readonly DesktopIrreversibleAction[] =
   [
     {
@@ -138,6 +155,16 @@ export const DESKTOP_IRREVERSIBLE_ACTIONS: readonly DesktopIrreversibleAction[] 
       // reached by accident, on a payment they were only waiting for, would
       // throw the payment away.
       confirmLabel: "Confirm give up",
+    },
+    {
+      id: "start_exit_without_provider",
+      control: "start_exit_without_provider",
+      warning: EXIT_WITHOUT_PROVIDER_WARNING,
+      renderedAs: "EXIT_WITHOUT_PROVIDER_WARNING",
+      // The exact amount is on screen beside this, and the press still takes a
+      // second one: the first press of this control by an owner who only meant
+      // to read the page would end a working channel.
+      confirmLabel: "Confirm, close this channel",
     },
   ];
 

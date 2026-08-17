@@ -295,6 +295,21 @@ async fn mainnet_pilot_blocks_new_money_without_external_anchor_but_keeps_close_
             .iter()
             .any(|value| value == "unilateral_l1_dispute_path_is_not_ready")
     );
+    // Served over HTTP, so this is what a wallet actually reads. The generic
+    // blocker above does not say whose side the gap is on; this one does, and
+    // it is the honest answer: the chain would permit the exit, and this
+    // software cannot put one in a user's hands.
+    assert!(
+        readiness["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "wallet_cannot_build_a_unilateral_exit_without_the_hub"),
+        "{readiness}"
+    );
+    assert_eq!(readiness["unilateral_l1_enforceable"], false, "{readiness}");
+    assert_eq!(readiness["trustless_finality"], false, "{readiness}");
+    println!("SERVED READINESS DOCUMENT: {readiness}");
 
     let response = client
         .post(format!("{base}/v1/fast-pay"))

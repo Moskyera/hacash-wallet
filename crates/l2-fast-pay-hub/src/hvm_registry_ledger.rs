@@ -17,6 +17,8 @@ pub const HVM_REGISTRY_PAYMENT_REQUEST_SCHEMA: &str = "hpay-hvm-registry-payment
 pub const HVM_REGISTRY_PAYMENT_STATUS_SCHEMA: &str = "hpay-hvm-registry-payment-status/2";
 pub const HVM_REGISTRY_CHANNEL_STATUS_SCHEMA: &str = "hpay-hvm-registry-channel-status/2";
 pub const HVM_REGISTRY_COSIGNED_BILL_SCHEMA: &str = "hpay-hvm-registry-cosigned-bill/2";
+pub const HVM_REGISTRY_REFUND_COUNTERSIGN_RESPONSE_SCHEMA: &str =
+    "hpay-hvm-registry-refund-countersign-response/2";
 pub const HVM_REGISTRY_PAYMENT_MAX_LIFETIME_SECONDS: u64 = 5 * 60;
 const HVM_REGISTRY_PAYER_AUTHORIZATION_DOMAIN: &[u8] = b"HPAY/HVM-REGISTRY/PAYER-AUTHORIZATION/V1";
 
@@ -52,6 +54,28 @@ const HVM_REGISTRY_PAYER_AUTHORIZATION_DOMAIN: &[u8] = b"HPAY/HVM-REGISTRY/PAYER
 pub struct HvmRegistryCosignedBillV2 {
     pub schema: String,
     pub bill: HvmRegistryBillV2,
+    #[serde(default)]
+    pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
+}
+
+/// What the open-countersign route answers with: 97 bytes, and the witness
+/// receipts that were live when they were produced.
+///
+/// There is deliberately no binding and no bill in here. The wallet already
+/// holds both - it built them - and returning the Hub's copies would only
+/// create somewhere for a Hub to propose a different channel. A response the
+/// wallet cannot use to change its own mind about what was signed is a
+/// response a hostile Hub has almost nothing to say through.
+///
+/// The receipts ride along for the same reason they ride along with a co-signed
+/// payment, and more so: this is the most important bill in the channel's life,
+/// and a Hub that has lost its witness must not be able to hide that on exactly
+/// this one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HvmRegistryRefundCountersignResponseV2 {
+    pub schema: String,
+    pub hub_refund_signature_hex: String,
     #[serde(default)]
     pub anchor_receipts: Vec<crate::rollback_anchor::SignedHubWitnessReceiptV1>,
 }

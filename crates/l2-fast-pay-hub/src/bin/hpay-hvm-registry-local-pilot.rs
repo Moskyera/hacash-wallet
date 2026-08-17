@@ -186,6 +186,11 @@ enum Command {
         exact_resubmit_commitment: Option<String>,
     },
     Initialize {
+        /// The Hub that must countersign the serial-1 full refund before any
+        /// `init` bytes leave this process. There is no local fallback: this
+        /// tool cannot produce a Hub refund signature by itself.
+        #[arg(long)]
+        hub_url: String,
         /// Exact unsigned commitment printed by PreviewInitialize.
         #[arg(long)]
         expected_preview_commitment: String,
@@ -759,6 +764,7 @@ async fn run_online(
             println!("Registry deployment confirmed: {contract_address}");
         }
         Command::Initialize {
+            hub_url,
             expected_preview_commitment,
             channel_id,
             left_deposit_zhu,
@@ -804,8 +810,21 @@ async fn run_online(
                 unix_timestamp()?,
                 gas_max,
                 &expected_preview_commitment,
+                unix_timestamp()?,
             )?;
             require_created_provenance(prepared.provenance)?;
+            // Ask BEFORE broadcasting `init`. A Hub that refuses here costs the
+            // user a deploy that was already sunk; a Hub that refuses after
+            // `init` confirms burns this (contract, left) slot forever, because
+            // re-`init` is only reachable from FINAL-and-claimed and a channel
+            // stranded in FUNDING is neither.
+            let ask = store
+                .refund_countersign_request()
+                .ok_or("initialization lost its refund countersign ask")?
+                .clone();
+            let answer = request_hub_refund_countersignature(&hub_url, &ask).await?;
+            store.record_hub_countersignature(&answer, &hub_url, unix_timestamp()?)?;
+            println!("Hub countersigned the serial-1 full refund; the user can now leave unaided.");
             run_lifecycle_record(
                 &node,
                 &network,
@@ -830,6 +849,19 @@ async fn run_online(
         } => {
             require_execution_args(network_fee_zhu, gas_max, confirmations, wait_seconds)?;
             let left = Account::create_by(identities.left_secret.as_str())?;
+            // The on-chain re-check, and it is not decoration. The refund bill
+            // binds the challenge window; `PayableHAC` does not check it. So a
+            // channel that was `init`ed with a different challenge window would
+            // take the deposit and then refuse the perfectly-signed refund.
+            let bundle = store
+                .recovery_bundle()
+                .cloned()
+                .ok_or("funding requires a Hub-countersigned refund bundle")?;
+            node.verify_hvm_registry_prefunding_bundle(&bundle, 1, 0)
+                .await?;
+            println!(
+                "Pre-funding chain re-check passed: the channel on chain is the one the refund bill names."
+            );
             let prepared = store.prepare_funding(
                 &left,
                 network_fee_zhu,
@@ -852,7 +884,12 @@ async fn run_online(
             let bundle = store
                 .recovery_bundle()
                 .ok_or("funding journal lost its recovery bundle")?;
-            node.verify_hvm_registry_initial_bundle(bundle, 1).await?;
+            // Open, not "initial": the reviewed contract now seeds a recovery
+            // buffer on every channel key when it takes custody, and
+            // `verify_hvm_registry_initial_bundle` requires zero recovery
+            // credit. Asserting the old shape here would report a failure on a
+            // funding that had in fact just succeeded.
+            node.verify_hvm_registry_open_bundle(bundle, 1, 1).await?;
             println!("Exact left-only channel funding confirmed.");
         }
         Command::Activate {
@@ -1337,6 +1374,40 @@ fn required_action(stage: HvmRegistryLifecycleStage) -> u16 {
         HvmRegistryLifecycleStage::Deployment => 40,
         HvmRegistryLifecycleStage::Initialization => 44,
     }
+}
+
+/// One request, one answer, and the wallet keeps 97 bytes of what comes back.
+///
+/// The response type carries no binding and no bill, so there is nothing here
+/// for a hostile Hub to substitute: `record_hub_countersignature` splices the
+/// signature into the bill this process already built and made durable.
+async fn request_hub_refund_countersignature(
+    hub_url: &str,
+    request: &l2_fast_pay_hub::hvm_registry::HvmRegistryRefundCountersignRequestV2,
+) -> Result<
+    l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryRefundCountersignResponseV2,
+    Box<dyn std::error::Error>,
+> {
+    let url = format!(
+        "{}/v2/hvm-registry/channel/open-countersign",
+        hub_url.trim_end_matches('/')
+    );
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?
+        .post(url)
+        .json(request)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the Hub refused to countersign the refund: HTTP {} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        )
+        .into());
+    }
+    Ok(response.json().await?)
 }
 
 fn require_created_provenance(
@@ -2149,6 +2220,23 @@ mod tests {
         assert!(Args::try_parse_from(base).is_err());
         let commitment = "11".repeat(32);
         let channel_id = "22".repeat(16);
+        // `--hub-url` is required, not optional. Initialization now has to ask
+        // a Hub for the serial-1 refund countersignature before it broadcasts
+        // anything, and there is no local fallback that could produce one.
+        assert!(
+            Args::try_parse_from(
+                base.into_iter()
+                    .chain([
+                        "--expected-preview-commitment",
+                        commitment.as_str(),
+                        "--channel-id",
+                        channel_id.as_str(),
+                    ])
+                    .collect::<Vec<_>>(),
+            )
+            .is_err(),
+            "initialize must refuse to run without a Hub to countersign the refund"
+        );
         let parsed = Args::try_parse_from(
             base.into_iter()
                 .chain([
@@ -2156,6 +2244,8 @@ mod tests {
                     commitment.as_str(),
                     "--channel-id",
                     channel_id.as_str(),
+                    "--hub-url",
+                    "http://127.0.0.1:8197",
                 ])
                 .collect::<Vec<_>>(),
         )

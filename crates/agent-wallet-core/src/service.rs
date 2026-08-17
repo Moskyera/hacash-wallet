@@ -67,7 +67,7 @@ pub use companion::{
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 pub use companion::{StrandedWitnessRecovery, WitnessRotationControls};
 pub use hvm::AgentHvmChannelBinding;
-pub use hvm_registry::AgentHvmRegistryBinding;
+pub use hvm_registry::{AgentHvmRegistryBinding, AgentHvmRegistryExitHead};
 use l2::{AgentChannelCloseOperation, AgentChannelSetupOperation};
 pub use l2::{
     AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
@@ -223,6 +223,12 @@ struct AgentWalletState {
     hvm_channel_binding: Option<AgentHvmChannelBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hvm_registry_binding: Option<AgentHvmRegistryBinding>,
+    /// The newest fully-signed registry bill, kept explicitly rather than
+    /// recovered by scanning `hvm_payment_operations`. Without it the user's
+    /// route out of a channel depends on a payment-operation map staying
+    /// intact; see [`AgentHvmRegistryExitHead`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_registry_exit_head: Option<AgentHvmRegistryExitHead>,
     agents: BTreeMap<String, AgentRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pairing_completion_outbox: BTreeMap<String, PairingCompletionOutboxEntry>,
@@ -696,6 +702,7 @@ impl AgentWalletManager {
             l2_channel_close: None,
             hvm_channel_binding: None,
             hvm_registry_binding: None,
+            hvm_registry_exit_head: None,
             agents: BTreeMap::new(),
             pairing_completion_outbox: BTreeMap::new(),
             companion_security: None,
