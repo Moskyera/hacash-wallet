@@ -400,8 +400,23 @@ impl HubMainnetReadiness {
         Ok(())
     }
 
-    pub(crate) fn require_channel_funding_ready(&self, amount_mei: &str) -> WalletResult<()> {
-        self.require_payment_ready(None)?;
+    /// The full payment gate plus this Hub's channel-funding cap.
+    ///
+    /// The policy is an argument for the same reason it is one on
+    /// `require_payment_ready_for_policy`: it is the wallet owner's explicit
+    /// choice, and it must never be inferred from the document being judged. A
+    /// Hub that declares itself `mainnet-bounded-pilot` cannot promote itself
+    /// into that policy; only a user who ticked the consent box can. Passing it
+    /// in also stops the funding gate silently re-judging under a policy the
+    /// caller already decided against - which is what it used to do, refusing
+    /// every consented bounded-pilot channel open one line after the same
+    /// document had passed the identical check under the right policy.
+    pub(crate) fn require_channel_funding_ready_for_policy(
+        &self,
+        amount_mei: &str,
+        policy: MainnetFastPayPolicy,
+    ) -> WalletResult<()> {
+        self.require_payment_ready_for_policy(None, policy)?;
         let amount = l2_fast_pay_hub::amount::parse_amount_mei(amount_mei)
             .map_err(|error| WalletError::L2(error.to_string()))?;
         let amount_zhu = amount
@@ -507,8 +522,10 @@ pub struct L2HubClient {
     mainnet_policy: MainnetFastPayPolicy,
 }
 
+/// Deliberately not `pub`: only this crate may name a mainnet policy, and only
+/// `new_for_wallet_policy` may derive one from the wallet owner's consent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MainnetFastPayPolicy {
+pub(crate) enum MainnetFastPayPolicy {
     TrustlessOnly,
     TrustedBoundedPilot,
 }
@@ -1056,6 +1073,20 @@ impl L2HubClient {
         Ok(readiness)
     }
 
+    /// Judge a channel deposit against a readiness document already in hand,
+    /// under this client's mainnet policy.
+    ///
+    /// Callers hold the document, not the policy: the policy came from the
+    /// wallet owner's consent when this client was built, and this is how it
+    /// reaches a gate that would otherwise have to guess.
+    pub(crate) fn require_channel_funding_ready(
+        &self,
+        readiness: &HubMainnetReadiness,
+        amount_mei: &str,
+    ) -> WalletResult<()> {
+        readiness.require_channel_funding_ready_for_policy(amount_mei, self.mainnet_policy)
+    }
+
     /// Re-read the readiness document and require the hard guarantees this
     /// client's mainnet policy depends on, naming whichever one is missing.
     ///
@@ -1143,8 +1174,10 @@ impl L2HubClient {
             // of `mainnet_readiness()` and this gate stays shut.
             let readiness = self.mainnet_readiness().await?;
             readiness.require_channel_binding_guarantees(self.mainnet_policy)?;
-            readiness.require_payment_ready_for_policy(None, self.mainnet_policy)?;
-            readiness.require_channel_funding_ready(user_deposit_mei)?;
+            // Runs the whole payment gate under this client's policy before it
+            // looks at the funding cap, so there is nothing left to repeat here.
+            readiness
+                .require_channel_funding_ready_for_policy(user_deposit_mei, self.mainnet_policy)?;
         }
         Ok(health)
     }
@@ -2469,11 +2502,14 @@ mod transport_tests {
             .require_payment_ready(Some("0.007"))
             .unwrap();
         lower_channel_cap
-            .require_channel_funding_ready("0.005")
+            .require_channel_funding_ready_for_policy("0.005", MainnetFastPayPolicy::TrustlessOnly)
             .unwrap();
         assert!(
             lower_channel_cap
-                .require_channel_funding_ready("0.006")
+                .require_channel_funding_ready_for_policy(
+                    "0.006",
+                    MainnetFastPayPolicy::TrustlessOnly,
+                )
                 .is_err()
         );
 

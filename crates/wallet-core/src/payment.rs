@@ -145,7 +145,11 @@ impl PaymentRouter {
             None => return Ok(None),
         };
 
-        let hub = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
+        let hub = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let health = match hub.health().await {
             Ok(health) => health,
             Err(_) => return Ok(None),
@@ -219,7 +223,11 @@ impl PaymentRouter {
             .clone()
             .ok_or_else(|| WalletError::L2("channel not configured".into()))?;
 
-        let hub = L2HubClient::new_for_network(hub_url, &self.settings.network_mode);
+        let hub = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let health = hub.health().await?;
         let hub_address = health.hub_address.clone().ok_or_else(|| {
             WalletError::L2("Fast Pay provider did not publish its hub address".into())
@@ -314,5 +322,184 @@ mod tests {
             .await
             .unwrap();
         assert!(plan.is_none());
+    }
+
+    /// The exact `/v1/readiness/mainnet` bytes a `mainnet-bounded-pilot` Hub
+    /// serves when it is pointed at the real Hacash mainnet fullnode.
+    ///
+    /// Captured with `curl` from a Hub built from this tree against the live
+    /// Hacash mainnet node on `http://127.0.0.1:8080` (chain id 0, height
+    /// 774025, `block_1_hash` 001e231c...db56), with no rollback witness
+    /// configured. It is the served response, byte for byte, not a Rust struct
+    /// re-serialised: only the four clock-dependent numbers are re-stamped,
+    /// because the wallet correctly refuses a stale snapshot.
+    ///
+    /// Every honest `false` that Hub publishes survives here -
+    /// `trustless_finality`, `unilateral_l1_enforceable`,
+    /// `channel_unilateral_exit`, `deployment_verified` - so this fixture can
+    /// never pass by being greener than the Hub it came from.
+    const LIVE_BOUNDED_PILOT_READINESS_BODY: &str = r#"{"schema":"hpay-fast-pay-mainnet-readiness/1","evaluated_unix":$EVALUATED$,"valid_until_unix":$VALID_UNTIL$,"profile":"mainnet-bounded-pilot","payments_enabled":true,"close_enabled":true,"mainnet_detected":true,"fullnode_capabilities":{"observed_unix":$EVALUATED$,"api_version":1,"chain_id":0,"height":774025,"next_height":774026,"mainnet":true,"network_kind":"mainnet","node_profile_id":"hacash-mainnet","block_1_hash":"001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56","network_instance_id":"5a310ec0f487a37156a182c67778495f66e5c7502f9871829edc790023b123cf","transaction_format_version":2,"tip_timestamp_unix":$TIP$,"tip_age_seconds":$TIP_AGE$,"registered_actions":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"enabled_actions":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"enabled_transactions":[0,1,2,3],"transaction_submit_bound":true,"hpay_channel_registry_query":false,"channel_unilateral_exit":false,"channel_unilateral_exit_evidence":{"schema":"hpay-hvm-channel-exit-evidence/1","manifest_valid":true,"contract_name":"HPAYChannelExitV1","protocol_domain":"HPAY/HVM-CHANNEL/V1","settlement_profile":"hpay-hvm-channel-v1","source_sha256":"c0a430eb9769d1d506641c379bb8aaf708c7bac7d03694b60a4be03fd001dd06","bytecode_sha3":"11a2efc27a0c951bbc6977186eb58bd076dd331a785f3c57242cf54a72238349","required_action_kinds":[40,41,44],"funding_model":{"left_deposit":"positive","right_hub_deposit":"exactly_zero"},"storage_key_count":18,"must_renew_every_storage_key":true,"deployment":{"enabled":false,"contract_address":null,"deployment_tx_hash":null,"deployment_height":null,"independently_verified":false},"on_chain_verification":{"observed_height":null,"confirmed_tx_height":null,"deployment_tx_confirmed":false,"contract_code_sha3":null,"contract_code_matches":false},"deployment_verified":false}},"rollback_anchor":null,"max_payment_hac_zhu":1000000,"max_channel_funding_hac_zhu":10000000,"allowlist_configured":true,"aggregate_tvl_within_limit":true,"max_aggregate_tvl_hac_zhu":100000000,"max_payment_satoshi":0,"wallet_fee_hac":"0","trustless_finality":false,"unilateral_l1_enforceable":false,"trusted_bounded_pilot":true,"settlement_model":"official Hacash ChannelPay bills with hub-coordinated bounded mainnet pilot","blockers":[],"close_blockers":[],"limitations":["settled does not mean unilateral L1 finality","the active Hacash mainnet exposes cooperative original-funding close action 3","pilot exposure must remain inside the configured payment and channel caps","new channels require an allowlisted user and aggregate Hub TVL at or below 100000000 zhu"]}"#;
+
+    fn live_bounded_pilot_readiness_body() -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        let tip_age = 443_u64;
+        LIVE_BOUNDED_PILOT_READINESS_BODY
+            .replace("$EVALUATED$", &now.to_string())
+            .replace("$VALID_UNTIL$", &(now + 60).to_string())
+            .replace("$TIP$", &now.saturating_sub(tip_age).to_string())
+            .replace("$TIP_AGE$", &tip_age.to_string())
+    }
+
+    /// The same Hub's `/v1/health`, likewise verbatim from the wire.
+    fn live_bounded_pilot_health_json(hub_address: &str) -> serde_json::Value {
+        serde_json::json!({
+            "ok": true,
+            "version": 7,
+            "name": "HPAY Fast Pay Hub",
+            "hub_address": hub_address,
+            "hub_fee_mei": "0",
+            "settlement_ready": true,
+            "cross_channel_ready": true,
+            "official_channelpay_ready": true,
+            "trusted_bounded_pilot_ready": true,
+            "deployment_profile": "mainnet-bounded-pilot"
+        })
+    }
+
+    /// A mainnet Hub that publishes the bounded pilot profile, and a wallet
+    /// whose owner ticked the bounded-pilot consent box, must route Fast Pay.
+    ///
+    /// Both halves matter and neither may be dropped:
+    ///
+    /// * consent withheld (the fail-closed default): no L2 plan. The bounded
+    ///   profile alone must never be enough.
+    /// * consent given: the L2 plan appears, against a Hub document that still
+    ///   reports `trustless_finality: false` and `unilateral_l1_enforceable:
+    ///   false`, which is exactly what the bounded pilot is and exactly what the
+    ///   user consented to.
+    ///
+    /// This is a Send-screen test on purpose. The old failure was silent: the
+    /// client was built with the trustless-only policy regardless of consent,
+    /// `require_mainnet_payment_ready` refused, `try_l2_plan` returned `None`,
+    /// and the user simply got a paid L1 transaction with no explanation.
+    #[tokio::test]
+    async fn mainnet_bounded_pilot_consent_reaches_the_send_screen() {
+        use axum::{Json, Router, routing::get};
+
+        const CHANNEL_ID: &str = "00112233445566778899aabbccddeeff";
+        let payer = WalletAccount::create("bounded-pilot-send-payer").unwrap();
+        let payee = WalletAccount::create("bounded-pilot-send-payee").unwrap();
+        let hub_account = WalletAccount::create("bounded-pilot-send-hub").unwrap();
+        let hub_address = hub_account.address();
+        let payer_address = payer.address();
+
+        let hub_app = Router::new()
+            .route(
+                "/v1/health",
+                get(move || {
+                    let body = live_bounded_pilot_health_json(&hub_address);
+                    async move { Json(body) }
+                }),
+            )
+            .route(
+                "/v1/readiness/mainnet",
+                get(|| async { live_bounded_pilot_readiness_body() }),
+            );
+        let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hub_url = format!("http://{}", hub_listener.local_addr().unwrap());
+        let hub_server = tokio::spawn(async move {
+            axum::serve(hub_listener, hub_app).await.unwrap();
+        });
+
+        let channel_left = payer_address.clone();
+        let channel_right = hub_account.address();
+        let node_app = Router::new().route(
+            "/query/channel",
+            get(move || {
+                let body = serde_json::json!({
+                    "ret": 0,
+                    "id": CHANNEL_ID,
+                    "status": 0,
+                    "open_height": 774_000,
+                    "close_height": 0,
+                    "reuse_version": 1,
+                    "arbitration_lock": 5,
+                    "left": { "address": channel_left, "hacash": "0.01", "satoshi": 0 },
+                    "right": { "address": channel_right, "hacash": "0", "satoshi": 0 }
+                });
+                async move { Json(body) }
+            }),
+        );
+        let node_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node_url = format!("http://{}", node_listener.local_addr().unwrap());
+        let node_server = tokio::spawn(async move {
+            axum::serve(node_listener, node_app).await.unwrap();
+        });
+
+        let settings_for = |consented: bool| WalletSettings {
+            node_url: node_url.clone(),
+            network_mode: "mainnet".into(),
+            l2_hub_url: Some(hub_url.clone()),
+            trusted_mainnet_fast_pay_pilot: consented,
+            channel_id_hex: Some(CHANNEL_ID.into()),
+            ..WalletSettings::default()
+        };
+
+        let without_consent = PaymentRouter::new(
+            NodeClient::new(&node_url).unwrap(),
+            settings_for(false),
+            BillStore::default(),
+        );
+        assert!(
+            without_consent
+                .try_l2_plan(&payer.address(), &payee.address(), 0.005)
+                .await
+                .unwrap()
+                .is_none(),
+            "a bounded-pilot Hub must not be used without the wallet owner's explicit consent"
+        );
+
+        let with_consent = PaymentRouter::new(
+            NodeClient::new(&node_url).unwrap(),
+            settings_for(true),
+            BillStore::default(),
+        );
+        let plan = with_consent
+            .try_l2_plan(&payer.address(), &payee.address(), 0.005)
+            .await
+            .unwrap()
+            .expect("consented bounded mainnet pilot must produce a Fast Pay plan");
+        assert_eq!(plan.rail, PaymentRail::L2Fast);
+        assert_eq!(plan.channel_id.as_deref(), Some(CHANNEL_ID));
+
+        // The channel-open gate, against the same served document. The two
+        // channel-open call sites in `authorization_service` build their client
+        // from exactly these three settings values, so this is what they now
+        // ask the Hub. It is stated in both directions for the same reason as
+        // above: consent is what opens it, and the bounded profile alone is not.
+        let open_gate = |consented: bool| {
+            let settings = settings_for(consented);
+            crate::l2_hub::L2HubClient::new_for_wallet_policy(
+                settings.l2_hub_url.clone().unwrap(),
+                &settings.network_mode,
+                settings.trusted_mainnet_fast_pay_pilot,
+            )
+        };
+        assert!(
+            open_gate(false)
+                .require_channel_open_ready(&hub_account.address(), "0.05")
+                .await
+                .is_err(),
+            "channel funding must not bind to a bounded-pilot Hub without explicit consent"
+        );
+        open_gate(true)
+            .require_channel_open_ready(&hub_account.address(), "0.05")
+            .await
+            .expect("consented bounded mainnet pilot must accept a capped channel open");
+
+        hub_server.abort();
+        node_server.abort();
     }
 }

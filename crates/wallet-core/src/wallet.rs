@@ -1751,7 +1751,7 @@ impl WalletService {
                     .min(DEFAULT_CHANNEL_DEPOSIT_MEI);
             }
             let deposit_wire = format_amount_mei(deposit);
-            readiness.require_channel_funding_ready(&deposit_wire)?;
+            client.require_channel_funding_ready(&readiness, &deposit_wire)?;
         }
 
         match self.settings.hub_right_address.clone() {

@@ -649,9 +649,13 @@ impl WalletService {
             .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
         let network_binding =
             exact_l1_channel_network_binding(&self.node, &self.settings.network_mode).await?;
-        crate::l2_hub::L2HubClient::new_for_network(&hub_url, &self.settings.network_mode)
-            .require_channel_open_ready(&preview.right_address, &preview.left_deposit)
-            .await?;
+        crate::l2_hub::L2HubClient::new_for_wallet_policy(
+            &hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        )
+        .require_channel_open_ready(&preview.right_address, &preview.left_deposit)
+        .await?;
         let encoded_channel_id = crate::channel::encoded_channel_id(&preview.channel_id)?;
         let (built, fee) = build_channel_open_tx_with_dynamic_fee(
             &self.node,
@@ -778,8 +782,11 @@ impl WalletService {
                 "Fast Pay Hub changed after channel-open preparation".into(),
             ));
         }
-        let client =
-            crate::l2_hub::L2HubClient::new_for_network(&hub_url, &self.settings.network_mode);
+        let client = crate::l2_hub::L2HubClient::new_for_wallet_policy(
+            &hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         client
             .require_channel_open_ready(&preview.right_address, &preview.left_deposit)
             .await?;
@@ -1126,8 +1133,11 @@ impl WalletService {
         let request = operation.request.clone().ok_or_else(|| {
             WalletError::L2("RecoveryRequired: exact channel-open request is missing".into())
         })?;
-        let client =
-            crate::l2_hub::L2HubClient::new_for_network(&hub_url, &self.settings.network_mode);
+        let client = crate::l2_hub::L2HubClient::new_for_wallet_policy(
+            &hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let response = match client.open_channel(&request).await {
             Ok(response) => response,
             Err(error) => {
@@ -1228,9 +1238,13 @@ impl WalletService {
         };
         let trusted = crate::l2_bill::trusted_channel_state(&self.bills, &channel)?;
         let settlement = cooperative_close_settlement(&channel, &trusted)?;
-        crate::l2_hub::L2HubClient::new_for_network(&hub_url, &self.settings.network_mode)
-            .require_channel_close_ready(&hub_address, settlement.transfer.is_some())
-            .await?;
+        crate::l2_hub::L2HubClient::new_for_wallet_policy(
+            &hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        )
+        .require_channel_close_ready(&hub_address, settlement.transfer.is_some())
+        .await?;
         let encoded_channel_id = crate::channel::encoded_channel_id(&channel_id)?;
         let (built, fee) = build_channel_close_tx_with_dynamic_fee(
             &self.node,
@@ -1399,8 +1413,11 @@ impl WalletService {
             &expected_actions,
         )?;
         self.ensure_transaction_network_binding(&body_hex).await?;
-        let client =
-            crate::l2_hub::L2HubClient::new_for_network(&hub_url, &self.settings.network_mode);
+        let client = crate::l2_hub::L2HubClient::new_for_wallet_policy(
+            &hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         client
             .require_channel_close_ready(&hub_address, settlement.transfer.is_some())
             .await?;
@@ -1611,8 +1628,11 @@ impl WalletService {
                 operation.operation_id
             ))
         })?;
-        let client =
-            crate::l2_hub::L2HubClient::new_for_network(&hub_url, &self.settings.network_mode);
+        let client = crate::l2_hub::L2HubClient::new_for_wallet_policy(
+            &hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let response = client.close_channel(request).await.map_err(|error| {
             WalletError::L2(format!(
                 "channel-close recovery remains pending for {}: {error}",
