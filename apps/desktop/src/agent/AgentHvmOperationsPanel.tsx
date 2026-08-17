@@ -39,7 +39,7 @@ function isHvmRail(value: string): value is HvmRail {
  * new bill?
  *
  * A continuity declaration always is: same serial, same bill commitment. The
- * copy written for a pending payment is actively misleading there — it shows
+ * copy written for a pending payment is actively misleading there: it shows
  * "last accepted" and "being offered" as the same serial and tells the reader
  * nothing was spent, describing a transaction that does not exist and never
  * will, because the Hub can no longer co-sign anything.
@@ -369,7 +369,7 @@ export function AgentHvmOperationsPanel({
                     // different witness - so the honest framing is about the
                     // channel's future, not about a pending payment.
                     <p className="agent-muted">
-                      No new payment is involved. This Hub is re-showing the bill you already hold at serial {anchorChange.serial}, vouched for by a different witness. A Hub in this state has stopped being able to co-sign, so accepting the new witness does not restore payments on this channel — closing on the bill you already hold is what actually settles it.
+                      No new payment is involved. This Hub is re-showing the bill you already hold at serial {anchorChange.serial}, vouched for by a different witness. A Hub in this state has stopped being able to co-sign, so accepting the new witness does not restore payments on this channel. Closing on the bill you already hold is what actually settles it.
                     </p>
                   ) : (
                     <dl className="agent-detail-grid">
