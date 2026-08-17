@@ -136,6 +136,39 @@ impl FastPayStatus {
             default_deposit_mei: DEFAULT_CHANNEL_DEPOSIT_MEI,
         }
     }
+
+    /// The provider is capable, and a mainnet gate refused. Say which.
+    ///
+    /// [`Self::provider_incompatible`] states a cause: the provider "does not
+    /// support safe, fee-free routed settlement yet". That is true of a Hub
+    /// whose `/v1/health` is missing a capability, and it was also shown when a
+    /// mainnet readiness gate refused, where it is simply false - the same Hub
+    /// was publishing `settlement_ready: true`, `cross_channel_ready: true` and
+    /// a zero fee at the moment the wallet told the user it could not do
+    /// fee-free routed settlement. What it lacked was the mainnet guarantees,
+    /// and the wallet was holding the Hub's own reason and dropped it. Telling
+    /// a user a wrong cause is worse than telling them a vague one: they go and
+    /// change the provider, which fixes nothing.
+    pub fn provider_incompatible_because(error: &crate::error::WalletError) -> Self {
+        Self {
+            state: FastPayState::ProviderIncompatible,
+            message: format!(
+                "Fast Pay is not available on this provider: {}",
+                user_facing_reason(error)
+            ),
+            provider_name: None,
+            hub_url: None,
+            can_enable: false,
+            default_deposit_mei: DEFAULT_CHANNEL_DEPOSIT_MEI,
+        }
+    }
+}
+
+/// User-facing text for a wallet error, without the `l2:` routing prefix that
+/// only makes sense inside the codebase.
+pub fn user_facing_reason(error: &crate::error::WalletError) -> String {
+    let text = error.to_string();
+    text.strip_prefix("l2: ").unwrap_or(&text).to_owned()
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +227,7 @@ pub async fn discover_all_hubs(extra_urls: &[String]) -> HubDiscoveryReport {
 
 async fn probe_hub_entry(id: String, fallback_name: String, hub_url: String) -> HubDiscoveryEntry {
     let preset = CSP_PRESETS.iter().find(|p| p.id == id);
-    let client = L2HubClient::new(&hub_url);
+    let client = L2HubClient::for_health_discovery(&hub_url);
     match client.health().await {
         Ok(health)
             if health.ok
@@ -287,9 +320,9 @@ pub async fn evaluate_fast_pay(
                     && crate::l2_hub::hub_fee_is_zero(&h) =>
             {
                 if settings.network_mode == "mainnet"
-                    && hub.require_mainnet_payment_ready(None).await.is_err()
+                    && let Err(error) = hub.require_mainnet_payment_ready(None).await
                 {
-                    return Ok(FastPayStatus::provider_incompatible());
+                    return Ok(FastPayStatus::provider_incompatible_because(&error));
                 }
                 if let Ok(ch) = query_channel(node, ch_id).await
                     && channel_ready(&ch, user)
@@ -336,7 +369,7 @@ pub async fn evaluate_fast_pay(
         let deposit = if settings.network_mode == "mainnet" {
             let readiness = match client.require_mainnet_payment_ready(None).await {
                 Ok(readiness) => readiness,
-                Err(_) => return Ok(FastPayStatus::provider_incompatible()),
+                Err(error) => return Ok(FastPayStatus::provider_incompatible_because(&error)),
             };
             (readiness.max_channel_funding_millimeis() as f64 / 1_000.0)
                 .min(DEFAULT_CHANNEL_DEPOSIT_MEI)

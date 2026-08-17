@@ -749,6 +749,25 @@ pub fn wallet_set_second_factor_threshold(
         .map_err(|e| e.to_string())
 }
 
+/// Give or withdraw consent to the capped, Hub-dependent mainnet Fast Pay pilot.
+///
+/// Its own authenticated command, because `wallet_update_settings` refuses to
+/// turn it on: it chooses the settlement model every later mainnet payment and
+/// channel open is judged under. Withdrawing consent also works through the
+/// generic settings command, so a user is never locked into the pilot by a
+/// screen that cannot ask for a passphrase.
+#[tauri::command]
+pub fn wallet_set_mainnet_fast_pay_consent(
+    consented: bool,
+    current_passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let current_passphrase = Zeroizing::new(current_passphrase);
+    let mut svc = state.inner.blocking_lock();
+    svc.set_trusted_mainnet_fast_pay_pilot(&current_passphrase, consented)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn wallet_set_hardware_mode(
     mode: String,

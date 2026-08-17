@@ -541,6 +541,16 @@ impl WalletService {
             || settings.biometric_unlock_enabled != current.biometric_unlock_enabled
             || settings.watch_only_address != current.watch_only_address
             || settings.channel_id_hex != current.channel_id_hex
+            // Turning the bounded mainnet pilot ON chooses a settlement model in
+            // which the money is only as safe as one Hub. That is the same class
+            // of decision as changing the security profile, and it was the only
+            // money-policy field on this struct that any unauthenticated caller
+            // could flip - while changing a channel id, which decides far less,
+            // already needed the authenticated path. Withdrawing consent is a
+            // strict tightening and stays available here, so a user can always
+            // step back out from a screen that cannot ask for a passphrase.
+            || (settings.trusted_mainnet_fast_pay_pilot
+                && !current.trusted_mainnet_fast_pay_pilot)
             || settings.quantum_mode != current.quantum_mode
             || settings.quantum_meta != current.quantum_meta;
         if sensitive_change {
@@ -857,6 +867,36 @@ impl WalletService {
         // A ticket prepared a moment ago carries the requirement computed under the old
         // threshold. Tightening the policy must not leave an already-authorized, or
         // authorization-free, operation waiting to execute under the looser rule.
+        self.clear_prepared_operation();
+        Ok(())
+    }
+
+    /// Give or withdraw consent to the bounded mainnet Fast Pay pilot.
+    ///
+    /// Its own authenticated command, because `update_settings` refuses to turn
+    /// this on: it selects the settlement model every later mainnet payment and
+    /// channel open is judged under, and the wallet asks for at least as much
+    /// authority to change that as it does to change a channel id.
+    pub fn set_trusted_mainnet_fast_pay_pilot(
+        &mut self,
+        current_passphrase: &str,
+        consented: bool,
+    ) -> WalletResult<()> {
+        if !self.vault_path.exists() {
+            return Err(WalletError::NoWallet);
+        }
+        self.verify_wallet_passphrase(current_passphrase)?;
+        self.settings.trusted_mainnet_fast_pay_pilot = consented;
+        self.settings.save()?;
+        // The router holds its own copy of the settings and is what the Send
+        // screen asks for a rail. Saving the file without refreshing it here
+        // would leave the consent decided and unread until the next restart -
+        // the exact shape of the bug this release was written to fix.
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
+        // A ticket prepared a moment ago was reviewed under the old settlement
+        // policy. Changing the policy must not leave an already-authorized
+        // operation waiting to execute under the other one.
         self.clear_prepared_operation();
         Ok(())
     }
@@ -3757,6 +3797,56 @@ mod vault_migration_tests {
         let mut hardware = wallet.get_settings();
         hardware.hardware_signing_mode = "watch_only".into();
         assert!(wallet.update_settings(hardware).is_err());
+    }
+
+    /// Consent to the bounded mainnet pilot is a money-policy decision, and the
+    /// generic settings command must not be able to make it.
+    ///
+    /// It was the only field on this struct that chose a mainnet settlement
+    /// model and that any unauthenticated caller on the IPC surface could flip,
+    /// while a channel id - which decides far less - already needed the
+    /// authenticated path. Withdrawal is the other half and is deliberately not
+    /// symmetric: turning the pilot off is a tightening, and a user who wants
+    /// out must never be held in by a screen that cannot ask for a passphrase.
+    #[test]
+    fn bounded_mainnet_pilot_consent_needs_its_own_authenticated_command() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+        assert!(!wallet.settings.trusted_mainnet_fast_pay_pilot);
+
+        let mut consented = wallet.get_settings();
+        consented.trusted_mainnet_fast_pay_pilot = true;
+        assert!(
+            wallet.update_settings(consented).is_err(),
+            "generic settings must not be able to turn the mainnet pilot on"
+        );
+        assert!(!wallet.settings.trusted_mainnet_fast_pay_pilot);
+
+        wallet
+            .set_trusted_mainnet_fast_pay_pilot(OLD_PASS, true)
+            .unwrap();
+        assert!(wallet.settings.trusted_mainnet_fast_pay_pilot);
+        // The router is what the Send screen asks for a rail, and it holds its
+        // own copy of the settings. A consent that never reaches it is a
+        // consent that does nothing until the wallet is restarted.
+        assert!(wallet.router.settings().trusted_mainnet_fast_pay_pilot);
+
+        assert!(
+            wallet
+                .set_trusted_mainnet_fast_pay_pilot("wrong-passphrase", false)
+                .is_err(),
+            "the authenticated command must still check the passphrase"
+        );
+        assert!(wallet.settings.trusted_mainnet_fast_pay_pilot);
+
+        let mut withdrawn = wallet.get_settings();
+        withdrawn.trusted_mainnet_fast_pay_pilot = false;
+        wallet
+            .update_settings(withdrawn)
+            .expect("withdrawing consent is a tightening and needs no ceremony");
+        assert!(!wallet.settings.trusted_mainnet_fast_pay_pilot);
+        assert!(!wallet.router.settings().trusted_mainnet_fast_pay_pilot);
     }
 
     #[test]

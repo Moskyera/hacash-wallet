@@ -82,11 +82,19 @@ pub struct HubMainnetReadiness {
     pub wallet_fee_hac: String,
     pub trustless_finality: bool,
     pub unilateral_l1_enforceable: bool,
-    #[serde(default)]
+    /// Required on the wire, deliberately.
+    ///
+    /// The trustless-only gate reads this as a *negative* requirement
+    /// (`!trusted_bounded_pilot`), so with a serde default an omitted field
+    /// satisfied it - absence read as "no objection" on a field whose whole
+    /// job is to raise one. The Hub always serialises it, so requiring it costs
+    /// an honest Hub nothing and turns a silently-satisfied clause into a
+    /// decode error.
     pub trusted_bounded_pilot: bool,
     pub settlement_model: String,
     pub blockers: Vec<String>,
-    #[serde(default)]
+    /// Required on the wire for the same reason as `trusted_bounded_pilot`: an
+    /// omitted list used to read as "the Hub raised no close objection".
     pub close_blockers: Vec<String>,
     pub limitations: Vec<String>,
     /// Published by a Hub whose one rollback-anchor witness is no longer the
@@ -155,16 +163,17 @@ const REQUIRED_COOPERATIVE_CLOSE_ACTION: u16 = 3;
 const REQUIRED_CLOSE_PRINCIPAL_TRANSFER_ACTION: u16 = 14;
 
 impl HubMainnetReadiness {
-    pub fn require_payment_ready(&self, amount_wire: Option<&str>) -> WalletResult<()> {
+    /// The trustless-only reading of this document, for tests that predate the
+    /// bounded pilot. Not a production entry point: a caller that reaches for a
+    /// gate with no policy argument gets the wallet owner's consent silently
+    /// overruled, which is the defect the policy argument exists to prevent.
+    #[cfg(test)]
+    fn require_payment_ready(&self, amount_wire: Option<&str>) -> WalletResult<()> {
         self.require_payment_ready_for_policy(amount_wire, MainnetFastPayPolicy::TrustlessOnly)
     }
 
-    fn require_payment_ready_for_policy(
-        &self,
-        amount_wire: Option<&str>,
-        policy: MainnetFastPayPolicy,
-    ) -> WalletResult<()> {
-        let settlement_contract_ready = match policy {
+    fn settlement_contract_ready(&self, policy: MainnetFastPayPolicy) -> bool {
+        match policy {
             MainnetFastPayPolicy::TrustlessOnly => {
                 self.profile == MAINNET_PILOT_PROFILE
                     && self.trustless_finality
@@ -174,16 +183,76 @@ impl HubMainnetReadiness {
             MainnetFastPayPolicy::TrustedBoundedPilot => {
                 self.profile == MAINNET_BOUNDED_PILOT_PROFILE && self.trusted_bounded_pilot
             }
-        };
-        if self.schema != MAINNET_READINESS_SCHEMA
-            || !self.payments_enabled
-            || self.mainnet_detected != Some(true)
-            || !settlement_contract_ready
-            || !self.blockers.is_empty()
-        {
-            return Err(WalletError::L2(
-                "Fast Pay mainnet readiness is not green; payment signing is blocked".into(),
+        }
+    }
+
+    /// Whatever this Hub said is standing in the way, in the Hub's own words.
+    ///
+    /// `blockers` is a list of identifiers the Hub publishes naming exactly
+    /// what it is waiting on - a missing rollback anchor, an unconfigured
+    /// allowlist, a fullnode that does not report a verified unilateral exit.
+    /// The wallet used to consume that list as `!is_empty()` and throw the
+    /// contents away, so a user pointed at a Hub that was honestly reporting
+    /// three specific, actionable problems was told only that readiness "is not
+    /// green", with no way to learn which of the five conditions in that one
+    /// `if` had failed. The Hub already joins its own blocker list into its own
+    /// refusal text; the wallet was the only half that dropped it.
+    ///
+    /// This names conditions, it does not judge them. Every clause here is the
+    /// same clause the gate enforces, so a refusal can never be described as
+    /// something other than what actually shut it.
+    fn payment_refusals(&self, policy: MainnetFastPayPolicy) -> Vec<String> {
+        let mut refusals = Vec::new();
+        if self.schema != MAINNET_READINESS_SCHEMA {
+            refusals.push(format!(
+                "the readiness document is schema \"{}\", not \"{MAINNET_READINESS_SCHEMA}\"",
+                self.schema
             ));
+        }
+        if !self.payments_enabled {
+            refusals.push("the Hub reports payments_enabled false".to_owned());
+        }
+        match self.mainnet_detected {
+            Some(true) => {}
+            Some(false) => {
+                refusals.push("the Hub reports it is not connected to mainnet".to_owned());
+            }
+            None => refusals
+                .push("the Hub could not determine whether it is connected to mainnet".to_owned()),
+        }
+        if !self.settlement_contract_ready(policy) {
+            refusals.push(match policy {
+                MainnetFastPayPolicy::TrustlessOnly => format!(
+                    "this wallet is set to trustless settlement only and the Hub publishes profile \"{}\"",
+                    self.profile
+                ),
+                MainnetFastPayPolicy::TrustedBoundedPilot => format!(
+                    "you consented to the bounded mainnet pilot and the Hub publishes profile \"{}\" with trusted_bounded_pilot {}",
+                    self.profile, self.trusted_bounded_pilot
+                ),
+            });
+        }
+        refusals.extend(self.named_blockers());
+        refusals
+    }
+
+    /// The Hub's own blocker identifiers, ready to append to any refusal.
+    fn named_blockers(&self) -> Option<String> {
+        (!self.blockers.is_empty())
+            .then(|| format!("the Hub published blockers: {}", self.blockers.join(", ")))
+    }
+
+    fn require_payment_ready_for_policy(
+        &self,
+        amount_wire: Option<&str>,
+        policy: MainnetFastPayPolicy,
+    ) -> WalletResult<()> {
+        let refusals = self.payment_refusals(policy);
+        if !refusals.is_empty() {
+            return Err(WalletError::L2(format!(
+                "Fast Pay mainnet readiness is not green; payment signing is blocked: {}",
+                refusals.join("; ")
+            )));
         }
         let now = unix_now();
         let validity = self
@@ -273,22 +342,63 @@ impl HubMainnetReadiness {
         Ok(())
     }
 
+    /// The cooperative-close gate, which takes no policy argument on purpose.
+    ///
+    /// Every sibling gate here - payment, hard guarantees, channel funding -
+    /// is handed the wallet owner's `MainnetFastPayPolicy`, because each of
+    /// them decides whether to create new exposure, and only the owner may
+    /// choose the settlement model they are exposed to. Close is the opposite
+    /// operation: it retires exposure that already exists. Refusing to close
+    /// because consent was withheld, or later withdrawn, would strand the money
+    /// inside the very channel the user is trying to leave - the wallet would
+    /// be using the consent flag to trap funds rather than to guard them.
+    ///
+    /// So this deliberately accepts both mainnet pilot profiles and reads no
+    /// consent. That asymmetry is intentional and load-bearing; do not "fix" it
+    /// by threading a policy through, and do not copy it into a gate that opens
+    /// a channel or signs a payment.
     pub fn require_cooperative_close_ready(
         &self,
         requires_principal_transfer: bool,
     ) -> WalletResult<()> {
-        if self.schema != MAINNET_READINESS_SCHEMA
-            || !matches!(
-                self.profile.as_str(),
-                MAINNET_PILOT_PROFILE | MAINNET_BOUNDED_PILOT_PROFILE
-            )
-            || !self.close_enabled
-            || self.mainnet_detected != Some(true)
-            || !self.close_blockers.is_empty()
-        {
-            return Err(WalletError::L2(
-                "Fast Pay mainnet cooperative-close readiness is not green".into(),
+        let mut refusals = Vec::new();
+        if self.schema != MAINNET_READINESS_SCHEMA {
+            refusals.push(format!(
+                "the readiness document is schema \"{}\", not \"{MAINNET_READINESS_SCHEMA}\"",
+                self.schema
             ));
+        }
+        if !matches!(
+            self.profile.as_str(),
+            MAINNET_PILOT_PROFILE | MAINNET_BOUNDED_PILOT_PROFILE
+        ) {
+            refusals.push(format!(
+                "the Hub publishes profile \"{}\", which is not a mainnet pilot profile",
+                self.profile
+            ));
+        }
+        if !self.close_enabled {
+            refusals.push("the Hub reports close_enabled false".to_owned());
+        }
+        match self.mainnet_detected {
+            Some(true) => {}
+            Some(false) => {
+                refusals.push("the Hub reports it is not connected to mainnet".to_owned());
+            }
+            None => refusals
+                .push("the Hub could not determine whether it is connected to mainnet".to_owned()),
+        }
+        if !self.close_blockers.is_empty() {
+            refusals.push(format!(
+                "the Hub published close blockers: {}",
+                self.close_blockers.join(", ")
+            ));
+        }
+        if !refusals.is_empty() {
+            return Err(WalletError::L2(format!(
+                "Fast Pay mainnet cooperative-close readiness is not green: {}",
+                refusals.join("; ")
+            )));
         }
         let now = unix_now();
         let validity = self
@@ -369,10 +479,11 @@ impl HubMainnetReadiness {
         match policy {
             MainnetFastPayPolicy::TrustlessOnly => {
                 if self.profile != MAINNET_PILOT_PROFILE || self.trusted_bounded_pilot {
-                    return Err(WalletError::L2(
-                        "Fast Pay Hub does not publish the trustless mainnet pilot profile; new funding is blocked"
-                            .into(),
-                    ));
+                    return Err(WalletError::L2(format!(
+                        "Fast Pay Hub does not publish the trustless mainnet pilot profile; new funding is blocked: it publishes profile \"{}\"{}",
+                        self.profile,
+                        append_named_blockers(self.named_blockers())
+                    )));
                 }
                 let mut missing = Vec::new();
                 if !self.trustless_finality {
@@ -383,17 +494,20 @@ impl HubMainnetReadiness {
                 }
                 if !missing.is_empty() {
                     return Err(WalletError::L2(format!(
-                        "Fast Pay Hub mainnet readiness does not report the required hard guarantee: {}; new funding is blocked",
-                        missing.join(" and ")
+                        "Fast Pay Hub mainnet readiness does not report the required hard guarantee: {}; new funding is blocked{}",
+                        missing.join(" and "),
+                        append_named_blockers(self.named_blockers())
                     )));
                 }
             }
             MainnetFastPayPolicy::TrustedBoundedPilot => {
                 if self.profile != MAINNET_BOUNDED_PILOT_PROFILE || !self.trusted_bounded_pilot {
-                    return Err(WalletError::L2(
-                        "Fast Pay Hub mainnet readiness does not report the required hard guarantee: trusted_bounded_pilot; new funding is blocked"
-                            .into(),
-                    ));
+                    return Err(WalletError::L2(format!(
+                        "Fast Pay Hub mainnet readiness does not report the required hard guarantee: trusted_bounded_pilot; new funding is blocked: it publishes profile \"{}\" with trusted_bounded_pilot {}{}",
+                        self.profile,
+                        self.trusted_bounded_pilot,
+                        append_named_blockers(self.named_blockers())
+                    )));
                 }
             }
         }
@@ -507,6 +621,12 @@ pub fn hub_fee_label(health: &HubHealth) -> Option<String> {
     })
 }
 
+/// Tack the Hub's own blocker identifiers onto a refusal, or nothing when the
+/// Hub published none.
+fn append_named_blockers(named: Option<String>) -> String {
+    named.map_or_else(String::new, |named| format!("; {named}"))
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -531,7 +651,18 @@ pub(crate) enum MainnetFastPayPolicy {
 }
 
 impl L2HubClient {
-    pub fn new(base_url: impl Into<String>) -> Self {
+    /// A client for provider discovery, which asks `/v1/health` and nothing
+    /// else.
+    ///
+    /// Discovery happens before a provider is chosen: there is no amount, no
+    /// channel and no signature, so there is no owner policy to carry and
+    /// `/v1/health` has no gate to skip. It is spelled this way rather than
+    /// `new` so that no future caller reaches for the short name and quietly
+    /// gets a client whose every mainnet gate is switched off - every gate in
+    /// this type sits behind `if self.mainnet`, and this constructor sets that
+    /// to false. Anything that funds, signs, or judges mainnet readiness must
+    /// use [`Self::new_for_wallet_policy`].
+    pub(crate) fn for_health_discovery(base_url: impl Into<String>) -> Self {
         Self::new_for_network(base_url, "testnet")
     }
 
@@ -1164,10 +1295,33 @@ impl L2HubClient {
                 }
             };
             if !health_profile_matches {
-                return Err(WalletError::L2(
-                    "Fast Pay provider does not match the explicitly selected mainnet settlement policy; new funding is blocked"
-                        .into(),
-                ));
+                // The refusal path pays for one extra read, so the user is told
+                // what the Hub is actually waiting on rather than only that the
+                // wallet and the provider disagree. A wallet with the consent
+                // box ticked, pointed at a full mainnet-pilot Hub, used to stop
+                // here with a sentence that named no blocker and quoted nothing
+                // the Hub said - even though the Hub was publishing a precise
+                // list one HTTP GET away. Failing to fetch it changes nothing:
+                // the gate was already shut and stays shut.
+                let published = self
+                    .mainnet_readiness()
+                    .await
+                    .ok()
+                    .and_then(|readiness| readiness.named_blockers());
+                return Err(WalletError::L2(format!(
+                    "Fast Pay provider does not match the explicitly selected mainnet settlement policy; new funding is blocked: your wallet is set to {}, and the provider publishes profile \"{}\"{}",
+                    match self.mainnet_policy {
+                        MainnetFastPayPolicy::TrustlessOnly =>
+                            "trustless settlement only (the mainnet pilot consent box is not ticked)",
+                        MainnetFastPayPolicy::TrustedBoundedPilot =>
+                            "the bounded mainnet pilot you consented to",
+                    },
+                    health
+                        .deployment_profile
+                        .as_deref()
+                        .unwrap_or("unpublished"),
+                    append_named_blockers(published)
+                )));
             }
             // One fetch of the authority, on a path that already paid for it.
             // A missing, malformed, expired or unreachable document errors out
@@ -2199,6 +2353,8 @@ mod transport_tests {
             "profile": "mainnet-pilot",
             "payments_enabled": enabled,
             "close_enabled": true,
+            "trusted_bounded_pilot": false,
+            "close_blockers": [],
             "mainnet_detected": true,
             "fullnode_capabilities": {
                 "observed_unix": now,
@@ -2345,11 +2501,17 @@ mod transport_tests {
             .await
             .unwrap_err()
             .to_string();
+        // Stated as the whole sentence, not a substring, so nothing can be
+        // quietly added, dropped or reworded here without this test saying so.
+        // It names the guarantees that are missing AND quotes the Hub's own
+        // account of why they are missing.
         assert_eq!(
             refusal,
             "l2: Fast Pay Hub mainnet readiness does not report the required hard guarantee: \
-             trustless_finality and unilateral_l1_enforceable; new funding is blocked",
-            "the refusal must name the guarantees that are missing"
+             trustless_finality and unilateral_l1_enforceable; new funding is blocked; \
+             the Hub published blockers: external_monotonic_rollback_anchor_is_not_ready, \
+             unilateral_l1_dispute_path_is_not_ready",
+            "the refusal must name the guarantees that are missing and the Hub's blockers"
         );
 
         anchored.store(true, Ordering::SeqCst);
@@ -2451,6 +2613,71 @@ mod transport_tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// A refusal must quote the Hub's own blockers, on every door a wallet can
+    /// walk up to.
+    ///
+    /// The Hub publishes `blockers`, a list naming exactly what it is waiting
+    /// on. Measured against a live mainnet-pilot Hub, none of the three it was
+    /// publishing reached any string a user could see: the wallet read the list
+    /// as `!is_empty()`, threw the contents away, and said only that readiness
+    /// "is not green". The three identifiers below are the ones that Hub was
+    /// actually serving.
+    ///
+    /// Both consent settings are exercised. Consent withheld is the ordinary
+    /// case; consent given against a full mainnet-pilot Hub is the one the
+    /// wallet used to answer with a sentence about policy mismatch that quoted
+    /// nothing the Hub said, and it is the configuration the refusal criterion
+    /// names.
+    #[tokio::test]
+    async fn a_refusal_quotes_the_blockers_the_hub_published() {
+        const BLOCKERS: [&str; 3] = [
+            "external_monotonic_rollback_anchor_is_not_ready",
+            "unilateral_l1_dispute_path_is_not_ready",
+            "fullnode_does_not_report_verified_channel_unilateral_exit",
+        ];
+        let app = Router::new()
+            .route(
+                "/v1/health",
+                get(|| async { Json(health_json(GATE_HUB_ADDRESS)) }),
+            )
+            .route(
+                "/v1/readiness/mainnet",
+                get(|| async {
+                    let mut value = readiness_json(false, BLOCKERS.to_vec(), 500_000);
+                    value["trustless_finality"] = serde_json::json!(false);
+                    value["unilateral_l1_enforceable"] = serde_json::json!(false);
+                    Json(value)
+                }),
+            );
+        let (url, server) = serve(app).await;
+
+        for consented in [false, true] {
+            let client = L2HubClient::new_for_wallet_policy(&url, "mainnet", consented);
+
+            let payment = client
+                .require_mainnet_payment_ready(Some("0.001"))
+                .await
+                .unwrap_err()
+                .to_string();
+            let funding = client
+                .require_channel_open_ready(GATE_HUB_ADDRESS, "0.005")
+                .await
+                .unwrap_err()
+                .to_string();
+
+            for refusal in [&payment, &funding] {
+                for blocker in BLOCKERS {
+                    assert!(
+                        refusal.contains(blocker),
+                        "a refusal must name what the Hub is waiting on. \
+                         consent={consented}, missing {blocker}, got: {refusal}"
+                    );
+                }
+            }
+        }
+        server.abort();
     }
 
     fn bounded_readiness_json() -> serde_json::Value {
@@ -2732,7 +2959,7 @@ mod transport_tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let error = L2HubClient::new(format!("http://{address}"))
+        let error = L2HubClient::for_health_discovery(format!("http://{address}"))
             .require_mainnet_payment_ready(Some("0.001"))
             .await
             .unwrap_err();
@@ -2748,7 +2975,7 @@ mod transport_tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let error = L2HubClient::new(format!("http://{address}"))
+        let error = L2HubClient::for_health_discovery(format!("http://{address}"))
             .require_mainnet_payment_ready(Some("0.001"))
             .await
             .unwrap_err();
@@ -2777,7 +3004,7 @@ mod transport_tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let client = L2HubClient::new(format!("http://{address}"));
+        let client = L2HubClient::for_health_discovery(format!("http://{address}"));
         client
             .require_mainnet_payment_ready(Some("0.001"))
             .await
@@ -2806,7 +3033,7 @@ mod transport_tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let error = L2HubClient::new(format!("http://{address}"))
+        let error = L2HubClient::for_health_discovery(format!("http://{address}"))
             .health()
             .await
             .unwrap_err();

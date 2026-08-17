@@ -207,6 +207,10 @@ export type SendPreview = {
     rail_detail: string;
     fee_breakdown: SendFeeBreakdown;
     l1_fee_tiers?: L1FeeTierQuote[];
+    // Set when the wallet had Fast Pay set up for this send and chose
+    // not to use it. The blockchain fallback is correct; doing it in
+    // silence was not.
+    fast_pay_declined?: string | null;
   };
   from: string;
   to: string;
@@ -664,6 +668,8 @@ export const api = {
     invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
   setSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) =>
     invoke<void>("wallet_set_second_factor_threshold", { amountMei, currentPassphrase }),
+  setMainnetFastPayConsent: (consented: boolean, currentPassphrase: string) =>
+    invoke<void>("wallet_set_mainnet_fast_pay_consent", { consented, currentPassphrase }),
   updatePrivacySettings: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   updateDustWhisperSettings: (dustWhisper: DustWhisperSettings) =>

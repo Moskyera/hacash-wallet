@@ -38,6 +38,7 @@ type Props = {
     hubUrl: string,
     hubAddress: string,
     trustedMainnetFastPayPilot: boolean,
+    currentPassphrase: string,
   ) => void;
   onHubHealth: () => void;
   onPreviewChannel: (
@@ -88,6 +89,9 @@ export default function FastPayScreen({
   const [hubUrl, setHubUrl] = useState("");
   const [hubAddress, setHubAddress] = useState("");
   const [trustedMainnetPilot, setTrustedMainnetPilot] = useState(false);
+  // Turning the pilot on is an authenticated change, so the screen has to be
+  // able to ask for the passphrase. Turning it off needs nothing.
+  const [mainnetPilotPassphrase, setMainnetPilotPassphrase] = useState("");
   const [channelPreview, setChannelPreview] = useState<ChannelSetupPreview | null>(null);
   const [showFastPayAdvanced, setShowFastPayAdvanced] = useState(false);
   const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
@@ -227,6 +231,20 @@ export default function FastPayScreen({
             />
             I understand the Hub dependency and want to use the capped mainnet pilot.
           </label>
+          {trustedMainnetPilot && !settings?.trusted_mainnet_fast_pay_pilot && (
+            <>
+              <label htmlFor="mainnet-pilot-passphrase">
+                Wallet passphrase, to confirm this choice
+              </label>
+              <input
+                id="mainnet-pilot-passphrase"
+                type="password"
+                autoComplete="current-password"
+                value={mainnetPilotPassphrase}
+                onChange={(event) => setMainnetPilotPassphrase(event.target.value)}
+              />
+            </>
+          )}
         </div>
       )}
 
@@ -358,7 +376,13 @@ export default function FastPayScreen({
             <button
               disabled={busy}
               onClick={() =>
-                onSaveL2Settings(nodeUrl, hubUrl, hubAddress, trustedMainnetPilot)
+                onSaveL2Settings(
+                  nodeUrl,
+                  hubUrl,
+                  hubAddress,
+                  trustedMainnetPilot,
+                  mainnetPilotPassphrase,
+                )
               }
             >
               Save settings

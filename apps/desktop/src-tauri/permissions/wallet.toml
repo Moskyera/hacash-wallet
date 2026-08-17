@@ -140,6 +140,7 @@ commands.allow = [
   "wallet_set_security_profile",
   "wallet_set_second_factor_threshold",
   "wallet_set_hardware_mode",
+  "wallet_set_mainnet_fast_pay_consent",
   "wallet_platform_info",
   "wallet_airgap_prepare_send",
   "wallet_airgap_sign_unsigned",

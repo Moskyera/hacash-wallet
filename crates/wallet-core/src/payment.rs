@@ -33,6 +33,31 @@ pub struct PaymentPlan {
     pub fee_breakdown: SendFeeBreakdown,
     #[serde(default)]
     pub l1_fee_tiers: Vec<L1FeeTierQuote>,
+    /// Why this send is falling back to a paid blockchain transaction, when the
+    /// wallet had a Fast Pay route set up and declined to use it.
+    ///
+    /// The fallback itself is right - refusing to pay at all because the Hub is
+    /// unavailable would be worse. What was wrong was that it happened in
+    /// silence. A user who had ticked the mainnet pilot consent box, opened a
+    /// channel and funded it would tap Send and simply be charged a fee, with
+    /// the wallet holding a precise reason it never showed anyone. `None` means
+    /// Fast Pay was never in play for this send (no provider, no channel), and
+    /// there is nothing to explain.
+    pub fast_pay_declined: Option<String>,
+}
+
+/// The Fast Pay routing decision for one send.
+enum L2Routing {
+    Planned(Box<PaymentPlan>),
+    /// Fast Pay is not carrying this send, with the reason to show the user
+    /// when there is one worth showing.
+    Declined(Option<String>),
+}
+
+impl L2Routing {
+    fn declined(reason: impl Into<String>) -> Self {
+        Self::Declined(Some(reason.into()))
+    }
 }
 
 pub struct PaymentRouter {
@@ -82,10 +107,12 @@ impl PaymentRouter {
         options.validate()?;
         crate::address::require_address_for_network(from, &self.settings.network_mode)?;
         crate::address::require_address_for_network(to, &self.settings.network_mode)?;
-        if !options.force_l1
-            && let Some(plan) = self.try_l2_plan(from, to, amount_mei).await?
-        {
-            return Ok(plan);
+        let mut fast_pay_declined = None;
+        if !options.force_l1 {
+            match self.try_l2_plan(from, to, amount_mei).await? {
+                L2Routing::Planned(plan) => return Ok(*plan),
+                L2Routing::Declined(reason) => fast_pay_declined = reason,
+            }
         }
         let _ = self.node.balance_mei(from).await?;
         let amount_wire = format_mei_for_node(amount_mei);
@@ -120,30 +147,33 @@ impl PaymentRouter {
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L1OnChain).into(),
             fee_breakdown,
             l1_fee_tiers: tier_set.tiers,
+            fast_pay_declined,
         })
     }
 
-    async fn try_l2_plan(
-        &self,
-        from: &str,
-        to: &str,
-        amount_mei: f64,
-    ) -> WalletResult<Option<PaymentPlan>> {
+    async fn try_l2_plan(&self, from: &str, to: &str, amount_mei: f64) -> WalletResult<L2Routing> {
+        // Read the wallet's own Fast Pay configuration first. Everything below
+        // this point is a reason the user deserves to see; everything above it
+        // is "the user never set Fast Pay up", which is not a fallback to
+        // explain.
+        let hub_url = match &self.settings.l2_hub_url {
+            Some(u) => u.clone(),
+            None => return Ok(L2Routing::Declined(None)),
+        };
+        let channel_id = match &self.settings.channel_id_hex {
+            Some(id) => id.clone(),
+            None => return Ok(L2Routing::Declined(None)),
+        };
+
         let from_address = crate::address::parse_address(from, &self.settings.network_mode)?;
         let to_address = crate::address::parse_address(to, &self.settings.network_mode)?;
         if !from_address.fast_pay_eligible || !to_address.fast_pay_eligible {
             // Fast Pay v0 is passive-only. Contracts, P2SH and quantum addresses stay on L1.
-            return Ok(None);
+            return Ok(L2Routing::declined(
+                "Fast Pay carries only plain v0 addresses, and this send uses a contract, \
+                 script or quantum address.",
+            ));
         }
-
-        let hub_url = match &self.settings.l2_hub_url {
-            Some(u) => u.clone(),
-            None => return Ok(None),
-        };
-        let channel_id = match &self.settings.channel_id_hex {
-            Some(id) => id.clone(),
-            None => return Ok(None),
-        };
 
         let hub = L2HubClient::new_for_wallet_policy(
             hub_url,
@@ -152,40 +182,52 @@ impl PaymentRouter {
         );
         let health = match hub.health().await {
             Ok(health) => health,
-            Err(_) => return Ok(None),
+            Err(_) => {
+                return Ok(L2Routing::declined(
+                    "Your Fast Pay provider could not be reached.",
+                ));
+            }
         };
         if !health.ok {
-            return Ok(None);
+            return Ok(L2Routing::declined(
+                "Your Fast Pay provider reports it is not healthy.",
+            ));
         }
         if health.version < 3
             || !health.settlement_ready
             || !crate::l2_hub::hub_fee_is_zero(&health)
         {
             // Fast Pay is fee-free and must produce a dispute-ready settlement bill.
-            return Ok(None);
+            return Ok(L2Routing::declined(
+                "Your Fast Pay provider cannot produce a fee-free, dispute-ready settlement bill.",
+            ));
         }
         if self.settings.network_mode == "mainnet" {
             let amount_wire = format_mei_for_node(amount_mei);
-            if hub
-                .require_mainnet_payment_ready(Some(&amount_wire))
-                .await
-                .is_err()
-            {
-                return Ok(None);
+            // The reason travels with the fallback. This gate refusing used to
+            // be the whole of what the user was told - which was nothing.
+            if let Err(error) = hub.require_mainnet_payment_ready(Some(&amount_wire)).await {
+                return Ok(L2Routing::declined(crate::fast_pay::user_facing_reason(
+                    &error,
+                )));
             }
         }
         let same_channel_payee = health.hub_address.as_deref() == Some(to);
         if !same_channel_payee && !health.cross_channel_ready {
-            return Ok(None);
+            return Ok(L2Routing::declined(
+                "Your Fast Pay provider cannot route to this recipient.",
+            ));
         }
 
         let channel = query_channel(&self.node, &channel_id).await?;
         if !channel_is_ready(&channel, from) {
-            return Ok(None);
+            return Ok(L2Routing::declined(
+                "Your Fast Pay channel is not open and usable for this sender.",
+            ));
         }
 
         let fee_breakdown = fast_pay_fee_breakdown(amount_mei)?;
-        Ok(Some(PaymentPlan {
+        Ok(L2Routing::Planned(Box::new(PaymentPlan {
             rail: PaymentRail::L2Fast,
             summary: format!("Send {amount_mei} HAC to {to}"),
             estimated_fee: "0 HAC".into(),
@@ -194,7 +236,8 @@ impl PaymentRouter {
             rail_detail: crate::fast_pay::rail_detail(PaymentRail::L2Fast).into(),
             fee_breakdown,
             l1_fee_tiers: Vec::new(),
-        }))
+            fast_pay_declined: None,
+        })))
     }
 
     pub async fn execute_l2(
@@ -317,11 +360,19 @@ mod tests {
             BillStore::default(),
         );
 
-        let plan = router
+        let routing = router
             .try_l2_plan(&payer.address(), &payee.address(), 1.0)
             .await
             .unwrap();
-        assert!(plan.is_none());
+        let L2Routing::Declined(reason) = routing else {
+            panic!("an unreachable hub must not produce a Fast Pay plan");
+        };
+        // Falling back is right; falling back in silence is not.
+        assert_eq!(
+            reason.as_deref(),
+            Some("Your Fast Pay provider could not be reached."),
+            "the L1 fallback must carry the reason Fast Pay was not used"
+        );
     }
 
     /// The exact `/v1/readiness/mainnet` bytes a `mainnet-bounded-pilot` Hub
@@ -452,13 +503,23 @@ mod tests {
             settings_for(false),
             BillStore::default(),
         );
+        let refused = without_consent
+            .try_l2_plan(&payer.address(), &payee.address(), 0.005)
+            .await
+            .unwrap();
+        let L2Routing::Declined(reason) = refused else {
+            panic!(
+                "a bounded-pilot Hub must not be used without the wallet owner's explicit consent"
+            );
+        };
+        // The refusal is correct and it must also be legible. This is the
+        // fallback that used to happen in silence: same wallet, same Hub, and
+        // the user is charged an L1 fee with no statement of why.
+        let reason = reason.expect("the L1 fallback must say why Fast Pay was not used");
         assert!(
-            without_consent
-                .try_l2_plan(&payer.address(), &payee.address(), 0.005)
-                .await
-                .unwrap()
-                .is_none(),
-            "a bounded-pilot Hub must not be used without the wallet owner's explicit consent"
+            reason.contains("trustless settlement only")
+                && reason.contains("mainnet-bounded-pilot"),
+            "the reason must name this wallet's policy and the Hub's profile, got: {reason}"
         );
 
         let with_consent = PaymentRouter::new(
@@ -466,13 +527,16 @@ mod tests {
             settings_for(true),
             BillStore::default(),
         );
-        let plan = with_consent
+        let L2Routing::Planned(plan) = with_consent
             .try_l2_plan(&payer.address(), &payee.address(), 0.005)
             .await
             .unwrap()
-            .expect("consented bounded mainnet pilot must produce a Fast Pay plan");
+        else {
+            panic!("consented bounded mainnet pilot must produce a Fast Pay plan");
+        };
         assert_eq!(plan.rail, PaymentRail::L2Fast);
         assert_eq!(plan.channel_id.as_deref(), Some(CHANNEL_ID));
+        assert!(plan.fast_pay_declined.is_none());
 
         // The channel-open gate, against the same served document. The two
         // channel-open call sites in `authorization_service` build their client

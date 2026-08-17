@@ -44,23 +44,8 @@ impl HubState {
             .collect::<Vec<_>>();
         let mut results = Vec::with_capacity(commitments.len());
         for commitment in commitments {
-            let now = crate::node::now_unix();
-            let (operation_id, idempotency_key) =
-                crate::hvm_scheduler::registry_operation_identity(&commitment, now);
             let response = self
-                .run_hvm_registry_lease_renewal(HvmRegistryLeaseRenewalRequestV2 {
-                    schema: crate::hvm_registry_watchtower::HVM_REGISTRY_LEASE_REQUEST_SCHEMA
-                        .into(),
-                    operation_id,
-                    idempotency_key,
-                    binding_commitment: commitment.clone(),
-                    renew_when_blocks_at_or_below: config.renew_when_live_blocks_at_or_below,
-                    periods: config.periods,
-                    network_fee_zhu: config.network_fee_zhu,
-                    timestamp: now,
-                    gas_max: config.gas_max,
-                    created_unix: now,
-                })
+                .hvm_registry_lease_channel_tick(&commitment, config)
                 .await;
             results.push(match response {
                 Ok(response) => crate::hvm_scheduler::HvmRegistryLeaseMaintenanceResult {
@@ -76,6 +61,50 @@ impl HubState {
             });
         }
         Ok(results)
+    }
+
+    /// One channel's lease pass.
+    ///
+    /// The operation is named after a one-minute clock window, so two passes
+    /// inside the same minute deliberately land on the same record — that is
+    /// what makes a repeat a resume instead of a duplicate. But the name is the
+    /// only part of the request the window makes stable: `commitment()` covers
+    /// `timestamp` and `created_unix` too, and `run_hvm_registry_lease_renewal`
+    /// refuses a retry whose commitment moved. Minting a fresh `now` here would
+    /// therefore hand the same record a different request one second later and
+    /// the Hub would refuse its own work, leaving a signed transaction with
+    /// nobody driving it.
+    ///
+    /// So the durable record is the tick's memory of when it first acted: if
+    /// one exists under this name, its exact request is rebuilt from it, and a
+    /// fresh `now` is read only when there is nothing to resume.
+    async fn hvm_registry_lease_channel_tick(
+        &self,
+        binding_commitment: &str,
+        config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
+    ) -> HubResult<HvmRegistryChainResponseV2> {
+        let now = crate::node::now_unix();
+        let (operation_id, idempotency_key) =
+            crate::hvm_scheduler::registry_operation_identity(binding_commitment, now);
+        let request = match self.hvm_registry_lease_renewal_request(
+            &operation_id,
+            config.renew_when_live_blocks_at_or_below,
+        )? {
+            Some(existing) => existing,
+            None => HvmRegistryLeaseRenewalRequestV2 {
+                schema: crate::hvm_registry_watchtower::HVM_REGISTRY_LEASE_REQUEST_SCHEMA.into(),
+                operation_id,
+                idempotency_key,
+                binding_commitment: binding_commitment.to_owned(),
+                renew_when_blocks_at_or_below: config.renew_when_live_blocks_at_or_below,
+                periods: config.periods,
+                network_fee_zhu: config.network_fee_zhu,
+                timestamp: now,
+                gas_max: config.gas_max,
+                created_unix: now,
+            },
+        };
+        self.run_hvm_registry_lease_renewal(request).await
     }
 
     /// Evaluate the watchtower once for every activated registry channel.
@@ -487,6 +516,62 @@ impl HubState {
         Ok(())
     }
 
+    /// Reconstruct the exact durable registry lease-renewal request an
+    /// operation was created from — the registry twin of
+    /// [`Self::hvm_lease_renewal_request`].
+    ///
+    /// A caller that rebuilds its request on every invocation has to reproduce
+    /// the original bytes exactly, or `run_hvm_registry_lease_renewal` refuses
+    /// the retry for changing the durable request. Everything the commitment
+    /// covers is read back from the record here, so the retry is the original
+    /// request rather than a lookalike.
+    ///
+    /// The caller supplies the admission threshold because it is not stored
+    /// separately on the record; the authenticated commitment comparison below
+    /// is what proves the supplied threshold is the original one, so a config
+    /// changed underneath a live operation is caught here and named, rather
+    /// than surfacing later as a bare "retry changed the durable request".
+    pub fn hvm_registry_lease_renewal_request(
+        &self,
+        operation_id: &str,
+        renew_when_blocks_at_or_below: u64,
+    ) -> HubResult<Option<HvmRegistryLeaseRenewalRequestV2>> {
+        if operation_id.trim().is_empty() {
+            return Err(HubError::State(
+                "registry chain operation id is empty".into(),
+            ));
+        }
+        let Some(operation) = self.load_hvm_registry_chain_operation(operation_id)? else {
+            return Ok(None);
+        };
+        if operation.kind != HvmChainOperationKind::RenewAllLeases {
+            return Err(HubError::State(
+                "registry chain operation id does not belong to a lease renewal".into(),
+            ));
+        }
+        let request = HvmRegistryLeaseRenewalRequestV2 {
+            schema: crate::hvm_registry_watchtower::HVM_REGISTRY_LEASE_REQUEST_SCHEMA.into(),
+            operation_id: operation.operation_id,
+            idempotency_key: operation.idempotency_key,
+            binding_commitment: operation.binding_commitment,
+            renew_when_blocks_at_or_below,
+            periods: operation.lease_periods.ok_or_else(|| {
+                HubError::State("durable registry lease renewal omitted its period count".into())
+            })?,
+            network_fee_zhu: operation.network_fee_zhu,
+            timestamp: operation.transaction_timestamp,
+            gas_max: operation.gas_max,
+            created_unix: operation.created_unix,
+        };
+        request.validate()?;
+        if request.commitment()? != operation.request_commitment {
+            return Err(HubError::State(
+                "durable registry lease renewal request commitment is inconsistent".into(),
+            ));
+        }
+        Ok(Some(request))
+    }
+
     pub async fn run_hvm_registry_lease_renewal(
         &self,
         request: HvmRegistryLeaseRenewalRequestV2,
@@ -886,23 +971,29 @@ impl HubState {
         }
     }
 
-    /// The exact transaction timestamp already committed for this operation.
+    /// Both clock fields already committed for this operation, as
+    /// `(transaction_timestamp, created_unix)`.
     ///
     /// A caller that rebuilds its request on every invocation has to reproduce
-    /// the original timestamp exactly, or the Hub refuses the retry for
-    /// changing the durable request. Reading the committed value back is what
-    /// lets that request carry a real clock reading instead of a synthetic
-    /// one: `chain::check` on the fullnode rejects outright any transaction
-    /// whose timestamp exceeds the node's own clock, so a timestamp invented
-    /// to be stable rather than read is a transaction that may never be
-    /// accepted.
-    pub fn hvm_registry_chain_operation_transaction_time(
+    /// the original values exactly, or the Hub refuses the retry for changing
+    /// the durable request. Reading the committed values back is what lets
+    /// that request carry a real clock reading instead of a synthetic one:
+    /// `chain::check` on the fullnode rejects outright any transaction whose
+    /// timestamp exceeds the node's own clock, so a timestamp invented to be
+    /// stable rather than read is a transaction that may never be accepted.
+    ///
+    /// Both are returned together, and deliberately so. The request commitment
+    /// covers `timestamp` and `created_unix` as two independent fields, and
+    /// nothing constrains a writer to set them equal. A caller handed only one
+    /// of them would have to guess the other, and would rebuild a request that
+    /// merely resembles the original the moment any writer set them apart.
+    pub fn hvm_registry_chain_operation_request_clock(
         &self,
         operation_id: &str,
-    ) -> HubResult<Option<u64>> {
+    ) -> HubResult<Option<(u64, u64)>> {
         Ok(self
             .load_hvm_registry_chain_operation(operation_id)?
-            .map(|operation| operation.transaction_timestamp))
+            .map(|operation| (operation.transaction_timestamp, operation.created_unix)))
     }
 
     pub fn hvm_registry_chain_operation_status(

@@ -498,8 +498,19 @@ export function useDesktopWallet(
       hubUrl: string,
       hubAddress: string,
       trustedMainnetFastPayPilot: boolean,
+      currentPassphrase: string,
     ) => {
       if (!settings) return;
+      // Giving consent to the bounded mainnet pilot chooses the settlement
+      // model every later mainnet payment is judged under, so it goes through
+      // its own authenticated command; wallet_update_settings refuses it.
+      // Withdrawing consent is a tightening and rides along with the rest.
+      const grantingConsent =
+        trustedMainnetFastPayPilot && !settings.trusted_mainnet_fast_pay_pilot;
+      if (grantingConsent && !currentPassphrase) {
+        onError("Enter your wallet passphrase to turn on the bounded mainnet pilot.");
+        return;
+      }
       setBusy(true);
       clearMessages();
       try {
@@ -507,10 +518,15 @@ export function useDesktopWallet(
           ...settings,
           node_url: nodeUrl.trim(),
           l2_hub_url: hubUrl.trim() || null,
-          trusted_mainnet_fast_pay_pilot: trustedMainnetFastPayPilot,
+          trusted_mainnet_fast_pay_pilot: grantingConsent
+            ? settings.trusted_mainnet_fast_pay_pilot
+            : trustedMainnetFastPayPilot,
           hub_right_address: hubAddress.trim() || settings.hub_right_address,
         };
         await api.updateSettings(next);
+        if (grantingConsent) {
+          await api.setMainnetFastPayConsent(true, currentPassphrase);
+        }
         await refreshSettings();
         await refreshStatus();
         setHubHealth(undefined);

@@ -487,6 +487,17 @@ fn monitor(
     suffix: &str,
     timestamp: u64,
 ) -> HvmRegistryWatchtowerRequestV2 {
+    monitor_at(binding_commitment, suffix, (timestamp, timestamp))
+}
+
+/// The commitment covers `timestamp` and `created_unix` as two independent
+/// fields, so a replay that means to reproduce a durable request has to carry
+/// both of them rather than deriving one from the other.
+fn monitor_at(
+    binding_commitment: &str,
+    suffix: &str,
+    (timestamp, created_unix): (u64, u64),
+) -> HvmRegistryWatchtowerRequestV2 {
     HvmRegistryWatchtowerRequestV2 {
         schema: HVM_REGISTRY_WATCHTOWER_REQUEST_SCHEMA.into(),
         operation_id: format!("registry-abandon-{suffix}"),
@@ -496,7 +507,7 @@ fn monitor(
         network_fee_zhu: 10_000,
         timestamp,
         gas_max: u8::MAX,
-        created_unix: timestamp,
+        created_unix,
     }
 }
 
@@ -711,11 +722,25 @@ async fn an_abandoned_record_stays_terminal_and_is_never_resubmitted() {
     );
 
     // Driving the original request again resolves to the terminal record.
+    //
+    // "The original request" has to mean the original bytes. The commitment
+    // the Hub compares a retry against covers `timestamp` and `created_unix`,
+    // so a request rebuilt from a fresh `now_unix()` is a *different* request
+    // as soon as the unix second has moved on, and the Hub rightly refuses it
+    // for changing the durable record rather than resolving to the terminal
+    // one this test is about. Every production caller reproduces the committed
+    // timestamp instead of minting a new one - the scheduler tick from the
+    // durable operation, the CLI through exactly the getter used here - and so
+    // does this replay.
+    let committed = hub
+        .hvm_registry_chain_operation_request_clock(&operation_id)
+        .unwrap()
+        .expect("the abandoned record still carries the clock fields it committed to");
     let replayed = hub
-        .run_hvm_registry_watchtower(monitor(
+        .run_hvm_registry_watchtower(monitor_at(
             &harness.binding_commitment,
             "terminal",
-            now_unix() + FUTURE_SKEW_SECONDS,
+            committed,
         ))
         .await
         .unwrap();

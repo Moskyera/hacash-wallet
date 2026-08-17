@@ -279,6 +279,12 @@ export default function PayTab({
             <div className="preview-box animate-in">
               <span className="badge badge-rail">{preview.plan.rail_label}</span>
               <p className="muted small">{preview.plan.rail_detail}</p>
+              {preview.plan.fast_pay_declined ? (
+                <p className="alert small" role="note">
+                  Fast Pay is set up but is not carrying this payment:{" "}
+                  {preview.plan.fast_pay_declined}
+                </p>
+              ) : null}
               <p>
                 <strong>{preview.amount_mei} HAC</strong> →{" "}
                 <code>{maskAddress(preview.to, hideAddresses)}</code>

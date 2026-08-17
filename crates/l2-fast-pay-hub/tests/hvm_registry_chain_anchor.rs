@@ -705,13 +705,13 @@ async fn registry_chain_commits_a_readable_non_future_transaction_time() {
 
     let readback = harness
         .hub
-        .hvm_registry_chain_operation_transaction_time(&operation_id)
+        .hvm_registry_chain_operation_request_clock(&operation_id)
         .unwrap();
     assert_eq!(
         readback,
-        Some(committed_time),
-        "a rebuilt request can only match the durable one if the committed \
-         timestamp reads back exactly"
+        Some((committed_time, committed_time)),
+        "a rebuilt request can only match the durable one if both committed \
+         clock fields read back exactly"
     );
     assert!(
         committed_time <= now_unix(),
@@ -720,7 +720,7 @@ async fn registry_chain_commits_a_readable_non_future_transaction_time() {
     assert_eq!(
         harness
             .hub
-            .hvm_registry_chain_operation_transaction_time("registry-lease-never-created")
+            .hvm_registry_chain_operation_request_clock("registry-lease-never-created")
             .unwrap(),
         None,
         "a first attempt has nothing to read back and must fall through to the clock"

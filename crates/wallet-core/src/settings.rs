@@ -223,6 +223,15 @@ pub struct WalletSettings {
     ///
     /// False is the fail-closed default. This never weakens L1 sends and is
     /// consulted only when constructing an L2 Hub client on mainnet.
+    ///
+    /// Turning it on needs `WalletService::set_trusted_mainnet_fast_pay_pilot`,
+    /// which asks for the wallet passphrase; `update_settings` refuses. Turning
+    /// it off is a tightening and needs nothing. It is still a plain field in a
+    /// plain file, so a party who can write this file can set it - but the same
+    /// party can already point `l2_hub_url` at a Hub of their choosing, so what
+    /// bounds that exposure is the Hub caps and the prepared-review ceremony,
+    /// not this flag. What the authenticated command buys is that no
+    /// unauthenticated caller on the IPC surface can turn it on.
     #[serde(default)]
     pub trusted_mainnet_fast_pay_pilot: bool,
     pub hub_right_address: Option<String>,

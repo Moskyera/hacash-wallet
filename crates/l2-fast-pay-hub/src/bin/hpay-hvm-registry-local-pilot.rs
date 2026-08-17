@@ -877,7 +877,7 @@ async fn run_online(
                 .activate_hvm_registry_recovery(bundle.clone(), 1, 0)
                 .await?;
             let operation_id = stable_id("lease", &commitment, "bootstrap")?;
-            let stable_time = registry_request_time(&hub, &operation_id)?;
+            let (stable_time, stable_created) = registry_request_time(&hub, &operation_id)?;
             let request = HvmRegistryLeaseRenewalRequestV2 {
                 schema: HVM_REGISTRY_LEASE_REQUEST_SCHEMA.into(),
                 operation_id: operation_id.clone(),
@@ -888,7 +888,7 @@ async fn run_online(
                 network_fee_zhu,
                 timestamp: stable_time,
                 gas_max,
-                created_unix: stable_time,
+                created_unix: stable_created,
             };
             let response = wait_registry_chain(
                 || hub.run_hvm_registry_lease_renewal(request.clone()),
@@ -995,7 +995,7 @@ async fn run_online(
                 &commitment,
                 &format!("{action:?}-{operation_label}"),
             )?;
-            let stable_time = registry_request_time(&hub, &operation_id)?;
+            let (stable_time, stable_created) = registry_request_time(&hub, &operation_id)?;
             let request = HvmRegistryWatchtowerRequestV2 {
                 schema: HVM_REGISTRY_WATCHTOWER_REQUEST_SCHEMA.into(),
                 operation_id: operation_id.clone(),
@@ -1005,7 +1005,7 @@ async fn run_online(
                 network_fee_zhu,
                 timestamp: stable_time,
                 gas_max,
-                created_unix: stable_time,
+                created_unix: stable_created,
             };
             let response = wait_registry_chain(
                 || run_registry_watch_action(&hub, action, request.clone()),
@@ -1655,13 +1655,20 @@ fn stable_id(
 /// timestamp already committed for that operation. The rebuilt request is
 /// therefore byte-identical to the persisted one, and the value can never be
 /// in the future.
+/// Both committed clock fields are read back, never one inferred from the
+/// other: the commitment covers `timestamp` and `created_unix` separately, so
+/// deriving the second from the first would rebuild a lookalike rather than
+/// the original request the moment the two were ever written apart.
 fn registry_request_time(
     hub: &HubState,
     operation_id: &str,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    match hub.hvm_registry_chain_operation_transaction_time(operation_id)? {
+) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+    match hub.hvm_registry_chain_operation_request_clock(operation_id)? {
         Some(committed) => Ok(committed),
-        None => unix_timestamp(),
+        None => {
+            let now = unix_timestamp()?;
+            Ok((now, now))
+        }
     }
 }
 

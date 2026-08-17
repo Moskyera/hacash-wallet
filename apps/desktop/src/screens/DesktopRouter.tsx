@@ -86,6 +86,7 @@ export type DesktopActions = {
     hubUrl: string,
     hubAddress: string,
     trustedMainnetFastPayPilot: boolean,
+    currentPassphrase: string,
   ) => void;
   onHubHealth: () => void;
   onPreviewChannel: (

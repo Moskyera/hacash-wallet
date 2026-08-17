@@ -112,6 +112,7 @@ commands.allow = [
   "wallet_execute_prepared_cold_vault_activation",
   "wallet_send_hacd",
   "wallet_set_hardware_mode",
+  "wallet_set_mainnet_fast_pay_consent",
   "wallet_set_security_profile",
   "wallet_set_second_factor_threshold",
   "wallet_status",

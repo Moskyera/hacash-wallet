@@ -144,23 +144,7 @@ impl HubState {
             .collect::<Vec<_>>();
         let mut results = Vec::with_capacity(commitments.len());
         for commitment in commitments {
-            let now = crate::node::now_unix();
-            let (operation_id, idempotency_key) =
-                crate::hvm_scheduler::operation_identity(&commitment, now);
-            let response = self
-                .run_hvm_lease_renewal(HvmLeaseRenewalRequestV1 {
-                    schema: crate::hvm_watchtower::HVM_LEASE_RENEWAL_REQUEST_SCHEMA.into(),
-                    operation_id,
-                    idempotency_key,
-                    binding_commitment: commitment.clone(),
-                    renew_when_live_blocks_at_or_below: config.renew_when_live_blocks_at_or_below,
-                    periods: config.periods,
-                    network_fee_zhu: config.network_fee_zhu,
-                    timestamp: now,
-                    gas_max: config.gas_max,
-                    created_unix: now,
-                })
-                .await;
+            let response = self.hvm_lease_channel_tick(&commitment, config).await;
             results.push(match response {
                 Ok(response) => crate::hvm_scheduler::HvmLeaseMaintenanceResult {
                     binding_commitment: commitment,
@@ -175,6 +159,49 @@ impl HubState {
             });
         }
         Ok(results)
+    }
+
+    /// One channel's lease pass.
+    ///
+    /// The operation is named after a one-minute clock window, so two passes
+    /// inside the same minute deliberately land on the same record — that is
+    /// what makes a repeat a resume instead of a duplicate. But the name is the
+    /// only part of the request the window makes stable: `commitment()` covers
+    /// `timestamp` and `created_unix` too, and `run_hvm_lease_renewal` refuses
+    /// a retry whose commitment moved. Minting a fresh `now` here would
+    /// therefore hand the same record a different request one second later and
+    /// the Hub would refuse its own work, leaving a signed transaction with
+    /// nobody driving it.
+    ///
+    /// So the durable record is the tick's memory of when it first acted: if
+    /// one exists under this name, its exact request is rebuilt from it, and a
+    /// fresh `now` is read only when there is nothing to resume.
+    async fn hvm_lease_channel_tick(
+        &self,
+        binding_commitment: &str,
+        config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
+    ) -> HubResult<HvmWatchtowerResponseV1> {
+        let now = crate::node::now_unix();
+        let (operation_id, idempotency_key) =
+            crate::hvm_scheduler::operation_identity(binding_commitment, now);
+        let request = match self
+            .hvm_lease_renewal_request(&operation_id, config.renew_when_live_blocks_at_or_below)?
+        {
+            Some(existing) => existing,
+            None => HvmLeaseRenewalRequestV1 {
+                schema: crate::hvm_watchtower::HVM_LEASE_RENEWAL_REQUEST_SCHEMA.into(),
+                operation_id,
+                idempotency_key,
+                binding_commitment: binding_commitment.to_owned(),
+                renew_when_live_blocks_at_or_below: config.renew_when_live_blocks_at_or_below,
+                periods: config.periods,
+                network_fee_zhu: config.network_fee_zhu,
+                timestamp: now,
+                gas_max: config.gas_max,
+                created_unix: now,
+            },
+        };
+        self.run_hvm_lease_renewal(request).await
     }
 
     pub async fn run_hvm_lease_renewal(

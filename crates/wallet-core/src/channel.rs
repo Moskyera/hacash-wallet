@@ -366,13 +366,37 @@ pub async fn query_channel(node: &NodeClient, channel_id_hex: &str) -> WalletRes
         .send()
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
-    let info: ChannelInfo = resp
+    // Read the node's own verdict before demanding the full channel shape. A
+    // real Hacash fullnode answers an unknown channel with
+    // `{"err":"channel not found","ret":1}` and nothing else, which does not
+    // deserialize into `ChannelInfo`; decoding first turned every
+    // never-opened channel into an opaque "error decoding response body" and
+    // made the `channel not found` branch every caller depends on
+    // unreachable. The Hub's own client already reads it in this order
+    // (`l2-fast-pay-hub/src/node.rs`), and the Hub is the half that was
+    // proven against the live chain.
+    let value: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| WalletError::Node(e.to_string()))?;
-    if info.ret != 0 {
-        return Err(WalletError::Node("channel not found".into()));
+    if value.get("ret").and_then(serde_json::Value::as_i64) != Some(0) {
+        let message = value
+            .get("err")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("fullnode rejected the channel query")
+            .trim();
+        if message.eq_ignore_ascii_case("channel not found") {
+            return Err(WalletError::Node("channel not found".into()));
+        }
+        // Anything else is not "there is no channel here". Saying so would
+        // invite a caller to open a second incarnation over a channel the
+        // node simply would not talk about.
+        return Err(WalletError::Node(format!(
+            "fullnode channel query rejected: {message}"
+        )));
     }
+    let info: ChannelInfo = serde_json::from_value(value)
+        .map_err(|e| WalletError::Node(format!("invalid fullnode channel response: {e}")))?;
     Ok(info)
 }
 
@@ -835,5 +859,92 @@ mod tests {
         assert!(
             cooperative_close_settlement(&channel, &trusted_state("0.0099", "0.0001")).is_err()
         );
+    }
+
+    /// The exact bytes a real Hacash fullnode serves for a channel that does
+    /// not exist, and for one that does.
+    ///
+    /// Captured with `curl` from `hacash-fullnode 1.0.10` on private chain 7:
+    ///
+    /// ```text
+    /// $ curl 'http://127.0.0.1:8217/query/channel?unit=mei&id=00112233445566778899aabbccddeeff'
+    /// {"err":"channel not found","ret":1}
+    /// ```
+    ///
+    /// That body carries no `id`, `status`, `left` or `right`, so decoding it
+    /// into `ChannelInfo` first fails, and the failure used to surface as
+    /// `error decoding response body` rather than `channel not found`. Every
+    /// caller that opens a first channel branches on the latter, so the very
+    /// first channel open against a live node could not get past the preview.
+    /// The mocked node in the Hub's own tests answers with a fully populated
+    /// object carrying `ret: 1`, which is why nothing caught it.
+    #[tokio::test]
+    async fn a_missing_channel_reads_as_not_found_on_the_real_wire_shape() {
+        use axum::{Router, routing::get};
+
+        let app = Router::new()
+            .route(
+                "/query/channel",
+                get(|axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    match query.get("id").map(String::as_str) {
+                        Some("00112233445566778899aabbccddeeff") => {
+                            r#"{"err":"channel not found","ret":1}"#
+                        }
+                        Some("aabb00112233445566778899ccddeeff") => {
+                            r#"{"err":"fullnode is still syncing","ret":1}"#
+                        }
+                        _ => {
+                            r#"{"arbitration_lock":5000,"close_height":0,"id":"2ff63939188c96bb6b1ace32ab88faac","interest_attribution":0,"left":{"address":"1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS","hacash":"1","satoshi":0},"open_height":42,"ret":0,"reuse_version":1,"right":{"address":"1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW","hacash":"0","satoshi":0},"status":0}"#
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let node = NodeClient::new(base).unwrap();
+
+        let missing = query_channel(&node, CHANNEL_ID).await.unwrap_err();
+        assert!(
+            missing.to_string().contains("channel not found"),
+            "{missing}"
+        );
+        assert_eq!(
+            next_channel_reuse_version(&node, CHANNEL_ID, LEFT_ADDRESS, RIGHT_ADDRESS)
+                .await
+                .unwrap(),
+            1,
+            "a channel the node has never seen is incarnation 1"
+        );
+
+        // A node that refuses to answer is not a node saying there is no
+        // channel. It must not read as an invitation to open one.
+        let refused = query_channel(&node, "aabb00112233445566778899ccddeeff")
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("still syncing"), "{refused}");
+        assert!(!refused.to_string().contains("channel not found"));
+        assert!(
+            next_channel_reuse_version(
+                &node,
+                "aabb00112233445566778899ccddeeff",
+                LEFT_ADDRESS,
+                RIGHT_ADDRESS
+            )
+            .await
+            .is_err()
+        );
+
+        // And a real channel still has to decode in full.
+        let live = query_channel(&node, "2ff63939188c96bb6b1ace32ab88faac")
+            .await
+            .unwrap();
+        assert_eq!(live.status, CHANNEL_STATUS_OPENING);
+        assert_eq!(live.reuse_version, 1);
+        assert_eq!(live.left.hacash, "1");
+
+        server.abort();
     }
 }

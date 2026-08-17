@@ -337,6 +337,12 @@ export default function SendScreen({
               <h3>Review & confirm</h3>
               <div className={railBadgeClass(preview.plan.rail)}>{preview.plan.rail_label}</div>
               <p className="muted">{preview.plan.rail_detail}</p>
+              {preview.plan.fast_pay_declined ? (
+                <p className="alert" role="note">
+                  Fast Pay is set up but is not carrying this payment:{" "}
+                  {preview.plan.fast_pay_declined}
+                </p>
+              ) : null}
               <p>
                 <strong>{formatHacMei(preview.amount_mei)} HAC</strong> →{" "}
                 <code>{maskAddress(preview.to, hideAddresses)}</code>

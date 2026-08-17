@@ -631,6 +631,46 @@ impl WalletService {
         self.finish_prepared_history(pending, result)
     }
 
+    /// Record a channel that the node has confirmed, everywhere it is read.
+    ///
+    /// The payment router keeps its own copy of the settings, and that copy is
+    /// what the Send screen asks for a channel. Writing `channel_id_hex` into
+    /// `self.settings` and saving the file left the router still holding the
+    /// pre-open snapshot, in which there is no channel; `try_l2_plan` read
+    /// `None`, returned no Fast Pay plan, and the send fell through to a paid
+    /// L1 transaction. Silently: the user had just opened and funded a
+    /// channel, was shown "channel confirmed", and then paid a fee anyway,
+    /// until something else happened to rebuild the router or the wallet was
+    /// restarted. Every other site that mutates and saves settings refreshes
+    /// the router in the same breath; the three channel-open confirmation
+    /// sites did not, and now they do, through here.
+    fn adopt_confirmed_channel(&mut self, channel_id: &str) -> WalletResult<()> {
+        self.set_active_channel(Some(channel_id.to_owned()))
+    }
+
+    /// Forget a channel the node has confirmed closed, everywhere it is read.
+    ///
+    /// The mirror of [`Self::adopt_confirmed_channel`], and it was missing for
+    /// the same reason: the two channel-close confirmation sites wrote
+    /// `channel_id_hex = None` into `self.settings`, saved, and returned,
+    /// leaving the payment router holding a channel that no longer exists. That
+    /// direction is the safe one - `channel_is_ready` rejects a closed channel,
+    /// so the send falls back to L1 rather than paying into a dead channel -
+    /// but the user is quoted a free Fast Pay send on the Send screen and then
+    /// charged a blockchain fee, until the wallet is restarted. Same omission,
+    /// same long-lived `WalletService`, so it goes through one place now.
+    fn release_closed_channel(&mut self) -> WalletResult<()> {
+        self.set_active_channel(None)
+    }
+
+    fn set_active_channel(&mut self, channel_id: Option<String>) -> WalletResult<()> {
+        self.settings.channel_id_hex = channel_id;
+        self.settings.save()?;
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
+        Ok(())
+    }
+
     pub async fn prepare_channel_open(
         &mut self,
         hub_address: &str,
@@ -967,9 +1007,18 @@ impl WalletService {
         let response = match client.open_channel(&request).await {
             Ok(response) => response,
             Err(error) => {
+                // Recovery stays required: this wallet cannot tell a Hub that
+                // refused the request from a Hub that accepted it and then lost
+                // the answer, and guessing the safe-looking one is how funds go
+                // missing. What it can do is lead with what the Hub actually
+                // said instead of burying it behind an operation id - a user
+                // the Hub turned away for not being on its pilot allowlist was
+                // reading a sentence about uncertainty and an id, with the real
+                // reason trailing off the end of it.
                 safety.mark_recovery_required()?;
                 return Err(WalletError::L2(format!(
-                    "channel-open Hub result is uncertain; recover operation {}: {error}",
+                    "the Fast Pay Hub did not confirm this channel open: {error}. The wallet is \
+                     holding operation {} for recovery; recover it before opening another channel.",
                     request.operation_id
                 )));
             }
@@ -996,8 +1045,7 @@ impl WalletService {
                 if exact_open_channel_matches(&channel, &preview, preview.reuse_version) =>
             {
                 safety.mark_confirmed()?;
-                self.settings.channel_id_hex = Some(preview.channel_id.clone());
-                self.settings.save()?;
+                self.adopt_confirmed_channel(&preview.channel_id)?;
                 crate::l1_channel_safety::clear_pending_locator(
                     self.require_signing_account()?,
                     &request.operation_id,
@@ -1099,8 +1147,7 @@ impl WalletService {
                     if exact_open_channel_matches(&channel, &preview, preview.reuse_version) =>
                 {
                     safety.mark_confirmed()?;
-                    self.settings.channel_id_hex = Some(preview.channel_id.clone());
-                    self.settings.save()?;
+                    self.adopt_confirmed_channel(&preview.channel_id)?;
                     crate::l1_channel_safety::clear_pending_locator(
                         self.require_signing_account()?,
                         &operation.operation_id,
@@ -1171,8 +1218,7 @@ impl WalletService {
                 if exact_open_channel_matches(&channel, &preview, preview.reuse_version) =>
             {
                 safety.mark_confirmed()?;
-                self.settings.channel_id_hex = Some(preview.channel_id.clone());
-                self.settings.save()?;
+                self.adopt_confirmed_channel(&preview.channel_id)?;
                 crate::l1_channel_safety::clear_pending_locator(
                     self.require_signing_account()?,
                     &operation.operation_id,
@@ -1557,8 +1603,7 @@ impl WalletService {
         let durable = safety.persist_hub_response(&response)?;
         match durable.status {
             crate::l1_channel_close_safety::ChannelCloseStatus::Confirmed => {
-                self.settings.channel_id_hex = None;
-                self.settings.save()?;
+                self.release_closed_channel()?;
                 let hash = response.transaction_hash.ok_or_else(|| {
                     WalletError::L2("confirmed channel close is missing transaction hash".into())
                 })?;
@@ -1665,8 +1710,7 @@ impl WalletService {
         let durable = safety.persist_hub_response(&response)?;
         match durable.status {
             crate::l1_channel_close_safety::ChannelCloseStatus::Confirmed => {
-                self.settings.channel_id_hex = None;
-                self.settings.save()?;
+                self.release_closed_channel()?;
                 let hash = response.transaction_hash.ok_or_else(|| {
                     WalletError::L2("confirmed channel close is missing transaction hash".into())
                 })?;

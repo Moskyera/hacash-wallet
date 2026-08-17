@@ -639,6 +639,64 @@ async fn the_same_situation_ticked_twice_does_not_produce_two_operations() {
     harness.server.abort();
 }
 
+/// A watchtower runs for as long as the channel does, so its retries land at
+/// later and later seconds. The durable request it compares itself against
+/// covers `timestamp` and `created_unix`, and a retry whose commitment moved is
+/// refused outright with "registry watchtower retry changed the durable
+/// request". If the tick derived either field from the caller's clock instead
+/// of from the record, the very first retry that crossed a second boundary
+/// would refuse its own operation and the record would be stranded forever.
+///
+/// So the gap here is real wall clock, not a simulated one, and it is crossed
+/// repeatedly: every pass after the first must still resolve to the same
+/// operation, never error, and never broadcast a second time.
+#[tokio::test]
+async fn a_retry_a_real_second_later_drives_the_same_operation_and_is_never_refused() {
+    let harness = harness("clock-gap").await;
+    // Short of finality, so the operation stays live and every later pass is a
+    // genuine retry of the durable record rather than a fresh situation.
+    harness.mock.confirmations.store(2, Ordering::SeqCst);
+    harness
+        .challenge("clock-gap-left", OBSERVED_HEIGHT + 10)
+        .await;
+
+    let hub = harness.hub();
+    let config = scheduler_config();
+    let first = hub.hvm_registry_watchtower_tick(&config).await.unwrap();
+    let first = first[0].response.as_ref().unwrap().clone();
+    assert_eq!(first.action, "respond");
+    assert_eq!(first.status, "submitted");
+    assert_eq!(harness.submits(), 1);
+
+    let opened_at = now_unix();
+    for pass in 1..=4 {
+        // Long enough that the unix second has certainly changed since the
+        // previous pass. This is the exact condition under which a clock-derived
+        // request would produce different bytes.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        let results = hub.hvm_registry_watchtower_tick(&config).await.unwrap();
+        assert_eq!(
+            results[0].error, None,
+            "pass {pass} refused its own durable operation"
+        );
+        let response = results[0].response.as_ref().unwrap();
+        assert_eq!(
+            response.operation_id, first.operation_id,
+            "pass {pass} named a different operation"
+        );
+        assert_eq!(
+            harness.submits(),
+            1,
+            "pass {pass} broadcast the response a second time"
+        );
+    }
+    assert!(
+        now_unix() > opened_at,
+        "the passes must genuinely have spanned more than one unix second"
+    );
+    harness.server.abort();
+}
+
 /// One channel whose evidence cannot be read must not take the others down
 /// with it. The tick records the failure against that binding and keeps going.
 #[tokio::test]

@@ -60,6 +60,9 @@ export default function FastPayChannelScreen({
   const [userDeposit, setUserDeposit] = useState("10");
   const [hubDeposit, setHubDeposit] = useState("0");
   const [trustedMainnetPilot, setTrustedMainnetPilot] = useState(false);
+  // Turning the pilot on is an authenticated change, so the screen has to be
+  // able to ask for the passphrase. Turning it off needs nothing.
+  const [mainnetPilotPassphrase, setMainnetPilotPassphrase] = useState("");
   const [preview, setPreview] = useState<ChannelSetupPreview | null>(null);
   const [inboxProbe, setInboxProbe] = useState<AsyncProbe<FastPayInboxItem[]>>(
     () => loadingProbe([]),
@@ -212,12 +215,31 @@ export default function FastPayChannelScreen({
 
   async function handleSaveMainnetPilotConsent() {
     if (!settings || settings.network_mode !== "mainnet") return;
+    // Giving consent chooses the settlement model every later mainnet payment
+    // and channel open is judged under, so it goes through its own
+    // authenticated command; wallet_update_settings refuses it. Withdrawing
+    // consent is a tightening and stays on the generic path, so a user can
+    // always step back out.
+    const grantingConsent =
+      trustedMainnetPilot && !settings.trusted_mainnet_fast_pay_pilot;
+    if (grantingConsent && !mainnetPilotPassphrase) {
+      onToast(
+        "Enter your wallet passphrase to turn on the bounded mainnet pilot.",
+        "error",
+      );
+      return;
+    }
     setBusy(true);
     try {
-      await api.updateSettings({
-        ...settings,
-        trusted_mainnet_fast_pay_pilot: trustedMainnetPilot,
-      });
+      if (grantingConsent) {
+        await api.setMainnetFastPayConsent(true, mainnetPilotPassphrase);
+      } else {
+        await api.updateSettings({
+          ...settings,
+          trusted_mainnet_fast_pay_pilot: trustedMainnetPilot,
+        });
+      }
+      setMainnetPilotPassphrase("");
       await onRefresh();
       onToast(
         trustedMainnetPilot
@@ -307,6 +329,22 @@ export default function FastPayChannelScreen({
               />
               I understand the Hub dependency and want to use the capped mainnet pilot.
             </label>
+            {trustedMainnetPilot && !settings.trusted_mainnet_fast_pay_pilot ? (
+              <>
+                <label htmlFor="mainnet-pilot-passphrase" className="muted small">
+                  Wallet passphrase, to confirm this choice
+                </label>
+                <input
+                  id="mainnet-pilot-passphrase"
+                  type="password"
+                  autoComplete="current-password"
+                  style={{ width: "100%" }}
+                  value={mainnetPilotPassphrase}
+                  onChange={(event) =>
+                    setMainnetPilotPassphrase(event.target.value)}
+                />
+              </>
+            ) : null}
             <button
               type="button"
               style={{ marginTop: "0.75rem", width: "100%" }}
