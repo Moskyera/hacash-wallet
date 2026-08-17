@@ -741,7 +741,27 @@ fn validate_rollback_anchor_state(state: &HubPersistedState) -> HubResult<()> {
                 "rollback anchor receipt for {operation_id} does not restate its request"
             )));
         }
-        if receipt.counter_value > anchor.pin.highest_counter_value {
+        // The pinned counter belongs to the pinned witness. A continuity
+        // reservation is by construction answered by a *different* store - the
+        // ceremony exists only while the pin no longer matches, and it
+        // deliberately does not move the pin - so its counter is a position in
+        // an unrelated sequence and comparing the two is a category error.
+        // Left in, it made the declaration permanently unavailable (a hard 500,
+        // on every read) for exactly the honest operator the path exists to
+        // rescue, whenever the replacement store happened to be ahead of the
+        // incumbent. The invariant that does apply is checked instead, and it
+        // is a stronger one: a continuity receipt must not come from the pinned
+        // store at all.
+        if operation_id.starts_with(crate::rollback_anchor::CONTINUITY_REQUEST_ID_PREFIX) {
+            if !anchor.pin.witness_instance_id.is_empty()
+                && receipt.witness_instance_id == anchor.pin.witness_instance_id
+            {
+                return Err(HubError::State(format!(
+                    "rollback anchor continuity reservation {operation_id} is receipted by the \
+                     witness store this Hub pinned, so it re-anchors nothing"
+                )));
+            }
+        } else if receipt.counter_value > anchor.pin.highest_counter_value {
             return Err(HubError::State(format!(
                 "rollback anchor receipt for {operation_id} is ahead of the durable counter"
             )));

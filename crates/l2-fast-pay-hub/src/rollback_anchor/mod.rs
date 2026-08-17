@@ -35,6 +35,7 @@
 
 pub mod client;
 mod codec;
+pub mod continuity;
 pub mod protocol;
 #[cfg(feature = "rollback-witness")]
 pub mod witness;
@@ -58,6 +59,10 @@ pub use client::{
     ROLLBACK_ANCHOR_EVIDENCE_SCHEMA, RollbackAnchorClient, RollbackAnchorConfig,
     RollbackAnchorEvidenceV1, RollbackAnchorPin, VerifiedAnchorReceipt, VerifiedWitnessStatus,
     WitnessEndpointPosture, witness_store_in_hub_state_tree,
+};
+pub use continuity::{
+    ANCHOR_CONTINUITY_DECLARATION_SCHEMA, AnchorContinuityDeclarationV1,
+    CONTINUITY_REQUEST_ID_PREFIX, WITNESS_IDENTITY_BREAK_SCHEMA, WitnessIdentityBreakV1,
 };
 pub use protocol::{
     HubAnchorRequestV1, HubWitnessAnswerV1, HubWitnessReceiptV1, HubWitnessRefusalV1,

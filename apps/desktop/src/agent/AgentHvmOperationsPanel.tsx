@@ -7,6 +7,7 @@ import {
   type AgentHvmRegistryBinding,
   type AnchorWitnessAnswer,
   type AnchorWitnessChange,
+  type AnchorWitnessRecord,
 } from "./api";
 
 type Props = {
@@ -31,6 +32,36 @@ type HvmRail = "registry_v2" | "legacy_v1";
 
 function isHvmRail(value: string): value is HvmRail {
   return value === "registry_v2" || value === "legacy_v1";
+}
+
+/**
+ * Is this a re-affirmation of the head the wallet already holds, rather than a
+ * new bill?
+ *
+ * A continuity declaration always is: same serial, same bill commitment. The
+ * copy written for a pending payment is actively misleading there — it shows
+ * "last accepted" and "being offered" as the same serial and tells the reader
+ * nothing was spent, describing a transaction that does not exist and never
+ * will, because the Hub can no longer co-sign anything.
+ */
+function isReAffirmation(change: AnchorWitnessChange): boolean {
+  return change.serial === change.last_accepted_serial;
+}
+
+/**
+ * Name a witness by the pair the wallet actually keyed on.
+ *
+ * The address alone is not enough, and the case where it is not enough is the
+ * one that matters most: a witness store rebuilt from nothing keeps its signing
+ * key, so the dropped and the offered rows render as the identical string and
+ * the reader is asked to spot a difference that is not on screen. The store
+ * instance is the half that changed, and it is already on the wire.
+ */
+function describeWitnesses(records: AnchorWitnessRecord[]): string {
+  if (records.length === 0) return "none";
+  return records
+    .map((record) => `${record.signer_address} (store ${record.witness_instance_id.slice(0, 16)}...)`)
+    .join(", ");
 }
 
 function replaceOperation(
@@ -69,15 +100,49 @@ export function AgentHvmOperationsPanel({
       // read back rather than remembered. This is the only place the question
       // reaches a person, and until it is answered the channel does not
       // advance in either direction.
+      //
+      // Every operation is read, not only the recoverable ones. A decision is
+      // parked against a *channel*, and the channel that most needs the
+      // question asked is one whose payments all committed cleanly and whose
+      // Hub then lost its witness - so the last operation on it is `committed`
+      // and gating on recoverability would hide the question exactly where it
+      // matters.
       const parked: Record<string, AnchorWitnessChange> = {};
+      const askedChannels = new Set<string>();
       for (const operation of loaded) {
-        if (!RECOVERABLE.has(operation.status)) continue;
         try {
           const change = await agentWalletApi.hvmAnchorDecision(walletId, operation.operation_id);
-          if (change) parked[operation.operation_id] = change;
+          if (change) {
+            parked[operation.operation_id] = change;
+            askedChannels.add(operation.binding_commitment);
+          }
         } catch {
           // A decision that cannot be read is not a decision that can be
           // skipped: the recover path refuses on its own while one is parked.
+        }
+      }
+      // Then the one question nothing else can ever ask.
+      //
+      // A Hub whose single witness was replaced will never co-sign another
+      // bill, and every other route into the witness ratchet runs on a new
+      // bill. So no payment, retry or recovery will ever park a decision on
+      // that channel again: without this call the owner's entire evidence is a
+      // channel that quietly stopped working. Once per channel per read, and
+      // only for channels that do not already owe an answer.
+      for (const operation of loaded) {
+        if (askedChannels.has(operation.binding_commitment)) continue;
+        askedChannels.add(operation.binding_commitment);
+        try {
+          const change = await agentWalletApi.refreshHvmAnchorContinuity(
+            walletId,
+            operation.operation_id,
+          );
+          if (change) parked[operation.operation_id] = change;
+        } catch {
+          // Expected on every healthy Hub: one in agreement with its pinned
+          // witness has nothing to declare and says so. A declaration that
+          // cannot be fetched changes nothing here - the channel is in exactly
+          // the state it was already in.
         }
       }
       setAnchorDecisions(parked);
@@ -296,22 +361,37 @@ export function AgentHvmOperationsPanel({
                   <p className="agent-warning">
                     {anchorChange.headline}. This is what an operator changing witnesses looks like, and it is also what a Hub re-using a bill number it already spent looks like. From here they are the same, so only you can answer it. Nothing was accepted and nothing was spent.
                   </p>
+                  {isReAffirmation(anchorChange) ? (
+                    // No new bill is on the table, and saying "bill being
+                    // offered" here would be describing a payment that does not
+                    // exist. This is a Hub that cannot sign at all any more,
+                    // re-showing the head this wallet already holds under a
+                    // different witness - so the honest framing is about the
+                    // channel's future, not about a pending payment.
+                    <p className="agent-muted">
+                      No new payment is involved. This Hub is re-showing the bill you already hold at serial {anchorChange.serial}, vouched for by a different witness. A Hub in this state has stopped being able to co-sign, so accepting the new witness does not restore payments on this channel — closing on the bill you already hold is what actually settles it.
+                    </p>
+                  ) : (
+                    <dl className="agent-detail-grid">
+                      <Detail label="Last bill you accepted" value={`Serial ${anchorChange.last_accepted_serial}`} />
+                      <Detail label="Bill being offered" value={`Serial ${anchorChange.serial}`} />
+                    </dl>
+                  )}
                   <dl className="agent-detail-grid">
-                    <Detail label="Last bill you accepted" value={`Serial ${anchorChange.last_accepted_serial}`} />
-                    <Detail label="Bill being offered" value={`Serial ${anchorChange.serial}`} />
                     <Detail
                       label="Witnesses no longer covering this channel"
-                      value={anchorChange.dropped.map((record) => record.signer_address).join(", ") || "none"}
+                      value={describeWitnesses(anchorChange.dropped)}
                       wide
                     />
                     <Detail
                       label="Witnesses this Hub offers now"
-                      value={anchorChange.offered.map((record) => record.signer_address).join(", ") || "none"}
+                      value={describeWitnesses(anchorChange.offered)}
                       wide
                     />
                   </dl>
                   <button
                     type="button"
+                    className={isReAffirmation(anchorChange) ? "agent-primary-action" : undefined}
                     disabled={busy}
                     onClick={() => void resolveAnchor(operation.operation_id, "close_channel")}
                   >
@@ -319,7 +399,7 @@ export function AgentHvmOperationsPanel({
                   </button>
                   <button
                     type="button"
-                    className="agent-primary-action"
+                    className={isReAffirmation(anchorChange) ? undefined : "agent-primary-action"}
                     disabled={busy}
                     onClick={() => void resolveAnchor(operation.operation_id, "accept_new_witness_set")}
                   >

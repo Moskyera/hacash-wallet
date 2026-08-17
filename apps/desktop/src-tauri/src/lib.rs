@@ -142,6 +142,7 @@ pub fn run() {
             wallet_tauri_common::agent_commands::agent_wallet_reconcile_hvm,
             wallet_tauri_common::agent_commands::agent_wallet_retry_hvm_exact,
             wallet_tauri_common::agent_commands::agent_wallet_hvm_anchor_decision,
+            wallet_tauri_common::agent_commands::agent_wallet_refresh_hvm_anchor_continuity,
             wallet_tauri_common::agent_commands::agent_wallet_resolve_hvm_anchor_decision,
             wallet_tauri_common::agent_commands::agent_wallet_list_pending_approvals,
             wallet_tauri_common::agent_commands::agent_wallet_revoke_agent,

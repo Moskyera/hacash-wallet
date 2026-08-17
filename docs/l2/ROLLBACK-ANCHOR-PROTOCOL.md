@@ -36,6 +36,34 @@ Nothing in this design touches `require_registry_non_mainnet`. The registry
 mainnet refusal stands exactly as written and is evaluated before any witness
 traffic, as it is today.
 
+### How many witnesses this protocol is spoken to
+
+**Exactly one, or none.** Both are settled decisions rather than current limits,
+and the rest of this document assumes them:
+
+- **A Hub has exactly one witness**, permanently and by design. The Hub holds a
+  single client, `rollback_anchor: Option<RollbackAnchorClient>`
+  (the `rollback_anchor` field of `HubState`,
+  `crates/l2-fast-pay-hub/src/state.rs`). There is no quorum, no threshold,
+  no fan-out, no set membership and no adoption ceremony anywhere in this
+  protocol, and none of them is missing work. A multi-witness build was attempted
+  and reverted because per-witness durable keying let a restored Hub, repointed
+  at attacker-controlled witnesses, re-sign a serial it had already signed; the
+  single-witness Hub was never affected by that hole. ADR-001, "One witness, by
+  design", records it in full so nobody re-adds it as an upgrade.
+- **Running a witness at all is optional.** The `Option` is genuinely optional:
+  `None` is a supported configuration that measures
+  `external_rollback_anchor_ready = false` and says so, rather than a broken one.
+  What is not optional is what happens once a witness *is* configured — every
+  refusal in this document holds, with no bypass.
+
+Where this document says "list", "set" or "every witness", read it as the shape
+of a comparison that is safe to write generally, not as a promise of more than
+one. Changing witness is therefore never a partial event: it is a **total**
+witness change, which the payer sees as zero overlap and adjudicates. That is
+the whole of rotation, and it is simpler than a rotation ceremony rather than a
+substitute for one.
+
 ---
 
 ## 2. Canonical encoding
@@ -199,11 +227,19 @@ a denial of service on a path where no bypass is permitted — and it would buy
 nothing, since obtaining the receipt already advanced the witness's counter.
 
 An absent `anchor_receipts` field deserialises to an empty list, and empty is
-never "skip the check": it means *every remembered witness was dropped*, which
-is the loudest prompt in the system. A Hub cannot reset a counterparty's ratchet
-by omission. See ADR-001, "The counterparty ratchet", for what this buys and for
+never "skip the check": it means *the remembered witness was dropped*, which is
+the loudest prompt in the system. A Hub cannot reset a counterparty's ratchet by
+omission. See ADR-001, "The counterparty ratchet", for what this buys and for
 the two residuals — a brand-new counterparty with no history, and a colluding
 witness — that it does not.
+
+The field is a list because that is the safe shape for the comparison, not
+because a Hub may present several. **A Hub has exactly one witness**
+(the `rollback_anchor` field of `HubState`, an `Option` of one client), so in
+practice the list holds zero receipts or one. That is settled design and not a
+limitation awaiting a lift — see ADR-001, "One witness, by design", for the
+multi-witness build that was attempted and reverted and why the extra witness
+was itself the bug.
 
 Because a wallet can crash between the Hub signing and the wallet persisting,
 the payment status document carries `anchor_receipts` beside
@@ -221,13 +257,24 @@ all — it invites the reader to assume a check that is not there.
 
 Re-accepting the exact recorded head is therefore allowed, and it is the only
 door in the ratchet that leads to "yes" without advancing anything. It is a
-narrow one: the receipts offered must still cover **every** witness the wallet
-recorded, and no recorded witness may present a counter below the one already
-held. An earlier build returned early on `serial == accepted_serial &&
-commitment == accepted_commitment` *before* those two checks, which made the
-recorded head the one place a bill was accepted with the rule skipped — the Hub
-could re-serve the head with no receipts at all, or with a witness whose counter
-had gone backwards after a Hub-and-witness co-restore, and be told yes.
+narrow one: the receipts offered must still cover the witness the wallet
+recorded, and that witness may not present a counter below the one already held.
+An earlier build returned early on `serial == accepted_serial && commitment ==
+accepted_commitment` *before* those two checks, which made the recorded head the
+one place a bill was accepted with the rule skipped — the Hub could re-serve the
+head with no receipts at all, or with a witness whose counter had gone backwards
+after a Hub-and-witness co-restore, and be told yes.
+
+This door is also the continuity path, and with one witness it is load-bearing
+rather than a convenience. A Hub whose witness identity changed keeps running,
+refuses to sign, publishes the break in `/v1/readiness/mainnet`, and re-anchors
+a head the payer **already holds** — same serial, same bill commitment. It signs
+nothing new, deliberately: a Hub that had to mint a fresh signature to prove
+itself would be signing under the witness it had just chosen, which proves
+nothing. The parked decision then goes to the payer
+(`crates/wallet-core/src/l2_safety.rs`, the `is_recorded_head` branch of
+`accept_anchored_bill`). See ADR-001, "The continuity
+path is load-bearing, not a nicety".
 
 ### Both ways a bill reaches the wallet carry the check
 
@@ -250,7 +297,7 @@ status document is what makes that possible, and it is not decoration.
 The ratchet lives in one file on the counterparty's disk. Deleting that
 directory is cheaper than any attack in §10 and leaves nothing inconsistent
 behind: a fresh store opens clean, the next bill takes the first-bill branch,
-and the witness set becomes whatever the Hub declares. Restoring the store from
+and the witness becomes whatever the Hub declares. Restoring the store from
 an older *coherent* snapshot — state, journal and checkpoint together — is the
 same problem wearing a suit: everything inside agrees, it is simply behind.
 
@@ -260,7 +307,7 @@ this one does not own. In Agent Wallet that is its own encrypted operation
 state, under a different key, with its own journal, and not in the same backup
 set. A memory that is **missing** while the floor is above zero, or **behind**
 the floor, is refused as `rollback_anchor_memory_behind_wallet`. It is a hard
-refusal and not a user decision: it is not a claim about the Hub's witnesses at
+refusal and not a user decision: it is not a claim about the Hub's witness at
 all, it is this machine's own files disagreeing with each other.
 
 The argument is mandatory rather than defaulted on purpose. A hardening
@@ -730,9 +777,17 @@ in this section privileges one witness address over another.
 | `witness_request_timeout` | yes | Fail closed on expiry. There is no "proceed on timeout". |
 | `witness_startup_probe_required` | — | Not configurable. Always required. |
 
+The block as a whole is **optional**; the settings within it are **all-or-
+nothing**. Configuring no witness is a supported choice. Configuring some of it
+is not: a partial configuration is refused at startup rather than becoming a Hub
+that quietly runs without an anchor.
+
 Absent or malformed configuration reads as *no witness*, which reads as
 `external_rollback_anchor_ready = false`. It never reads as "anchor not
 required".
+
+There is exactly one such block. There is no second witness stanza, no priority
+order and no fallback witness, because a Hub has exactly one witness — §1.
 
 ---
 
@@ -750,7 +805,9 @@ required".
 2. **One witness for many Hubs.** The ADR flags this. The counter namespace is
    per `hub_identity`, so it is mechanically fine — but if the witness operator
    is also a Hub operator, the trust story changes and `previous_counter_value`
-   becomes harder to reason about across tenants.
+   becomes harder to reason about across tenants. This is *multi-tenancy at the
+   witness*, many Hubs to one witness, and it is genuinely open. It is not the
+   reverse question — many witnesses to one Hub — which is closed; see §1.
 3. **Witness log retention.** "Back to the last close or resync baseline" is the
    floor. A longer retention makes incidents easier and costs almost nothing;
    someone should pick a number.

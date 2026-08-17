@@ -29,6 +29,11 @@ use std::sync::atomic::Ordering;
 
 use crate::error::{HubError, HubResult};
 use crate::journal::{JournalEvent, JournalOperationType, JournalPhase};
+use crate::rollback_anchor::continuity::{
+    ANCHOR_CONTINUITY_DECLARATION_SCHEMA, AnchorContinuityDeclarationV1,
+    CONTINUITY_REQUEST_ID_PREFIX, WitnessIdentityBreakV1, continuity_request_from_recorded_head,
+    continuity_request_id,
+};
 use crate::rollback_anchor::protocol::{
     MAX_ANCHOR_LIFETIME_SECS, REFUSAL_ATTESTATION_MISSING_OR_EXPIRED, REFUSAL_COUNTER_SKIPPED,
     REFUSAL_FORK_AT_SERIAL, REFUSAL_HUB_BEHIND_WITNESS, REFUSAL_RECEIPT_NOT_BOUND,
@@ -37,7 +42,7 @@ use crate::rollback_anchor::protocol::{
 };
 use crate::rollback_anchor::{
     HubAnchorRequestV1, RollbackAnchorClient, RollbackAnchorConfig, RollbackAnchorEvidenceV1,
-    SignedHubAnchorRequestV1, SignedHubWitnessReceiptV1, VerifiedAnchorReceipt,
+    RollbackAnchorPin, SignedHubAnchorRequestV1, SignedHubWitnessReceiptV1, VerifiedAnchorReceipt,
 };
 use crate::storage::{
     PersistedRollbackAnchorReservation, PersistedRollbackAnchorState, state_commitment,
@@ -45,6 +50,19 @@ use crate::storage::{
 };
 
 use super::HubState;
+
+/// Did the witness refuse because the position asked for is not the position it
+/// is at, rather than because anything about the request was wrong?
+///
+/// Used for exactly one decision - whether a continuity request that was
+/// persisted but never receipted may be re-minted at the witness's current
+/// counter - and deliberately narrow. A refusal of this kind is proof that the
+/// witness holds no record of the request id, because a recorded id is replayed
+/// before either the clock or the counter is consulted.
+fn witness_refused_the_position(error: &HubError) -> bool {
+    let text = error.to_string();
+    text.contains(REFUSAL_HUB_BEHIND_WITNESS) || text.contains(REFUSAL_COUNTER_SKIPPED)
+}
 
 /// What a startup probe means for the **process**, which is a different
 /// question from what it means for a **signature**.
@@ -444,6 +462,455 @@ impl HubState {
         ))
     }
 
+    /// Is this Hub configured with a different witness store than the one it
+    /// pinned? Measured from durable state and configuration, with no network.
+    ///
+    /// With exactly one witness (ADR-001, settled) any change of witness is a
+    /// total change, so this is the single condition under which the anchor
+    /// stops being a guard and becomes a permanent refusal: the startup probe
+    /// can never agree again, `rollback_anchor_probe_agreed` stays false
+    /// forever, and the only exit an operator has left is to delete the
+    /// `--rollback-witness-*` flags - the anchor's failure mode being "turn it
+    /// off".
+    ///
+    /// It is deliberately measured without a probe. A replacement witness that
+    /// is itself slow or unreachable would otherwise present as
+    /// `rollback_anchor_witness_unreachable`, which is the transient identifier
+    /// and tells the operator to wait for something that is never coming back.
+    /// The comparison is against the *attestation* rather than a live answer
+    /// because [`RollbackAnchorClient::verify_status`] already refuses any
+    /// status naming a store the attestation does not describe, so the attested
+    /// store is the store this Hub can ever talk to.
+    ///
+    /// `Ok(None)` for a Hub with no anchor, for a Hub whose pin is still empty
+    /// (it adopts on first contact), and for the ordinary case where the
+    /// configured witness is the pinned one.
+    ///
+    /// `Err` when the durable pin cannot be read at all. That case used to be
+    /// swallowed into `None` by an `.ok()?`, and `None` is the shape that means
+    /// *healthy* here - so a Hub whose state lock was poisoned published a
+    /// document with no blocker, no break and `payments_enabled` left true,
+    /// which is the one reading it must never produce. An unreadable pin is not
+    /// evidence of an intact pin.
+    pub fn rollback_anchor_witness_identity_break(
+        &self,
+    ) -> HubResult<Option<WitnessIdentityBreakV1>> {
+        let Some(client) = self.rollback_anchor.as_ref() else {
+            return Ok(None);
+        };
+        let pin = self.anchor_state()?.pin;
+        Ok(WitnessIdentityBreakV1::detect(
+            &self.hub_address,
+            &pin,
+            client.witness_id(),
+            client.witness_epoch(),
+            client.attested_witness_instance_id(),
+            crate::node::now_unix(),
+        ))
+    }
+
+    /// The continuity declaration: the head the payer already holds,
+    /// re-anchored under the witness answering now.
+    ///
+    /// # What it does not do
+    ///
+    /// It signs no bill. It moves no pin, sets no `rollback_anchor_probe_agreed`,
+    /// advances no `channel_serials`, and clears no latch. A Hub that refuses to
+    /// sign before this is called refuses to sign after it, for exactly the same
+    /// reason and with exactly the same message. The only thing it produces is
+    /// evidence, addressed to the one party that can judge it.
+    ///
+    /// # Why every refusal below is there
+    ///
+    /// * **No anchor, or no break.** A Hub in agreement with its pinned witness
+    ///   has nothing to declare. Allowing a declaration there would let a
+    ///   healthy Hub mint an out-of-band re-anchor of an old head, which is a
+    ///   receipt an attacker would very much like to have.
+    /// * **The probe agreed.** Same condition from the other side, checked
+    ///   against the bit the signing path actually gates on, so the two cannot
+    ///   disagree.
+    /// * **The channel is latched.** A channel condemned for a real rollback
+    ///   gets the operator procedure in `ROLLBACK-ANCHOR-RECOVERY.md`, not a
+    ///   ceremony. Re-anchoring a condemned head at a fresh witness is the
+    ///   attack, not the remedy.
+    /// * **No stored receipt for the head.** The declaration re-anchors the
+    ///   bill commitment the payer holds, which is the payer-signed,
+    ///   Hub-*unsigned* commitment. The only place this Hub has that value is
+    ///   the receipt it stored beside the head. Without it there is nothing to
+    ///   re-anchor and this refuses rather than inventing a commitment.
+    pub async fn rollback_anchor_continuity_declaration(
+        &self,
+        binding_commitment: &str,
+        now_unix: u64,
+    ) -> HubResult<AnchorContinuityDeclarationV1> {
+        let client = self.rollback_anchor.as_ref().ok_or_else(|| {
+            HubError::State(
+                "this Hub has no external rollback anchor configured, so there is no witness \
+                 identity break to declare"
+                    .into(),
+            )
+        })?;
+        let identity_break = self
+            .rollback_anchor_witness_identity_break()?
+            .ok_or_else(|| {
+                HubError::State(
+                "this Hub's configured witness is the witness it pinned. A continuity declaration \
+                 re-anchors a head under a *replacement* witness and exists only while the anchor \
+                 is refusing; there is nothing to declare"
+                    .into(),
+            )
+            })?;
+        if self.rollback_anchor_probe_agreed.load(Ordering::Acquire) {
+            return Err(HubError::State(
+                "the external rollback anchor startup probe has agreed, so this Hub is signing \
+                 normally and has no break to declare"
+                    .into(),
+            ));
+        }
+        if let Some(reason) = self.latched_rollback_anchor_refusal(binding_commitment)? {
+            return Err(HubError::State(format!(
+                "this channel is latched in rollback anchor refusal and will not be re-anchored \
+                 under a new witness. Follow docs/l2/ROLLBACK-ANCHOR-RECOVERY.md: {reason}"
+            )));
+        }
+
+        // Everything below is a read-check-write across two `await` points, and
+        // this route is a public `GET` that anyone who knows a binding
+        // commitment can call. Unserialised, two simultaneous reads on
+        // *different* channels each take the witness's current counter, each
+        // mint a request at counter+1, and the one that loses is refused
+        // `rollback_anchor_counter_skipped` - after which its persisted request
+        // is replayed forever and that channel's payer can never be served a
+        // declaration at all. One at a time is not a performance decision: a
+        // channel's declaration is minted once and replayed from disk
+        // afterwards, so the serialised path is walked once per channel per
+        // witness.
+        let _serialised = self.rollback_anchor_continuity_lock.lock().await;
+
+        let anchor = self.anchor_state()?;
+        let (serial, bill_commitment, head_request_id) =
+            self.recorded_anchored_head(binding_commitment)?;
+        let request_id = continuity_request_id(binding_commitment, serial);
+
+        // A declaration already made for this exact head is replayed verbatim.
+        // Without this, every read would mint a fresh reservation and burn a
+        // position on the replacement witness, and two payers reading the same
+        // channel would be shown two different declarations of one head.
+        if let Some(existing) = anchor.reservations.get(&request_id)
+            && let (Some(receipt), Some(signature_hex)) = (
+                existing.receipt.as_ref(),
+                existing.receipt_signature_hex.as_ref(),
+            )
+            && receipt.binding_commitment == binding_commitment
+            && receipt.serial == serial
+            && receipt.proposed_bill_commitment == bill_commitment
+            && receipt.witness_instance_id == identity_break.attested_witness_instance_id
+        {
+            let signed = SignedHubWitnessReceiptV1 {
+                receipt: receipt.clone(),
+                signature_hex: signature_hex.clone(),
+            };
+            // Re-verified rather than trusted for having come off this Hub's
+            // own disk, which is the thing this subsystem assumes was tampered
+            // with.
+            signed.verify_against_pinned_key(client.witness_receipt_address())?;
+            return Ok(AnchorContinuityDeclarationV1 {
+                schema: ANCHOR_CONTINUITY_DECLARATION_SCHEMA.to_owned(),
+                hub_identity: self.hub_address.trim().to_owned(),
+                binding_commitment: binding_commitment.to_owned(),
+                serial,
+                bill_commitment,
+                witness_identity_break: identity_break,
+                receipts: vec![signed],
+                declared_at: now_unix,
+            });
+        }
+
+        // A request persisted by an earlier attempt that did not get as far as
+        // its receipt is replayed byte for byte, exactly as the signing path
+        // replays one. Rebuilding it instead would pick up a counter the
+        // witness has since moved, which changes the request commitment, and a
+        // known request id bearing a different commitment is an equivocation
+        // attempt to the witness rather than a retry - so it would be refused
+        // `rollback_anchor_replay_mismatch` forever.
+        let replayed = anchor
+            .reservations
+            .get(&request_id)
+            .map(|reservation| reservation.request.clone());
+        let replayed_from_disk = replayed.is_some();
+        let mut request = match replayed {
+            Some(request) => {
+                if request.binding_commitment != binding_commitment
+                    || request.serial != serial
+                    || request.proposed_bill_commitment != bill_commitment
+                {
+                    return Err(HubError::State(format!(
+                        "{REFUSAL_RECEIPT_NOT_BOUND}: the continuity reservation stored under this \
+                         channel's head does not describe that head. Nothing is declared"
+                    )));
+                }
+                request
+            }
+            None => {
+                let recorded = anchor
+                    .reservations
+                    .get(&head_request_id)
+                    .map(|reservation| reservation.request.clone())
+                    .ok_or_else(|| {
+                        HubError::State(
+                            "this Hub no longer holds the anchor request that reserved this \
+                             channel's head, so it cannot re-anchor that exact bill without \
+                             inventing fields. Nothing is declared"
+                                .into(),
+                        )
+                    })?;
+                if recorded.binding_commitment != binding_commitment
+                    || recorded.serial != serial
+                    || recorded.proposed_bill_commitment != bill_commitment
+                {
+                    return Err(HubError::State(format!(
+                        "{REFUSAL_RECEIPT_NOT_BOUND}: the stored anchor request for this channel's \
+                         head does not describe the head. Nothing is declared"
+                    )));
+                }
+                // The replacement witness is probed with a WAIVED pin, and that
+                // is the one place this path deviates from the signing path. It
+                // has to: a replacement store is by definition a different
+                // `witness_instance_id` at a lower counter, so the pinned-
+                // instance and counter gates would refuse every time and there
+                // would be no declaration to make. Waiving them here is safe for
+                // exactly one reason - nothing that follows signs, sets
+                // `rollback_anchor_probe_agreed` or writes the pin, so the Hub
+                // gains no authority from the answer. Every check that does not
+                // depend on the pin still runs inside `verify_status`: the
+                // receipt-key signature, the witness id, the epoch, this Hub's
+                // identity, the probe nonce, freshness, and that the answering
+                // store is the one the signed deployment attestation describes.
+                let status = client
+                    .probe(&RollbackAnchorPin::default(), now_unix)
+                    .await?;
+                if status.status.witness_instance_id == identity_break.pinned_witness_instance_id {
+                    return Err(HubError::State(
+                        "the witness answered from the store this Hub pinned after all, so there \
+                         is no break to declare"
+                            .into(),
+                    ));
+                }
+                continuity_request_from_recorded_head(
+                    &recorded,
+                    client.witness_id(),
+                    client.witness_epoch(),
+                    status.status.counter_value.saturating_add(1),
+                    now_unix,
+                )?
+            }
+        };
+        let signer = self
+            .hub_signer
+            .as_ref()
+            .ok_or_else(|| HubError::State("Hub signer is unavailable".into()))?;
+
+        // A persisted request that never got a receipt may be re-minted at the
+        // witness's current position **exactly once**, and only when the
+        // witness itself says it has no record of it.
+        //
+        // Without this a single lost send is terminal for one channel. The
+        // continuity request id is derived from (binding, serial) and the
+        // serial can never move - the Hub cannot sign - so unlike the payment
+        // path there is no fresh id to retry under; the stale counter is
+        // replayed into `rollback_anchor_hub_behind_witness` forever, and the
+        // operator is shown a *rollback accusation* about a Hub that did
+        // nothing wrong.
+        //
+        // Re-minting under a known id is normally an equivocation attempt, and
+        // the witness treats it as one. It is safe here for one reason: the
+        // witness answers a request id it holds by replaying its recorded
+        // receipt, *before* it looks at the clock or the counter
+        // (`rollback_anchor/witness.rs`, layer 2 idempotency). A counter
+        // refusal is therefore proof that this id was never recorded, so
+        // nothing is being equivocated - there is no first answer to contradict.
+        let mut remint_budget = u8::from(replayed_from_disk);
+        let verified = loop {
+            let request_commitment = request.commitment()?;
+            let signed_request = SignedHubAnchorRequestV1::sign(request.clone(), signer.account())?;
+
+            // Durable before the wire, the same ordering the signing path uses
+            // and for the same reason: a request the Hub cannot prove it made
+            // is a request it cannot safely replay.
+            let event = self.anchor_event(
+                JournalPhase::RollbackAnchorRequestPersisted,
+                &request_id,
+                binding_commitment,
+                &request_commitment,
+                now_unix,
+            );
+            let persisted_request = request.clone();
+            self.persist_rollback_anchor(event, |anchor| {
+                anchor.reservations.insert(
+                    request_id.clone(),
+                    PersistedRollbackAnchorReservation {
+                        request: persisted_request,
+                        request_commitment: request_commitment.clone(),
+                        receipt: None,
+                        receipt_signature_hex: None,
+                        updated_unix: now_unix,
+                    },
+                );
+                Ok(())
+            })?;
+
+            match client
+                .reserve(&signed_request, &RollbackAnchorPin::default(), now_unix)
+                .await
+            {
+                Ok(verified) => break verified,
+                Err(error) if remint_budget > 0 && witness_refused_the_position(&error) => {
+                    remint_budget -= 1;
+                    let status = client
+                        .probe(&RollbackAnchorPin::default(), now_unix)
+                        .await?;
+                    if status.status.witness_instance_id
+                        == identity_break.pinned_witness_instance_id
+                    {
+                        return Err(HubError::State(
+                            "the witness answered from the store this Hub pinned after all, so \
+                             there is no break to declare"
+                                .into(),
+                        ));
+                    }
+                    request = continuity_request_from_recorded_head(
+                        &request,
+                        client.witness_id(),
+                        client.witness_epoch(),
+                        status.status.counter_value.saturating_add(1),
+                        now_unix,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let receipt = verified.receipt().clone();
+        let receipt_signature_hex = verified.signed.signature_hex.clone();
+        let request_commitment = receipt.request_commitment.clone();
+        if receipt.binding_commitment != binding_commitment
+            || receipt.serial != serial
+            || receipt.proposed_bill_commitment != bill_commitment
+        {
+            return Err(HubError::State(format!(
+                "{REFUSAL_RECEIPT_NOT_BOUND}: the replacement witness receipted a different bill \
+                 than the head this Hub asked it to re-anchor. Nothing is declared"
+            )));
+        }
+        // The store that answered has to be the store the configured
+        // attestation describes, checked here on the way in and not only on the
+        // replay path.
+        //
+        // `verify_receipt` was handed a waived pin, so the pinned-instance gate
+        // it would normally apply did not run. Without this the mint path
+        // accepts a receipt the replay path would then reject, which silently
+        // loses the "a second read replays" property: every subsequent read
+        // falls through, re-signs, re-persists and re-probes, unbounded, on a
+        // Hub that is already in trouble.
+        if receipt.witness_instance_id != identity_break.attested_witness_instance_id {
+            return Err(HubError::State(format!(
+                "{REFUSAL_ATTESTATION_MISSING_OR_EXPIRED}: the witness receipted this re-anchor \
+                 from store {} while the configured deployment attestation describes store {}. \
+                 Nothing is declared",
+                receipt.witness_instance_id, identity_break.attested_witness_instance_id
+            )));
+        }
+        // The receipt is stored so a second read replays it. Note what is NOT
+        // written here and is written by `reserve_rollback_anchor`:
+        // `anchor.pin` and `anchor.channel_serials`. Adopting the replacement
+        // witness into the pin is precisely the move that would let a
+        // rolled-back Hub launder itself, and this ceremony must leave the Hub
+        // exactly as unable to sign as it found it.
+        let event = self.anchor_event(
+            JournalPhase::RollbackAnchorReceiptPersisted,
+            &request_id,
+            binding_commitment,
+            &request_commitment,
+            now_unix,
+        );
+        self.persist_rollback_anchor(event, |anchor| {
+            let reservation = anchor.reservations.get_mut(&request_id).ok_or_else(|| {
+                HubError::State(
+                    "rollback anchor continuity reservation disappeared before its receipt".into(),
+                )
+            })?;
+            reservation.receipt = Some(receipt.clone());
+            reservation.receipt_signature_hex = Some(receipt_signature_hex.clone());
+            reservation.updated_unix = now_unix;
+            Ok(())
+        })?;
+
+        Ok(AnchorContinuityDeclarationV1 {
+            schema: ANCHOR_CONTINUITY_DECLARATION_SCHEMA.to_owned(),
+            hub_identity: self.hub_address.trim().to_owned(),
+            binding_commitment: binding_commitment.to_owned(),
+            serial,
+            bill_commitment,
+            witness_identity_break: identity_break,
+            receipts: vec![verified.signed],
+            declared_at: now_unix,
+        })
+    }
+
+    /// The head of one channel as the *payer* knows it: `(serial, the
+    /// payer-signed Hub-unsigned bill commitment, the reservation that
+    /// anchored it)`.
+    ///
+    /// Read out of the receipt stored beside the ledger head rather than
+    /// recomputed, because the commitment the payer recorded covers the bill
+    /// *before* the Hub's signature was filled in, and the Hub keeps no other
+    /// copy of that value. The serial is cross-checked against the ledger head
+    /// so a stale receipt cannot pass itself off as the head.
+    fn recorded_anchored_head(&self, binding_commitment: &str) -> HubResult<(u64, String, String)> {
+        let guard = self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+        let head = guard
+            .hvm_registry_ledgers
+            .get(binding_commitment)
+            .map(|ledger| {
+                (
+                    ledger.latest_fully_signed_bill.serial,
+                    &ledger.latest_anchor_receipts,
+                )
+            })
+            .or_else(|| {
+                guard
+                    .hvm_channel_ledgers
+                    .get(binding_commitment)
+                    .map(|ledger| {
+                        (
+                            ledger.latest_fully_signed_bill.serial,
+                            &ledger.latest_anchor_receipts,
+                        )
+                    })
+            });
+        let Some((ledger_serial, receipts)) = head else {
+            return Err(HubError::NotFound(format!("channel {binding_commitment}")));
+        };
+        let receipt = receipts
+            .iter()
+            .map(|signed| &signed.receipt)
+            .find(|receipt| receipt.serial == ledger_serial)
+            .ok_or_else(|| {
+                HubError::State(
+                    "this channel's head carries no witness receipt, so this Hub holds no record \
+                     of the bill commitment the payer accepted and has nothing to re-anchor"
+                        .into(),
+                )
+            })?;
+        Ok((
+            receipt.serial,
+            receipt.proposed_bill_commitment.clone(),
+            receipt.request_id.clone(),
+        ))
+    }
+
     /// Reserve the exact bill position with the witness, or refuse.
     ///
     /// Returns `Ok(None)` only when no anchor is configured at all **and** this
@@ -477,6 +944,21 @@ impl HubState {
         let Some(client) = self.rollback_anchor.as_ref() else {
             return Ok(None);
         };
+        // Continuity declarations share this durable reservation map, and a
+        // payment is free to choose its own `operation_id`. A payment that
+        // claimed the continuity namespace would collide with a declaration's
+        // entry, so the namespace is refused by name rather than left to
+        // whichever write landed second.
+        if subject
+            .operation_id
+            .starts_with(CONTINUITY_REQUEST_ID_PREFIX)
+        {
+            return Err(HubError::State(format!(
+                "{REFUSAL_RECEIPT_NOT_BOUND}: `{CONTINUITY_REQUEST_ID_PREFIX}` is reserved for \
+                 rollback anchor continuity declarations and cannot be used as a payment \
+                 operation id"
+            )));
+        }
         if !self.rollback_anchor_probe_agreed.load(Ordering::Acquire) {
             return Err(HubError::State(
                 "the external rollback anchor startup probe has not agreed with the witness, so \
@@ -722,6 +1204,17 @@ impl HubState {
         // live and nothing to protect. Everywhere that can sign, this goes
         // through the same authenticated write as every other money-path
         // transition, so the state and the journal cannot drift apart.
+        //
+        // It is still worth saying out loud when a witness *is* configured,
+        // because a pin held only in memory is re-adopted on first contact from
+        // whichever store answers after a restart - so that Hub would publish
+        // no identity break and report a probe that agreed. It is not refused
+        // here: such a Hub is already blocked from payments for a strictly
+        // stronger reason (`hub_operational_ready` is false without
+        // authenticated storage, so nothing settles), and refusing here would
+        // break the measurement path without protecting a signature that could
+        // never happen. What it must not do is stay unsaid, so
+        // `note_rollback_anchor_pin_is_not_durable` publishes it.
         if self.journal.is_none() || self.state_store.is_none() {
             *guard = next_state;
             return Ok(());
@@ -956,7 +1449,10 @@ mod outbound_receipt_gate_tests {
     #[test]
     fn an_anchored_hub_never_serves_a_bill_without_its_receipts() {
         let error = check(true, &[]).expect_err("an anchored Hub must not serve a bare bill");
-        assert!(error.contains("rollback_anchor_receipt_not_bound_to_request"), "{error}");
+        assert!(
+            error.contains("rollback_anchor_receipt_not_bound_to_request"),
+            "{error}"
+        );
         assert!(error.contains("resets its witness ratchet"), "{error}");
     }
 

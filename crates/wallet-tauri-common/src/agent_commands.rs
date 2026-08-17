@@ -1322,37 +1322,85 @@ pub async fn agent_wallet_hvm_anchor_decision(
             .await
             .pending_hvm_anchor_decision(&wallet_id, &operation_id)
             .map_err(public_error)?;
-        let Some(change) = pending else {
-            return Ok(Value::Null);
-        };
-        Ok(json!({
-            "binding_commitment": change.binding_commitment,
-            "serial": change.serial,
-            "last_accepted_serial": change.last_accepted_serial,
-            "zero_overlap": change.is_zero_overlap(),
-            "headline": change.headline(),
-            "dropped": change
-                .dropped
-                .iter()
-                .map(anchor_witness_evidence)
-                .collect::<Vec<Value>>(),
-            "retained": change
-                .retained
-                .iter()
-                .map(anchor_witness_evidence)
-                .collect::<Vec<Value>>(),
-            "offered": change
-                .offered
-                .iter()
-                .map(anchor_witness_evidence)
-                .collect::<Vec<Value>>(),
-        }))
+        Ok(pending.as_ref().map_or(Value::Null, anchor_change_evidence))
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     {
         let _ = (wallet_id, operation_id, state);
         Err("Agent HVM Fast Pay is disabled in this build".to_owned())
     }
+}
+
+/// Ask the Hub to re-anchor this channel's existing head under the witness it
+/// is answering with now, and adjudicate the answer here.
+///
+/// This is the read half above with the one thing it cannot do added: it works
+/// on a channel that will never see another payment. A Hub has exactly one
+/// rollback-anchor witness, and if that witness's durable store is replaced the
+/// Hub refuses to co-sign anything from then on - so every other route into the
+/// witness ratchet, all of which run on a *new* bill, is closed forever and the
+/// parked decision this endpoint reads would never be raised at all.
+///
+/// Nothing new is signed to produce it: the declaration is the same serial and
+/// the same bill commitment this wallet already holds. The answer is the same
+/// two-way question as `agent_wallet_hvm_anchor_decision`, answered with
+/// `agent_wallet_resolve_hvm_anchor_decision`, and `null` when the Hub's
+/// witness still covers the head and there is nothing to decide.
+#[tauri::command]
+pub async fn agent_wallet_refresh_hvm_anchor_continuity(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+        let pending = require_manager(&state)?
+            .lock()
+            .await
+            .refresh_hvm_anchor_continuity(&wallet_id, &operation_id)
+            .await
+            .map_err(public_error)?;
+        Ok(pending.as_ref().map_or(Value::Null, anchor_change_evidence))
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// One parked witness-set change, shaped for a person.
+///
+/// Shared by the read half and the continuity refresh so the two cannot show
+/// the same event two different ways.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn anchor_change_evidence(change: &hacash_wallet_core::l2_safety::AnchorWitnessChangeV1) -> Value {
+    json!({
+        "binding_commitment": change.binding_commitment,
+        "serial": change.serial,
+        "last_accepted_serial": change.last_accepted_serial,
+        "zero_overlap": change.is_zero_overlap(),
+        "headline": change.headline(),
+        "dropped": change
+            .dropped
+            .iter()
+            .map(anchor_witness_evidence)
+            .collect::<Vec<Value>>(),
+        "retained": change
+            .retained
+            .iter()
+            .map(anchor_witness_evidence)
+            .collect::<Vec<Value>>(),
+        "offered": change
+            .offered
+            .iter()
+            .map(anchor_witness_evidence)
+            .collect::<Vec<Value>>(),
+    })
 }
 
 /// The write half. Exactly two answers, and no third: `accept_new_witness_set`
@@ -1404,9 +1452,7 @@ pub async fn agent_wallet_resolve_hvm_anchor_decision(
 /// that matters; `witness_id` is a label the Hub typed and is shown as such,
 /// so a reader is never invited to treat a name as an identity.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-fn anchor_witness_evidence(
-    record: &hacash_wallet_core::l2_safety::AnchorWitnessRecordV1,
-) -> Value {
+fn anchor_witness_evidence(record: &hacash_wallet_core::l2_safety::AnchorWitnessRecordV1) -> Value {
     json!({
         "signer_address": record.signer_address,
         "witness_instance_id": record.witness_instance_id,

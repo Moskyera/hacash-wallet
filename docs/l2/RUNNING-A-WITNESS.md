@@ -32,6 +32,14 @@ and it will happily sign bill 5 a second time with different numbers. Both
 signatures are valid. Somebody loses money. The witness catches that only because
 it was not in the backup.
 
+**Two things to know before you read further.** Running a witness is
+**optional** — a Hub without one is honest about having no anchor and measures
+`external_rollback_anchor_ready = false`; a Hub with one is better off. Neither
+is a lie, and nobody is obliged to run this. And a Hub has **exactly one**
+witness, permanently and by design, so if a Hub points at you it points at you
+alone: there is no quorum you are a member of, and no second witness sharing the
+load or covering your outage. Section 9 is where that lands on you.
+
 ---
 
 ## 2. What it needs
@@ -168,6 +176,40 @@ have a very elaborate copy of your Hub's state file.
 Be honest with yourself about this. Nobody will check it, which is exactly why it
 matters.
 
+### What your own witness is worth, stated exactly
+
+If you run the witness for your own Hub, be clear about what you have bought,
+because it is easy to oversell and the oversold version is worse than no claim.
+
+**It does not stop you tampering with it.** You hold the disk, the keys and the
+process. You can stop the Hub, stop the witness, restore both to an earlier point
+together, and start them: same `witness_instance_id`, counter exactly where the
+Hub expects it, every signature valid, nothing detectable. No code here changes
+that, and none ever will. Anyone who tells you a self-run witness means you
+"cannot tamper with the witness" is wrong, and this document will not say it.
+
+**What it does catch is most of what actually goes wrong:**
+
+- a disk failure, and the restore from an older backup that follows it;
+- a bad restore — the wrong snapshot, a stale volume reattached, a state file
+  copied off a staging box;
+- crash recovery that comes back at old state;
+- a second Hub instance started by accident against the same keys, through the
+  global counter;
+- a state file quietly reverted underneath a running Hub, or rolled back by
+  filesystem corruption.
+
+That list is **most real incidents**. Infrastructure failing and humans making
+restore mistakes is the common case; an operator deciding to roll back their own
+Hub is not. So a self-run witness is well worth running — it protects you from
+your own infrastructure, which is the thing most likely to hurt you.
+
+What it is *not* is protection for your counterparty **against you**. That
+requires a witness you do not control: the counterparty's own, or a neutral third
+party. Both postures are valid and the code is identical for all three; only the
+guarantee differs, which is why the posture is published beside the flag rather
+than hidden behind it. Do not describe the first as the second.
+
 ---
 
 ## 6. Running it
@@ -285,7 +327,7 @@ export HACASH_HUB_ROLLBACK_WITNESS_ATTESTATION_FILE=/etc/hpay-fast-pay-hub/witne
 scripts/START-HUB-WITH-REMOTE-WITNESS.sh https://witness.acme.example
 ```
 
-### Changing witness later is not a config edit today. Read this before you agree to run one.
+### Changing witness later is a real operational event. Read this before you agree to run one.
 
 The paragraph that used to sit here said changing witness was "a change to those
 five values, never a code change". That was false, and it was load-bearing for
@@ -301,22 +343,56 @@ What actually happens if you point a running Hub at a different witness:
    refuses before signing anything. **Every channel on that Hub stops being
    signable**, not just one.
 3. The pin lives inside the Hub's authenticated state commitment, so it cannot
-   be edited out with a text editor. There is no supported command that clears
-   it — witness adoption is deliberately not built.
-4. The Hub's client holds **one** witness, so there is no "run both for a bill"
-   overlap window either. Every rotation is a zero-overlap event for every live
-   channel, which means every counterparty is prompted to decide (see ADR-001,
-   "The counterparty ratchet").
+   be edited out with a text editor.
+4. The Hub holds **exactly one** witness
+   (the `rollback_anchor` field of `HubState`,
+   `crates/l2-fast-pay-hub/src/state.rs`), so there is no "run both for a
+   bill" overlap window. Every witness change is therefore a **total** change and
+   a zero-overlap event for every live channel, which means every counterparty is
+   prompted to decide (see ADR-001, "The counterparty ratchet").
 
-The only path that restores service today is removing the five values and
-running unanchored — which costs your payers exactly the same prompt a rotation
-would have cost them, and costs you the anchor permanently. That is a bad price
-on the honest path and we are not going to pretend otherwise.
+**That is the whole of rotation, and it is the design rather than a missing
+feature.** One witness is permanent, settled and deliberate: a multi-witness
+build was attempted and reverted because per-witness durable keying let a
+restored Hub, repointed at attacker-controlled witnesses, re-sign a serial it had
+already signed — a hole the single-witness Hub never had. So there is no adoption
+ceremony coming, no quorum, no overlap window and no second witness to stage a
+handover through. Do not wait for one, and do not build toward one. ADR-001,
+"One witness, by design", records the reasoning so it is not re-litigated.
+
+**The Hub does not die with its witness, and that part is not optional.** With
+one witness, a witness that goes away would otherwise take every channel with it
+and leave "drop the configuration and run unanchored" as the only working exit —
+the anchor punishing an honest operator for someone else's failure. So a Hub
+whose witness identity changed starts, refuses to sign silently rather than
+crash-looping, keeps serving reads and cooperative close, and publishes the break
+in `/v1/readiness/mainnet`. Re-anchoring then runs against a head the payer
+already holds — same serial, same bill commitment — and **signs nothing new**,
+because a Hub minting a fresh signature under a witness it had just chosen would
+be proving nothing. The payer adjudicates it.
+
+**Be clear about what that does and does not buy you, because the difference
+matters more than the mechanism.** A change of witness identity is **terminal
+for that Hub's signing**, permanently, on every channel. The pin only moves
+through a signature and a signature only happens after the pin has moved, so
+there is no order in which a Hub can adopt a replacement witness by itself, and
+adding one would be exactly the laundering path the anchor exists to refuse. The
+continuity declaration does not restore signing and is not meant to: it makes the
+break legible to the only party that can judge it, so that the honest exit —
+every channel closing cooperatively on the head its payer already holds, with its
+intact receipt from the witness that really signed it — is available and
+informed, instead of every channel simply going quiet.
+
+The two exits are therefore: close the channels on their last accepted heads, or
+remove the five values and run unanchored — which remains possible and honest,
+costs your payers the same prompt a change of witness would have, and costs you
+the anchor. Neither of them is "carry on signing under a new witness", and no
+future release should quietly add one without deciding, out loud, what a
+signature means afterwards.
 
 So: **choose a witness operator you expect to still be there in a year**, and
-treat rotation as an operational event that needs a maintenance window and a
-conversation with every counterparty, not a config edit. A witness adoption
-ceremony and multi-witness configuration are the fix; neither exists yet.
+treat a change of witness as an operational event that needs a maintenance window
+and a conversation with every counterparty, not a config edit.
 
 ---
 
@@ -414,6 +490,13 @@ you stops signing. Not degraded — stopped. That is deliberate and correct, and
 there is no bypass flag, so your outage is their outage. If you cannot commit to
 a reasonable uptime, say so before someone points a Hub at you rather than
 after.
+
+**And you are the only witness they have.** A Hub has exactly one, by design, so
+there is no quorum to carry a Hub through your outage and no second witness to
+fail over to. What stops that being fatal is on the Hub's side, not yours: a Hub
+whose witness went away keeps running, refuses to sign, and publishes the break
+rather than dying — see §7. It still cannot sign until you are back. Take the
+uptime commitment as seriously as that implies.
 
 **You will be asked to authorise a recovery.** Sooner or later a Hub operator
 restores from a backup and needs a resynchronisation signed. That is a human

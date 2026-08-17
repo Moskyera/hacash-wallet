@@ -942,7 +942,10 @@ impl ClientL2Safety {
     }
 
     pub fn anchor_memory(&self, binding_commitment: &str) -> Option<ChannelAnchorMemoryV1> {
-        self.state.anchor_witness_memory.get(binding_commitment).cloned()
+        self.state
+            .anchor_witness_memory
+            .get(binding_commitment)
+            .cloned()
     }
 
     /// Verify the anchor receipts riding with one anchored bill, compare the
@@ -1024,7 +1027,12 @@ impl ClientL2Safety {
             }
         }
 
-        let Some(memory) = self.state.anchor_witness_memory.get(binding_commitment).cloned() else {
+        let Some(memory) = self
+            .state
+            .anchor_witness_memory
+            .get(binding_commitment)
+            .cloned()
+        else {
             // No memory. Either this really is the first bill on this channel,
             // or the memory was lost — the store deleted, or restored from an
             // older snapshot that predates this channel. The caller's
@@ -1131,8 +1139,22 @@ impl ClientL2Safety {
         // On a re-affirmation of the recorded head the honest Hub replays the
         // *same* receipts, so equality is expected there and only a genuine
         // decrease is refused. Anywhere else the counter must have moved.
+        //
+        // `retired` is consulted alongside `witnesses`, and that is not a
+        // detail. Accepting a witness-set change moves the dropped records to
+        // `retired` rather than erasing them, precisely so the event survives
+        // - but if only `witnesses` were ratcheted, a witness that had been
+        // dropped and accepted away could come back with its counter at zero
+        // and be treated as brand new. That is the amnesia attack with one
+        // extra step: drop the witness, get the prompt accepted once, then
+        // re-offer the same store rebuilt from nothing. The record exists; it
+        // has to be read.
         for (key, candidate) in &offered {
-            if let Some(known) = memory.witnesses.get(key) {
+            if let Some(known) = memory
+                .witnesses
+                .get(key)
+                .or_else(|| memory.retired.get(key))
+            {
                 let went_backwards = if is_recorded_head {
                     candidate.highest_counter_value < known.highest_counter_value
                 } else {
@@ -1529,14 +1551,17 @@ fn recover_anchor_receipt_signer(receipt: &SignedHubWitnessReceiptV1) -> WalletR
             "anchor receipt signature has trailing bytes".into(),
         ));
     }
-    let signer =
-        field::Address::from(sys::Account::get_address_by_public_key(*signature.publickey))
-            .to_readable();
-    receipt.verify_against_pinned_key(&signer).map_err(|error| {
-        WalletError::L2(format!(
-            "anchor receipt signature does not verify against the key it carries: {error}"
-        ))
-    })?;
+    let signer = field::Address::from(sys::Account::get_address_by_public_key(
+        *signature.publickey,
+    ))
+    .to_readable();
+    receipt
+        .verify_against_pinned_key(&signer)
+        .map_err(|error| {
+            WalletError::L2(format!(
+                "anchor receipt signature does not verify against the key it carries: {error}"
+            ))
+        })?;
     Ok(signer)
 }
 

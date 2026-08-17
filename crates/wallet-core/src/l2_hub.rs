@@ -89,6 +89,36 @@ pub struct HubMainnetReadiness {
     #[serde(default)]
     pub close_blockers: Vec<String>,
     pub limitations: Vec<String>,
+    /// Published by a Hub whose one rollback-anchor witness is no longer the
+    /// durable store it pinned.
+    ///
+    /// Kept on this side of the wire deliberately. Without it the wallet sees
+    /// only `payments_enabled = false` plus a blocker string, which is exactly
+    /// what a witness that is merely *unreachable* looks like - and the whole
+    /// reason the Hub measures this without a probe is that the two need
+    /// telling apart: one clears by itself in thirty seconds, the other never
+    /// clears and is the only condition under which asking the Hub for a
+    /// continuity declaration is the right move. Dropping the field here threw
+    /// away that distinction at the last hop, in the party it was written for.
+    ///
+    /// `None` for every healthy Hub and for every Hub that never had an
+    /// anchor, because the Hub skips the field when it is absent.
+    #[serde(default)]
+    pub rollback_anchor_witness_identity_break:
+        Option<l2_fast_pay_hub::rollback_anchor::WitnessIdentityBreakV1>,
+}
+
+impl HubMainnetReadiness {
+    /// Is this Hub refusing because its one witness is gone, rather than
+    /// because it cannot currently be reached?
+    ///
+    /// `true` means the refusal is permanent on the Hub's own account and a
+    /// continuity declaration is the only thing that will tell this wallet
+    /// anything further. `false` includes "temporarily unreachable", which is
+    /// a thing to wait out and not a thing to adjudicate.
+    pub fn witness_identity_is_broken(&self) -> bool {
+        self.rollback_anchor_witness_identity_break.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -863,6 +893,158 @@ impl L2HubClient {
                 WalletError::L2(format!("Hub registry latest bill is invalid: {error}"))
             })?;
         Ok(status)
+    }
+
+    /// Fetch this Hub's continuity declaration for one channel and adjudicate
+    /// it against this wallet's own anchor memory.
+    ///
+    /// # What this is for
+    ///
+    /// A Hub has exactly one rollback-anchor witness. If that witness's durable
+    /// store is replaced - the witness operator rebuilds it, or the Hub's
+    /// operator has to move to a different witness entirely - the Hub's pin no
+    /// longer matches, its startup probe can never agree again, and it refuses
+    /// to sign every bill from then on. From this wallet's side that is
+    /// indistinguishable from a Hub that has simply gone quiet, and quiet is
+    /// exactly what an operator swapping the witness in order to re-sign
+    /// history would also look like.
+    ///
+    /// So the Hub publishes the head *this wallet already holds* - same serial,
+    /// same bill commitment - re-anchored under the witness answering now, and
+    /// this runs it through the ordinary overlap rule. Nothing new was signed
+    /// by the Hub to produce it, which is the point: a Hub that had to sign
+    /// something in order to prove itself would be signing under a witness it
+    /// had just chosen.
+    ///
+    /// # What comes back
+    ///
+    /// * `Ok(())` - the declaration re-affirmed the recorded head and every
+    ///   witness this wallet remembers is still covering it. Nothing changed
+    ///   and nothing needs deciding, which for a genuine break is not the
+    ///   expected answer.
+    /// * `Err` prefixed [`crate::l2_safety::ANCHOR_WITNESS_DECISION_REQUIRED`] -
+    ///   the expected answer. The witness this wallet recorded is gone, the
+    ///   change is now parked durably in this wallet's own store, and a human
+    ///   picks: adopt the new witness set, or close the channel on the last
+    ///   accepted head. With one witness the swap is always total, so this is
+    ///   the strong zero-overlap prompt.
+    /// * any other `Err` - a hard refusal. A declaration whose serial is below
+    ///   this wallet's accepted head, whose receipts do not verify, or that is
+    ///   bound to another bill, channel or Hub is refused outright and is never
+    ///   a user choice. That is the case a rolled-back Hub lands in.
+    ///
+    /// The Hub's own claim about the break travels in the document and is
+    /// deliberately not trusted for anything: the decision is made from the
+    /// receipts, which are signed by a party the Hub cannot forge, against
+    /// memory the Hub cannot reach.
+    pub async fn adjudicate_anchor_continuity(
+        &self,
+        binding_commitment: &str,
+        safety: &mut crate::l2_safety::ClientL2Safety,
+        hub_identity: &str,
+        independent_serial_floor: u64,
+    ) -> WalletResult<()> {
+        require_lower_commitment(binding_commitment, "HVM registry binding")?;
+        let url = format!(
+            "{}/v2/hvm-registry/channel/{binding_commitment}/anchor-continuity",
+            self.base_url
+        );
+        let response = self.http()?.get(url).send().await.map_err(|error| {
+            WalletError::L2(format!("Hub anchor continuity unavailable: {error}"))
+        })?;
+        let declaration: l2_fast_pay_hub::rollback_anchor::AnchorContinuityDeclarationV1 =
+            Self::read_hub_json(response, "Hub anchor continuity declaration").await?;
+        if declaration.schema
+            != l2_fast_pay_hub::rollback_anchor::ANCHOR_CONTINUITY_DECLARATION_SCHEMA
+            || declaration.binding_commitment != binding_commitment
+            || declaration.hub_identity != hub_identity
+        {
+            return Err(WalletError::L2(
+                "Hub anchor continuity declaration is for a different channel, Hub or schema"
+                    .into(),
+            ));
+        }
+        if declaration.receipts.is_empty() {
+            // An empty list is not "no anchor to show". It is the Hub asking
+            // this wallet to record that every witness it remembers was
+            // dropped, on a document the Hub chose to serve - which would let a
+            // Hub reset the ratchet by publishing nothing at all. A declaration
+            // is a re-anchor or it is not a declaration.
+            return Err(WalletError::L2(
+                "Hub anchor continuity declaration carries no witness receipt, so it re-anchors \
+                 nothing and proves nothing"
+                    .into(),
+            ));
+        }
+        // The declaration must be of the head **this wallet already holds**.
+        //
+        // Everything else on this path describes it as a re-affirmation, and
+        // until this check existed nothing enforced it. `serial` and
+        // `bill_commitment` arrive chosen by the Hub; the witness receipts a
+        // *position*, copying whatever `proposed_bill_commitment` it was
+        // handed, so a genuine witness signature proves nothing about which
+        // bill it is; and no bill travels with a declaration, so
+        // `validate_fully_signed` - which every other acceptance path runs -
+        // has nothing to run on. Every other caller of `accept_anchored_bill`
+        // derives both values from a proposal this wallet itself signed
+        // (`request.proposed_bill.commitment()`); this one is the only place a
+        // counterparty ever chose them.
+        //
+        // Unchecked, a Hub serves serial N+1000 with a commitment this wallet
+        // has never seen, and the ratchet - which only ever moves the head
+        // *up* - either advances silently (when the offered set still covers
+        // the remembered witnesses) or advances on one click of the prompt.
+        // Either way the wallet's durable record of its own head is replaced
+        // by a bill that does not exist, every genuine bill afterwards is
+        // refused `rollback_anchor_witness_behind_hub`, and the value a
+        // cooperative close is defined against is a commitment the wallet
+        // cannot produce. That is not a re-anchor; it is the Hub writing the
+        // wallet's memory.
+        let Some(memory) = safety.anchor_memory(binding_commitment) else {
+            // No memory at all. The floor is what tells a genuinely new channel
+            // apart from a store that lost its memory, exactly as it does
+            // inside `accept_anchored_bill`, and the lost-memory case keeps the
+            // identifier the recovery document indexes so the diagnosis does
+            // not get quieter for being caught one layer earlier.
+            if independent_serial_floor > 0 {
+                return Err(WalletError::L2(format!(
+                    "{}: this wallet's own payment history reaches serial \
+                     {independent_serial_floor} on this channel, but its rollback-anchor memory \
+                     for the channel is gone. A continuity declaration re-anchors a head this \
+                     wallet already accepted; accepting one into an empty memory would hand the \
+                     Hub the witness set and the head of its choice. Nothing was accepted",
+                    crate::l2_safety::REFUSAL_ANCHOR_MEMORY_BEHIND_WALLET
+                )));
+            }
+            return Err(WalletError::L2(
+                "this wallet holds no rollback-anchor memory for this channel, so there is no \
+                 recorded head for a continuity declaration to re-affirm. A declaration re-anchors \
+                 a head this wallet already accepted; it can never establish the first one"
+                    .into(),
+            ));
+        };
+        if declaration.serial != memory.accepted_serial
+            || declaration.bill_commitment != memory.accepted_bill_commitment
+        {
+            return Err(WalletError::L2(format!(
+                "Hub anchor continuity declaration is not this wallet's recorded head: it declares \
+                 serial {} with bill commitment {}, and this wallet accepted serial {} with bill \
+                 commitment {}. A continuity declaration re-anchors the head the counterparty \
+                 already holds and nothing else. Nothing was accepted",
+                declaration.serial,
+                declaration.bill_commitment,
+                memory.accepted_serial,
+                memory.accepted_bill_commitment
+            )));
+        }
+        safety.accept_anchored_bill(
+            binding_commitment,
+            hub_identity,
+            &declaration.bill_commitment,
+            declaration.serial,
+            &declaration.receipts,
+            independent_serial_floor,
+        )
     }
 
     pub async fn require_mainnet_payment_ready(

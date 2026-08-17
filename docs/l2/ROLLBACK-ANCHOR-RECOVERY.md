@@ -60,6 +60,14 @@ The witness holds **commitments, never bills**. It cannot pay anyone, cannot
 sign a bill, and does not know any balance. It knows only: *for this Hub, on
 this channel, a bill at serial N with commitment X was reserved at counter C.*
 
+**Two facts about the shape of this, so nothing below reads as a gap.** A Hub
+has **exactly one witness**, permanently and by design — there is no quorum, no
+second witness to fail over to, and no adoption ceremony, and ADR-001 records why
+under "One witness, by design". And running a witness at all is **optional**: a
+Hub with no witness configured says so honestly and measures
+`external_rollback_anchor_ready = false`. If you are reading this document, the
+Hub in front of you has one, and it has refused.
+
 ---
 
 ## 2. What the Hub is telling you
@@ -76,6 +84,7 @@ The Hub emits exactly one of these identifiers. Find yours.
 | `rollback_anchor_witness_unreachable` | Network, DNS, TLS, or timeout. No evidence either way. | [Section 6](#6-the-witness-is-simply-down) |
 | `rollback_anchor_witness_is_not_external` | The configured witness failed the separation checks — its URL names this host or plaintext, it shares this Hub's key, or its durable store is sitting inside this Hub's own backup set. | [Section 7](#7-the-witness-failed-the-separation-check) |
 | `rollback_anchor_attestation_missing_or_expired` | The deployment attestation naming who runs the witness is absent or out of date. | [Section 7](#7-the-witness-failed-the-separation-check) |
+| `rollback_anchor_witness_identity_unreadable` | Published on `/v1/readiness/mainnet`, not on the signing path. This Hub could not read its own durable anchor record, so it cannot say whether the witness it is configured with is the witness it pinned. It is **not** a claim that the pin moved — it is a claim that the question could not be answered, and payments are blocked for exactly that reason. Fix the storage fault (disk, permissions, a poisoned process) and re-read the endpoint; cooperative close is unaffected throughout. | Not an anchor procedure. Treat it as a storage incident, then re-read this table |
 | `rollback_anchor_channels_latched_in_refusal` | Published on `/v1/readiness/mainnet`, not on the signing path. One or more channels are **already condemned** in this Hub's durable state by an earlier refusal, and will not sign again until the procedure that condemned them is completed. The count is in `limitations`. This appears whether or not a witness is configured now: a latch lives in `hub-state.json`, so removing the witness configuration does not clear it. | Whichever procedure the original refusal named — re-read your incident record, not this table |
 
 **You do not have to catch the log line.** A Hub whose startup probe did not
@@ -296,6 +305,23 @@ are pointed at a different witness than you think.
 silently.** A witness that can be reset is not an anchor, and a Hub that
 tolerates a reset witness has no anchor either.
 
+**The Hub is still up while you do this, and that is deliberate.** With exactly
+one witness, losing the witness would otherwise take the Hub with it, and the
+only working exit would be to drop the configuration and run unanchored — the
+anchor punishing an honest operator for a third party's failure, with "turn it
+off" as its failure mode. So a Hub whose witness identity changed **starts**,
+refuses every signature **silently** rather than crash-looping, serves reads and
+cooperative close, and publishes the break in `/v1/readiness/mainnet` — the
+identifier in `blockers`, the explanation in `limitations`. Read it from there
+rather than from a log line you may have missed. Nothing is waived by the Hub
+being up: no probe has agreed, so nothing signs.
+
+Note also what the Hub does **not** do: it does not sign anything new to prove
+itself. Re-anchoring goes through a head the payer already holds — same serial,
+same bill commitment — because a Hub minting a fresh signature under a witness it
+had just chosen would be proving nothing. The payer decides
+(`AnchorWitnessChangeRequiresDecision`, §9b).
+
 1. **Do not sign.** The Hub will refuse. Leave it refusing.
 2. Confirm which witness you are actually talking to: the endpoint, the pinned
    `witness_id`, the pinned receipt public key, and the `witness_instance_id` on
@@ -305,13 +331,69 @@ tolerates a reset witness has no anchor either.
    record, a failover that pointed somewhere new), fix the configuration and
    restart. That is a configuration incident, not a recovery one.
 4. If you are pointed at the **right** witness and it genuinely lost state, the
-   witness must be rebuilt to a position **at or above** the Hub's current head,
-   from the witness's own backups and from the Hub's records, under the same
-   authorisation process as Procedure A — and the rebuild must be documented as
-   a period during which the anchor guarantee did not hold.
+   witness would have to be rebuilt to a position **at or above** the Hub's
+   current head, from the witness's own backups and from the Hub's records,
+   under the same authorisation process as Procedure A — and the rebuild would
+   have to be documented as a period during which the anchor guarantee did not
+   hold. **That mechanism does not exist.** There is no resynchronisation
+   subcommand and no authorisation-apply path; `hpay-rollback-witness` has
+   `serve`, `instance` and `attest` and nothing else. Do not improvise one, and
+   do not read this step as a procedure you can follow today. Read step 6.
 5. Until it is rebuilt and re-attested, `external_rollback_anchor_ready` is
    `false` and must be reported `false`. The Hub is running without an anchor.
    Treat that as a service-affecting outage, because it is.
+6. **What you can actually do today**, and it is not "get signing back". A
+   witness identity change is terminal for this Hub's signing: the pin only moves
+   through a signature and a signature only happens after the pin has moved, so
+   the Hub cannot adopt a replacement by itself, and a version that could would
+   be the laundering path the anchor exists to refuse. So: serve each live
+   channel's continuity declaration
+   (`GET /v2/hvm-registry/channel/{binding_commitment}/anchor-continuity`), let
+   every payer adjudicate it, and close the channels cooperatively on the heads
+   their payers already hold — close is deliberately never blocked by this. Then
+   rebuild the Hub on a fresh state directory with a new witness, or run
+   unanchored and say so. Tell your counterparties out of band as well; nothing
+   in the protocol carries the announcement.
+
+**About that declaration.** It is served per channel on a Hub that will never
+co-sign again, and it is the *only* thing that reaches the payer in this state,
+because every other route into their witness ratchet runs on a new bill and
+there will never be another new bill. It re-anchors the channel's existing head —
+same serial, same bill commitment — under the witness answering now, and **signs
+nothing new**. It moves no pin, sets no probe agreement, advances no channel
+serial and clears no latch: a Hub that refuses before serving one refuses after.
+On a healthy Hub the route refuses, because there is nothing to declare.
+
+**And there is a case in this procedure where the route refuses too — read this
+before you go looking for a bug.** Everything above about declarations applies to
+a witness whose **durable store identity changed**: a new store, a new
+`witness_instance_id`, a replacement. It does **not** apply to the other and more
+likely incident that lands you on this page — the witness box died and was
+rebuilt **from the witness's own backup**, a few reservations behind. A restored
+store replays its own header, so it keeps its identity: the pin still matches,
+nothing about the witness set changed, and
+`GET /v2/hvm-registry/channel/{binding_commitment}/anchor-continuity` refuses
+with *"this Hub's configured witness is the witness it pinned"*. That refusal is
+correct and it is not a defect.
+
+Two consequences, both deliberate:
+
+* **The payer is owed no adjudication, and gets none.** No witness was swapped,
+  so there is no set change to decide about; the receipt the payer holds for its
+  head is still from the store that issued it. Close the channel cooperatively on
+  that head — close is never blocked by this — and the payer needs nothing from
+  the Hub to do it.
+* **Serving a declaration here would be the forbidden move wearing a ceremony's
+  name.** It would ask a witness that has gone backwards to reserve a position
+  for a head it has forgotten, which is step 4's "resynchronise the witness to
+  the Hub" carried out by the Hub itself, unauthorised. The Hub refuses instead.
+
+The identifier you will see is `rollback_anchor_witness_behind_hub`, not
+`rollback_anchor_witness_instance_changed`, and the readiness document carries no
+`rollback_anchor_witness_identity_break` object. Both facts are pinned by
+`a_witness_restored_from_its_own_backup_is_refused_and_has_no_declaration_to_serve`
+in `crates/l2-fast-pay-hub/tests/rollback_anchor_hub.rs`. There is no path back to
+signing from this state, for the reason step 4 gives.
 
 **Honest note:** a witness that lost its state has already told you something
 about how it is operated. Fix that before restoring service, not after.
@@ -547,18 +629,24 @@ operator who goes looking for them here should find them rather than assume they
 are a Hub fault.
 
 **`AnchorWitnessChangeRequiresDecision`** — the wallet has noticed that this Hub
-has stopped using a witness that receipted an earlier bill on that channel. It
+has stopped using the witness that receipted an earlier bill on that channel. It
 is not a bug and there is nothing to fix on the Hub: the wallet is asking its
-owner whether to accept the new witness set or close the channel. It is what a
-witness rotation looks like from the far side, and also what a rollback attempt
-looks like from the far side, which is why the wallet cannot answer it alone.
-If you rotated a witness on purpose, tell your counterparties out of band —
+owner whether to accept the new witness or close the channel. It is what an
+honest change of witness looks like from the far side, and also what a rollback
+attempt looks like from the far side, which is why the wallet cannot answer it
+alone. If you changed witness on purpose, tell your counterparties out of band —
 nothing in the protocol carries that announcement, and without it the honest
-answer for them is to close. See §7 of `RUNNING-A-WITNESS.md` before planning a
-rotation at all.
+answer for them is to close. See §7 of `RUNNING-A-WITNESS.md` before planning
+one at all.
+
+Because a Hub has exactly one witness, this is always the **strong** form of the
+prompt: every witness the payer recorded is gone at once, so they see zero
+overlap rather than an ambiguous partial change. That is by design and is a
+benefit of the single-witness decision, not a side effect of it. See ADR-001,
+"One witness, by design".
 
 **`rollback_anchor_memory_behind_wallet`** — the wallet's own record of this
-channel's witnesses is missing or older than its own payment history. That is a
+channel's witness is missing or older than its own payment history. That is a
 fault on the wallet's machine (a deleted or partially restored L2 store), not on
 the Hub. The Hub side of it is: do not offer to "help" by re-signing anything,
 and do not treat a wallet in this state as evidence about your own position.
@@ -587,7 +675,7 @@ ALWAYS
 
 NEVER
   Re-sign the gap.  Lower the counter.  Restore the witness to match.
-  Swap witnesses.   Bypass the check.   Resync during split brain.
+  Swap the witness. Bypass the check.   Resync during split brain.
 
 The frozen Hub is the safe Hub. Slow is fine. Wrong is not.
 ```

@@ -520,6 +520,18 @@ impl RollbackAnchorClient {
         self.config.witness_epoch
     }
 
+    /// The durable store the *currently configured* deployment attestation
+    /// describes.
+    ///
+    /// This is the store the witness must be answering from - [`Self::
+    /// verify_status`] refuses any status naming a different one - so comparing
+    /// it against `RollbackAnchorPin::witness_instance_id` detects a witness
+    /// identity change without a single network round trip, and therefore
+    /// works when the replacement is itself unreachable.
+    pub fn attested_witness_instance_id(&self) -> &str {
+        &self.config.attestation.attestation.witness_instance_id
+    }
+
     pub fn hub_identity(&self) -> &str {
         &self.hub_identity
     }
@@ -634,6 +646,29 @@ impl RollbackAnchorClient {
             return Err(HubError::Node(format!(
                 "{REFUSAL_ATTESTATION_MISSING_OR_EXPIRED}: the deployment attestation describes a \
                  different witness store than the one answering"
+            )));
+        }
+        // And it has to be an attestation that is still in force.
+        //
+        // `attestation_is_valid_at` used to have exactly one caller,
+        // `evidence_from`, which only fills in the published document -
+        // `connect` verifies the attestation's signature and binding and never
+        // looks at `expires_at`. So a Hub whose attestation had lapsed probed
+        // happily and went on co-signing on it. The attestation is the only
+        // statement of *who runs this witness* and it is deliberately given a
+        // bounded life so that the operator has to re-affirm it rather than set
+        // it once; letting it lapse silently on the signing path gives away the
+        // whole point of the bound. On the full mainnet profile readiness
+        // already refused to call the anchor ready without it, so this only
+        // aligns the gate with what the document said; on the bounded pilot
+        // profile that blocker is waived, and this is the gap.
+        if !self.attestation_is_valid_at(now_unix) {
+            return Err(HubError::Node(format!(
+                "{REFUSAL_ATTESTATION_MISSING_OR_EXPIRED}: the witness deployment attestation was \
+                 valid until {} and it is now {now_unix}. Re-attest with the witness operator's \
+                 offline authorisation key; the anchor does not vouch on a lapsed statement of who \
+                 runs the witness",
+                self.config.attestation.attestation.expires_at
             )));
         }
         // Hard refusal 4: the counter is never observed to decrease.

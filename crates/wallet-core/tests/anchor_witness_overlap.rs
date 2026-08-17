@@ -459,7 +459,12 @@ fn the_first_bill_records_a_baseline_silently_and_the_second_ratchets() {
     assert_eq!(memory.accepted_serial, 2);
     assert_eq!(memory.accepted_bill_commitment, bill2);
     assert_eq!(
-        memory.witnesses.values().next().unwrap().highest_counter_value,
+        memory
+            .witnesses
+            .values()
+            .next()
+            .unwrap()
+            .highest_counter_value,
         8
     );
 
@@ -505,7 +510,9 @@ fn a_witness_counter_that_goes_backwards_is_a_hard_refusal_not_a_decision() {
         )
         .expect_err("a restored witness counter must be refused");
     assert!(
-        error.to_string().contains("rollback_anchor_witness_behind_hub"),
+        error
+            .to_string()
+            .contains("rollback_anchor_witness_behind_hub"),
         "unexpected error: {error}"
     );
     assert!(
@@ -548,7 +555,9 @@ fn a_bill_at_or_below_the_accepted_head_is_refused() {
         )
         .expect_err("a fork at the accepted serial must be refused");
     assert!(
-        error.to_string().contains("rollback_anchor_witness_behind_hub"),
+        error
+            .to_string()
+            .contains("rollback_anchor_witness_behind_hub"),
         "unexpected error: {error}"
     );
 
@@ -636,7 +645,9 @@ fn re_affirming_the_recorded_head_still_runs_the_whole_rule() {
         )
         .expect_err("a witness contradicting itself at the head must be refused");
     assert!(
-        error.to_string().contains("rollback_anchor_witness_behind_hub"),
+        error
+            .to_string()
+            .contains("rollback_anchor_witness_behind_hub"),
         "unexpected error: {error}"
     );
 
@@ -1172,4 +1183,109 @@ fn each_binding_keeps_its_own_ratchet() {
         let memory = safety.anchor_memory(binding).unwrap();
         assert_eq!(memory.witnesses.values().next().unwrap().witness_id, label);
     }
+}
+
+/// Retiring a witness must not un-ratchet it.
+///
+/// Accepting a set change moves the dropped records to `retired` rather than
+/// erasing them, and the reason given is that the event has to survive in the
+/// record. That is only half of what `retired` is for. If the counter ratchet
+/// reads `witnesses` alone, a retired witness is, to the ratchet, a witness the
+/// wallet has never seen - so the amnesia attack simply gains one extra step:
+/// swap the witness once, get the prompt accepted (which is the answer a user
+/// gives when the swap looks legitimate), then bring the original store back
+/// rebuilt from nothing, its counter at zero, and it is treated as new.
+///
+/// The record is right there on disk. It has to be read.
+#[test]
+fn a_retired_witness_that_comes_back_with_a_reset_counter_is_still_refused() {
+    let rig = Rig::new();
+    let w1 = Witness::new("anchor-w1", "witness-one", 0x41);
+    let w2 = Witness::new("anchor-w2", "witness-two", 0x42);
+    let binding = hash64(0x51);
+    let mut safety = rig.open();
+
+    // The wallet watches w1 reach counter 40 on this channel.
+    let bill1 = hash64(0x61);
+    safety
+        .accept_anchored_bill(
+            &binding,
+            &rig.hub_identity,
+            &bill1,
+            1,
+            &[w1.sign(w1.receipt(&rig.hub_identity, &binding, 1, &bill1, 40))],
+            0,
+        )
+        .unwrap();
+
+    // The Hub moves to w2. The human accepts, which is the whole point of the
+    // prompt existing: this is what a legitimate rotation looks like.
+    let bill2 = hash64(0x62);
+    safety
+        .accept_anchored_bill(
+            &binding,
+            &rig.hub_identity,
+            &bill2,
+            2,
+            &[w2.sign(w2.receipt(&rig.hub_identity, &binding, 2, &bill2, 3))],
+            0,
+        )
+        .unwrap_err();
+    safety
+        .resolve_anchor_witness_change(&binding, AnchorWitnessDecision::AcceptNewWitnessSet)
+        .unwrap();
+    let memory = safety.anchor_memory(&binding).unwrap();
+    assert_eq!(memory.retired.len(), 1);
+    assert_eq!(memory.witnesses.len(), 1);
+    assert_eq!(
+        memory.retired.values().next().unwrap().signer_address,
+        w1.account.address()
+    );
+
+    // w1 comes back with the *same* key and the *same* store instance - so the
+    // overlap key is identical and it is not a new witness - but its counter is
+    // back at 2. That is a store rebuilt from nothing.
+    let bill3 = hash64(0x63);
+    let error = safety
+        .accept_anchored_bill(
+            &binding,
+            &rig.hub_identity,
+            &bill3,
+            3,
+            &[
+                w2.sign(w2.receipt(&rig.hub_identity, &binding, 3, &bill3, 4)),
+                w1.sign(w1.receipt(&rig.hub_identity, &binding, 3, &bill3, 2)),
+            ],
+            0,
+        )
+        .expect_err("a retired witness is still a witness this wallet has watched")
+        .to_string();
+    assert!(
+        error.contains("rollback_anchor_witness_behind_hub"),
+        "unexpected error: {error}"
+    );
+
+    // And the refusal is hard: nothing was parked and the head did not move.
+    let memory = safety.anchor_memory(&binding).unwrap();
+    assert_eq!(memory.accepted_serial, 2);
+    assert_eq!(memory.accepted_bill_commitment, bill2);
+    assert!(memory.pending_decision.is_none());
+
+    // The same witness returning *ahead* of where it was retired is fine. The
+    // rule is a ratchet, not a ban.
+    safety
+        .accept_anchored_bill(
+            &binding,
+            &rig.hub_identity,
+            &bill3,
+            3,
+            &[
+                w2.sign(w2.receipt(&rig.hub_identity, &binding, 3, &bill3, 4)),
+                w1.sign(w1.receipt(&rig.hub_identity, &binding, 3, &bill3, 41)),
+            ],
+            0,
+        )
+        .expect("a witness that really did move forward is not the amnesia case");
+    let memory = safety.anchor_memory(&binding).unwrap();
+    assert_eq!(memory.accepted_serial, 3);
 }

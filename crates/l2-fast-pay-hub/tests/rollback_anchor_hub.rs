@@ -232,6 +232,43 @@ fn left_signed_payment(
     request
 }
 
+/// The same proposal, built against a head that has already moved.
+///
+/// [`left_signed_payment`] always builds on the channel's initial recovery
+/// bill, so on a channel that has taken a payment it is refused by the ledger
+/// as a stale `previous_bill_commitment` - long before the anchor is consulted.
+/// A test that wants to prove the *anchor* refuses has to get past the ledger
+/// first, which means proposing on the real head.
+fn left_signed_payment_on_head(
+    left: &Account,
+    bundle: &HvmRegistryRecoveryBundleV2,
+    previous: &HvmRegistryBillV2,
+    operation_id: &str,
+    now: u64,
+) -> HvmRegistryPaymentRequestV2 {
+    let mut request = HvmRegistryPaymentRequestV2::build_unsigned(
+        &network_binding(),
+        &bundle.binding,
+        previous,
+        operation_id,
+        &format!("{operation_id}-idempotency"),
+        &bundle.binding.right_hub_address,
+        100_000,
+        now,
+        now + 300,
+    )
+    .unwrap();
+    let hash = request.proposed_bill.signing_hash(&bundle.binding).unwrap();
+    request.proposed_bill.left_signature_hex =
+        hex::encode(Sign::create_by(left, &hash).serialize());
+    let authorization_hash = request
+        .payer_authorization_hash(&bundle.binding, previous)
+        .unwrap();
+    request.payer_authorization_signature_hex =
+        hex::encode(Sign::create_by(left, &authorization_hash).serialize());
+    request
+}
+
 async fn spawn_node(binding: HvmRegistryBindingV2) -> (String, JoinHandle<()>) {
     let expected = binding.clone();
     let live = snapshot(&binding);
@@ -1100,12 +1137,22 @@ fn every_refusal_identifier_is_indexed_by_the_recovery_document() {
         // signing path, but an operator meets it the same way and has to be
         // able to look it up the same way.
         l2_fast_pay_hub::readiness::ROLLBACK_ANCHOR_LATCHED_BLOCKER,
+        l2_fast_pay_hub::readiness::ROLLBACK_ANCHOR_IDENTITY_UNREADABLE_BLOCKER,
     ] {
         assert!(
             document.contains(identifier),
             "{identifier} is printed by the Hub but has no entry in the recovery document"
         );
     }
+
+    // The readiness text tells an operator whose witness was replaced to read
+    // this document, and names the route it should find there. A route the Hub
+    // points at and the document does not mention is a dead end at the exact
+    // moment an operator has run out of other options.
+    assert!(
+        document.contains("anchor-continuity"),
+        "the continuity route the readiness document points operators at must be documented here"
+    );
 
     for reason in [
         WitnessRefusalReason::HubBehindWitness,
@@ -1662,4 +1709,798 @@ async fn a_cosigned_bill_carries_its_witness_receipt_all_the_way_onto_the_wire()
     server.abort();
     node.abort();
     witness.handle.abort();
+}
+
+/// LOSING THE ONE WITNESS MUST NOT MEAN LOSING THE HUB.
+///
+/// A Hub has exactly one witness (ADR-001, settled). Replace that witness's
+/// durable store - the witness operator rebuilds it, or the Hub's operator has
+/// no choice but to move to a different witness - and the pin no longer
+/// matches. The startup probe refuses `rollback_anchor_witness_instance_changed`
+/// and can never agree again, so the Hub co-signs nothing, forever. That part
+/// is correct and this test asserts it stays correct: a fresh witness store
+/// agrees with everything, which is amnesia rather than agreement, and no
+/// Hub-side check can tell an honest replacement apart from a rolled-back Hub
+/// shopping for a witness with no memory.
+///
+/// What was missing is the exit. The break was legible only as an absent
+/// blocker; the payer - the one party whose memory the Hub cannot reach and
+/// therefore the only one who can judge this - was told nothing at all; and the
+/// only thing an operator could actually *do* was delete the five
+/// `--rollback-witness-*` flags, which is the anchor's failure mode being "turn
+/// it off".
+///
+/// So, in order: the process starts, the signature is still refused, the break
+/// is named in the readiness document with both store identities, and the Hub
+/// serves a declaration - this channel's existing head, same serial and same
+/// bill commitment, re-anchored under the witness answering now. **Nothing new
+/// is signed to produce it.** A Hub that had to sign in order to prove itself
+/// would be signing under a witness it had just chosen, which is the circle.
+#[tokio::test]
+async fn a_replaced_witness_starts_publishes_the_break_and_declares_the_head_without_signing() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-continuity-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x49; 20])).to_readable();
+    let (left, bundle) = signed_bundle("rollback-anchor-continuity-left", &hub_account, &contract);
+    let binding_commitment = bundle.binding.commitment().unwrap();
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let incumbent = spawn_witness("continuity-incumbent").await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("hub-state.json");
+
+    // The head the payer will end up holding: one real co-signed bill at serial
+    // 2, receipted by the incumbent witness.
+    let head_commitment = {
+        let hub = build_hub(&state_path, &hub_account, &node_url)
+            .with_rollback_anchor(incumbent.config(&hub_identity, None))
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+        hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+            .await
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+        let payment = left_signed_payment(&left, &bundle, "continuity-payment-1", now_unix());
+        // The commitment the receipt binds to, and the value the payer records
+        // as its accepted head: the payer-signed, Hub-UNSIGNED bill.
+        let commitment = payment.proposed_bill.commitment().unwrap();
+        assert_eq!(
+            hub.cosign_hvm_registry_payment(payment, now_unix())
+                .await
+                .unwrap()
+                .bill
+                .serial,
+            2
+        );
+        commitment
+    };
+    assert_eq!(
+        incumbent.observed_serial(&hub_identity, &binding_commitment),
+        Some(2)
+    );
+
+    // THE BREAK. The incumbent's store is gone; the operator is now configured
+    // against a different witness, correctly attested to this Hub. Everything
+    // about this configuration is valid. It is simply not the store this Hub
+    // pinned.
+    let replacement = spawn_witness("continuity-replacement").await;
+
+    // 1. IT STARTS. Attaching the anchor and running the boot probe both
+    //    complete; there is no `?` out of either that takes the process with
+    //    it. A Hub that will not start cannot close a channel cooperatively,
+    //    cannot answer readiness, and cannot tell anyone why - and under
+    //    `Restart=on-failure` the operator's instinct to restart it is the
+    //    first thing the recovery document forbids.
+    let hub = build_hub(&state_path, &hub_account, &node_url)
+        .with_rollback_anchor(replacement.config(&hub_identity, None))
+        .expect("a Hub whose witness was replaced must still be constructible");
+    let posture = hub.run_rollback_anchor_startup_probe_at_boot().await;
+    assert!(
+        !posture.agreed,
+        "a replacement witness store agrees with everything and proves nothing"
+    );
+    assert_eq!(
+        posture.refusal_identifier,
+        Some("rollback_anchor_witness_instance_changed")
+    );
+    assert!(
+        posture.condemning,
+        "a changed witness store does not clear by waiting and must not be retried in a loop"
+    );
+
+    // 2. IT DOES NOT SIGN. Untouched, and asserted before anything else runs,
+    //    so no later step can be read as having enabled it.
+    let head_bill = hub
+        .hvm_registry_channel_status(&binding_commitment)
+        .unwrap()
+        .latest_fully_signed_bill;
+    assert_eq!(head_bill.serial, 2);
+    let refused = left_signed_payment_on_head(
+        &left,
+        &bundle,
+        &head_bill,
+        "continuity-payment-2",
+        now_unix(),
+    );
+    let error = hub
+        .cosign_hvm_registry_payment(refused, now_unix())
+        .await
+        .expect_err("a Hub whose probe has not agreed must not sign")
+        .to_string();
+    assert!(
+        error.contains("startup probe has not agreed"),
+        "got: {error}"
+    );
+
+    // 3. IT PUBLISHES THE BREAK, by name and with both store identities, so it
+    //    is visible from outside rather than inferable from an absent blocker.
+    //    Read off the serialised document, because that is what an operator and
+    //    a monitoring system actually receive.
+    let readiness = hub.mainnet_readiness().await;
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "rollback_anchor_witness_instance_changed"),
+        "got {:?}",
+        readiness.blockers
+    );
+    assert!(!readiness.payments_enabled);
+    assert!(
+        !readiness
+            .close_blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("rollback_anchor_witness")),
+        "a broken anchor must never trap a channel that wants to close, got {:?}",
+        readiness.close_blockers
+    );
+    let document = serde_json::to_value(&readiness).unwrap();
+    let published = document
+        .get("rollback_anchor_witness_identity_break")
+        .cloned()
+        .expect(
+            "a Hub refusing forever because its witness was replaced must say so in the readiness \
+             document, not leave it to be inferred",
+        );
+    assert_eq!(
+        published
+            .get("pinned_witness_instance_id")
+            .and_then(Value::as_str),
+        Some(incumbent.instance_id(&hub_identity).as_str()),
+        "the break must name the store this Hub pinned, got {published:?}"
+    );
+    assert_eq!(
+        published
+            .get("attested_witness_instance_id")
+            .and_then(Value::as_str),
+        Some(replacement.instance_id(&hub_identity).as_str()),
+        "and the store it is configured with now, got {published:?}"
+    );
+    assert!(
+        readiness.limitations.iter().any(|limitation| {
+            limitation.contains("anchor-continuity") && limitation.contains("Nothing new is signed")
+        }),
+        "and in words, pointing at where the declaration is served, got {:?}",
+        readiness.limitations
+    );
+
+    // 4. IT SERVES A DECLARATION, over real HTTP, on the running Hub.
+    let hub = Arc::new(hub);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let served = hub.clone();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, l2_fast_pay_hub::build_router(served)).await;
+    });
+    let url =
+        format!("http://{address}/v2/hvm-registry/channel/{binding_commitment}/anchor-continuity");
+    let response = reqwest::Client::new().get(&url).send().await.unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "a Hub that is refusing to sign must still be able to tell the payer why"
+    );
+    let declaration: Value = response.json().await.unwrap();
+
+    // Same serial, same bill commitment. This is the whole safety argument: the
+    // ceremony re-anchors a head the payer already holds and mints nothing.
+    assert_eq!(
+        declaration.get("serial").and_then(Value::as_u64),
+        Some(2),
+        "got {declaration:?}"
+    );
+    assert_eq!(
+        declaration.get("bill_commitment").and_then(Value::as_str),
+        Some(head_commitment.as_str()),
+        "the declared commitment must be the payer-signed, Hub-unsigned one the payer recorded"
+    );
+    let receipts = declaration
+        .get("receipts")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("a declaration re-anchors or it declares nothing");
+    assert_eq!(receipts.len(), 1, "one Hub, one witness: got {receipts:?}");
+    let signed: SignedHubWitnessReceiptV1 = serde_json::from_value(receipts[0].clone()).unwrap();
+    signed
+        .verify_against_pinned_key(replacement.service.receipt_address())
+        .expect("the re-anchor must be signed by the replacement witness's real key");
+    assert_eq!(signed.receipt.serial, 2);
+    assert_eq!(signed.receipt.proposed_bill_commitment, head_commitment);
+    assert_eq!(signed.receipt.binding_commitment, binding_commitment);
+    assert_eq!(
+        signed.receipt.witness_instance_id,
+        replacement.instance_id(&hub_identity),
+        "the receipt must name the replacement's store - that is the half of the pair key the \
+         payer's ratchet notices has changed"
+    );
+
+    // A second read replays the first declaration rather than minting another.
+    // Two payers reading one head must be shown one declaration, and a read
+    // must not burn a position on the witness every time.
+    let again: Value = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        again.get("receipts"),
+        declaration.get("receipts"),
+        "a repeated read must replay the same declaration"
+    );
+
+    // AND THE PART THAT MUST NOT HAVE MOVED. The Hub is exactly as unable to
+    // sign as it was before it declared anything, and the incumbent - which
+    // still holds the truth about this channel - was not touched by any of it.
+    // Asserted on the exact bit `reserve_rollback_anchor` reads before any
+    // signature, rather than on a second payment attempt: the payment path is
+    // already unavailable for its own reasons by now, and this is the gate
+    // itself. Re-running the probe re-derives it from the live witness.
+    let after = hub.run_rollback_anchor_startup_probe_at_boot().await;
+    assert!(
+        !after.agreed,
+        "declaring must not adopt the replacement witness or set the bit that permits signing"
+    );
+    assert_eq!(
+        after.refusal_identifier,
+        Some("rollback_anchor_witness_instance_changed"),
+        "and the Hub must still be refusing for the same reason it was before"
+    );
+    assert!(
+        serde_json::to_value(&hub.mainnet_readiness().await)
+            .unwrap()
+            .get("rollback_anchor_witness_identity_break")
+            .is_some(),
+        "the break is not cleared by declaring it"
+    );
+    assert_eq!(
+        incumbent.observed_serial(&hub_identity, &binding_commitment),
+        Some(2)
+    );
+
+    server.abort();
+    node.abort();
+    incumbent.handle.abort();
+    replacement.handle.abort();
+}
+
+/// The other way a Hub loses its witness, and the one that actually happens:
+/// the witness box dies and is rebuilt **from the witness's own backup**, a few
+/// reservations behind.
+///
+/// This is deliberately *not* the continuity case, and the difference is the
+/// point. A restored store keeps its identity - `WitnessStore::open` takes the
+/// instance id out of the replayed header and mints a fresh one only when there
+/// is no header - so the pin still matches, nothing about the Hub's witness
+/// *identity* changed, and there is no witness set for a payer to adjudicate.
+/// What changed is that the anchor has forgotten positions this Hub already
+/// signed, which is exactly the shape of a witness that was reset for an
+/// attacker's benefit. The Hub cannot tell those apart and must not try.
+///
+/// So this test pins the honest answer rather than a hoped-for one:
+///
+/// * the Hub **starts**, refuses silently, and names the refusal
+///   `rollback_anchor_witness_behind_hub` - the identifier the recovery document
+///   routes to Procedure B - rather than the transient unreachable one;
+/// * it publishes **no** `rollback_anchor_witness_identity_break`, because none
+///   happened, and blurring the two would tell an operator to go looking for a
+///   replacement witness that does not exist;
+/// * the continuity declaration **refuses**, by name. Serving one here would
+///   mean asking a witness that has gone backwards to re-anchor a head it has
+///   forgotten, which is `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md`'s "do not
+///   resynchronise the witness to the Hub" performed by the Hub itself;
+/// * cooperative close is untouched, which is the whole exit that remains.
+///
+/// There is no way back to signing from here and this test does not pretend
+/// there is. Procedure B step 4 says so out loud: the rebuild-to-position
+/// mechanism does not exist.
+#[tokio::test]
+async fn a_witness_restored_from_its_own_backup_is_refused_and_has_no_declaration_to_serve() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-restored-witness-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x4a; 20])).to_readable();
+    let (left, bundle) = signed_bundle("rollback-anchor-restored-left", &hub_account, &contract);
+    let binding_commitment = bundle.binding.commitment().unwrap();
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+
+    // The witness store lives in its own directory, not in the Hub's state
+    // tree - co-location is a separate refusal with its own test.
+    let witness_directory = tempfile::tempdir().unwrap();
+    let store_path = witness_directory.path().join("witness-log.jsonl");
+    let backup_path = witness_directory.path().join("witness-log.backup.jsonl");
+    let witness = spawn_witness_at("restored-witness", None, store_path.clone()).await;
+    let instance_id = witness.instance_id(&hub_identity);
+
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("hub-state.json");
+
+    {
+        let hub = build_hub(&state_path, &hub_account, &node_url)
+            .with_rollback_anchor(witness.config(&hub_identity, None))
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+        hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+            .await
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+
+        // THE BACKUP, taken here: a real backup of the witness's own store,
+        // from before the reservation it is about to lose.
+        std::fs::copy(&store_path, &backup_path).unwrap();
+
+        let payment = left_signed_payment(&left, &bundle, "restored-payment-1", now_unix());
+        assert_eq!(
+            hub.cosign_hvm_registry_payment(payment, now_unix())
+                .await
+                .unwrap()
+                .bill
+                .serial,
+            2
+        );
+    }
+    assert_eq!(
+        witness.observed_serial(&hub_identity, &binding_commitment),
+        Some(2)
+    );
+
+    // THE INCIDENT. The witness box is lost and rebuilt from that backup, under
+    // the same operator, the same signing key and - because the store header is
+    // replayed rather than re-minted - the same durable identity.
+    witness.handle.abort();
+    std::fs::copy(&backup_path, &store_path).unwrap();
+    let restored = spawn_witness_at("restored-witness", None, store_path.clone()).await;
+    assert_eq!(
+        restored.instance_id(&hub_identity),
+        instance_id,
+        "a store restored from its own backup keeps its identity - that is what makes this case \
+         different from a replacement, and it is why the continuity path does not apply"
+    );
+    assert_eq!(
+        restored.observed_serial(&hub_identity, &binding_commitment),
+        None,
+        "and it has forgotten the position this Hub signed against it"
+    );
+
+    // 1. IT STARTS, and names the permanent condition rather than a transient
+    //    one. `condemning` is what stops the boot path retrying it in a loop.
+    let hub = build_hub(&state_path, &hub_account, &node_url)
+        .with_rollback_anchor(restored.config(&hub_identity, None))
+        .expect("a Hub whose witness lost state must still be constructible");
+    let posture = hub.run_rollback_anchor_startup_probe_at_boot().await;
+    assert!(!posture.agreed);
+    assert_eq!(
+        posture.refusal_identifier,
+        Some("rollback_anchor_witness_behind_hub"),
+        "got {posture:?}"
+    );
+    assert!(posture.condemning);
+
+    // 2. IT DOES NOT SIGN.
+    let head_bill = hub
+        .hvm_registry_channel_status(&binding_commitment)
+        .unwrap()
+        .latest_fully_signed_bill;
+    assert_eq!(head_bill.serial, 2);
+    let refused =
+        left_signed_payment_on_head(&left, &bundle, &head_bill, "restored-payment-2", now_unix());
+    let error = hub
+        .cosign_hvm_registry_payment(refused, now_unix())
+        .await
+        .expect_err("a witness that went backwards is not an anchor")
+        .to_string();
+    assert!(
+        error.contains("startup probe has not agreed"),
+        "got: {error}"
+    );
+
+    // 3. IT PUBLISHES THE RIGHT THING, AND NOT THE WRONG ONE.
+    let readiness = hub.mainnet_readiness().await;
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "rollback_anchor_witness_behind_hub"),
+        "got {:?}",
+        readiness.blockers
+    );
+    assert!(!readiness.payments_enabled);
+    assert!(
+        !readiness
+            .close_blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("rollback_anchor_witness")),
+        "closing on the head the payer already holds is the only exit left and must stay open, \
+         got {:?}",
+        readiness.close_blockers
+    );
+    assert!(
+        hub.rollback_anchor_witness_identity_break()
+            .unwrap()
+            .is_none(),
+        "the store identity did not change, and saying it did would send the operator hunting for \
+         a replacement witness that does not exist"
+    );
+    assert!(
+        serde_json::to_value(&readiness)
+            .unwrap()
+            .get("rollback_anchor_witness_identity_break")
+            .is_none(),
+        "and the document must not carry a break that did not happen"
+    );
+
+    // 4. THERE IS NO DECLARATION, and the refusal says why in the operator's
+    //    terms. A declaration here would be the Hub resynchronising its own
+    //    witness under a ceremony name.
+    let declined = hub
+        .rollback_anchor_continuity_declaration(&binding_commitment, now_unix())
+        .await
+        .expect_err("a witness that is behind is not a replacement witness")
+        .to_string();
+    assert!(
+        declined.contains("is the witness it pinned"),
+        "got: {declined}"
+    );
+
+    node.abort();
+    restored.handle.abort();
+}
+
+/// A payment may not claim the reservation namespace the continuity ceremony
+/// owns.
+///
+/// Continuity declarations are persisted in the same durable map as ordinary
+/// per-payment reservations, keyed by a deterministic id, and a payer picks its
+/// own `operation_id`. Nothing else in the system stops the two colliding, so
+/// the prefix is refused by name on the signing path. This is the only change
+/// this work makes to the path that reaches a key, so it gets a test of its
+/// own.
+#[tokio::test]
+async fn a_payment_cannot_claim_the_continuity_reservation_namespace() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-namespace-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x4a; 20])).to_readable();
+    let (left, bundle) = signed_bundle("rollback-anchor-namespace-left", &hub_account, &contract);
+    let binding_commitment = bundle.binding.commitment().unwrap();
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let witness = spawn_witness("namespace-witness").await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let hub = build_hub(
+        &directory.path().join("hub-state.json"),
+        &hub_account,
+        &node_url,
+    )
+    .with_rollback_anchor(witness.config(&hub_identity, None))
+    .unwrap();
+    hub.run_rollback_anchor_startup_probe().await.unwrap();
+    hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+        .await
+        .unwrap();
+    hub.run_rollback_anchor_startup_probe().await.unwrap();
+
+    // The control first, so the refusal below is known to be about the
+    // namespace and not about the payment: this Hub is healthy, its probe has
+    // agreed, and it co-signs.
+    let payment = left_signed_payment(&left, &bundle, "namespace-ordinary", now_unix());
+    let head = hub
+        .cosign_hvm_registry_payment(payment, now_unix())
+        .await
+        .expect("an ordinary operation id is unaffected")
+        .bill;
+    assert_eq!(head.serial, 2);
+
+    // The same Hub, the same channel, the same signer. The only thing wrong
+    // with this payment is that its operation id claims the reservation key
+    // space the continuity ceremony owns.
+    let claim = format!(
+        "{}{binding_commitment}/2",
+        l2_fast_pay_hub::rollback_anchor::CONTINUITY_REQUEST_ID_PREFIX
+    );
+    let payment = left_signed_payment_on_head(&left, &bundle, &head, &claim, now_unix());
+    let error = hub
+        .cosign_hvm_registry_payment(payment, now_unix())
+        .await
+        .expect_err("the continuity namespace is not a payment's to take")
+        .to_string();
+    assert!(
+        error.contains("is reserved for rollback anchor continuity declarations"),
+        "got: {error}"
+    );
+
+    node.abort();
+    witness.handle.abort();
+}
+
+/// A lost send must not be terminal for one channel's declaration, and a
+/// replacement witness that is *ahead* of the old pin must not make the
+/// declaration impossible to store.
+///
+/// Two separate defects, reachable together because they are both about the
+/// same wrong assumption - that a replacement witness's counter is comparable
+/// with the incumbent's.
+///
+/// 1. The continuity request id is derived from `(binding, serial)`, and on a
+///    Hub that will never sign again the serial can never move. So unlike the
+///    payment path there is no fresh id to retry under: a request that was
+///    persisted and then never reached the witness is replayed at its original
+///    counter forever, and once any other channel has taken that position the
+///    witness refuses `rollback_anchor_hub_behind_witness` - a *rollback
+///    accusation* - at a Hub that did nothing wrong. The re-mint is allowed
+///    only when the witness's own refusal proves it holds no record of the id.
+///
+/// 2. The durable state validator required every stored receipt's counter to
+///    sit at or below the pin. A continuity receipt comes from a different
+///    store, whose counter is unrelated; when the replacement happened to be
+///    ahead, persisting the declaration failed - a hard 500 on every read, for
+///    exactly the operator this path exists to rescue.
+#[tokio::test]
+async fn a_declaration_survives_a_lost_send_and_a_replacement_witness_that_is_ahead() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let hub_account = Account::create_by("rollback-anchor-remint-hub").unwrap();
+    let hub_identity = Address::from(*hub_account.address()).to_readable();
+    let contract =
+        ContractAddress::from_unchecked(Address::create_contract([0x4b; 20])).to_readable();
+    let (left, bundle) = signed_bundle("rollback-anchor-remint-left", &hub_account, &contract);
+    let binding_commitment = bundle.binding.commitment().unwrap();
+    let (node_url, node) = spawn_node(bundle.binding.clone()).await;
+    let incumbent = spawn_witness("remint-incumbent").await;
+
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("hub-state.json");
+    let head_commitment = {
+        let hub = build_hub(&state_path, &hub_account, &node_url)
+            .with_rollback_anchor(incumbent.config(&hub_identity, None))
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+        hub.activate_hvm_registry_recovery(bundle.clone(), 5_000, 1)
+            .await
+            .unwrap();
+        hub.run_rollback_anchor_startup_probe().await.unwrap();
+        let payment = left_signed_payment(&left, &bundle, "remint-payment-1", now_unix());
+        let commitment = payment.proposed_bill.commitment().unwrap();
+        assert_eq!(
+            hub.cosign_hvm_registry_payment(payment, now_unix())
+                .await
+                .unwrap()
+                .bill
+                .serial,
+            2
+        );
+        commitment
+    };
+
+    // The replacement, put deliberately AHEAD of the pin by serving other
+    // channels of the same Hub before this one asks for anything. This is the
+    // ordinary case for a witness that was already running - not a contrivance.
+    let replacement = spawn_witness("remint-replacement").await;
+    for step in 1..=5u64 {
+        let now = now_unix();
+        let request = HubAnchorRequestV1 {
+            request_version: 1,
+            request_id: format!("other-channel-{step}"),
+            hub_identity: hub_identity.clone(),
+            witness_id: replacement.service.witness_id().to_owned(),
+            witness_epoch: replacement.service.witness_epoch(),
+            settlement_profile: HPAY_REGISTRY_SETTLEMENT_PROFILE.to_owned(),
+            network_instance_id: INSTANCE.to_owned(),
+            binding_commitment: hex::encode([u8::try_from(step).unwrap(); 32]),
+            channel_id: format!("other-channel-{step}"),
+            reuse_version: 0,
+            serial: 1,
+            previous_bill_commitment: "1a".repeat(32),
+            proposed_bill_commitment: "2b".repeat(32),
+            counter_value: step,
+            hub_journal_sequence: step,
+            hub_journal_head_hash: "3c".repeat(32),
+            hub_state_commitment: "4d".repeat(32),
+            created_at: now,
+            expires_at: now + 60,
+        };
+        let signed = SignedHubAnchorRequestV1::sign(request, &hub_account).unwrap();
+        assert!(matches!(
+            replacement.service.reserve(&signed, now_unix()).unwrap(),
+            HubWitnessAnswerV1::Receipt(_)
+        ));
+    }
+
+    // A proxy in front of the replacement whose `/anchor` route can be cut. The
+    // status route stays up throughout, because that is what a lost send looks
+    // like: the Hub probes fine, persists its request, and the reservation
+    // never lands.
+    let reserve_reaches_the_witness = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (proxy_url, proxy) =
+        spawn_witness_proxy(&replacement.url, reserve_reaches_the_witness.clone()).await;
+
+    let hub = build_hub(&state_path, &hub_account, &node_url)
+        .with_rollback_anchor(replacement.config(&hub_identity, Some(&proxy_url)))
+        .expect("a Hub whose witness was replaced must still be constructible");
+    assert!(!hub.run_rollback_anchor_startup_probe_at_boot().await.agreed);
+
+    // THE LOST SEND. The request is persisted; the witness never sees it.
+    let error = hub
+        .rollback_anchor_continuity_declaration(&binding_commitment, now_unix())
+        .await
+        .expect_err("the reservation could not be delivered")
+        .to_string();
+    assert!(
+        error.contains("rollback_anchor_witness_unreachable"),
+        "got: {error}"
+    );
+
+    // Another channel takes the position that was reserved for this one while
+    // the send was in flight, so the persisted counter is now stale.
+    {
+        let now = now_unix();
+        let request = HubAnchorRequestV1 {
+            request_version: 1,
+            request_id: "other-channel-after".to_owned(),
+            hub_identity: hub_identity.clone(),
+            witness_id: replacement.service.witness_id().to_owned(),
+            witness_epoch: replacement.service.witness_epoch(),
+            settlement_profile: HPAY_REGISTRY_SETTLEMENT_PROFILE.to_owned(),
+            network_instance_id: INSTANCE.to_owned(),
+            binding_commitment: hex::encode([0xfeu8; 32]),
+            channel_id: "other-channel-after".to_owned(),
+            reuse_version: 0,
+            serial: 1,
+            previous_bill_commitment: "1a".repeat(32),
+            proposed_bill_commitment: "2b".repeat(32),
+            counter_value: 6,
+            hub_journal_sequence: 6,
+            hub_journal_head_hash: "3c".repeat(32),
+            hub_state_commitment: "4d".repeat(32),
+            created_at: now,
+            expires_at: now + 60,
+        };
+        let signed = SignedHubAnchorRequestV1::sign(request, &hub_account).unwrap();
+        assert!(matches!(
+            replacement.service.reserve(&signed, now_unix()).unwrap(),
+            HubWitnessAnswerV1::Receipt(_)
+        ));
+    }
+
+    // The witness is reachable again. The declaration must now get through.
+    reserve_reaches_the_witness.store(true, std::sync::atomic::Ordering::Release);
+    let declaration = hub
+        .rollback_anchor_continuity_declaration(&binding_commitment, now_unix())
+        .await
+        .expect("a lost send must not cost this channel its declaration forever");
+    assert_eq!(declaration.serial, 2);
+    assert_eq!(declaration.bill_commitment, head_commitment);
+    assert_eq!(declaration.receipts.len(), 1);
+    let receipt = &declaration.receipts[0].receipt;
+    assert_eq!(
+        receipt.witness_instance_id,
+        replacement.instance_id(&hub_identity)
+    );
+    assert!(
+        receipt.counter_value > 5,
+        "the re-anchor takes the replacement's *current* position, got {}",
+        receipt.counter_value
+    );
+
+    // A second read replays it rather than burning another position on the
+    // replacement, and the Hub is exactly as unable to sign as it was.
+    let again = hub
+        .rollback_anchor_continuity_declaration(&binding_commitment, now_unix())
+        .await
+        .expect("a second read replays");
+    assert_eq!(
+        again.receipts[0].receipt.counter_value,
+        receipt.counter_value
+    );
+    let refused = left_signed_payment_on_head(
+        &left,
+        &bundle,
+        &hub.hvm_registry_channel_status(&binding_commitment)
+            .unwrap()
+            .latest_fully_signed_bill,
+        "remint-payment-2",
+        now_unix(),
+    );
+    let error = hub
+        .cosign_hvm_registry_payment(refused, now_unix())
+        .await
+        .expect_err("declaring must never restore signing")
+        .to_string();
+    assert!(
+        error.contains("startup probe has not agreed"),
+        "got: {error}"
+    );
+
+    proxy.abort();
+    node.abort();
+    incumbent.handle.abort();
+    replacement.handle.abort();
+}
+
+/// A witness endpoint whose reservation route can be cut without taking its
+/// status route down with it - which is what a send lost in the network looks
+/// like from the Hub, and the only state in which a persisted-but-unreceipted
+/// continuity request exists.
+async fn spawn_witness_proxy(
+    upstream: &str,
+    reserve_reaches_the_witness: Arc<std::sync::atomic::AtomicBool>,
+) -> (String, JoinHandle<()>) {
+    use axum::routing::post;
+
+    let status_upstream = format!(
+        "{upstream}{}",
+        l2_fast_pay_hub::rollback_anchor::ANCHOR_STATUS_PATH
+    );
+    let reserve_upstream = format!(
+        "{upstream}{}",
+        l2_fast_pay_hub::rollback_anchor::ANCHOR_RESERVE_PATH
+    );
+    let app = Router::new()
+        .route(
+            l2_fast_pay_hub::rollback_anchor::ANCHOR_STATUS_PATH,
+            post(move |body: String| {
+                let status_upstream = status_upstream.clone();
+                async move { forward(&status_upstream, body).await }
+            }),
+        )
+        .route(
+            l2_fast_pay_hub::rollback_anchor::ANCHOR_RESERVE_PATH,
+            post(move |body: String| {
+                let reserve_upstream = reserve_upstream.clone();
+                let open = reserve_reaches_the_witness.clone();
+                async move {
+                    if !open.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err(StatusCode::BAD_GATEWAY);
+                    }
+                    forward(&reserve_upstream, body).await
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{address}"), handle)
+}
+
+async fn forward(url: &str, body: String) -> Result<axum::response::Response, StatusCode> {
+    use axum::response::IntoResponse;
+
+    let response = reqwest::Client::new()
+        .post(url)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = response.text().await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok((status, [("content-type", "application/json")], body).into_response())
 }

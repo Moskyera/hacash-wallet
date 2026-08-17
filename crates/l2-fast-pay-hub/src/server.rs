@@ -180,6 +180,14 @@ pub fn build_router_with_trusted_proxy(
             "/v2/hvm-registry/channel/{binding_commitment}",
             get(hvm_registry_channel_status_handler),
         )
+        // The continuity declaration. Reachable on a Hub that is refusing to
+        // sign, because that is the only Hub it means anything on, and it is
+        // how a payer learns that this Hub's one witness was replaced instead
+        // of inferring it from a channel that quietly stopped working.
+        .route(
+            "/v2/hvm-registry/channel/{binding_commitment}/anchor-continuity",
+            get(rollback_anchor_continuity_handler),
+        )
         .route("/v1/l1/channel/open", post(channel_open_handler))
         .route("/v1/l1/channel/close", post(channel_close_handler))
         .route("/v1/fast-pay/inbox/{payee}", get(recipient_inbox_handler))
@@ -424,6 +432,33 @@ async fn hvm_registry_channel_status_handler(
 ) -> Result<Json<HvmRegistryChannelStatusV2>, HubHttpError> {
     Ok(Json(
         state.hub.hvm_registry_channel_status(&binding_commitment)?,
+    ))
+}
+
+/// Serve the continuity declaration for one channel.
+///
+/// A `GET` that signs no bill, advances no ledger and moves no pin - but it is
+/// not a read. Minting a declaration writes the Hub's durable anchor record
+/// twice and talks to the replacement witness twice, so it is admitted like a
+/// mutation and not like a status page: unauthenticated callers who know a
+/// binding commitment must not be able to drive unbounded durable writes and
+/// outbound witness traffic on a Hub that is already in trouble. The mint
+/// happens once per head; every read after it replays from disk, and both go
+/// through `HubState::rollback_anchor_continuity_declaration`, which serialises
+/// them.
+///
+/// On a healthy Hub this refuses, because a Hub in agreement with its pinned
+/// witness has nothing to declare.
+async fn rollback_anchor_continuity_handler(
+    State(state): State<AppState>,
+    Path(binding_commitment): Path<String>,
+) -> Result<Json<crate::rollback_anchor::AnchorContinuityDeclarationV1>, HubHttpError> {
+    let _global_permit = acquire_global_mutation_permit(&state)?;
+    Ok(Json(
+        state
+            .hub
+            .rollback_anchor_continuity_declaration(&binding_commitment, crate::node::now_unix())
+            .await?,
     ))
 }
 

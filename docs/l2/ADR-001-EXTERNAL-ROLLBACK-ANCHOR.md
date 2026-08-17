@@ -64,6 +64,15 @@ Implement **Option C, a remote witness**, as the anchor, with the TPM counter
 (Option A) available as an optional second factor for single-operator
 deployments.
 
+Two further points are settled and are not open questions. Both have their own
+sections below, because both are the kind of thing a later reader mistakes for
+an oversight and "fixes".
+
+- **A Hub has exactly one witness.** Permanently, by design, not a limitation
+  awaiting a lift. See [One witness, by design](#one-witness-by-design).
+- **Running a witness at all is optional.** An operator runs one or does not.
+  See [The witness is optional](#the-witness-is-optional).
+
 ## Options considered
 
 ### Option A: TPM 2.0 NV monotonic counter
@@ -195,7 +204,10 @@ rail charge a fee per payment.
   flags. It is inert today and is being repointed at the readiness document in
   separate work. Confirm that landed before this flag can ever be `true`.
 - Whether one witness may serve multiple Hubs, and what that means for the trust
-  story if the witness operator is also a Hub operator.
+  story if the witness operator is also a Hub operator. This is a question about
+  *multi-tenancy at the witness* — many Hubs to one witness — and it is open. It
+  is not a question about many witnesses to one Hub, which is settled: see
+  [One witness, by design](#one-witness-by-design).
 
 ## Action items
 
@@ -218,6 +230,148 @@ rail charge a fee per payment.
 7. [ ] Optional: add the TPM counter as a second factor for single-operator
        deployments, ANDed with the witness, never substituted for it.
 
+## One witness, by design
+
+**A Hub has exactly one witness.** Not one by default, not one for now, not one
+until the fan-out lands. One, permanently, as the design.
+
+The `rollback_anchor` field of `HubState`
+(`crates/l2-fast-pay-hub/src/state.rs`) is the whole statement in code:
+
+```rust
+rollback_anchor: Option<crate::rollback_anchor::RollbackAnchorClient>,
+```
+
+An `Option` of one client. There is no collection, no quorum size, no threshold,
+no set membership and no adoption ceremony, and none of those is missing work.
+
+### Why, so nobody re-adds it in a year thinking it is an upgrade
+
+Multi-witness support **was built, and was reverted.** Three adversarial passes
+over that build found the same hole each time, and it was proved end to end
+against live witness services rather than argued about:
+
+> Per-witness durable keying let a Hub with two witnesses be restored from
+> backup, repointed at attacker-controlled witnesses, and re-sign a serial it
+> had already signed.
+
+The keying was per witness, so a Hub that carried two of them carried two
+independently resettable pins. Restore the Hub, point it at witnesses the
+attacker provisioned, and the per-witness state that was supposed to refuse had
+been reset along with everything else — which is precisely the double signature
+this entire document exists to prevent, reintroduced by the mechanism meant to
+strengthen it.
+
+**The single-witness Hub was never affected by that hole.** The hole existed
+*only* because there was more than one. It was not a bug in the fan-out that a
+more careful fan-out would avoid; the extra witness was the bug.
+
+So: **simplicity here is the security property, not a compromise.** A reader who
+arrives at this file thinking "one witness is a single point of failure, we
+should support several" is repeating an experiment that has already been run and
+whose result was a working exploit. Availability is not what the anchor buys,
+and the way to reduce the blast radius of a witness outage is not to add a
+second pin that can be reset. The reverted work is preserved outside this
+repository and is deliberately not linked here.
+
+### What follows from it, and is therefore not a gap
+
+- **No quorum, no threshold, no "m of n".** There is no n.
+- **No fan-out.** A bill carries the receipt of the one witness that reserved it.
+- **No set membership and no adoption ceremony.** There is nothing to join or
+  leave, so there is no ritual for joining or leaving.
+- **Rotation is not a ceremony either.** With one witness, changing witness is
+  simply a *total* witness change. Every live channel loses every witness the
+  payer recorded at once, which is a zero-overlap event, which the payer
+  adjudicates — see [the counterparty ratchet](#the-counterparty-ratchet-which-narrows-the-paragraph-above)
+  below and §7 of `RUNNING-A-WITNESS.md`. That is the whole mechanism. It is
+  simpler than a rotation protocol, not a poorer substitute for one.
+
+### The overlap rule matters more with one witness, not less
+
+It would be easy to read "one witness" as making the payer-side overlap rule
+less relevant. The opposite is true, and this is a benefit of the decision
+rather than a cost of it.
+
+With exactly one witness, the overlap rule is the **only** thing that stops a
+Hub silently swapping its witness. And because any swap is now a *total* swap,
+the payer sees the strong zero-overlap signal rather than the mild "some
+witnesses changed" one. The ambiguous middle case — a partial change that could
+be read either way — does not exist, because there is no set to partially
+change.
+
+The rule itself is unchanged and is stated in full below: overlap is computed on
+the address **recovered from the receipt signature**, paired with the signed
+`witness_instance_id` (`crates/wallet-core/src/l2_safety.rs`,
+`AnchorWitnessRecordV1` and its `key()`, fed by `recover_anchor_receipt_signer`),
+never on the `witness_id` label the Hub typed.
+
+### The continuity path is load-bearing, not a nicety
+
+With one witness, losing the witness kills the Hub. The store identity pin
+refuses, `rollback_anchor_probe_agreed` never becomes true, every channel stops
+signing, and if the only exit were "drop the configuration and run unanchored"
+then the anchor would be punishing an honest operator for a third party's
+failure, with "turn it off" as its failure mode. That is not acceptable, and it
+is the one thing that had to ship alongside this decision.
+
+So a Hub whose witness identity changed **starts**, refuses to sign **silently**
+— no crash loop, no unexplained exit — publishes the break in the readiness
+document, and serves a declaration the *payer* adjudicates:
+
+- It starts. `run_rollback_anchor_startup_probe_at_boot` returns a posture
+  instead of an error, precisely so the process survives to serve reads and
+  cooperative close (`crates/l2-fast-pay-hub/src/state/rollback_anchor.rs`,
+  `run_rollback_anchor_startup_probe_at_boot`, whose doc comment states the rule
+  in full).
+- It still refuses every signature. The posture sets nothing;
+  `rollback_anchor_probe_agreed` stays false and `reserve_rollback_anchor` gates
+  on it. **A bill that would not be signed before this existed is not signed
+  after it.**
+- It publishes the break. `note_rollback_anchor_probe_refusal`
+  (`crates/l2-fast-pay-hub/src/readiness.rs`) pushes the refusal identifier
+  into `blockers`, sets `payments_enabled = false`, and spells the situation out
+  in `limitations`. Close is deliberately *not* blocked.
+- The payer adjudicates. The declaration is the existing re-affirmation path in
+  `accept_anchored_bill`: same serial, same bill commitment, the whole rule run
+  first, and a decision parked for a human when the witness changed
+  (`crates/wallet-core/src/l2_safety.rs`, the `is_recorded_head` branch of
+  `accept_anchored_bill`; tested in
+  `crates/wallet-core/tests/anchor_witness_overlap.rs`). It is already wired to
+  the desktop app.
+
+**The ceremony signs nothing new**, and that is the point of re-anchoring a head
+the payer already holds rather than minting a fresh bill. A Hub that had to
+produce a new signature in order to prove itself would be signing under the very
+witness it had just chosen, which is a circle and proves nothing.
+
+## The witness is optional
+
+Running a witness is a **choice**, and both answers are honest.
+
+`rollback_anchor` is an `Option` (the field quoted above) and `None` is a
+supported, documented configuration, not a broken one:
+
+- **A Hub without a witness is honest about having no anchor.** It measures
+  `external_rollback_anchor_ready = false`, which keeps the trustless
+  `mainnet-pilot` profile blocked. It does not claim an anchor it does not have.
+  `mainnet-bounded-pilot` is unaffected, because it never claimed one.
+- **A Hub with a witness is better off**, by exactly the amount set out in
+  [What a same-operator witness is actually worth](#what-a-same-operator-witness-is-actually-worth)
+  and no more.
+
+Neither is a lie, and the distinction is published rather than inferred. What is
+*not* optional is the meaning of the flag: absent or malformed witness
+configuration reads as **no witness**, which reads as `false`. It never reads as
+"anchor not required".
+
+The one thing optionality does not soften: once a witness *is* configured, it is
+mandatory on the signing path. There is no bypass, no degraded mode and no grace
+period — see [The two things that must never happen](#the-two-things-that-must-never-happen).
+And removing the configuration does not clear a condemnation already written to
+`hub-state.json`; the latch check runs before the unconfigured-anchor exit
+precisely so that deleting flags cannot un-condemn a channel.
+
 ## Who runs the witness
 
 This was previously left open. It is decided here, because leaving it open makes
@@ -233,9 +387,13 @@ the user is the ability to *read* what that Hub's anchor is worth — which is w
 the posture and the operating entity are published beside the flag rather than
 hidden behind it.
 
-**The Hub operator runs a Hub, and points it at a witness over the network.**
-One service, plus an address in their configuration. They are not required to run
-a witness themselves, and running one is not the normal starting position.
+**The Hub operator runs a Hub, and may point it at a witness over the network.**
+One service, plus an address in their configuration. Two separate choices, and
+neither is forced: whether to have a witness at all
+([it is optional](#the-witness-is-optional)), and, having decided to, whether to
+run it themselves — which they are not required to do and which is not the
+normal starting position. A Hub operator who points at somebody else's witness
+runs exactly one service, the Hub.
 
 **The project will run one public witness, so that an operator needs no second
 machine to start.** Stated as an intent, because **it does not exist yet**: there
@@ -322,13 +480,18 @@ worth having. They are not the same guarantee and must never be reported as one.
 Everything said above is true *Hub-side*. It stops being the whole truth once
 the receipts ride back to the counterparty with the bill.
 
-The rule is one sentence: **every new bill must carry a receipt from at least
-one witness that receipted the counterparty's most recently accepted bill** —
-enforced, more strongly, as *no witness the counterparty recorded may
-disappear without the counterparty being told*. The counterparty keys that
-memory by `binding_commitment` and stores it inside its own authenticated L2
-state commitment, on a different machine, under a different key
+The rule is one sentence: **every new bill must carry a receipt from a witness
+that receipted the counterparty's most recently accepted bill** — enforced,
+equivalently, as *no witness the counterparty recorded may disappear without the
+counterparty being told*. The counterparty keys that memory by
+`binding_commitment` and stores it inside its own authenticated L2 state
+commitment, on a different machine, under a different key
 (`crates/wallet-core/src/l2_safety.rs`, `accept_anchored_bill`).
+
+Because a Hub has exactly one witness, the two phrasings coincide and there is
+no partial case: the overlap is either total or zero. The general form is kept
+in the code because it is the safe way to write the comparison, not because a
+set is coming.
 
 This closes the circularity that the rest of this document accepts. To roll
 back past serial S and re-spend, the Hub must present a bill at or below S. Any
@@ -347,21 +510,21 @@ backwards is a hard refusal.
 What the ratchet does **not** do, stated plainly:
 
 - It guarantees **continuity, not honesty**. For a brand-new counterparty with
-  no history there is nothing to compare against, so the set is whatever the
-  Hub declares. A Hub malicious from the start can present a witness set it
-  fully controls and the ratchet will faithfully preserve that set forever.
-  This is irreducible without an external registry of witnesses. It matters
-  less than it sounds — a fresh channel at serial 0 has nothing to roll back
-  to, and the ratchet accrues from the first bill onward — but it is real, and
-  the counterparty's only defence against a set that was corrupt from bill one
+  no history there is nothing to compare against, so the witness is whatever the
+  Hub declares. A Hub malicious from the start can present a witness it fully
+  controls and the ratchet will faithfully preserve that witness forever. This
+  is irreducible without an external registry of witnesses. It matters less than
+  it sounds — a fresh channel at serial 0 has nothing to roll back to, and the
+  ratchet accrues from the first bill onward — but it is real, and the
+  counterparty's only defence against a witness that was corrupt from bill one
   is the trust decision it makes *before* bill one: who runs the witness.
-- It does not defeat a **colluding** witness: one already in the counterparty's
-  recorded set, same key, same instance, willing to fabricate monotone counters
-  and re-receipt a serial it already holds. No check here can see that. It is
-  the same residual as a same-operator witness, above.
+- It does not defeat a **colluding** witness: the one the counterparty already
+  recorded, same key, same instance, willing to fabricate monotone counters and
+  re-receipt a serial it already holds. No check here can see that. It is the
+  same residual as a same-operator witness, above.
 
-Write it as "the wallet verifies the witness set has not changed since it first
-saw one", never as "the wallet verifies the witness set".
+Write it as "the wallet verifies the witness has not changed since it first saw
+one", never as "the wallet verifies the witness".
 
 #### The counterparty's memory is not self-anchoring either
 
@@ -407,10 +570,14 @@ path with no check on it.*
 #### The decision has to reach a person, and closing has to stay real
 
 Zero overlap is a user decision. It is never a silent accept, and never an
-automatic halt: an innocent witness rotation and a Hub swapping witnesses in
-order to re-sign history are byte-identical from the counterparty's side, and no
-amount of protocol can tell them apart. Only the owner knows whether their
-operator announced a change.
+automatic halt: an operator honestly moving to a new witness, and a Hub swapping
+its witness in order to re-sign history, are byte-identical from the
+counterparty's side, and no amount of protocol can tell them apart. Only the
+owner knows whether their operator announced a change.
+
+With one witness this is the *only* shape the question ever takes. Every witness
+change is a total change, so the counterparty is always looking at zero overlap
+and never at an ambiguous partial one.
 
 That means the parked decision must be readable and answerable by a human, or
 the rule has no "yes" at all and its refusals pile up against a wall. It is

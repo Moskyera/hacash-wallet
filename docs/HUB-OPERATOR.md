@@ -105,6 +105,44 @@ going backwards. A Hub restored from an old backup will re-sign a bill serial it
 has already signed, with different balances, and both signatures are valid to the
 contract. The witness catches that only because it is not in the Hub's backup set.
 
+**A Hub has exactly one witness, and running one is optional.** Both are settled
+design decisions, not current limitations, and everything below assumes them.
+
+*Exactly one, permanently.* There is no quorum, no threshold, no second witness
+to fail over to, and no adoption ceremony — and none of that is missing work. A
+multi-witness build was attempted and reverted: per-witness durable keying let a
+Hub with two witnesses be restored from backup, repointed at attacker-controlled
+witnesses, and re-sign a serial it had already signed. The single-witness Hub was
+never affected by that hole; the extra witness *was* the hole. Simplicity here is
+the security property. If you arrive at this thinking several witnesses would be
+an upgrade, read `docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md`, "One witness, by
+design", first — that experiment has been run and it produced a working exploit.
+
+*Optional, genuinely.* You may run a Hub with no witness. It is honest about
+having no anchor: it measures `external_rollback_anchor_ready = false`, which
+keeps the trustless `mainnet-pilot` profile blocked, and it never claims
+otherwise. A Hub with a witness is better off. Neither is a lie. What is not
+optional is what happens once a witness *is* configured — see the unreachable
+paragraph below.
+
+*Changing witness is therefore always a total change*, which every counterparty
+sees as a zero-overlap event and adjudicates for themselves. That is the whole of
+rotation; there is no ceremony and none is planned. Plan it as an operational
+event with a maintenance window and a conversation with your counterparties, per
+`docs/l2/RUNNING-A-WITNESS.md` §7.
+
+**If you run the witness yourself, be exact about what it buys you.** It catches
+a disk failure and the old-backup restore that follows, a bad restore, the wrong
+snapshot, a stale volume, crash recovery to old state, and a second Hub instance
+started by accident — which is **most real incidents**, and is well worth having.
+It does **not** catch you. You hold the disk, the keys and the process; you can
+stop both, restore both together and start both, and every check in this system
+passes. No code of ours changes that. A self-run witness protects you from your
+own infrastructure; it does not protect your counterparty from you. Only a
+witness you do not control — the counterparty's, or a neutral third party's —
+does that. This is why the posture is published beside the flag instead of hidden
+behind it, and why a Hub must never advertise the first as the second.
+
 **What ships today: no witness configured.** There is no public witness address
 yet, so there is no default to point at. A default hostname that did not answer
 would be worse than an empty field — the Hub would refuse to sign for a reason
@@ -133,9 +171,21 @@ export HACASH_HUB_ROLLBACK_WITNESS_ATTESTATION_FILE=/etc/hpay-fast-pay-hub/witne
 scripts/START-HUB-WITH-REMOTE-WITNESS.sh https://witness.example.org
 ```
 
-The witness operator supplies all five values. Moving to a different witness —
-your own on separate infrastructure, the counterparty's, a neutral third party's
-— is a change to those five values and nothing else. It is not a code change.
+The witness operator supplies all five values.
+
+**Choosing a witness at the start is a configuration choice; changing it later is
+not.** Your own on separate infrastructure, the counterparty's, a neutral third
+party's — all three postures run the same binary and the same protocol, and
+picking among them on day one is exactly these five values. Do not read that as
+"you can swap witness whenever you like": the Hub pins the witness's store
+identity on first contact, inside its authenticated state commitment, so pointing
+a *running* Hub at a different witness refuses with
+`rollback_anchor_witness_instance_changed` and stops every channel on that Hub
+from signing, not just one. An earlier version of this guide said moving witness
+was "a change to those five values and nothing else"; that was false and is
+corrected here rather than softened. Read `docs/l2/RUNNING-A-WITNESS.md` §7
+before you commit to a witness operator, and choose one you expect to still be
+there in a year.
 
 **When the witness is unreachable the Hub refuses to sign and channels freeze.**
 That is designed, not a defect, and there is no flag, timeout, grace period or
@@ -154,6 +204,21 @@ signing by itself once the witness answers and agrees, so there is nothing to
 restart. This is not a softening of the paragraph above: nothing signs until a
 probe agrees. It exists because a Hub that crash-loops under
 `Restart=on-failure` cannot serve a close and cannot tell you what is wrong.
+
+**The same holds when the witness identity has changed, and with one witness that
+is load-bearing rather than a nicety.** Because a Hub has exactly one witness,
+losing it would otherwise stop every channel with the only working exit being to
+drop the configuration and run unanchored — the anchor punishing you for a third
+party's failure, with "turn it off" as its failure mode. So a Hub whose witness
+identity changed starts, refuses to sign **silently** rather than crash-looping,
+keeps serving reads and cooperative close, publishes the break in the readiness
+document (`blockers` for the identifier, `limitations` for the explanation), and
+serves a declaration your **payers** adjudicate. Re-anchoring runs against a head
+the payer already holds — same serial, same bill commitment — and signs nothing
+new, deliberately: a Hub minting a fresh signature under a witness it had just
+chosen would be proving nothing. Do not restart the Hub in a loop and do not
+reconfigure the anchor to restore signing; look the identifier up in
+`docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2.
 
 **Where the witness sits is published, not hidden.** `/v1/readiness/mainnet`
 carries a `rollback_anchor` object beside the flag, naming the attested posture

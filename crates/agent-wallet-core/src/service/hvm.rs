@@ -920,7 +920,8 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
-            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let floor =
+                self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
             let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let fully_signed = hub
                 .cosign_hvm_registry_payment(
@@ -971,7 +972,8 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
-            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let floor =
+                self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
             let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let fully_signed = hub
                 .cosign_hvm_payment(
@@ -1058,7 +1060,8 @@ impl AgentWalletManager {
                     .signed_registry_request()?
                     .clone()
             };
-            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let floor =
+                self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
             let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let status = hub
                 .reconcile_hvm_registry_payment(
@@ -1120,7 +1123,8 @@ impl AgentWalletManager {
                     .signed_request()?
                     .clone()
             };
-            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let floor =
+                self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
             let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             let status = hub
                 .reconcile_hvm_payment(
@@ -1286,7 +1290,8 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
-            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let floor =
+                self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
             let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             match hub
                 .cosign_hvm_registry_payment(
@@ -1335,7 +1340,8 @@ impl AgentWalletManager {
                 HvmDurableTransition::Submitted,
             )?;
             verified.permit.checkpoint(false)?;
-            let floor = self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
+            let floor =
+                self.anchor_serial_floor(wallet_id, verified.binding.binding_commitment())?;
             let mut anchor_safety = self.open_hvm_anchor_safety(wallet_id, &verified.binding)?;
             match hub
                 .cosign_hvm_payment(
@@ -1399,6 +1405,72 @@ impl AgentWalletManager {
         Ok(safety.pending_anchor_decision(&binding))
     }
 
+    /// Ask the Hub for its rollback-anchor continuity declaration on this
+    /// channel and adjudicate it here, in this wallet's own store.
+    ///
+    /// # When this is the only thing that works
+    ///
+    /// A Hub has exactly one witness. Replace that witness's durable store and
+    /// the Hub's pin no longer matches it: its startup probe can never agree
+    /// again and it refuses to co-sign anything, permanently. Every ordinary
+    /// path into the ratchet - [`Self::submit_hvm_payment`] and the
+    /// reconciliation twins - runs `accept_anchored_bill` on a *new* bill, and
+    /// there is no new bill and never will be, so none of them can ever be
+    /// reached again on that channel. Without this call the owner's evidence is
+    /// a channel that stopped working and a Hub log they cannot see.
+    ///
+    /// The declaration is the channel's existing head - same serial, same bill
+    /// commitment - re-anchored under the witness answering now. It runs
+    /// through the same [`hacash_wallet_core::l2_safety::ClientL2Safety::
+    /// accept_anchored_bill`] as every payment, with the same independent
+    /// serial floor from this wallet's own encrypted state, so the answer is
+    /// produced by the rule rather than beside it.
+    ///
+    /// Returns the parked decision when one is now owed - which, for a genuine
+    /// single-witness swap, is always, and always as the strong zero-overlap
+    /// prompt. `AgentWalletError::AnchorWitnessDecisionRequired` and the parked
+    /// change are the same event seen from two sides; the change is returned
+    /// rather than the error because the caller needs the evidence to show.
+    /// A hard refusal - a declaration below this wallet's accepted head, or one
+    /// whose receipts do not verify - is an `Err` and never a prompt.
+    ///
+    /// Answered with [`Self::resolve_hvm_anchor_decision`].
+    pub async fn refresh_hvm_anchor_continuity(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &crate::types::OperationId,
+    ) -> AgentWalletResult<Option<hacash_wallet_core::l2_safety::AnchorWitnessChangeV1>> {
+        let binding = self.anchor_binding_for_operation(wallet_id, operation_id)?;
+        let binding_commitment = binding.binding_commitment().to_owned();
+        let hub =
+            L2HubClient::new_for_wallet_policy(binding.hub_url().to_owned(), "testnet", false);
+        let floor = self.anchor_serial_floor(wallet_id, &binding_commitment)?;
+        let mut safety = self.open_hvm_anchor_safety(wallet_id, &binding)?;
+        let outcome = hub
+            .adjudicate_anchor_continuity(
+                &binding_commitment,
+                &mut safety,
+                binding.hub_address(),
+                floor,
+            )
+            .await;
+        match outcome {
+            // The head re-affirmed and still fully covered. Nothing was
+            // dropped, so there is nothing to decide - and nothing was written.
+            Ok(()) => Ok(safety.pending_anchor_decision(&binding_commitment)),
+            Err(error) => match classify_anchor_error(error) {
+                // The parked change is durable in this wallet's store by the
+                // time the error comes back, so it is read out rather than
+                // rebuilt. A user interface that dies here comes back to the
+                // same question.
+                AgentWalletError::AnchorWitnessDecisionRequired => {
+                    Ok(safety.pending_anchor_decision(&binding_commitment))
+                }
+                classified => Err(classified),
+            },
+        }
+    }
+
     /// Record the owner's answer to a parked rollback-anchor decision.
     ///
     /// There are exactly two answers and no third. Accepting adopts the new
@@ -1423,6 +1495,23 @@ impl AgentWalletManager {
         wallet_id: &AgentWalletId,
         operation_id: &crate::types::OperationId,
     ) -> AgentWalletResult<(String, hacash_wallet_core::l2_safety::ClientL2Safety)> {
+        let binding = self.anchor_binding_for_operation(wallet_id, operation_id)?;
+        let binding_commitment = binding.binding_commitment().to_owned();
+        let safety = self.open_hvm_anchor_safety(wallet_id, &binding)?;
+        Ok((binding_commitment, safety))
+    }
+
+    /// The verified binding this operation is on, re-derived from durable state
+    /// and cross-checked against the operation's own recorded commitment.
+    ///
+    /// Split out of [`Self::anchor_store_for_operation`] because the continuity
+    /// path needs the Hub URL and address as well as the store, and re-deriving
+    /// the binding a second way would be a second place for the two to drift.
+    fn anchor_binding_for_operation(
+        &self,
+        wallet_id: &AgentWalletId,
+        operation_id: &crate::types::OperationId,
+    ) -> AgentWalletResult<VerifiedAgentHvmBinding> {
         let session = self.session(wallet_id)?;
         let state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
@@ -1442,8 +1531,7 @@ impl AgentWalletManager {
         if binding.binding_commitment() != binding_commitment {
             return Err(AgentWalletError::ApprovalCommitmentMismatch);
         }
-        let safety = self.open_hvm_anchor_safety(wallet_id, &binding)?;
-        Ok((binding_commitment, safety))
+        Ok(binding)
     }
 
     /// Open the per-channel authenticated store that holds this channel's

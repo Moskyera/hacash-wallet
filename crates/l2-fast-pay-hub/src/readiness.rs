@@ -28,6 +28,16 @@ const ADMISSION_NOT_EVALUATED: &str = "mainnet_pilot_admission_policy_not_evalua
 /// witness is configured. Indexed by `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md`
 /// section 2 like every other anchor identifier.
 pub const ROLLBACK_ANCHOR_LATCHED_BLOCKER: &str = "rollback_anchor_channels_latched_in_refusal";
+/// Published when this Hub cannot read its own durable rollback-anchor pin and
+/// therefore cannot say whether the witness it is configured with is the
+/// witness it pinned. Not the same claim as
+/// `rollback_anchor_witness_instance_changed`, which asserts the pin *did*
+/// move; this one asserts only that the question could not be answered, and
+/// blocks payments for exactly that reason. Indexed by
+/// `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2 like every other anchor
+/// identifier.
+pub const ROLLBACK_ANCHOR_IDENTITY_UNREADABLE_BLOCKER: &str =
+    "rollback_anchor_witness_identity_unreadable";
 
 pub fn is_mainnet_pilot_profile(profile: &str) -> bool {
     matches!(
@@ -136,6 +146,26 @@ pub struct MainnetReadinessV1 {
     /// reopened.
     #[serde(default)]
     pub rollback_anchor: Option<crate::rollback_anchor::RollbackAnchorEvidenceV1>,
+    /// The witness identity break, stated rather than left to be inferred.
+    ///
+    /// `rollback_anchor` above goes `None` the moment the configured witness
+    /// cannot be verified, which is exactly what a replaced witness looks like -
+    /// so on the one failure this field is about, the field that would have
+    /// carried the evidence is empty. The blocker beside it names the refusal
+    /// identifier; this names *which store was pinned and which one is
+    /// configured now*, which is the difference between "the witness is down,
+    /// wait" and "the witness is gone, this will never clear on its own".
+    ///
+    /// Measured from durable state and configuration with no network, so it is
+    /// published whether or not the replacement can be reached.
+    ///
+    /// `None` for every Hub that has no anchor, has not yet pinned one, or is
+    /// configured with the witness it pinned - which is every healthy Hub, so
+    /// the field is skipped when absent and the document of a Hub that never
+    /// had an anchor is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_anchor_witness_identity_break:
+        Option<crate::rollback_anchor::WitnessIdentityBreakV1>,
     pub max_payment_hac_zhu: u64,
     pub max_channel_funding_hac_zhu: u64,
     pub allowlist_configured: bool,
@@ -300,6 +330,10 @@ impl MainnetReadinessV1 {
             mainnet_detected,
             fullnode_capabilities,
             rollback_anchor: anchor.cloned(),
+            // Filled in by `note_rollback_anchor_witness_identity_break`, which
+            // reads the Hub's durable pin. `evaluate` is given only the probe
+            // evidence and has nothing to measure it from.
+            rollback_anchor_witness_identity_break: None,
             max_payment_hac_zhu: if is_mainnet_pilot {
                 max_payment_hac_zhu
             } else {
@@ -424,6 +458,111 @@ impl MainnetReadinessV1 {
              docs/l2/ROLLBACK-ANCHOR-RECOVERY.md section 2 - do not restart the Hub in a loop and \
              do not reconfigure the anchor to restore signing"
         ));
+    }
+
+    /// Publish that this Hub's one witness is no longer the witness it pinned.
+    ///
+    /// `note_rollback_anchor_probe_refusal` above already publishes the
+    /// identifier when a probe has run and failed. This is not that, and the
+    /// difference is the whole point: a Hub whose replacement witness is also
+    /// unreachable publishes `rollback_anchor_witness_unreachable`, the
+    /// *transient* identifier, which tells an operator to wait for a witness
+    /// that is never coming back. This measurement needs no probe, so the
+    /// permanent condition is named even when nothing answers, and it carries
+    /// the two store identities so a reader can see that the pin moved rather
+    /// than guess.
+    ///
+    /// **This publishes; it does not gate**, exactly like the two methods above
+    /// it. `rollback_anchor_probe_agreed` is what refuses signatures and is
+    /// untouched. Payments are blocked here because a Hub in this state refuses
+    /// every bill anyway and must not advertise otherwise; close is
+    /// deliberately not blocked, because closing on the last accepted head is
+    /// the honest exit this whole path exists to keep open.
+    ///
+    /// Takes the *result* of the measurement rather than its success value, so
+    /// that a pin which cannot be read fails to the blocked side. `None` here
+    /// is the shape that means "this Hub is healthy"; an unreadable durable
+    /// state must never be able to produce it.
+    pub fn note_rollback_anchor_witness_identity_break(
+        &mut self,
+        identity_break: HubResult<Option<crate::rollback_anchor::WitnessIdentityBreakV1>>,
+    ) {
+        let identity_break = match identity_break {
+            Ok(Some(identity_break)) => identity_break,
+            Ok(None) => return,
+            Err(error) => {
+                if !self
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker == ROLLBACK_ANCHOR_IDENTITY_UNREADABLE_BLOCKER)
+                {
+                    self.blockers
+                        .push(ROLLBACK_ANCHOR_IDENTITY_UNREADABLE_BLOCKER.to_owned());
+                }
+                self.payments_enabled = false;
+                self.limitations.push(format!(
+                    "this Hub could not read its own durable rollback-anchor pin, so it cannot \
+                     say whether the witness it is configured with is the witness it pinned \
+                     ({error}). That is not evidence the pin is intact, so payments are blocked \
+                     until it can be read. Cooperative close is unaffected. See \
+                     docs/l2/ROLLBACK-ANCHOR-RECOVERY.md section 2"
+                ));
+                return;
+            }
+        };
+        if !self
+            .blockers
+            .iter()
+            .any(|blocker| blocker == &identity_break.refusal_identifier)
+        {
+            self.blockers
+                .push(identity_break.refusal_identifier.clone());
+        }
+        self.payments_enabled = false;
+        self.limitations.push(format!(
+            "the external rollback anchor witness this Hub pinned ({}) is not the witness it is \
+             configured with now ({}); the startup probe cannot agree again and this Hub will \
+             sign no bill on any channel, permanently. That is not a state an operator procedure \
+             clears: the pin moves only through a signature and a signature happens only after \
+             the pin has moved, and a Hub that could adopt a replacement witness by itself would \
+             be the laundering path this anchor exists to refuse. What it can still do it is \
+             doing - it is running, it answers reads and cooperative close, and it serves a \
+             continuity declaration per channel at GET \
+             /v2/hvm-registry/channel/{{binding_commitment}}/anchor-continuity: the channel's \
+             existing head, same serial and same bill commitment, re-anchored under the witness \
+             answering now. Nothing new is signed by it; the payer adjudicates, and the exit is \
+             to close each channel on the head its payer already holds. See \
+             docs/l2/ROLLBACK-ANCHOR-RECOVERY.md, Procedure B step 6",
+            identity_break.pinned_witness_instance_id, identity_break.attested_witness_instance_id
+        ));
+        self.rollback_anchor_witness_identity_break = Some(identity_break);
+    }
+
+    /// Say so when the anchor's pin has nowhere durable to live.
+    ///
+    /// A Hub with no authenticated durable storage keeps its rollback-anchor
+    /// record in memory, so the pin does not survive a restart and is re-adopted
+    /// on first contact from whichever store answers next - which is the amnesia
+    /// this subsystem refuses everywhere else, and it would show up as a probe
+    /// that agreed and a break that was never published.
+    ///
+    /// A limitation rather than a blocker, deliberately: that Hub is already
+    /// blocked from payments by `hub_operational_ready`, because without
+    /// authenticated storage nothing settles at all. A second blocker for the
+    /// same underlying fact would be noise; an unsaid one would be a lie.
+    pub fn note_rollback_anchor_pin_is_not_durable(&mut self, pin_is_not_durable: bool) {
+        if !pin_is_not_durable {
+            return;
+        }
+        self.limitations.push(
+            "this Hub has an external rollback anchor configured but no authenticated durable \
+             storage, so the witness pin is held only in memory: it does not survive a restart, \
+             and after one the Hub would adopt whichever witness store answers first rather than \
+             detect that it changed. Nothing settles on this Hub in any case - see the \
+             hub_signer_authenticated_storage_or_recovery_gate_is_not_ready blocker - and the \
+             anchor measurement below must not be read as an anchor guarantee"
+                .to_owned(),
+        );
     }
 
     pub fn apply_mainnet_admission(

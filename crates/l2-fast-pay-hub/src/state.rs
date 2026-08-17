@@ -138,6 +138,14 @@ pub struct HubState {
     /// configured, which reads as `external_rollback_anchor_ready = false` and
     /// never as "anchor not required".
     rollback_anchor: Option<crate::rollback_anchor::RollbackAnchorClient>,
+    /// Serialises continuity declarations against each other.
+    ///
+    /// The declaration route is a public `GET` that reads the durable anchor
+    /// record, talks to the witness twice and writes twice, across `await`
+    /// points. Two of them running at once would each mint a request at the
+    /// witness's current counter plus one, and the loser is refused a position
+    /// that was taken while it was in flight.
+    rollback_anchor_continuity_lock: tokio::sync::Mutex<()>,
     /// Set only by a startup probe that agreed with the witness on every
     /// channel this Hub holds. While it is false the anchor path refuses.
     rollback_anchor_probe_agreed: AtomicBool,
@@ -530,6 +538,7 @@ impl HubState {
             close_recovery_lock: tokio::sync::Mutex::new(()),
             hvm_signing_lock: tokio::sync::Mutex::new(()),
             rollback_anchor: None,
+            rollback_anchor_continuity_lock: tokio::sync::Mutex::new(()),
             rollback_anchor_probe_agreed: AtomicBool::new(false),
             rollback_anchor_probe_refusal: RwLock::new(None),
             deployment_profile,
@@ -644,6 +653,20 @@ impl HubState {
         // `Restart=on-failure` is a crash loop that answers no endpoint and
         // names no identifier. Same ordering rule as the line above.
         readiness.note_rollback_anchor_probe_refusal(self.rollback_anchor_probe_refusal());
+        // And, separately, whether the witness this Hub is configured with is
+        // still the witness it pinned. Separate because it needs no probe: a
+        // replacement witness that is itself unreachable would otherwise be
+        // published only as the transient `rollback_anchor_witness_unreachable`,
+        // which tells the operator to wait for a witness that is gone. Same
+        // ordering rule as the two lines above.
+        readiness.note_rollback_anchor_witness_identity_break(
+            self.rollback_anchor_witness_identity_break(),
+        );
+        // And whether the pin that measurement rests on is durable at all.
+        readiness.note_rollback_anchor_pin_is_not_durable(
+            self.rollback_anchor.is_some()
+                && (self.journal.is_none() || self.state_store.is_none()),
+        );
         readiness.apply_mainnet_admission(
             &self.mainnet_admission_policy,
             self.aggregate_pilot_tvl_zhu(),

@@ -1193,6 +1193,16 @@ export const agentWalletApi = {
       walletId,
       operationId,
     }),
+  // Asks the Hub to re-anchor this channel's existing head - same serial, same
+  // bill commitment, nothing newly signed - under the witness it is answering
+  // with now, and adjudicates the result. This is the only route into the
+  // witness ratchet on a channel whose Hub has lost its one witness and will
+  // therefore never co-sign another bill; every other route needs a new bill.
+  refreshHvmAnchorContinuity: (walletId: string, operationId: string) =>
+    invoke<AnchorWitnessChange | null>("agent_wallet_refresh_hvm_anchor_continuity", {
+      walletId,
+      operationId,
+    }),
   resolveHvmAnchorDecision: (
     walletId: string,
     operationId: string,
