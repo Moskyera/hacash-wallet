@@ -52,7 +52,7 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "async-trait",
- "axum",
+ "axum 0.8.9",
  "basis",
  "chrono",
  "field",
@@ -373,11 +373,45 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "axum"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
+dependencies = [
+ "async-trait",
+ "axum-core 0.4.5",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "itoa",
+ "matchit 0.7.3",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "rustversion",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
- "axum-core",
+ "axum-core 0.5.6",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -387,7 +421,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "itoa",
- "matchit",
+ "matchit 0.8.4",
  "memchr",
  "mime",
  "percent-encoding",
@@ -399,6 +433,27 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "rustversion",
+ "sync_wrapper",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -799,6 +854,18 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "chain"
+version = "0.1.0"
+dependencies = [
+ "basis",
+ "dyn-clone",
+ "field",
+ "hex",
+ "protocol",
+ "sys",
 ]
 
 [[package]]
@@ -1482,7 +1549,7 @@ name = "dust-whisper"
 version = "1.0.3"
 dependencies = [
  "aes-gcm",
- "axum",
+ "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
  "clap",
@@ -2228,7 +2295,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
- "axum",
+ "axum 0.8.9",
  "base64 0.22.1",
  "basis",
  "chrono",
@@ -2254,6 +2321,7 @@ dependencies = [
  "sha2 0.10.9",
  "sys",
  "tempfile",
+ "testkit",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2947,7 +3015,7 @@ version = "1.0.3"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "axum",
+ "axum 0.8.9",
  "basis",
  "clap",
  "field",
@@ -2965,6 +3033,7 @@ dependencies = [
  "sha3",
  "sys",
  "tempfile",
+ "testkit",
  "thiserror 2.0.18",
  "tokio",
  "tower-http",
@@ -3131,6 +3200,12 @@ dependencies = [
  "tendril",
  "web_atoms",
 ]
+
+[[package]]
+name = "matchit"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "matchit"
@@ -5556,6 +5631,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "testkit"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "basis",
+ "chain",
+ "field",
+ "hex",
+ "mint",
+ "protocol",
+ "serde_json",
+ "sys",
+ "tokio",
+ "vm",
+ "x16rs",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6220,6 +6313,7 @@ dependencies = [
  "hpay-agent-connector",
  "hpay-companion-lan-runtime",
  "hpay-companion-protocol",
+ "l2-fast-pay-hub",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
