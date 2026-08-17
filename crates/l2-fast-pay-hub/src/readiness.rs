@@ -185,10 +185,30 @@ pub struct MainnetReadinessV1 {
 
 impl MainnetReadinessV1 {
     /// `anchor` is the very evidence `external_rollback_anchor_ready` was
-    /// measured from, and is published verbatim. Passing `None` alongside a
-    /// `true` flag is not expressible in the Hub - both come from one
-    /// `HubHardGuarantees::measure` call over one probe - and `None` alongside
-    /// `false` is the ordinary "no witness" case.
+    /// measured from, and is published verbatim. `capabilities` is likewise the
+    /// evidence `l1_dispute_path_ready` was measured from.
+    ///
+    /// **Both booleans are claims, and this function does not take them on
+    /// trust.** Each is re-measured here from the evidence that travels in the
+    /// same document and kept only where the two agree:
+    ///
+    /// ```text
+    /// published = caller_claim AND measured_from_the_published_evidence
+    /// ```
+    ///
+    /// The production caller passes exactly these measurements already
+    /// ([`crate::state::HubState::mainnet_readiness`] hands over
+    /// [`HubHardGuarantees`] fields measured from this same probe), so nothing
+    /// about a real Hub changes. What changes is what a *wrong* caller can
+    /// produce. `evaluate` is `pub`, and before this it would publish
+    /// `unilateral_l1_enforceable: true` and `trustless_finality: true` over a
+    /// `fullnode_capabilities` block that carried no verified registry
+    /// deployment at all, and over `rollback_anchor: null` — the document
+    /// contradicting itself, in the direction of a guarantee. A false green is
+    /// the one failure this project ranks worse than a permanent red, so the
+    /// flags are now conjunctions that no argument list can widen: passing
+    /// `true` can never make them `true`, it can only fail to make them
+    /// `false`.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         profile: &str,
@@ -200,6 +220,19 @@ impl MainnetReadinessV1 {
         l1_dispute_path_ready: bool,
         capabilities: Result<FullnodeCapabilitiesV1, HubError>,
     ) -> Self {
+        // Re-measure both claims against the evidence that will be published
+        // beside them, before anything downstream reads either. Placed first so
+        // the blocker list, `close_blockers`, `payments_enabled` and the two
+        // guarantee flags all derive from one narrowed value and cannot
+        // disagree with each other.
+        let external_rollback_anchor_ready = external_rollback_anchor_ready
+            && measure_external_rollback_anchor_ready(anchor, crate::node::now_unix());
+        let node_reported_unilateral_exit =
+            measure_node_reported_unilateral_exit(capabilities.as_ref().ok());
+        let user_side_unilateral_exit_ready = measure_user_side_unilateral_exit_ready();
+        let l1_dispute_path_ready = l1_dispute_path_ready
+            && node_reported_unilateral_exit
+            && user_side_unilateral_exit_ready;
         let mut blockers = Vec::new();
         if !hub_operational_ready {
             blockers.push("hub_signer_authenticated_storage_or_recovery_gate_is_not_ready".into());
@@ -217,7 +250,7 @@ impl MainnetReadinessV1 {
             // wallet on any platform can build a challenge, respond, finalize
             // or claim transaction, so a user holding a perfectly valid
             // countersigned bill still has no instrument to present it with.
-            if !measure_user_side_unilateral_exit_ready() {
+            if !user_side_unilateral_exit_ready {
                 blockers.push("wallet_cannot_build_a_unilateral_exit_without_the_hub".into());
             }
         }
@@ -257,11 +290,9 @@ impl MainnetReadinessV1 {
                         blockers
                             .push("fullnode_missing_required_cooperative_close_action_3".into());
                     }
-                    if profile == MAINNET_PILOT_PROFILE
-                        && !measure_node_reported_unilateral_exit(Some(&capabilities))
-                    {
+                    if profile == MAINNET_PILOT_PROFILE && !node_reported_unilateral_exit {
                         blockers.push(
-                            "fullnode_does_not_report_verified_channel_unilateral_exit".into(),
+                            "fullnode_does_not_report_verified_registry_unilateral_exit".into(),
                         );
                     }
                 } else if capabilities.mainnet {
@@ -290,7 +321,7 @@ impl MainnetReadinessV1 {
                     && blocker.as_str() != "unilateral_l1_dispute_path_is_not_ready"
                     && blocker.as_str() != "wallet_cannot_build_a_unilateral_exit_without_the_hub"
                     && blocker.as_str()
-                        != "fullnode_does_not_report_verified_channel_unilateral_exit"
+                        != "fullnode_does_not_report_verified_registry_unilateral_exit"
                     && !blocker.starts_with("mainnet payment cap")
                     && !blocker.starts_with("mainnet channel-funding cap")
             })
@@ -354,6 +385,11 @@ impl MainnetReadinessV1 {
             max_aggregate_tvl_hac_zhu: 0,
             max_payment_satoshi: 0,
             wallet_fee_hac: "0",
+            // Both shadowed values, already narrowed to the evidence published
+            // in this very document. A reader can check either flag against the
+            // `rollback_anchor` and `fullnode_capabilities` blocks beside it and
+            // reach the same verdict, which is the only way a guarantee in a
+            // document is worth anything.
             trustless_finality: external_rollback_anchor_ready && l1_dispute_path_ready,
             unilateral_l1_enforceable: l1_dispute_path_ready,
             trusted_bounded_pilot: is_bounded_pilot,
@@ -858,6 +894,18 @@ pub fn measure_user_side_unilateral_exit_ready() -> bool {
 /// unreachable or unparseable node), a `false` capability flag, or evidence
 /// that fails `validate_candidate` each read `false`.
 ///
+/// **Which contract.** The shared registry,
+/// [`crate::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE`]. That has to be
+/// said out loud, because for a long time it was not the one measured here.
+/// This gate weighed [`crate::node::ChannelUnilateralExitEvidence`], which is
+/// hard-bound to `hpay-hvm-channel-v1` — the per-channel V1 contract. The
+/// registry V2 profile is what the wallet funds, what the bills are signed
+/// under, what the watchtower renews and what the exit driver was proven
+/// against on a real chain. Deploying V2 to Hacash mainnet would have left
+/// this reading `false` forever, and a `true` from a V1 deployment would have
+/// been a guarantee about a path nobody travels. Measuring a contract the
+/// system does not use is not a conservative error; it is an unrelated one.
+///
 /// **Why the third term exists.** The first two are both statements made by
 /// the fullnode about itself, in a different repository. Until this term was
 /// added, `unilateral_l1_enforceable` — the guarantee a wallet reads before it
@@ -875,25 +923,30 @@ pub fn measure_l1_dispute_path_ready(capabilities: Option<&FullnodeCapabilitiesV
 
 /// The fullnode half of the dispute-path measurement, on its own.
 ///
-/// True when the connected node advertises the unilateral-exit capability and
-/// carries evidence of an exactly verified mainnet deployment of the reviewed
-/// exit contract. Missing capabilities (an unreachable or unparseable node), a
-/// `false` capability flag, or evidence that fails `validate_candidate` each
-/// read `false`.
+/// True when the connected node advertises the **shared registry V2**
+/// unilateral-exit capability and carries evidence of an exactly verified
+/// mainnet deployment of the reviewed registry contract. Missing capabilities
+/// (an unreachable or unparseable node), a `false` capability flag, or evidence
+/// that fails `validate_candidate` each read `false`.
 ///
 /// Named and exported separately because it is exactly the part of the claim
 /// that a node can speak to, and keeping it distinct is what stops it being
 /// mistaken for the whole. On its own it never gates anything.
+///
+/// The V1 per-channel evidence, if the node still publishes it, is carried in
+/// [`FullnodeCapabilitiesV1::channel_unilateral_exit_evidence`] and validated
+/// on parse — but it is not a term here, because it is about a contract this
+/// system does not settle on.
 pub fn measure_node_reported_unilateral_exit(
     capabilities: Option<&FullnodeCapabilitiesV1>,
 ) -> bool {
     capabilities.is_some_and(|capabilities| {
-        capabilities.channel_unilateral_exit
+        capabilities.channel_registry_unilateral_exit
             && capabilities
-                .channel_unilateral_exit_evidence
+                .channel_registry_unilateral_exit_evidence
                 .as_ref()
                 .is_some_and(
-                    crate::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment,
+                    crate::node::RegistryUnilateralExitEvidence::is_verified_mainnet_deployment,
                 )
     })
 }
@@ -1015,27 +1068,224 @@ mod tests {
                 },
                 deployment_verified: true,
             }),
+            channel_registry_unilateral_exit: true,
+            channel_registry_unilateral_exit_evidence: Some(registry_exit_evidence()),
         }
+    }
+
+    /// A fully verified **V2** evidence document, for the fixture only.
+    ///
+    /// It describes a mainnet deployment that does not exist, which is the
+    /// whole point of a fixture: it lets the tests below prove that each term
+    /// of the gate is load bearing without anything being deployed. The
+    /// separate test file `honest_readiness_flags` proves the opposite
+    /// direction — that the real Hub, against the real node, publishes false.
+    fn registry_exit_evidence() -> crate::node::RegistryUnilateralExitEvidence {
+        let network_instance = crate::l1_channel::canonical_network_instance_id(
+            "mainnet",
+            0,
+            true,
+            crate::node::HACASH_MAINNET_BLOCK_ONE_HASH,
+            "hacash-mainnet",
+            2,
+        );
+        crate::node::RegistryUnilateralExitEvidence {
+            schema: crate::hvm_registry::HVM_REGISTRY_EXIT_EVIDENCE_SCHEMA.to_owned(),
+            manifest_valid: true,
+            contract_name: crate::hvm_registry::HPAY_REGISTRY_CONTRACT_NAME.to_owned(),
+            protocol_domain: crate::hvm_registry::HPAY_REGISTRY_PROTOCOL_DOMAIN.to_owned(),
+            settlement_profile: crate::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE.to_owned(),
+            source_sha256: "33".repeat(32),
+            bytecode_sha3: crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3.to_owned(),
+            required_action_kinds: crate::hvm_registry::HPAY_REGISTRY_REQUIRED_ACTION_KINDS
+                .to_vec(),
+            channel_model: crate::node::RegistryUnilateralExitChannelModel {
+                left_deposit: "positive".to_owned(),
+                right_hub_deposit: "exactly_zero".to_owned(),
+                maximum_active_channels_per_left_address: 1,
+                first_reuse: 0,
+            },
+            registry_key_count: crate::hvm_registry::HVM_REGISTRY_STORAGE_KEY_COUNT,
+            channel_key_count: crate::hvm_registry::HVM_REGISTRY_CHANNEL_KEY_COUNT,
+            must_renew_every_registry_key: true,
+            must_renew_every_channel_key: true,
+            maximum_renewal_step_periods: crate::hvm_registry::HPAY_REGISTRY_MAX_RENT_STEP,
+            deployment: crate::node::RegistryUnilateralExitDeployment {
+                enabled: true,
+                contract_address: Some(
+                    vm::ContractAddress::from_unchecked(field::Address::create_contract(
+                        [9_u8; 20],
+                    ))
+                    .to_readable(),
+                ),
+                deployment_tx_hash: Some("44".repeat(32)),
+                deployment_height: Some(HACASH_MAINNET_MIN_SAFE_HEIGHT),
+                independently_verified: true,
+                external_audit_complete: false,
+            },
+            on_chain_verification: crate::node::RegistryUnilateralExitOnChainVerification {
+                observed_height: Some(900_000),
+                confirmed_tx_height: Some(HACASH_MAINNET_MIN_SAFE_HEIGHT),
+                deployment_tx_confirmed: true,
+                contract_code_sha3: Some(
+                    crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3.to_owned(),
+                ),
+                contract_code_matches: true,
+                deployment_action_verified: true,
+                hub_address: Some(field::Address::create_contract([5_u8; 20]).to_readable()),
+                constructor_network_instance_id: Some(network_instance.clone()),
+                node_network_instance_id: Some(network_instance),
+                network_binding_matches: true,
+            },
+            deployment_verified: true,
+        }
+    }
+
+    /// The gate must be reading the contract this system settles on.
+    ///
+    /// This is the regression test for the defect: `measure_l1_dispute_path_
+    /// ready` used to be satisfied by a verified **V1** per-channel document
+    /// and to ignore V2 entirely. Strip the V2 evidence and leave the V1
+    /// evidence fully green, and the node half must read `false`.
+    #[test]
+    fn the_node_half_measures_the_shared_registry_and_not_the_v1_channel_contract() {
+        let green = capabilities();
+        assert!(
+            measure_node_reported_unilateral_exit(Some(&green)),
+            "a node with verified registry V2 evidence is the case this gate is about"
+        );
+
+        let mut v1_only = capabilities();
+        v1_only.channel_registry_unilateral_exit = false;
+        v1_only.channel_registry_unilateral_exit_evidence = None;
+        assert!(
+            v1_only.channel_unilateral_exit
+                && v1_only
+                    .channel_unilateral_exit_evidence
+                    .as_ref()
+                    .is_some_and(
+                        crate::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment
+                    ),
+            "the V1 half of this fixture is deliberately fully verified"
+        );
+        assert!(
+            !measure_node_reported_unilateral_exit(Some(&v1_only)),
+            "a verified V1 per-channel deployment says nothing about the registry profile \
+             this system settles on, and must never satisfy this gate"
+        );
+
+        let mut registry_only = capabilities();
+        registry_only.channel_unilateral_exit = false;
+        registry_only.channel_unilateral_exit_evidence = None;
+        assert!(
+            measure_node_reported_unilateral_exit(Some(&registry_only)),
+            "V1 is not a term: a node that stopped publishing it entirely still answers \
+             for the profile that is actually used"
+        );
+
+        let mut flag_down = capabilities();
+        flag_down.channel_registry_unilateral_exit = false;
+        assert!(!measure_node_reported_unilateral_exit(Some(&flag_down)));
+
+        let mut evidence_gone = capabilities();
+        evidence_gone.channel_registry_unilateral_exit_evidence = None;
+        assert!(!measure_node_reported_unilateral_exit(Some(&evidence_gone)));
+    }
+
+    /// Every chain-derived term of the V2 document is load bearing, and the
+    /// two V2-only bindings especially: a registry deployed by someone else,
+    /// or constructed for another network, must never verify.
+    #[test]
+    fn registry_evidence_fails_closed_on_every_missing_derivation() {
+        assert!(registry_exit_evidence().is_verified_mainnet_deployment());
+
+        let mut wrong_profile = registry_exit_evidence();
+        wrong_profile.settlement_profile =
+            crate::node::HPAY_CHANNEL_EXIT_SETTLEMENT_PROFILE.to_owned();
+        assert!(!wrong_profile.is_verified_mainnet_deployment());
+
+        let mut wrong_bytecode = registry_exit_evidence();
+        wrong_bytecode.bytecode_sha3 = "ff".repeat(32);
+        assert!(!wrong_bytecode.is_verified_mainnet_deployment());
+
+        let mut wrong_rent_step = registry_exit_evidence();
+        wrong_rent_step.maximum_renewal_step_periods = 5_000;
+        assert!(
+            !wrong_rent_step.is_verified_mainnet_deployment(),
+            "the V1 renewal step against a V2 contract aborts every renewal"
+        );
+
+        let mut below_floor = registry_exit_evidence();
+        below_floor.deployment.deployment_height = Some(HACASH_MAINNET_MIN_SAFE_HEIGHT - 1);
+        below_floor.on_chain_verification.confirmed_tx_height =
+            Some(HACASH_MAINNET_MIN_SAFE_HEIGHT - 1);
+        assert!(!below_floor.is_verified_mainnet_deployment());
+
+        let mut no_action = registry_exit_evidence();
+        no_action.on_chain_verification.deployment_action_verified = false;
+        assert!(
+            !no_action.is_verified_mainnet_deployment(),
+            "code on chain is not proof that this transaction put it there"
+        );
+
+        let mut foreign_network = registry_exit_evidence();
+        foreign_network
+            .on_chain_verification
+            .constructor_network_instance_id = Some("ab".repeat(32));
+        foreign_network
+            .on_chain_verification
+            .network_binding_matches = false;
+        assert!(!foreign_network.is_verified_mainnet_deployment());
+
+        let mut lying_binding = registry_exit_evidence();
+        lying_binding
+            .on_chain_verification
+            .constructor_network_instance_id = Some("ab".repeat(32));
+        assert!(
+            !lying_binding.is_verified_mainnet_deployment(),
+            "a document may not assert network_binding_matches over bytes that do not match"
+        );
+
+        let mut no_hub = registry_exit_evidence();
+        no_hub.on_chain_verification.hub_address = None;
+        assert!(!no_hub.is_verified_mainnet_deployment());
+
+        let mut wrong_live_code = registry_exit_evidence();
+        wrong_live_code.on_chain_verification.contract_code_sha3 = Some("ff".repeat(32));
+        assert!(!wrong_live_code.is_verified_mainnet_deployment());
+
+        let mut claimed_without_deployment = registry_exit_evidence();
+        claimed_without_deployment.deployment_verified = false;
+        claimed_without_deployment.deployment.independently_verified = false;
+        assert!(
+            claimed_without_deployment.validate_candidate().is_err(),
+            "an unverified candidate must not still be carrying deployment authority"
+        );
     }
 
     #[test]
     fn mainnet_pilot_is_capped_and_explicitly_fee_free() {
-        let mut readiness = MainnetReadinessV1::evaluate(
-            MAINNET_PILOT_PROFILE,
-            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
-            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
-            true,
-            true,
-            None,
-            true,
-            Ok(capabilities()),
-        );
-        assert!(!readiness.payments_enabled);
         let policy = MainnetPilotAdmissionPolicy::try_new(
             ["1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW"],
             MAINNET_PILOT_MAX_AGGREGATE_TVL_HAC_ZHU,
         )
         .unwrap();
+
+        // The caps are `is_mainnet_pilot_profile` caps, identical on both
+        // mainnet profiles. They are exercised here on the bounded one because
+        // that is the only profile whose document can honestly reach
+        // `payments_enabled` today — see the second half.
+        let mut readiness = MainnetReadinessV1::evaluate(
+            MAINNET_BOUNDED_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            false,
+            None,
+            false,
+            Ok(capabilities()),
+        );
+        assert!(!readiness.payments_enabled);
         readiness.apply_mainnet_admission(&policy, Ok(0));
         assert!(readiness.payments_enabled);
         assert_eq!(readiness.wallet_fee_hac, "0");
@@ -1056,6 +1306,141 @@ mod tests {
                     MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU + 1,
                 )
                 .is_err()
+        );
+
+        // The full pilot profile publishes the same caps and is fee-free in the
+        // same words, and is still shut - with a live witness, an admitted
+        // allowlist, a fullnode reporting a verified registry deployment, and a
+        // caller asserting both guarantees. Nothing in an argument list opens
+        // it, because the part that is missing is a user who can leave without
+        // the Hub.
+        let anchor = anchor_evidence(crate::node::now_unix());
+        let mut full = MainnetReadinessV1::evaluate(
+            MAINNET_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            true,
+            Some(&anchor),
+            true,
+            Ok(capabilities()),
+        );
+        full.apply_mainnet_admission(&policy, Ok(0));
+        assert_eq!(
+            full.max_payment_hac_zhu,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU
+        );
+        assert_eq!(
+            full.max_channel_funding_hac_zhu,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU
+        );
+        assert_eq!(full.wallet_fee_hac, "0");
+        assert!(!full.payments_enabled);
+        assert!(!full.unilateral_l1_enforceable);
+        assert!(!full.trustless_finality);
+        assert!(
+            full.blockers
+                .iter()
+                .any(|it| it == "wallet_cannot_build_a_unilateral_exit_without_the_hub")
+        );
+        assert!(
+            full.require_payment_ready(HacAmount::from_millimeis(1))
+                .is_err()
+        );
+    }
+
+    /// No argument list may publish a guarantee the published evidence does
+    /// not support.
+    ///
+    /// [`MainnetReadinessV1::evaluate`] is public and takes both guarantees as
+    /// plain booleans. It used to write them straight into the document, so a
+    /// caller could hand it `l1_dispute_path_ready: true` beside a
+    /// `fullnode_capabilities` block with no registry evidence whatsoever, or
+    /// `external_rollback_anchor_ready: true` beside `rollback_anchor: null`,
+    /// and get `unilateral_l1_enforceable: true` and `trustless_finality: true`
+    /// on the wire. The document would then be contradicting itself in the
+    /// direction of a guarantee - the single failure this project ranks below a
+    /// permanent red.
+    #[test]
+    fn no_argument_list_can_publish_a_guarantee_the_evidence_does_not_support() {
+        let mut nothing_deployed = capabilities();
+        nothing_deployed.channel_unilateral_exit = false;
+        nothing_deployed.channel_unilateral_exit_evidence = None;
+        nothing_deployed.channel_registry_unilateral_exit = false;
+        nothing_deployed.channel_registry_unilateral_exit_evidence = None;
+
+        let lied_to = MainnetReadinessV1::evaluate(
+            MAINNET_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            true,
+            None,
+            true,
+            Ok(nothing_deployed),
+        );
+        assert!(
+            !lied_to.unilateral_l1_enforceable,
+            "nothing is deployed and no anchor was supplied; the caller saying \
+             otherwise must not reach the wire"
+        );
+        assert!(!lied_to.trustless_finality);
+        assert!(!lied_to.payments_enabled);
+        assert!(
+            lied_to
+                .blockers
+                .iter()
+                .any(|it| it == "external_monotonic_rollback_anchor_is_not_ready"),
+            "the blocker list has to agree with the flags, or the document is \
+             still self-contradictory"
+        );
+        assert!(
+            lied_to
+                .blockers
+                .iter()
+                .any(|it| it == "fullnode_does_not_report_verified_registry_unilateral_exit")
+        );
+
+        // Same lie with an unreachable fullnode: a probe that failed is not
+        // evidence of anything, least of all of a verified deployment.
+        let blind = MainnetReadinessV1::evaluate(
+            MAINNET_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            true,
+            None,
+            true,
+            Err(HubError::Node("offline".into())),
+        );
+        assert!(!blind.unilateral_l1_enforceable);
+        assert!(!blind.trustless_finality);
+
+        // And an anchor claim over evidence that fails its own measurement -
+        // here a witness whose attestation has expired - is not an anchor.
+        let mut expired = anchor_evidence(crate::node::now_unix());
+        expired.attestation_expires_unix = 0;
+        let stale_anchor = MainnetReadinessV1::evaluate(
+            MAINNET_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            true,
+            Some(&expired),
+            true,
+            Ok(capabilities()),
+        );
+        assert!(!stale_anchor.trustless_finality);
+        assert!(
+            stale_anchor
+                .blockers
+                .iter()
+                .any(|it| it == "external_monotonic_rollback_anchor_is_not_ready")
+        );
+        assert_eq!(
+            stale_anchor.rollback_anchor.as_ref(),
+            Some(&expired),
+            "the evidence that failed still travels, so a reader can see why"
         );
     }
 
@@ -1130,7 +1515,7 @@ mod tests {
     #[test]
     fn operator_dispute_flag_cannot_override_missing_node_unilateral_exit() {
         let mut node = capabilities();
-        node.channel_unilateral_exit = false;
+        node.channel_registry_unilateral_exit = false;
         let readiness = MainnetReadinessV1::evaluate(
             MAINNET_PILOT_PROFILE,
             1_000_000,
@@ -1144,11 +1529,11 @@ mod tests {
         assert!(!readiness.payments_enabled);
         assert!(readiness.close_enabled);
         assert!(readiness.blockers.iter().any(|blocker| {
-            blocker == "fullnode_does_not_report_verified_channel_unilateral_exit"
+            blocker == "fullnode_does_not_report_verified_registry_unilateral_exit"
         }));
 
         let mut missing_evidence = capabilities();
-        missing_evidence.channel_unilateral_exit_evidence = None;
+        missing_evidence.channel_registry_unilateral_exit_evidence = None;
         let readiness = MainnetReadinessV1::evaluate(
             MAINNET_PILOT_PROFILE,
             1_000_000,
@@ -1161,28 +1546,32 @@ mod tests {
         );
         assert!(!readiness.payments_enabled);
         assert!(readiness.blockers.iter().any(|blocker| {
-            blocker == "fullnode_does_not_report_verified_channel_unilateral_exit"
+            blocker == "fullnode_does_not_report_verified_registry_unilateral_exit"
         }));
     }
 
     /// A fullnode that reports everything perfectly is still not a user
     /// getting their money out.
     ///
-    /// `capabilities()` is the fully green fixture: `channel_unilateral_exit`
-    /// true, an independently verified mainnet deployment, confirmed
-    /// deployment transaction, matching code hash. Before the user-side term
-    /// existed that combination alone published
-    /// `unilateral_l1_enforceable: true`. It must not, because no wallet can
-    /// build the exit transaction, and this test is what stops that
+    /// `capabilities()` is the fully green fixture:
+    /// `channel_registry_unilateral_exit` true, an independently verified
+    /// mainnet deployment of the shared registry, confirmed deployment
+    /// transaction, matching code hash, constructor bound to this node's own
+    /// network. Before the user-side term existed that combination alone
+    /// published `unilateral_l1_enforceable: true`. It must not, because no
+    /// wallet can build the exit transaction, and this test is what stops that
     /// combination from ever being enough again.
     #[test]
     fn a_perfect_fullnode_report_is_not_a_unilateral_exit() {
         let node = capabilities();
         assert!(
-            node.channel_unilateral_exit
-                && node.channel_unilateral_exit_evidence.as_ref().is_some_and(
-                    crate::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment
-                ),
+            node.channel_registry_unilateral_exit
+                && node
+                    .channel_registry_unilateral_exit_evidence
+                    .as_ref()
+                    .is_some_and(
+                        crate::node::RegistryUnilateralExitEvidence::is_verified_mainnet_deployment
+                    ),
             "the fixture must be the fully green fullnode report, or this proves nothing"
         );
         assert!(
@@ -1271,15 +1660,18 @@ mod tests {
         );
 
         let mut withdrawn = capabilities();
-        withdrawn.channel_unilateral_exit = false;
+        withdrawn.channel_registry_unilateral_exit = false;
         assert!(!measure_node_reported_unilateral_exit(Some(&withdrawn)));
 
         let mut no_evidence = capabilities();
-        no_evidence.channel_unilateral_exit_evidence = None;
+        no_evidence.channel_registry_unilateral_exit_evidence = None;
         assert!(!measure_node_reported_unilateral_exit(Some(&no_evidence)));
 
         let mut unverified = capabilities();
-        if let Some(evidence) = unverified.channel_unilateral_exit_evidence.as_mut() {
+        if let Some(evidence) = unverified
+            .channel_registry_unilateral_exit_evidence
+            .as_mut()
+        {
             evidence.deployment_verified = false;
         }
         assert!(
@@ -1486,6 +1878,13 @@ mod tests {
 
     /// The anchor input must change the verdict, so that a real anchor will
     /// actually flow through the gate instead of being reported decoratively.
+    ///
+    /// The verdict is the blocker list and `payments_enabled`, not
+    /// `trustless_finality` — that flag is a conjunction with the dispute path,
+    /// and the dispute path is held false by a term no anchor can supply (no
+    /// wallet can build an exit). Reading it here would only ever have proved
+    /// the anchor load bearing by way of a caller's assertion, which is exactly
+    /// what stopped being possible.
     #[test]
     fn the_anchor_input_is_load_bearing_not_decorative() {
         let anchor_blocker = "external_monotonic_rollback_anchor_is_not_ready";
@@ -1502,18 +1901,39 @@ mod tests {
         assert!(!without.trustless_finality);
         assert!(without.blockers.iter().any(|it| it == anchor_blocker));
 
+        // The same Hub, the same fullnode, one live verified witness added. The
+        // anchor blocker has to disappear, or the witness is decoration.
+        let anchor = anchor_evidence(crate::node::now_unix());
         let with = MainnetReadinessV1::evaluate(
             MAINNET_PILOT_PROFILE,
             MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
             MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
             true,
             true,
-            None,
+            Some(&anchor),
             true,
             Ok(capabilities()),
         );
-        assert!(with.trustless_finality);
-        assert!(!with.blockers.iter().any(|it| it == anchor_blocker));
+        assert!(
+            !with.blockers.iter().any(|it| it == anchor_blocker),
+            "a live, verified, fresh witness must clear its own blocker, got {:?}",
+            with.blockers
+        );
+        assert_ne!(
+            without.blockers, with.blockers,
+            "the anchor input has to change the verdict"
+        );
+
+        // And what remains is the honest reason, named. `trustless_finality` is
+        // still false with a perfect anchor and a perfect fullnode, because the
+        // user still has no way out on their own.
+        assert!(!with.trustless_finality);
+        assert!(!with.unilateral_l1_enforceable);
+        assert!(
+            with.blockers
+                .iter()
+                .any(|it| it == "wallet_cannot_build_a_unilateral_exit_without_the_hub")
+        );
     }
 
     /// The posture must reach the published document, and it must reach it

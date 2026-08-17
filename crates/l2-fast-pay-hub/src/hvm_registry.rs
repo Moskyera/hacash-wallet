@@ -18,6 +18,19 @@ pub const HPAY_REGISTRY_SETTLEMENT_PROFILE: &str = "hpay-hvm-shared-registry-v2"
 pub const HPAY_REGISTRY_PROTOCOL_DOMAIN: &str = "HPAY/HVM-CHANNEL-REGISTRY/V2";
 pub const HPAY_REGISTRY_BYTECODE_SHA3: &str =
     "2fa7429d9e686dd2457eeb1b4476f972c7ddd9be6a0371c9765eff2910209b04";
+/// The reviewed contract's name in the fullnode's own manifest.
+pub const HPAY_REGISTRY_CONTRACT_NAME: &str = "HPAYChannelRegistryV2";
+/// The HVM action kinds a node must execute to run a registry exit at all:
+/// contract call, contract deploy and the account-abstraction wrapper.
+pub const HPAY_REGISTRY_REQUIRED_ACTION_KINDS: &[u16] = &[40, 41, 44];
+/// The fullnode's deployment-verified document for *this* settlement profile.
+///
+/// Deliberately not the V1 `hpay-hvm-channel-exit-evidence/1` schema. The two
+/// describe different contracts with different bytecode, and a gate that reads
+/// the V1 document while this system settles on V2 is measuring something it
+/// does not use — which is a false negative today and would be a false
+/// guarantee the moment either one is deployed.
+pub const HVM_REGISTRY_EXIT_EVIDENCE_SCHEMA: &str = "hpay-hvm-channel-registry-exit-evidence/2";
 pub const HVM_REGISTRY_BINDING_SCHEMA: &str = "hpay-hvm-registry-binding/2";
 pub const HVM_REGISTRY_BILL_SCHEMA: &str = "hpay-hvm-registry-bill/2";
 pub const HVM_REGISTRY_RECOVERY_BUNDLE_SCHEMA: &str = "hpay-hvm-registry-recovery-bundle/2";

@@ -419,12 +419,17 @@ async fn drive_mainnet_gate() {
         "mainnet chain id is 0"
     );
     assert_eq!(caps["chain"]["mainnet"].as_bool(), Some(true));
+    // The registry V2 flag first, because it is the one the Hub's gate reads.
+    // The V1 per-channel number is kept beside it, labelled, so nobody reads
+    // this line and concludes the wrong contract is being waited on.
     println!(
-        "[node] {mainnet_url} chain id {} mainnet {} height {} tip_age {} unilateral_exit {}",
+        "[node] {mainnet_url} chain id {} mainnet {} height {} tip_age {} \
+         registry_unilateral_exit (v2, gated) {} unilateral_exit (v1, gates nothing) {}",
         caps["chain"]["id"],
         caps["chain"]["mainnet"],
         caps["chain"]["height"],
         caps["sync"]["tip_age_seconds"],
+        caps["features"]["channel_registry_unilateral_exit"],
         caps["features"]["channel_unilateral_exit"]
     );
 

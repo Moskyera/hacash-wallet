@@ -111,11 +111,20 @@ async fn assert_real_mainnet(node_url: &str) -> serde_json::Value {
         Some(true),
         "this harness only observes the real Hacash mainnet"
     );
+    // Both settlement profiles, side by side and labelled, because for a long
+    // time only the V1 number was printed here and it is not the one that
+    // gates. `channel_registry_unilateral_exit` is the shared registry V2
+    // profile this system settles on and the flag `measure_node_reported_
+    // unilateral_exit` actually reads; a node that predates the capability
+    // prints `null`, which is the fail-closed answer and not a `false`.
     println!(
-        "[node] {node_url} chain id {} mainnet {} height {} channel_unilateral_exit {}",
+        "[node] {node_url} chain id {} mainnet {} height {} \
+         channel_registry_unilateral_exit (v2, gated) {} \
+         channel_unilateral_exit (v1, gates nothing) {}",
         capabilities["chain"]["id"],
         capabilities["chain"]["mainnet"],
         capabilities["chain"]["height"],
+        capabilities["features"]["channel_registry_unilateral_exit"],
         capabilities["features"]["channel_unilateral_exit"]
     );
     capabilities

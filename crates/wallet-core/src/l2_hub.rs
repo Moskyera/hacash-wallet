@@ -137,15 +137,62 @@ pub struct HubFullnodeCapabilities {
     pub height: u64,
     pub next_height: u64,
     pub mainnet: bool,
+    /// The node's own answer to "which chain instance am I on", as the Hub
+    /// republished it.
+    ///
+    /// Mirrored so this wallet can do for itself what the Hub does at parse
+    /// time: check that the registry evidence's `node_network_instance_id` is
+    /// the same instance the node claims elsewhere in the same document. Absent
+    /// it, the wallet was trusting the Hub to have done that check, on a
+    /// document the Hub itself is free to compose.
+    #[serde(default)]
+    pub network_instance_id: Option<String>,
     pub tip_timestamp_unix: u64,
     pub tip_age_seconds: u64,
     pub enabled_actions: Vec<u16>,
     /// Exact node capability, not an operator assertion.
+    ///
+    /// The V1 per-channel profile, `hpay-hvm-channel-v1`. Kept because a Hub
+    /// still publishes it, and read by nothing that gates money: the wallet's
+    /// trustless gate is about the contract its own channels live in.
     #[serde(default)]
     pub channel_unilateral_exit: bool,
     #[serde(default)]
     pub channel_unilateral_exit_evidence:
         Option<l2_fast_pay_hub::node::ChannelUnilateralExitEvidence>,
+    /// The shared registry V2 profile, `hpay-hvm-shared-registry-v2` — the one
+    /// this wallet's channels are actually opened, funded, billed and exited
+    /// under, and therefore the only one worth gating on.
+    #[serde(default)]
+    pub channel_registry_unilateral_exit: bool,
+    #[serde(default)]
+    pub channel_registry_unilateral_exit_evidence:
+        Option<l2_fast_pay_hub::node::RegistryUnilateralExitEvidence>,
+}
+
+/// Does the published registry evidence describe the chain the node in the same
+/// document says it is on?
+///
+/// Fails closed on absence: a node that will not name its own network instance,
+/// or evidence that will not name the one it was constructed against, has not
+/// answered the question. Only reached under
+/// [`MainnetFastPayPolicy::TrustlessOnly`], where "I could leave without this
+/// Hub" is the promise being checked, and leaving on the wrong chain is not
+/// leaving.
+fn registry_is_bound_to_the_reported_network(capabilities: &HubFullnodeCapabilities) -> bool {
+    let Some(node_instance) = capabilities.network_instance_id.as_deref() else {
+        return false;
+    };
+    capabilities
+        .channel_registry_unilateral_exit_evidence
+        .as_ref()
+        .and_then(|evidence| {
+            evidence
+                .on_chain_verification
+                .node_network_instance_id
+                .as_deref()
+        })
+        .is_some_and(|evidence_instance| evidence_instance == node_instance)
 }
 
 const MAINNET_READINESS_SCHEMA: &str = "hpay-fast-pay-mainnet-readiness/1";
@@ -312,14 +359,28 @@ impl HubMainnetReadiness {
             || !capabilities
                 .enabled_actions
                 .contains(&REQUIRED_COOPERATIVE_CLOSE_ACTION)
+            // The trustless policy is the wallet saying "I will only send if I
+            // could get out without this Hub". That question is about the
+            // contract this wallet's channels live in — the shared registry
+            // V2 profile — not about `hpay-hvm-channel-v1`, which this wallet
+            // never opens a channel in. Reading the V1 document here was the
+            // same wrong-contract measurement the Hub's own gate carried.
             || (matches!(policy, MainnetFastPayPolicy::TrustlessOnly)
-                && (!capabilities.channel_unilateral_exit
+                && (!capabilities.channel_registry_unilateral_exit
                     || !capabilities
-                        .channel_unilateral_exit_evidence
+                        .channel_registry_unilateral_exit_evidence
                         .as_ref()
                         .is_some_and(
-                            l2_fast_pay_hub::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment,
-                        )))
+                            l2_fast_pay_hub::node::RegistryUnilateralExitEvidence::is_verified_mainnet_deployment,
+                        )
+                    // And the registry has to be bound to the chain instance
+                    // this same document says the node is on. The evidence
+                    // proves the constructor argument equals whatever the node
+                    // called its own instance id; only this comparison proves
+                    // that instance is the one the wallet was told about. Both
+                    // halves come off the same wire from the same Hub, so
+                    // checking them against each other is the whole point.
+                    || !registry_is_bound_to_the_reported_network(capabilities)))
         {
             return Err(WalletError::L2(
                 "Fast Pay Hub fullnode capabilities are incompatible or stale".into(),
@@ -2344,6 +2405,59 @@ mod transport_tests {
 
     use super::*;
 
+    /// The fullnode's verified evidence for the profile this wallet's channels
+    /// actually live in. Built in its own function so the readiness fixture
+    /// stays inside `json!`'s expansion limit.
+    fn verified_registry_exit_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "schema": l2_fast_pay_hub::hvm_registry::HVM_REGISTRY_EXIT_EVIDENCE_SCHEMA,
+            "manifest_valid": true,
+            "contract_name": l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_CONTRACT_NAME,
+            "protocol_domain": l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_PROTOCOL_DOMAIN,
+            "settlement_profile": l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE,
+            "source_sha256": "33".repeat(32),
+            "bytecode_sha3": l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3,
+            "required_action_kinds":
+                l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_REQUIRED_ACTION_KINDS,
+            "channel_model": {
+                "left_deposit": "positive",
+                "right_hub_deposit": "exactly_zero",
+                "maximum_active_channels_per_left_address": 1,
+                "first_reuse": 0
+            },
+            "registry_key_count": l2_fast_pay_hub::hvm_registry::HVM_REGISTRY_STORAGE_KEY_COUNT,
+            "channel_key_count": l2_fast_pay_hub::hvm_registry::HVM_REGISTRY_CHANNEL_KEY_COUNT,
+            "must_renew_every_registry_key": true,
+            "must_renew_every_channel_key": true,
+            "maximum_renewal_step_periods":
+                l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_MAX_RENT_STEP,
+            "deployment": {
+                "enabled": true,
+                "contract_address": vm::ContractAddress::from_unchecked(
+                    field::Address::create_contract([9_u8; 20]),
+                )
+                .to_readable(),
+                "deployment_tx_hash": "44".repeat(32),
+                "deployment_height": MAINNET_MIN_SAFE_HEIGHT,
+                "independently_verified": true,
+                "external_audit_complete": false
+            },
+            "on_chain_verification": {
+                "observed_height": 900000,
+                "confirmed_tx_height": MAINNET_MIN_SAFE_HEIGHT,
+                "deployment_tx_confirmed": true,
+                "contract_code_sha3": l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3,
+                "contract_code_matches": true,
+                "deployment_action_verified": true,
+                "hub_address": field::Address::create_contract([5_u8; 20]).to_readable(),
+                "constructor_network_instance_id": "55".repeat(32),
+                "node_network_instance_id": "55".repeat(32),
+                "network_binding_matches": true
+            },
+            "deployment_verified": true
+        })
+    }
+
     fn readiness_json(enabled: bool, blockers: Vec<&str>, cap_zhu: u64) -> serde_json::Value {
         let now = unix_now();
         serde_json::json!({
@@ -2363,6 +2477,10 @@ mod transport_tests {
                 "height": 900000,
                 "next_height": 900001,
                 "mainnet": true,
+                // The same instance id `verified_registry_exit_evidence`
+                // reports the registry was constructed against, because a Hub
+                // whose two halves disagree is refused.
+                "network_instance_id": "55".repeat(32),
                 "tip_timestamp_unix": now,
                 "tip_age_seconds": 0,
                 "enabled_actions": [1, 2, 3],
@@ -2401,7 +2519,9 @@ mod transport_tests {
                         "contract_code_matches": true
                     },
                     "deployment_verified": true
-                }
+                },
+                "channel_registry_unilateral_exit": true,
+                "channel_registry_unilateral_exit_evidence": verified_registry_exit_evidence()
             },
             "max_payment_hac_zhu": cap_zhu,
             "max_channel_funding_hac_zhu": cap_zhu.min(MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU),
@@ -2635,7 +2755,7 @@ mod transport_tests {
         const BLOCKERS: [&str; 3] = [
             "external_monotonic_rollback_anchor_is_not_ready",
             "unilateral_l1_dispute_path_is_not_ready",
-            "fullnode_does_not_report_verified_channel_unilateral_exit",
+            "fullnode_does_not_report_verified_registry_unilateral_exit",
         ];
         let app = Router::new()
             .route(
@@ -2790,7 +2910,7 @@ mod transport_tests {
             .fullnode_capabilities
             .as_mut()
             .unwrap()
-            .channel_unilateral_exit = false;
+            .channel_registry_unilateral_exit = false;
         assert!(
             missing_unilateral_exit
                 .require_payment_ready(Some("0.001"))
@@ -2802,7 +2922,7 @@ mod transport_tests {
             .fullnode_capabilities
             .as_mut()
             .unwrap()
-            .channel_unilateral_exit_evidence = None;
+            .channel_registry_unilateral_exit_evidence = None;
         assert!(
             missing_exit_evidence
                 .require_payment_ready(Some("0.001"))
@@ -2814,7 +2934,7 @@ mod transport_tests {
             .fullnode_capabilities
             .as_mut()
             .unwrap()
-            .channel_unilateral_exit_evidence
+            .channel_registry_unilateral_exit_evidence
             .as_mut()
             .unwrap()
             .bytecode_sha3 = "33".repeat(32);
@@ -2829,13 +2949,77 @@ mod transport_tests {
             .fullnode_capabilities
             .as_mut()
             .unwrap()
-            .channel_unilateral_exit_evidence
+            .channel_registry_unilateral_exit_evidence
             .as_mut()
             .unwrap()
             .on_chain_verification
             .contract_code_matches = false;
         assert!(
             tampered_live_evidence
+                .require_payment_ready(Some("0.001"))
+                .is_err()
+        );
+
+        // The wrong-contract case, stated on the wallet side. A Hub whose node
+        // proves a fully verified V1 per-channel deployment, and nothing for
+        // the registry, must not satisfy a wallet that asked for trustless
+        // settlement: none of this wallet's channels live in that contract.
+        let mut v1_only = green.clone();
+        {
+            let capabilities = v1_only.fullnode_capabilities.as_mut().unwrap();
+            capabilities.channel_registry_unilateral_exit = false;
+            capabilities.channel_registry_unilateral_exit_evidence = None;
+            assert!(
+                capabilities.channel_unilateral_exit
+                    && capabilities
+                        .channel_unilateral_exit_evidence
+                        .as_ref()
+                        .is_some_and(
+                            l2_fast_pay_hub::node::ChannelUnilateralExitEvidence::is_verified_mainnet_deployment
+                        ),
+                "the V1 half is deliberately fully verified here"
+            );
+        }
+        assert!(v1_only.require_payment_ready(Some("0.001")).is_err());
+
+        // A registry that verifies perfectly against some *other* chain
+        // instance. Every term inside the evidence still agrees with itself -
+        // constructor equals node instance - so only comparing it against the
+        // node identity published beside it catches this, and the wallet has to
+        // do that comparison itself rather than assume the Hub did.
+        let mut foreign_network = green.clone();
+        {
+            let capabilities = foreign_network.fullnode_capabilities.as_mut().unwrap();
+            let evidence = capabilities
+                .channel_registry_unilateral_exit_evidence
+                .as_mut()
+                .unwrap();
+            evidence
+                .on_chain_verification
+                .constructor_network_instance_id = Some("ab".repeat(32));
+            evidence.on_chain_verification.node_network_instance_id = Some("ab".repeat(32));
+            assert!(
+                evidence.is_verified_mainnet_deployment(),
+                "the evidence has to be internally perfect, or this proves nothing"
+            );
+        }
+        assert!(
+            foreign_network
+                .require_payment_ready(Some("0.001"))
+                .is_err(),
+            "a registry constructed for another chain instance is not this wallet's exit"
+        );
+
+        // And a Hub that simply declines to say which instance its node is on
+        // has not answered the question either.
+        let mut anonymous_network = green.clone();
+        anonymous_network
+            .fullnode_capabilities
+            .as_mut()
+            .unwrap()
+            .network_instance_id = None;
+        assert!(
+            anonymous_network
                 .require_payment_ready(Some("0.001"))
                 .is_err()
         );

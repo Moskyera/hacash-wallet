@@ -124,6 +124,117 @@ fn unverified_exit_evidence() -> Value {
     })
 }
 
+/// The reviewed **shared registry V2** artifact — the settlement profile this
+/// system actually uses, and therefore the one the dispute-path gate measures.
+const REVIEWED_REGISTRY_BYTECODE_SHA3: &str =
+    "2fa7429d9e686dd2457eeb1b4476f972c7ddd9be6a0371c9765eff2910209b04";
+const REVIEWED_REGISTRY_SOURCE_SHA256: &str =
+    "37fabe6b8ab54431864715530c0f16c89fed3b609c23c227e592cec24e2ab8b5";
+/// The network instance id this fake node publishes for itself. The registry's
+/// constructor argument has to be exactly this, or the deployment belongs to
+/// another chain.
+const NETWORK_INSTANCE_ID: &str =
+    "1111111111111111111111111111111111111111111111111111111111111111";
+const REGISTRY_CONTRACT_ADDRESS: &str = "ncJoygx8qBSHAw4sJbo5jTk1FJthJ1QLw";
+const REGISTRY_DEPLOYMENT_TX_HASH: &str =
+    "9f2c1d5e4b7a03682d9c4f1a8e6b0d37c25a9418f0e73b6c4d81a2953f6e07bd";
+/// The Hub's deploying signer, re-derived by the node from the deploying
+/// transaction's own main address.
+const REGISTRY_HUB_ADDRESS: &str = "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW";
+
+/// Everything about the reviewed registry artifact that does not depend on
+/// whether it is deployed.
+fn registry_evidence_artifact() -> Value {
+    json!({
+        "schema": "hpay-hvm-channel-registry-exit-evidence/2",
+        "manifest_valid": true,
+        "contract_name": "HPAYChannelRegistryV2",
+        "protocol_domain": "HPAY/HVM-CHANNEL-REGISTRY/V2",
+        "settlement_profile": "hpay-hvm-shared-registry-v2",
+        "source_sha256": REVIEWED_REGISTRY_SOURCE_SHA256,
+        "bytecode_sha3": REVIEWED_REGISTRY_BYTECODE_SHA3,
+        "required_action_kinds": [40, 41, 44],
+        "channel_model": {
+            "left_deposit": "positive",
+            "right_hub_deposit": "exactly_zero",
+            "maximum_active_channels_per_left_address": 1,
+            "first_reuse": 0
+        },
+        "registry_key_count": 6,
+        "channel_key_count": 12,
+        "must_renew_every_registry_key": true,
+        "must_renew_every_channel_key": true,
+        "maximum_renewal_step_periods": 150
+    })
+}
+
+fn with_registry_artifact(extra: Value) -> Value {
+    let mut evidence = registry_evidence_artifact();
+    let object = evidence.as_object_mut().expect("evidence is an object");
+    for (key, value) in extra.as_object().expect("extra is an object") {
+        object.insert(key.clone(), value.clone());
+    }
+    evidence
+}
+
+/// Evidence describing a genuinely verified mainnet deployment of the reviewed
+/// registry contract, including both V2-only bindings: the deploying
+/// transaction really deployed this artifact, and its constructor argument is
+/// this node's own network instance.
+fn verified_registry_evidence() -> Value {
+    with_registry_artifact(json!({
+        "deployment": {
+            "enabled": true,
+            "contract_address": REGISTRY_CONTRACT_ADDRESS,
+            "deployment_tx_hash": REGISTRY_DEPLOYMENT_TX_HASH,
+            "deployment_height": DEPLOYMENT_HEIGHT,
+            "independently_verified": true,
+            "external_audit_complete": false
+        },
+        "on_chain_verification": {
+            "observed_height": OBSERVED_HEIGHT,
+            "confirmed_tx_height": DEPLOYMENT_HEIGHT,
+            "deployment_tx_confirmed": true,
+            "contract_code_sha3": REVIEWED_REGISTRY_BYTECODE_SHA3,
+            "contract_code_matches": true,
+            "deployment_action_verified": true,
+            "hub_address": REGISTRY_HUB_ADDRESS,
+            "constructor_network_instance_id": NETWORK_INSTANCE_ID,
+            "node_network_instance_id": NETWORK_INSTANCE_ID,
+            "network_binding_matches": true
+        },
+        "deployment_verified": true
+    }))
+}
+
+/// The evidence the real fullnode serves today: the reviewed registry artifact
+/// is known exactly, and nothing is deployed on Hacash mainnet.
+fn unverified_registry_evidence() -> Value {
+    with_registry_artifact(json!({
+        "deployment": {
+            "enabled": false,
+            "contract_address": null,
+            "deployment_tx_hash": null,
+            "deployment_height": null,
+            "independently_verified": false,
+            "external_audit_complete": false
+        },
+        "on_chain_verification": {
+            "observed_height": null,
+            "confirmed_tx_height": null,
+            "deployment_tx_confirmed": false,
+            "contract_code_sha3": null,
+            "contract_code_matches": false,
+            "deployment_action_verified": false,
+            "hub_address": null,
+            "constructor_network_instance_id": null,
+            "node_network_instance_id": null,
+            "network_binding_matches": false
+        },
+        "deployment_verified": false
+    }))
+}
+
 /// A mainnet fullnode that either does or does not report a verified native
 /// unilateral-exit capability.
 async fn spawn_node(exit_supported: bool) -> (String, JoinHandle<()>) {
@@ -131,19 +242,173 @@ async fn spawn_node(exit_supported: bool) -> (String, JoinHandle<()>) {
     (url, handle)
 }
 
+/// A mainnet fullnode with an arbitrary `features` object, for the cases where
+/// the two settlement profiles must be told apart.
+async fn spawn_node_with_features(features: Value) -> (String, JoinHandle<()>) {
+    let app = Router::new().route(
+        "/query/capabilities",
+        get(move || {
+            let features = features.clone();
+            async move {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                Json(json!({
+                    "ret": 0,
+                    "api_version": 1,
+                    "api": {
+                        "transaction_submit_bound": true,
+                        "hpay_channel_registry_query": true
+                    },
+                    "chain": {
+                        "id": 0,
+                        "height": OBSERVED_HEIGHT,
+                        "next_height": OBSERVED_HEIGHT + 1,
+                        "mainnet": true
+                    },
+                    "network": {
+                        "kind": "mainnet",
+                        "node_profile_id": "hacash-mainnet",
+                        "block_1_hash":
+                            "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+                        "instance_id": NETWORK_INSTANCE_ID,
+                        "transaction_format_version": 2
+                    },
+                    "sync": {
+                        "tip_timestamp_unix": now,
+                        "observed_unix": now,
+                        "tip_age_seconds": 0,
+                        "max_tip_age_seconds": 3600,
+                        "fresh": true
+                    },
+                    "actions": {
+                        "registered": [1, 2, 3, 14, 1041],
+                        "enabled": [1, 2, 3, 14, 1041]
+                    },
+                    "transactions": {"registered": [2], "enabled": [2]},
+                    "features": features
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), handle)
+}
+
+/// The regression test for the wrong-contract gate.
+///
+/// A node that has a fully verified mainnet deployment of the **V1
+/// per-channel** contract, and nothing at all for the shared registry, must
+/// leave the dispute-path measurement `false`. It was not false before: the
+/// gate read `ChannelUnilateralExitEvidence`, which is bound to
+/// `hpay-hvm-channel-v1`, while every channel this system opens, funds, bills
+/// and exits lives in `hpay-hvm-shared-registry-v2`.
+///
+/// The mirror case is the point of the whole change: a node that publishes
+/// only the registry profile, and has dropped V1 entirely, *does* satisfy the
+/// node half. That is the deployment the owner was about to pay for.
+#[tokio::test]
+async fn the_v1_channel_profile_alone_never_opens_the_gate() {
+    let (node_url, server) = spawn_node_with_features(json!({
+        "channel_unilateral_exit": true,
+        "channel_unilateral_exit_evidence": verified_exit_evidence(),
+        "channel_registry_unilateral_exit": false,
+        "channel_registry_unilateral_exit_evidence": unverified_registry_evidence(),
+    }))
+    .await;
+    let hub = build_hub(&node_url, "v1-only-hub");
+    let readiness = hub.mainnet_readiness().await;
+    let capabilities = readiness
+        .fullnode_capabilities
+        .as_ref()
+        .expect("the node answered, so its capabilities parsed");
+    assert!(
+        capabilities.channel_unilateral_exit,
+        "the V1 half is deliberately fully verified in this fixture"
+    );
+    assert!(
+        !l2_fast_pay_hub::readiness::measure_node_reported_unilateral_exit(Some(capabilities)),
+        "a verified V1 per-channel deployment is not evidence about the registry \
+         profile this system settles on"
+    );
+    assert!(!readiness.unilateral_l1_enforceable);
+    assert!(!readiness.trustless_finality);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker == "unilateral_l1_dispute_path_is_not_ready"),
+        "the document must still name the missing dispute path, got {:?}",
+        readiness.blockers
+    );
+    server.abort();
+
+    let (node_url, server) = spawn_node_with_features(json!({
+        "channel_registry_unilateral_exit": true,
+        "channel_registry_unilateral_exit_evidence": verified_registry_evidence(),
+    }))
+    .await;
+    let hub = build_hub(&node_url, "registry-only-hub");
+    let capabilities = hub.mainnet_readiness().await.fullnode_capabilities;
+    assert!(
+        l2_fast_pay_hub::readiness::measure_node_reported_unilateral_exit(capabilities.as_ref()),
+        "a node that publishes only the registry profile still answers for the \
+         contract this system actually uses"
+    );
+    server.abort();
+}
+
+/// A registry deployed for some other chain must never be presented to this
+/// one as its own, and the Hub must not take the node's word for which chain
+/// it is on.
+#[tokio::test]
+async fn a_registry_constructed_for_another_network_is_refused_at_parse_time() {
+    let mut foreign = verified_registry_evidence();
+    foreign["on_chain_verification"]["constructor_network_instance_id"] =
+        Value::from("22".repeat(32));
+    foreign["on_chain_verification"]["node_network_instance_id"] = Value::from("22".repeat(32));
+    let (node_url, server) = spawn_node_with_features(json!({
+        "channel_registry_unilateral_exit": true,
+        "channel_registry_unilateral_exit_evidence": foreign,
+    }))
+    .await;
+    let hub = build_hub(&node_url, "foreign-registry-hub");
+    let readiness = hub.mainnet_readiness().await;
+    assert!(
+        readiness.fullnode_capabilities.is_none(),
+        "evidence that disagrees with the node's own network identity must not parse"
+    );
+    assert!(!readiness.unilateral_l1_enforceable);
+    server.abort();
+}
+
 /// The same fullnode, plus a counter of how many capability probes it has been
 /// asked to serve. Any endpoint that claims to do no node I/O can be held to it.
 async fn spawn_counting_node(exit_supported: bool) -> (String, JoinHandle<()>, Arc<AtomicUsize>) {
     let probes = Arc::new(AtomicUsize::new(0));
+    // Both settlement profiles move together in this fixture, so that
+    // `exit_supported` still means "the node proves an exit". They are
+    // separate keys about separate contracts, and the gate reads only V2 -
+    // `the_v1_channel_profile_alone_never_opens_the_gate` below is the test
+    // that holds them apart.
     let features = if exit_supported {
         json!({
             "channel_unilateral_exit": true,
             "channel_unilateral_exit_evidence": verified_exit_evidence(),
+            "channel_registry_unilateral_exit": true,
+            "channel_registry_unilateral_exit_evidence": verified_registry_evidence(),
         })
     } else {
         json!({
             "channel_unilateral_exit": false,
             "channel_unilateral_exit_evidence": unverified_exit_evidence(),
+            "channel_registry_unilateral_exit": false,
+            "channel_registry_unilateral_exit_evidence": unverified_registry_evidence(),
         })
     };
     let app = Router::new().route(
@@ -177,7 +442,7 @@ async fn spawn_counting_node(exit_supported: bool) -> (String, JoinHandle<()>, A
                             "node_profile_id": "hacash-mainnet",
                             "block_1_hash":
                                 "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
-                            "instance_id": "11".repeat(32),
+                            "instance_id": NETWORK_INSTANCE_ID,
                             "transaction_format_version": 2
                         },
                         "sync": {

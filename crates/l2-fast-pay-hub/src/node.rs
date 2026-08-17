@@ -442,6 +442,225 @@ impl ChannelUnilateralExitEvidence {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryUnilateralExitDeployment {
+    pub enabled: bool,
+    pub contract_address: Option<String>,
+    pub deployment_tx_hash: Option<String>,
+    pub deployment_height: Option<u64>,
+    pub independently_verified: bool,
+    /// Carried, published, and deliberately not a term in
+    /// [`RegistryUnilateralExitEvidence::validate_candidate`]. An audit is a
+    /// judgement about a contract, not a fact this node can re-derive from its
+    /// block store, and everything else in this document is the latter. It
+    /// travels with the evidence so a person choosing a Hub can see it.
+    pub external_audit_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryUnilateralExitOnChainVerification {
+    pub observed_height: Option<u64>,
+    pub confirmed_tx_height: Option<u64>,
+    pub deployment_tx_confirmed: bool,
+    pub contract_code_sha3: Option<String>,
+    pub contract_code_matches: bool,
+    /// The deploying block re-read: this transaction really carries a
+    /// `ContractDeploy` whose derived address and code hash are the ones
+    /// claimed. V1 has no equivalent because a per-channel contract carries no
+    /// bindings; a shared registry carries two, and both live here.
+    pub deployment_action_verified: bool,
+    /// The deploying transaction's own main signer.
+    pub hub_address: Option<String>,
+    /// The exact 32-byte constructor argument the deploying transaction
+    /// carried, and the network instance id the node computes for itself.
+    /// Equal, or the registry belongs to another chain.
+    pub constructor_network_instance_id: Option<String>,
+    pub node_network_instance_id: Option<String>,
+    pub network_binding_matches: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryUnilateralExitChannelModel {
+    pub left_deposit: String,
+    pub right_hub_deposit: String,
+    pub maximum_active_channels_per_left_address: u64,
+    pub first_reuse: u32,
+}
+
+/// The fullnode's evidence about the **shared registry V2** contract — the
+/// settlement profile this system actually uses.
+///
+/// This type exists because [`ChannelUnilateralExitEvidence`] is hard-bound to
+/// `hpay-hvm-channel-v1` by
+/// [`HPAY_CHANNEL_EXIT_SETTLEMENT_PROFILE`], and the path that was built,
+/// proven and shipped is
+/// [`crate::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE`]. A gate that
+/// weighed the V1 document was weighing a different contract: deploying the
+/// registry to mainnet would not have moved it, and — worse in the other
+/// direction — deploying the *V1* contract would have moved a flag about a
+/// path no user travels.
+///
+/// Same shape as V1 on purpose. `validate_candidate` is the same two-branch
+/// rule: a verified document must carry complete, self-consistent, chain-
+/// derived deployment authority, and an unverified one must carry none of it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryUnilateralExitEvidence {
+    pub schema: String,
+    pub manifest_valid: bool,
+    pub contract_name: String,
+    pub protocol_domain: String,
+    pub settlement_profile: String,
+    pub source_sha256: String,
+    pub bytecode_sha3: String,
+    pub required_action_kinds: Vec<u16>,
+    pub channel_model: RegistryUnilateralExitChannelModel,
+    pub registry_key_count: u64,
+    pub channel_key_count: u64,
+    pub must_renew_every_registry_key: bool,
+    pub must_renew_every_channel_key: bool,
+    pub maximum_renewal_step_periods: u64,
+    pub deployment: RegistryUnilateralExitDeployment,
+    pub on_chain_verification: RegistryUnilateralExitOnChainVerification,
+    pub deployment_verified: bool,
+}
+
+impl RegistryUnilateralExitEvidence {
+    pub fn validate_candidate(&self) -> HubResult<()> {
+        if self.schema != crate::hvm_registry::HVM_REGISTRY_EXIT_EVIDENCE_SCHEMA
+            || !self.manifest_valid
+            || self.contract_name != crate::hvm_registry::HPAY_REGISTRY_CONTRACT_NAME
+            || self.protocol_domain != crate::hvm_registry::HPAY_REGISTRY_PROTOCOL_DOMAIN
+            || self.settlement_profile != crate::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE
+            || !is_lower_hex(&self.source_sha256, 32)
+            || self.bytecode_sha3 != crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3
+            || self.required_action_kinds
+                != crate::hvm_registry::HPAY_REGISTRY_REQUIRED_ACTION_KINDS
+            || self.channel_model.left_deposit != "positive"
+            || self.channel_model.right_hub_deposit != "exactly_zero"
+            || self.channel_model.maximum_active_channels_per_left_address != 1
+            || self.channel_model.first_reuse != 0
+            || self.registry_key_count != crate::hvm_registry::HVM_REGISTRY_STORAGE_KEY_COUNT
+            || self.channel_key_count != crate::hvm_registry::HVM_REGISTRY_CHANNEL_KEY_COUNT
+            || !self.must_renew_every_registry_key
+            || !self.must_renew_every_channel_key
+            || self.maximum_renewal_step_periods != crate::hvm_registry::HPAY_REGISTRY_MAX_RENT_STEP
+            || self.deployment_verified != self.deployment.independently_verified
+        {
+            return Err(HubError::Node(
+                "fullnode registry-exit evidence does not match the reviewed HPAY HVM shared \
+                 registry V2 artifact"
+                    .into(),
+            ));
+        }
+        if self.deployment_verified {
+            let address = self.deployment.contract_address.as_deref().ok_or_else(|| {
+                HubError::Node("verified registry-exit deployment is missing its address".into())
+            })?;
+            let address = Address::from_readable(address).map_err(|_| {
+                HubError::Node("verified registry-exit contract address is invalid".into())
+            })?;
+            ContractAddress::from_addr(address).map_err(|_| {
+                HubError::Node(
+                    "verified registry-exit address is not an HVM contract address".into(),
+                )
+            })?;
+            if !self.deployment.enabled
+                || self.deployment.deployment_height < Some(HACASH_MAINNET_MIN_SAFE_HEIGHT)
+                || !self
+                    .deployment
+                    .deployment_tx_hash
+                    .as_deref()
+                    .is_some_and(|hash| is_lower_hex(hash, 32))
+            {
+                return Err(HubError::Node(
+                    "verified registry-exit deployment evidence is incomplete".into(),
+                ));
+            }
+            let deployment_height = self.deployment.deployment_height.unwrap_or_default();
+            if self.on_chain_verification.observed_height < Some(deployment_height)
+                || self.on_chain_verification.confirmed_tx_height != Some(deployment_height)
+                || !self.on_chain_verification.deployment_tx_confirmed
+                || self.on_chain_verification.contract_code_sha3.as_deref()
+                    != Some(crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3)
+                || !self.on_chain_verification.contract_code_matches
+            {
+                return Err(HubError::Node(
+                    "verified registry-exit deployment lacks exact live chain evidence".into(),
+                ));
+            }
+            // The two V2-only bindings. A shared registry is one contract for
+            // one Hub on one network, so "this code is on chain" is not enough
+            // on its own: the deploying transaction has to be the one that put
+            // it there, and it has to have been constructed for this network.
+            let hub_address = self
+                .on_chain_verification
+                .hub_address
+                .as_deref()
+                .ok_or_else(|| {
+                    HubError::Node(
+                        "verified registry-exit deployment does not name its deploying Hub".into(),
+                    )
+                })?;
+            Address::from_readable(hub_address).map_err(|_| {
+                HubError::Node("verified registry-exit Hub address is invalid".into())
+            })?;
+            let constructor = self
+                .on_chain_verification
+                .constructor_network_instance_id
+                .as_deref();
+            if !self.on_chain_verification.deployment_action_verified
+                || !self.on_chain_verification.network_binding_matches
+                || !constructor.is_some_and(|value| is_lower_hex(value, 32))
+                || constructor
+                    != self
+                        .on_chain_verification
+                        .node_network_instance_id
+                        .as_deref()
+            {
+                return Err(HubError::Node(
+                    "verified registry-exit deployment is not bound to this node's own network \
+                     instance"
+                        .into(),
+                ));
+            }
+        } else if self.deployment.enabled
+            || self.deployment.contract_address.is_some()
+            || self.deployment.deployment_tx_hash.is_some()
+            || self.deployment.deployment_height.is_some()
+            || self.deployment.independently_verified
+            || self.on_chain_verification.observed_height.is_some()
+            || self.on_chain_verification.confirmed_tx_height.is_some()
+            || self.on_chain_verification.contract_code_sha3.is_some()
+            || self.on_chain_verification.hub_address.is_some()
+            || self
+                .on_chain_verification
+                .constructor_network_instance_id
+                .is_some()
+        {
+            return Err(HubError::Node(
+                "unverified registry-exit candidate contains deployment authority".into(),
+            ));
+        } else if self.on_chain_verification.deployment_tx_confirmed
+            || self.on_chain_verification.contract_code_matches
+            || self.on_chain_verification.deployment_action_verified
+            || self.on_chain_verification.network_binding_matches
+        {
+            return Err(HubError::Node(
+                "unverified registry-exit candidate claims live chain verification".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_verified_mainnet_deployment(&self) -> bool {
+        self.validate_candidate().is_ok() && self.deployment_verified
+    }
+}
+
 fn is_lower_hex(value: &str, bytes: usize) -> bool {
     value.len() == bytes * 2
         && value
@@ -474,6 +693,13 @@ pub struct FullnodeCapabilitiesV1 {
     pub channel_unilateral_exit: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_unilateral_exit_evidence: Option<ChannelUnilateralExitEvidence>,
+    /// The same statement for the shared registry V2 profile — the one this
+    /// system settles on. `#[serde(default)]` so a readiness document written
+    /// by an older Hub still parses, and defaults to the fail-closed answer.
+    #[serde(default)]
+    pub channel_registry_unilateral_exit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_registry_unilateral_exit_evidence: Option<RegistryUnilateralExitEvidence>,
 }
 
 impl FullnodeCapabilitiesV1 {
@@ -669,6 +895,55 @@ impl FullnodeCapabilitiesV1 {
                 "fullnode claims unilateral exit without an exact verified HVM deployment".into(),
             ));
         }
+        let channel_registry_unilateral_exit = value
+            .get("features")
+            .and_then(Value::as_object)
+            .and_then(|features| features.get("channel_registry_unilateral_exit"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let channel_registry_unilateral_exit_evidence = value
+            .get("features")
+            .and_then(Value::as_object)
+            .and_then(|features| features.get("channel_registry_unilateral_exit_evidence"))
+            .map(|evidence| {
+                serde_json::from_value::<RegistryUnilateralExitEvidence>(evidence.clone()).map_err(
+                    |_| HubError::Node("fullnode registry-exit evidence is malformed".into()),
+                )
+            })
+            .transpose()?;
+        if let Some(evidence) = channel_registry_unilateral_exit_evidence.as_ref() {
+            evidence.validate_candidate()?;
+        }
+        if channel_registry_unilateral_exit
+            && !channel_registry_unilateral_exit_evidence
+                .as_ref()
+                .is_some_and(RegistryUnilateralExitEvidence::is_verified_mainnet_deployment)
+        {
+            return Err(HubError::Node(
+                "fullnode claims registry unilateral exit without an exact verified HVM \
+                 deployment"
+                    .into(),
+            ));
+        }
+        // The registry is bound to one network by its constructor. The
+        // evidence says which network the *node* thinks it is on; this is the
+        // same node's own identity in the same document. If those two ever
+        // disagree the node is not describing itself, and nothing it says
+        // about a deployment can be relied on.
+        if let Some(evidence) = channel_registry_unilateral_exit_evidence.as_ref()
+            && evidence.deployment_verified
+            && evidence
+                .on_chain_verification
+                .node_network_instance_id
+                .as_deref()
+                != network_instance_id.as_deref()
+        {
+            return Err(HubError::Node(
+                "fullnode registry-exit evidence names a different network instance than the \
+                 node itself"
+                    .into(),
+            ));
+        }
         Ok(Self {
             observed_unix,
             api_version,
@@ -690,6 +965,8 @@ impl FullnodeCapabilitiesV1 {
             hpay_channel_registry_query,
             channel_unilateral_exit,
             channel_unilateral_exit_evidence,
+            channel_registry_unilateral_exit,
+            channel_registry_unilateral_exit_evidence,
         })
     }
 }

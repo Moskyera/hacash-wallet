@@ -125,13 +125,17 @@ async fn main() -> Result<()> {
         .fullnode_capabilities
         .as_ref()
         .context("Hub readiness omitted fullnode capabilities")?;
+    // The shared registry V2 profile: the contract every channel this wallet
+    // opens actually lives in. This used to read the V1 per-channel evidence,
+    // which is a different contract and would have passed a preflight for a
+    // rail nobody uses.
     let hvm_evidence = hub_node
-        .channel_unilateral_exit_evidence
+        .channel_registry_unilateral_exit_evidence
         .as_ref()
         .filter(|evidence| {
-            hub_node.channel_unilateral_exit && evidence.is_verified_mainnet_deployment()
+            hub_node.channel_registry_unilateral_exit && evidence.is_verified_mainnet_deployment()
         })
-        .context("Hub did not publish a verified HPAY HVM mainnet deployment")?;
+        .context("Hub did not publish a verified HPAY HVM shared-registry mainnet deployment")?;
 
     println!(
         "{}",
@@ -162,7 +166,11 @@ async fn main() -> Result<()> {
                 "contract_address": hvm_evidence.deployment.contract_address,
                 "deployment_tx_hash": hvm_evidence.deployment.deployment_tx_hash,
                 "deployment_height": hvm_evidence.deployment.deployment_height,
+                "settlement_profile": hvm_evidence.settlement_profile,
                 "contract_code_sha3": hvm_evidence.on_chain_verification.contract_code_sha3,
+                "deploying_hub_address": hvm_evidence.on_chain_verification.hub_address,
+                "constructor_network_instance_id":
+                    hvm_evidence.on_chain_verification.constructor_network_instance_id,
             }
         }))?
     );

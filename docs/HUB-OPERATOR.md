@@ -14,7 +14,7 @@ The Hub fails closed unless all of the following remain true:
 - the full node is at or above the pinned mainnet checkpoint;
 - the Hub signer, durable state and authenticated journal are configured;
 - the selected profile is exactly the policy explicitly accepted by the wallet;
-- for `mainnet-pilot`, an independent rollback anchor and unilateral L1 dispute path are verified, and the exact full node reports `features.channel_unilateral_exit=true`;
+- for `mainnet-pilot`, an independent rollback anchor and unilateral L1 dispute path are verified, and the exact full node reports `features.channel_registry_unilateral_exit=true` with verified deployment evidence for the shared registry contract `hpay-hvm-shared-registry-v2`;
 - for `mainnet-bounded-pilot`, the payer is allowlisted and aggregate Hub TVL stays within its cap;
 - the wallet fee is exactly zero;
 - both the payment and channel-funding amounts stay within their configured caps;
@@ -94,7 +94,9 @@ curl http://127.0.0.1:8790/v1/readiness/mainnet
 
 For `mainnet-bounded-pilot`, `payments_enabled` may be `true` only when the node, durable storage, allowlist, TVL and caps are all green; `trusted_bounded_pilot` must be `true`, `wallet_fee_hac` must be `"0"`, and the wallet must have explicit local consent. For `mainnet-pilot`, `payments_enabled` must remain `false` until the rollback-anchor and unilateral-dispute blockers are backed by real independent services and tests. Readiness expires quickly by design; never cache it as permanent approval.
 
-The current Istanbul full node reports `features.channel_unilateral_exit=false`. This is intentional: legacy Go dispute action numbers collide with Istanbul TEX/AST action kinds. Do not override this result with an operator flag and do not copy the legacy codecs into the mainnet registry.
+**Which capability the gate reads.** The Hub settles on the shared registry contract, settlement profile `hpay-hvm-shared-registry-v2`, so the flag that gates `mainnet-pilot` is `features.channel_registry_unilateral_exit` and its `channel_registry_unilateral_exit_evidence` document. The current Istanbul full node reports it `false`, with honest evidence naming the artifact exactly and reporting nothing deployed. Do not override this result with an operator flag.
+
+`features.channel_unilateral_exit` is the older per-channel contract `hpay-hvm-channel-v1`. It also reports `false` — intentionally: legacy Go dispute action numbers collide with Istanbul TEX/AST action kinds, and the legacy codecs must not be copied into the mainnet registry. It is still published and still validated on parse, but it **gates nothing**. A wallet's channels do not live in that contract, so a `true` there would be a guarantee about a path nobody travels. If you are waiting for a flag to turn green, it is the registry one.
 
 ## External rollback anchor (witness)
 

@@ -132,17 +132,38 @@ verified signature from the exact local wallet address.
 Wallet Hub API v7 advertises explicit readiness fields for the external
 rollback anchor, L1 dispute path, authenticated Official ChannelPay session, and
 aggregate production readiness. The fullnode capability response also
-advertises `features.channel_unilateral_exit` together with exact HVM deployment
-evidence. The current Istanbul registry reports it as `false`: legacy Go
-dispute action numbers collide with Istanbul TEX/AST kinds and cannot be copied
-into mainnet. The candidate HVM path also remains false until the running node
-confirms the pinned deployment transaction and exact on-chain contract edition
-hash. Deployment is still insufficient because current channels use the native
-ChannelPay settlement profile; Wallet, Hub, bill codec, recovery and watchtower
-must explicitly adopt the separate HVM profile first. The node therefore does
-not auto-enable the boolean from deployment evidence. Both Hub and wallet
+advertises two unilateral-exit capabilities, each with its own exact HVM
+deployment evidence document, and the gate reads exactly one of them.
+
+`features.channel_registry_unilateral_exit` is the shared registry contract,
+settlement profile `hpay-hvm-shared-registry-v2`. **This is the gated one**,
+because it is the contract this system's channels are opened, funded, billed and
+exited under. `features.channel_unilateral_exit` is the older per-channel
+contract `hpay-hvm-channel-v1`; it is still published and still validated on
+parse, and it gates nothing. Measuring V1 was a real defect once: it made the
+flag insensitive to deploying the contract that matters, and sensitive to
+deploying one no user travels.
+
+Both currently report `false`. V1 is false because legacy Go dispute action
+numbers collide with Istanbul TEX/AST kinds and cannot be copied into mainnet.
+The registry is false because nothing is deployed: its evidence names the
+artifact exactly - source hash, bytecode hash, storage key counts, renewal step
+- and reports every chain-derived term as null. It stays false until the running
+node confirms the deployment transaction, the exact on-chain contract edition
+hash, that the deploying transaction really carried the contract deploy, and
+that the constructor bound the registry to this node's own network instance. The
+node never auto-enables the boolean from deployment evidence. Both Hub and wallet
 require the boolean and the complete evidence, so an operator flag or edited
-manifest cannot override the missing dispute path. The bounded trusted-Hub
+manifest cannot override the missing dispute path.
+
+Deployment alone is still not enough, and this is the part most easily lost: the
+node's report is a statement a node makes about itself. The published
+`unilateral_l1_enforceable` also requires that this software can put the exit
+transactions in a *user's* hands, which today it cannot
+(`USER_SIDE_UNILATERAL_EXIT_DRIVER_READY` is `false`). The readiness document
+re-derives both guarantee flags from the evidence it publishes beside them, so
+no caller and no operator can assert a guarantee the document itself contradicts.
+The bounded trusted-Hub
 pilot remains separately capped; cooperative recovery close stays available.
 Testnet and local development retain the existing custom transport and all HPAY
 safety extensions.

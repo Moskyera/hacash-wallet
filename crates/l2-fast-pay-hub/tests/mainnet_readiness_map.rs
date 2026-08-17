@@ -297,10 +297,73 @@ fn the_fullnode_still_hardcodes_the_unilateral_exit_capability_false() {
         "the fullnode no longer hardcodes channel_unilateral_exit; MAINNET_READINESS_MAP.md \
          section 1 is now out of date and must be re-measured"
     );
+    // And the same for the profile this system actually settles on. This is
+    // the one the dispute-path gate reads, so it is the one whose literal
+    // decides whether `unilateral_l1_enforceable` can ever be published true.
+    assert!(
+        source.contains("let channel_registry_unilateral_exit = false;"),
+        "the fullnode no longer hardcodes channel_registry_unilateral_exit; that flag is \
+         what measure_node_reported_unilateral_exit reads, so MAINNET_READINESS_MAP.md \
+         section 1 must be re-measured before anything downstream is trusted"
+    );
 
     let dispute = section(&map(), "### 1. Unilateral L1 dispute path");
     assert!(
         dispute.contains("node_api.rs:"),
         "the map must cite the literal in the fullnode rather than describing it"
     );
+}
+
+/// The documents an operator actually reads must name the capability that
+/// actually gates.
+///
+/// `MAINNET_READINESS_MAP.md` is guarded by the tests above; nothing guarded
+/// `HUB-OPERATOR.md` or `L2_SAFETY_MODEL.md`, and both went on telling a Hub
+/// operator to wait for `features.channel_unilateral_exit=true` after the gate
+/// had moved to the shared registry. That is the same wrong-contract defect the
+/// code was corrected for, left standing in the one place a human reads it: an
+/// operator following it waits for a flag that opens nothing, and could deploy
+/// the wrong contract on the strength of it.
+///
+/// Checked mechanically rather than by review, because a stale sentence in a
+/// document has no compiler.
+#[test]
+fn the_operator_documents_name_the_capability_that_gates() {
+    let profile = l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE;
+    for relative in ["docs/HUB-OPERATOR.md", "docs/l2/L2_SAFETY_MODEL.md"] {
+        let path = repo_root().join(relative);
+        let document = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+
+        assert!(
+            document.contains("channel_registry_unilateral_exit"),
+            "{relative} never names the capability the dispute-path gate reads, so a reader \
+             cannot tell which flag they are waiting on"
+        );
+        assert!(
+            document.contains(profile),
+            "{relative} must name the settlement profile {profile:?} the gate is about"
+        );
+        // The exact sentence the defect wore. Any wording that presents the V1
+        // per-channel flag as the condition for `mainnet-pilot` is the bug.
+        for forbidden in [
+            "reports `features.channel_unilateral_exit=true`",
+            "requires `features.channel_unilateral_exit=true`",
+        ] {
+            assert!(
+                !document.contains(forbidden),
+                "{relative} still says {forbidden:?}; that flag is the V1 per-channel \
+                 contract and it gates nothing"
+            );
+        }
+        // V1 may be mentioned - it is still published - but only if the
+        // document says out loud that it is not the gate, so the two cannot be
+        // confused by someone skimming.
+        if document.contains("features.channel_unilateral_exit") {
+            assert!(
+                document.contains("gates nothing"),
+                "{relative} mentions the V1 capability without saying it gates nothing"
+            );
+        }
+    }
 }

@@ -10,7 +10,7 @@ node. Where something is an inference it says so.
 
 `GET /v1/readiness/mainnet` on a running Hub is the machine-readable answer.
 It is evaluated by `MainnetReadinessV1::evaluate`
-(`crates/l2-fast-pay-hub/src/readiness.rs:193-360`). Ask it rather than trusting
+(`crates/l2-fast-pay-hub/src/readiness.rs:213-400`). Ask it rather than trusting
 a checklist.
 
 The measurement that matters is a mainnet-profile Hub pointed at the real
@@ -48,7 +48,7 @@ mainnet-pilot          {"error":"Fast Pay Hub is unavailable"}
                        hub log: mainnet payment gate blocked:
                          external_monotonic_rollback_anchor_is_not_ready;
                          unilateral_l1_dispute_path_is_not_ready;
-                         fullnode_does_not_report_verified_channel_unilateral_exit
+                         fullnode_does_not_report_verified_registry_unilateral_exit
 ```
 
 So the Hub is not what stops a mainnet payment on the bounded profile.
@@ -64,12 +64,12 @@ trusted_bounded_pilot      false
 blockers
   external_monotonic_rollback_anchor_is_not_ready
   unilateral_l1_dispute_path_is_not_ready
-  fullnode_does_not_report_verified_channel_unilateral_exit
+  fullnode_does_not_report_verified_registry_unilateral_exit
 close_blockers  []
 ```
 
 `close_blockers` is empty on both, so cooperative close is available on both
-profiles even while the full profile refuses payments (`readiness.rs:280-293`
+profiles even while the full profile refuses payments (`readiness.rs:314-330`
 filters the waived and admission identifiers out of `blockers`).
 
 Two identifiers that look like blockers and are not. The control, the same two
@@ -80,19 +80,19 @@ mainnet-pilot          blockers  external_monotonic_rollback_anchor_is_not_ready
                                  unilateral_l1_dispute_path_is_not_ready
                                  mainnet_pilot_requires_hacash_mainnet_fullnode
                                  fullnode_below_pinned_mainnet_checkpoint_765432
-                                 fullnode_does_not_report_verified_channel_unilateral_exit
+                                 fullnode_does_not_report_verified_registry_unilateral_exit
 mainnet-bounded-pilot  blockers  mainnet_pilot_requires_hacash_mainnet_fullnode
                                  fullnode_below_pinned_mainnet_checkpoint_765432
 ```
 
-`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:234-236`) and
-`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:237-242`) are
+`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:276-278`) and
+`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:279-284`) are
 artefacts of pointing a mainnet profile at the wrong chain. They vanish against
 the real mainnet node, as the two documents above show, and are not work.
 
 ## Two mainnet routes exist, and they are not the same thing
 
-`readiness.rs:207-213` branches on `is_bounded_pilot`:
+`readiness.rs:239-245` branches on `is_bounded_pilot`:
 
 ```rust
 let is_bounded_pilot = profile == MAINNET_BOUNDED_PILOT_PROFILE;
@@ -100,8 +100,8 @@ if !external_rollback_anchor_ready && !is_bounded_pilot { blockers.push(...) }
 if !l1_dispute_path_ready && !is_bounded_pilot { blockers.push(...) }
 ```
 
-and on the profile again at `readiness.rs:250-262`, which raises
-`fullnode_does_not_report_verified_channel_unilateral_exit` on `mainnet-pilot`
+and on the profile again at `readiness.rs:293-297`, which raises
+`fullnode_does_not_report_verified_registry_unilateral_exit` on `mainnet-pilot`
 only.
 
 **Bounded pilot** waives those three blockers and nothing else. It is the route
@@ -111,12 +111,12 @@ bounded profile identically:
 
 | demand | where |
 | --- | --- |
-| Hub signer plus authenticated durable storage | `readiness.rs:204-206` |
-| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:215-229`, `readiness.rs:679-685` |
-| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:233-242` |
-| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:243-249` |
-| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:568-601` |
-| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:654-676` |
+| Hub signer plus authenticated durable storage | `readiness.rs:236-238` |
+| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:257-270`, `readiness.rs:719-725` |
+| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:275-284` |
+| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:285-292` |
+| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:608-641` |
+| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:694-716` |
 
 **Full mainnet** does not waive them. It needs all three to be genuinely true.
 
@@ -133,7 +133,7 @@ rather than hiding it.
 
 ## Why full mainnet cannot be reached today
 
-`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:352-353`)
+`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:387-393`)
 publishes the measurement:
 
 ```rust
@@ -147,6 +147,16 @@ monotonic rollback anchor as well as the dispute path, so it reads `false` on
 any Hub whose anchor evidence is missing, unverified or stale — which is every
 Hub with no witness configured. That is a fail-closed stance, not an oversight.
 
+Both inputs are also *re-measured inside `evaluate`* against the evidence the
+same document publishes — `rollback_anchor` and `fullnode_capabilities` — and
+kept only where the two agree. `evaluate` is a public function taking two plain
+booleans, and before that conjunction it would write a caller's `true` straight
+onto the wire beside a `fullnode_capabilities` block carrying no verified
+registry deployment and a `rollback_anchor` of `null`: a document contradicting
+itself in the direction of a guarantee. Passing `true` can now only fail to make
+a flag `false`; it can never make one `true`. Pinned by
+`no_argument_list_can_publish_a_guarantee_the_evidence_does_not_support`.
+
 ### `/v1/health` publishes none of this, on purpose
 
 `HubState::health` performs no fullnode I/O, so it has no evidence to weigh. It
@@ -159,12 +169,42 @@ wallet gating on one could never be un-bricked by the guarantee arriving.
 gating on `HubHealth` for one is a compile error.
 
 `HubHardGuarantees::production_mainnet_ready` still exists as the Hub's internal
-aggregate measurement (`readiness.rs:928-940`); it is simply no longer exported
+aggregate measurement (`readiness.rs:984-990`); it is simply no longer exported
 on the liveness endpoint.
 
 ### 1. Unilateral L1 dispute path
 
-**Corrected twice. Read the dates.** The 2026-08-15 version said the contract
+**Corrected a third time, 2026-08-17: the gate was measuring the wrong
+contract.** Everything below this paragraph was written about
+`HPAYChannelExitV1`, settlement profile `hpay-hvm-channel-v1` — the V1
+per-channel contract. That is not the contract this system uses.
+`measure_l1_dispute_path_ready` required
+`ChannelUnilateralExitEvidence::is_verified_mainnet_deployment`, and that
+evidence type is hard-bound to the V1 profile
+(`crates/l2-fast-pay-hub/src/node.rs:33`). The path that was built, proven and
+shipped is the shared registry, `hpay-hvm-shared-registry-v2`
+(`crates/l2-fast-pay-hub/src/hvm_registry.rs:17`), and the fullnode fed only V1
+evidence: V2 had a snapshot endpoint and the `hpay_channel_registry_query` flag
+and no deployment-verified capability at all.
+
+The consequence was not conservative. Deploying registry V2 to Hacash mainnet
+would have left `unilateral_l1_enforceable` reading `false` forever, because the
+gate was looking at a different contract — and a V1 deployment would have moved
+a flag about a rail no user travels. The measurement is now bound to V2:
+`RegistryUnilateralExitEvidence` (`crates/l2-fast-pay-hub/src/node.rs:511`) and
+the fullnode's `channel_registry_unilateral_exit_evidence`
+(`../hacash-fullnodedev/app/src/hpay_channel_registry.rs:196`), which re-derives
+the deployment from the node's own block store exactly as V1 does and
+additionally proves the two V2-only bindings: the deploying transaction really
+carries this artifact, and its 32-byte constructor argument is the node's own
+network instance.
+
+**The flag did not move.** Nothing is deployed on Hacash mainnet, so the honest
+V2 answer is still `false` — now for the right reason. Section 2 below, the rail
+migration, is what the correction does *not* change: it was always the expensive
+part, and it is still open.
+
+**Corrected twice before that. Read the dates.** The 2026-08-15 version said the contract
 was not deployed. The 2026-08-16 version overcorrected: it found the deployment,
 did not check which chain it was on, called it verified on chain, and concluded
 that the remaining work was fullnode configuration. Both halves of that were
