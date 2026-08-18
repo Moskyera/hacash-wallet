@@ -886,14 +886,44 @@ mod user_side_exit_readiness_tests {
     /// the on-chain proof exists. That is exactly the situation in which a flag
     /// is most likely to be flipped for the wrong reason, so this test states
     /// the remaining gap in a place that fails if the flag moves without it.
-    #[test]
-    fn the_flag_is_down_because_no_surface_can_sign_an_exit() {
-        if !super::USER_SIDE_UNILATERAL_EXIT_DRIVER_READY {
-            return;
-        }
+    /// One term of the tripwire: records the message when the term is unmet.
+    ///
+    /// Deliberately not `assert!`. A term that fails must be *collected* and
+    /// not thrown, so that one missing capability cannot hide the other eleven
+    /// behind the first panic, and so the terms can be measured while the flag
+    /// is down without the measurement itself being a failure.
+    macro_rules! term {
+        ($unmet:ident, $condition:expr, $($message:tt)*) => {
+            if !$condition {
+                $unmet.push(format!($($message)*));
+            }
+        };
+    }
+
+    /// Every term, evaluated unconditionally, returning the ones that fail.
+    ///
+    /// Split out of the test below because the test used to begin with
+    /// `if !USER_SIDE_UNILATERAL_EXIT_DRIVER_READY { return; }`, which meant
+    /// that while the flag was down - which is the whole time it has ever
+    /// existed - none of these terms was evaluated at all. The suite reported
+    /// the tripwire green over a body that never ran, so the flag was held
+    /// down by human restraint and this file got the credit.
+    ///
+    /// Now the terms are measured on every run whatever the flag says, the
+    /// test below turns them into a failure only when the flag claims they
+    /// hold, and `every_term_is_measured_and_reported` prints the standing of
+    /// each one so the gap is visible before somebody decides to close it.
+    fn unmet_user_side_exit_terms() -> Vec<String> {
+        let mut unmet: Vec<String> = Vec::new();
         let signer = include_str!("../../agent-wallet-core/src/signer.rs");
-        assert!(
-            signer.contains("sign_exact_registry_exit"),
+        // Narrowed, like every other term. This one read the raw file long
+        // after terms 3 and 4 were given the narrowing, so a single line
+        // `// sign_exact_registry_exit` over a signer with the capability
+        // deleted satisfied the first thing this tripwire asks.
+        let signer_source = shipped_source(signer);
+        term!(
+            unmet,
+            signer_source.contains("fn sign_exact_registry_exit("),
             "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the wallet still has no \
              way to sign an exit. The builders work and the chain accepts them, but a user \
              cannot reach either, and a flag that reads true while a user is trapped is worse \
@@ -924,7 +954,8 @@ mod user_side_exit_readiness_tests {
         // cannot satisfy that, a test cannot, and neither can a helper nobody
         // calls.
         let commands = include_str!("../../wallet-tauri-common/src/agent_commands.rs");
-        assert!(
+        term!(
+            unmet,
             shipped_source(commands).contains(".advance_registry_exit(")
                 || shipped_source(commands).contains(".advance_hvm_registry_exit("),
             "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while nothing an owner can \
@@ -947,9 +978,9 @@ mod user_side_exit_readiness_tests {
         // channel that cannot exist is a worse lie than a red screen, so the
         // channel-open signer is named here the same way the exit signer was
         // named here before it existed.
-        let signer_source = shipped_source(signer);
-        assert!(
-            signer_source.contains("sign_exact_registry_channel_open"),
+        term!(
+            unmet,
+            signer_source.contains("fn sign_exact_registry_channel_open("),
             "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while no Agent Wallet can \
              open a registry channel in the first place. Adoption needs the wallet's own left \
              signature on the serial-1 refund bill and nothing in `agent-wallet-core` produces \
@@ -972,12 +1003,50 @@ mod user_side_exit_readiness_tests {
         //
         // So the funding signing boundary is named the way the exit signer and
         // the open signer were named here before they existed.
-        assert!(
-            signer_source.contains("sign_exact_registry_funding"),
+        term!(
+            unmet,
+            signer_source.contains("fn sign_exact_registry_funding("),
             "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while no Agent Wallet can put \
              money into the channel it opened. The refund exists, the permission exists, and \
              nothing shipped spends it, so every channel a user could exit is empty."
         );
+
+        // Terms 3 and 4 name a *definition*, which is the right shape for a
+        // signing boundary: the capability is that the method exists on the
+        // signer. But a definition nobody calls signs nothing, and a reviewer
+        // satisfied both terms with one `#[allow(dead_code)] fn` that returned
+        // the names as strings. So each signing boundary must also be reached
+        // from the service module that owns that hop, and reached with a call
+        // rather than a mention.
+        let open_service = shipped_source(include_str!(
+            "../../agent-wallet-core/src/service/hvm_registry_open.rs"
+        ));
+        let exit_service = shipped_source(include_str!(
+            "../../agent-wallet-core/src/service/hvm_registry.rs"
+        ));
+        for (source, module, method) in [
+            (
+                &open_service,
+                "hvm_registry_open",
+                "sign_exact_registry_channel_open(",
+            ),
+            (
+                &open_service,
+                "hvm_registry_open",
+                "sign_exact_registry_funding(",
+            ),
+            (&exit_service, "hvm_registry", "sign_exact_registry_exit("),
+        ] {
+            term!(
+                unmet,
+                source.contains(&format!(".{method}")),
+                "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while `{module}` never \
+                 calls `{method}`. The signer can make these bytes and nothing asks it to, \
+                 which is the same capability-with-no-caller shape as a driver whose only \
+                 caller is a test - one layer further down, where the earlier terms cannot \
+                 see it."
+            );
+        }
 
         // Fifth term: A PRESS THAT REACHES IT, and one that reaches the
         // provider-free adoption.
@@ -990,13 +1059,15 @@ mod user_side_exit_readiness_tests {
         // adopted binding needed the provider alive four times and the
         // provider was gone. The chain would have paid.
         let shipped_commands = shipped_source(commands);
-        assert!(
+        term!(
+            unmet,
             shipped_commands.contains(".fund_hvm_registry_channel("),
             "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while nothing an owner can \
              press puts the deposit into the channel. A funding method whose only caller is a \
              test is the shape this workspace has shipped three times."
         );
-        assert!(
+        term!(
+            unmet,
             shipped_commands.contains(".adopt_hvm_registry_channel_from_chain("),
             "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the only route to an \
              adopted binding needs the provider alive. The exit refuses without that binding, \
@@ -1020,10 +1091,23 @@ mod user_side_exit_readiness_tests {
         // to demand chain evidence in its own signature. Named as the
         // parameter, because a parameter cannot be satisfied by a comment and
         // cannot be forgotten by a caller.
+        //
+        // Naming `validate_prefunding_binding(` was not enough on its own,
+        // and the comment above used to claim a parameter "cannot be forgotten
+        // by a caller". It can, if nothing is required to call it: the bare
+        // name would equally match a `fn validate_prefunding_binding(` that
+        // nobody invokes, so the gate could be defined, never called, and this
+        // term would still read true.
+        //
+        // What is demanded instead is the *method call*, leading dot included.
+        // The gate is defined in another module; what this file has to do is
+        // reach it, and `.validate_prefunding_binding(` is that fact and
+        // cannot be satisfied by a definition.
         let open_gate = shipped_source(include_str!("../../wallet-core/src/hvm_registry_open.rs"));
-        assert!(
+        term!(
+            unmet,
             open_gate.contains("chain: &HvmRegistryOpenChainEvidenceV1<'_>,")
-                && open_gate.contains("validate_prefunding_binding("),
+                && open_gate.contains(".validate_prefunding_binding("),
             "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while funding permission could \
              be produced without reading the wallet's own fullnode. A refund that names a \
              contract nobody checked is a refund for something that is not the registry, and a \
@@ -1044,22 +1128,32 @@ mod user_side_exit_readiness_tests {
         //
         // So the shell is read too, and both halves of it: registration and
         // permission. Neither alone makes a command pressable.
-        let shell = include_str!("../../../apps/desktop/src-tauri/src/lib.rs");
-        let permissions = include_str!("../../../apps/desktop/src-tauri/permissions/wallet.toml");
+        //
+        // Both halves were read completely raw, which made this the cheapest
+        // term in the file to forge: four Rust `//` lines and four TOML `#`
+        // lines, over a shell that registered nothing and an allowlist that
+        // permitted nothing, satisfied all eight assertions below. They are
+        // narrowed now, each by the rules of its own language.
+        let shell = shipped_source(include_str!("../../../apps/desktop/src-tauri/src/lib.rs"));
+        let permissions = shipped_toml(include_str!(
+            "../../../apps/desktop/src-tauri/permissions/wallet.toml"
+        ));
         for command in [
             "agent_wallet_open_hvm_registry_channel",
             "agent_wallet_fund_hvm_registry_channel",
             "agent_wallet_adopt_hvm_registry_channel",
             "agent_wallet_start_hvm_registry_exit",
         ] {
-            assert!(
+            term!(
+                unmet,
                 shell.contains(&format!("wallet_tauri_common::agent_commands::{command},")),
                 "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the desktop shell \
                  does not register `{command}`. A Tauri command the invoke handler has never \
                  heard of is a button that returns an error, and every term above would still \
                  pass."
             );
-            assert!(
+            term!(
+                unmet,
                 permissions.contains(&format!("\"{command}\"")),
                 "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the desktop \
                  capability allowlist does not permit `{command}`. Registration without \
@@ -1078,14 +1172,22 @@ mod user_side_exit_readiness_tests {
         //
         // Named as the `invoke` call rather than as a button, because a button
         // is a rendering detail and the invoke is the fact.
-        let renderer = shipped_source(include_str!("../../../apps/desktop/src/agent/api.ts"));
+        //
+        // Narrowed by TypeScript's rules and not by Rust's. `shipped_source`
+        // deletes string literals, which is right for Rust - a symbol inside a
+        // string does nothing - and exactly wrong here, because the command
+        // name *is* a string literal and deleting it would make this term
+        // impossible to satisfy rather than hard to forge. So comments go and
+        // strings stay.
+        let renderer = shipped_typescript(include_str!("../../../apps/desktop/src/agent/api.ts"));
         for command in [
             "agent_wallet_open_hvm_registry_channel",
             "agent_wallet_fund_hvm_registry_channel",
             "agent_wallet_adopt_hvm_registry_channel",
             "agent_wallet_start_hvm_registry_exit",
         ] {
-            assert!(
+            term!(
+                unmet,
                 renderer.contains(&format!("(\"{command}\",")),
                 "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while nothing an owner can \
                  see calls `{command}`. Every term above can pass over a capability that only \
@@ -1093,17 +1195,336 @@ mod user_side_exit_readiness_tests {
                  people who are not reading the source."
             );
         }
+
+        // Ninth term: A SCREEN THAT RENDERS THE WRAPPER.
+        //
+        // Term 8 reads `api.ts` and nothing else, so an exported wrapper that
+        // no component ever calls satisfies it. That is the same
+        // "registered but never called" hole one final layer up, and it is the
+        // layer an ordinary person actually touches: a renderer wrapper nobody
+        // renders is a capability for whoever reads `api.ts`.
+        //
+        // So the admin surface is read too, and each wrapper must be called
+        // from it. Named as the call on the API object, because that is the
+        // fact; which button carries it is a rendering detail.
+        let admin = shipped_typescript(include_str!(
+            "../../../apps/desktop/src/agent/AgentAdminPages.tsx"
+        ));
+        for wrapper in [
+            "openHvmRegistryChannel(",
+            "fundHvmRegistryChannel(",
+            "adoptHvmRegistryChannel(",
+            "startHvmRegistryExit(",
+        ] {
+            term!(
+                unmet,
+                admin.contains(&format!("agentWalletApi.{wrapper}")),
+                "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while no screen calls \
+                 `{wrapper}`. The renderer wrapper exists and the command is registered and \
+                 permitted, and an owner opening this app still cannot reach any of it."
+            );
+        }
+        unmet
     }
 
-    /// Everything in a source file that a build actually ships: no comments,
-    /// and nothing from the first `#[cfg(test)]` onwards.
+    /// The tripwire itself: the flag may not be true over an unmet term.
+    #[test]
+    fn the_flag_is_down_because_no_surface_can_sign_an_exit() {
+        let unmet = unmet_user_side_exit_terms();
+        if !super::USER_SIDE_UNILATERAL_EXIT_DRIVER_READY {
+            return;
+        }
+        assert!(
+            unmet.is_empty(),
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY is true and {} term(s) of this tripwire do \
+             not hold:\n\n{}",
+            unmet.len(),
+            unmet.join("\n\n")
+        );
+    }
+
+    /// The terms are measured on every run, and their standing is printed.
+    ///
+    /// This test exists because the tripwire above is silent by construction
+    /// while the flag is down: it has nothing to say until somebody sets the
+    /// flag, and by then the person setting it is the person least likely to
+    /// be told something they do not want to hear. Running the terms anyway
+    /// turns "the flag is false" from an assertion nobody checks into a
+    /// measurement anybody can read with `--nocapture`.
+    ///
+    /// It asserts only two things, and neither is the flag. First, that terms
+    /// are actually being evaluated, so this cannot quietly become the empty
+    /// check that the early return had already made it. Second, that a green
+    /// term list and a false flag are allowed to coexist - because they must:
+    /// every term here is a source-reachability check, and no arrangement of
+    /// them can witness a person opening a channel, paying over it, losing
+    /// their provider and walking out with their money. That run is the bar.
+    /// These terms are the floor.
+    #[test]
+    fn every_term_is_measured_and_reported() {
+        let unmet = unmet_user_side_exit_terms();
+        println!(
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY = {}",
+            super::USER_SIDE_UNILATERAL_EXIT_DRIVER_READY
+        );
+        if unmet.is_empty() {
+            println!("all terms hold");
+        } else {
+            println!("{} term(s) do not hold:", unmet.len());
+            for reason in &unmet {
+                println!("  UNMET: {reason}");
+            }
+        }
+        // The measurement must be doing work. `unmet_user_side_exit_terms`
+        // reads six real files; if any of them stopped containing the code
+        // these terms are about, that is a finding and not a pass.
+        let commands = shipped_source(include_str!(
+            "../../wallet-tauri-common/src/agent_commands.rs"
+        ));
+        assert!(
+            commands.contains("#[tauri::command]"),
+            "the tripwire is reading a file that no longer holds Tauri commands, so its terms \
+             are measuring nothing"
+        );
+    }
+
+    /// Everything in a source file that a build actually ships: no comments of
+    /// any kind, no string or character literals, and nothing from the first
+    /// test-only `cfg` onwards.
+    ///
+    /// # Why each of these is here
+    ///
+    /// A reviewer reimplemented every term of this tripwire against mutated
+    /// copies of the six real files, deleted the capability from all six, left
+    /// only prose and dead code behind, and got every assertion to pass. Each
+    /// clause below closes one of the routes they took, and the companion test
+    /// `prose_dead_code_and_disabled_cfgs_do_not_satisfy_the_tripwire` drives
+    /// all of them.
+    ///
+    /// * **Line comments.** Was the only filter. `// sign_exact_registry_exit`
+    ///   satisfied any term that read a raw file.
+    /// * **Block comments.** `/* ... */` was not filtered at all, so the same
+    ///   sentence in different punctuation walked straight through the
+    ///   narrowing that was supposed to stop it.
+    /// * **String and character literals.** A term looking for a symbol is
+    ///   asking whether the code *does* something. `let _ = "sign_exact_...";`
+    ///   does nothing and matched.
+    /// * **Test-only `cfg`s.** The split was on the exact literal
+    ///   `#[cfg(test)]`, so `#[cfg(all(test, feature = "..."))]` - and any
+    ///   `cfg` gated on a feature that is off in the shipped build - was
+    ///   treated as shipped code.
+    ///
+    /// This is deliberately a lexical approximation and not a Rust parser. It
+    /// errs towards *removing* text, which is the safe direction: removing too
+    /// much can only make a term harder to satisfy, never easier.
     fn shipped_source(source: &str) -> String {
+        // Everything from the first test-only `cfg` attribute onwards. Any
+        // `cfg` whose predicate names the bare `test` identifier counts, not
+        // just the exact literal `#[cfg(test)]`.
+        //
+        // `test` must be matched as a whole token and outside string literals,
+        // and both halves of that are load-bearing rather than fussy. A
+        // substring search truncates at
+        // `#[cfg(feature = "agent-wallet-testnet-pilot")]` - "testnet"
+        // contains "test" - which is the attribute guarding almost every
+        // registry command and signing boundary in this workspace. Cutting
+        // there silently removed the code every term is about and reported ten
+        // capabilities missing that were present. A tripwire that fails closed
+        // is right; one that fails closed for the wrong reason teaches people
+        // to disbelieve it.
+        let mut shipped = source;
+        for (index, _) in source.match_indices("#[cfg(") {
+            let tail = &source[index..];
+            let Some(end) = tail.find(']') else { continue };
+            if predicate_names_test(&tail[..end]) {
+                shipped = &source[..index];
+                break;
+            }
+        }
+
+        // Strip comments and literals in one pass, so a construct cannot hide
+        // inside another. Kept character by character because the alternative
+        // is a regex that is wrong about `"//"` or `/* "unterminated */`.
+        let bytes: Vec<char> = shipped.chars().collect();
+        let mut out = String::with_capacity(shipped.len());
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let rest_is = |needle: &str| shipped_starts_with(&bytes, index, needle);
+            if rest_is("//") {
+                while index < bytes.len() && bytes[index] != '\n' {
+                    index += 1;
+                }
+            } else if rest_is("/*") {
+                index += 2;
+                let mut depth = 1usize;
+                while index < bytes.len() && depth > 0 {
+                    if shipped_starts_with(&bytes, index, "/*") {
+                        depth += 1;
+                        index += 2;
+                    } else if shipped_starts_with(&bytes, index, "*/") {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+                // A comment separated two tokens; it must not join them.
+                out.push(' ');
+            } else if bytes[index] == '"' {
+                index += 1;
+                while index < bytes.len() && bytes[index] != '"' {
+                    index += if bytes[index] == '\\' { 2 } else { 1 };
+                }
+                index += 1;
+                out.push_str("\"\"");
+            } else if bytes[index] == '\'' {
+                // A lifetime is not a literal, and must survive.
+                let closes = (1..=4).any(|ahead| {
+                    bytes
+                        .get(index + ahead)
+                        .is_some_and(|character| *character == '\'')
+                });
+                if closes {
+                    index += 1;
+                    while index < bytes.len() && bytes[index] != '\'' {
+                        index += if bytes[index] == '\\' { 2 } else { 1 };
+                    }
+                    index += 1;
+                    out.push_str("''");
+                } else {
+                    out.push(bytes[index]);
+                    index += 1;
+                }
+            } else {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+        out
+    }
+
+    /// Whether a `cfg` predicate names the bare `test` identifier.
+    ///
+    /// Identifiers are taken outside string literals, so a *feature* called
+    /// `agent-wallet-testnet-pilot` is not a test gate and neither is one
+    /// called `test-utils`.
+    fn predicate_names_test(predicate: &str) -> bool {
+        // `any(test, ...)` is not a test-only gate: the code ships whenever any
+        // other disjunct holds. `#[cfg(any(test, feature =
+        // "agent-wallet-testnet-pilot"))]` guards the registry signing methods
+        // themselves, and treating it as test-only cut all three of them out
+        // of the shipped source and reported the wallet unable to sign.
+        //
+        // So disjunctions are removed before the bare `test` is looked for,
+        // which leaves `#[cfg(test)]` and `#[cfg(all(test, ...))]` - the two
+        // shapes that really do mean "not in a shipped build".
+        let mut required = String::with_capacity(predicate.len());
+        let mut rest = predicate;
+        while let Some(at) = rest.find("any(") {
+            required.push_str(&rest[..at]);
+            let mut depth = 0usize;
+            let mut end = None;
+            for (offset, character) in rest[at + 3..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(at + 3 + offset + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match end {
+                Some(end) => rest = &rest[end..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        required.push_str(rest);
+
+        let mut identifier = String::new();
+        let mut in_string = false;
+        let mut names_test = false;
+        for character in required.chars() {
+            if character == '"' {
+                in_string = !in_string;
+                identifier.clear();
+                continue;
+            }
+            if in_string {
+                continue;
+            }
+            if character.is_alphanumeric() || character == '_' {
+                identifier.push(character);
+            } else {
+                names_test |= identifier == "test";
+                identifier.clear();
+            }
+        }
+        names_test | (identifier == "test")
+    }
+
+    /// Whether `needle` begins at `index` in an already-decoded source.
+    fn shipped_starts_with(source: &[char], index: usize, needle: &str) -> bool {
+        needle
+            .chars()
+            .enumerate()
+            .all(|(offset, character)| source.get(index + offset) == Some(&character))
+    }
+
+    /// The same narrowing for TypeScript: comments go, string literals stay.
+    ///
+    /// The renderer terms ask whether a command *name* appears in an `invoke`
+    /// call, and that name is a string. Deleting literals the way the Rust
+    /// narrowing does would make those terms unsatisfiable rather than
+    /// unforgeable, so only comments are removed here. That is weaker than the
+    /// Rust narrowing and deliberately so: a reviewer forged these terms with
+    /// `/* invoke("...") is planned for a later release */`, which this stops,
+    /// and the term that a real screen calls the wrapper is what carries the
+    /// rest of the weight.
+    fn shipped_typescript(source: &str) -> String {
+        let characters: Vec<char> = source.chars().collect();
+        let mut out = String::with_capacity(source.len());
+        let mut index = 0usize;
+        while index < characters.len() {
+            if shipped_starts_with(&characters, index, "//") {
+                while index < characters.len() && characters[index] != '\n' {
+                    index += 1;
+                }
+            } else if shipped_starts_with(&characters, index, "/*") {
+                index += 2;
+                while index < characters.len() && !shipped_starts_with(&characters, index, "*/") {
+                    index += 1;
+                }
+                index += 2;
+                out.push(' ');
+            } else {
+                out.push(characters[index]);
+                index += 1;
+            }
+        }
+        out
+    }
+
+    /// The same narrowing for a TOML file, where a comment starts with `#`.
+    ///
+    /// The capability allowlist is TOML, and it was read completely raw: not
+    /// even the line-comment filter ran on it, so four commented-out entries
+    /// satisfied the term that says the desktop permits them.
+    fn shipped_toml(source: &str) -> String {
         source
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or_default()
             .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
+            .map(|line| match line.find('#') {
+                // Only a `#` outside a string starts a comment. Counting quotes
+                // before it is enough for an allowlist of quoted names.
+                Some(at) if line[..at].matches('"').count() % 2 == 0 => &line[..at],
+                _ => line,
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1136,6 +1557,130 @@ mod user_side_exit_readiness_tests {
                 && !shipped.contains(".advance_hvm_registry_exit("),
             "a file that only mentions the driver in comments and in its own tests would still \
              satisfy the flag's caller check"
+        );
+    }
+
+    /// Every route a reviewer actually used to forge this tripwire.
+    ///
+    /// The test above checked one pattern, for one term, against `//` and a
+    /// bare `#[cfg(test)]`. A reviewer then reimplemented all of the terms
+    /// against mutated copies of the six real files, deleted the capability
+    /// from every one of them, and got 19 of 19 assertions to pass over source
+    /// in which nothing worked. Each case below is one of the shapes they
+    /// used. They are unit tests of the narrowing rather than of the terms,
+    /// because the narrowing is the thing every term shares.
+    #[test]
+    fn prose_dead_code_and_disabled_cfgs_do_not_satisfy_the_tripwire() {
+        // A line comment, which was the only case ever covered.
+        assert!(
+            !shipped_source("// sign_exact_registry_exit\n").contains("sign_exact_registry_exit")
+        );
+
+        // A block comment, which was not filtered at all.
+        assert!(
+            !shipped_source("/* the driver is reached at m.advance_hvm_registry_exit(w) */")
+                .contains(".advance_hvm_registry_exit("),
+            "a block comment still satisfies a caller term"
+        );
+        // Including a multi-line one, and one that nests.
+        assert!(
+            !shipped_source("/*\n .fund_hvm_registry_channel(\n /* .adopt_x( */\n */")
+                .contains(".fund_hvm_registry_channel("),
+            "a multi-line or nested block comment still satisfies a caller term"
+        );
+
+        // A string literal, which is a mention and not a call.
+        assert!(
+            !shipped_source("fn f() { let _ = \"sign_exact_registry_funding(\"; }")
+                .contains("sign_exact_registry_funding("),
+            "a string literal still satisfies a signing-boundary term"
+        );
+
+        // A `cfg` that is gated on `test` but is not the exact literal the
+        // split used to look for.
+        assert!(
+            !shipped_source(
+                "#[cfg(all(test, feature = \"never-enabled\"))]\nmod m { fn t() { \
+                 m.adopt_hvm_registry_channel_from_chain(w); } }"
+            )
+            .contains(".adopt_hvm_registry_channel_from_chain("),
+            "a test module behind a compound cfg is still treated as shipped code"
+        );
+
+        // ...but a feature whose *name* merely contains "test" is not a test
+        // gate. `agent-wallet-testnet-pilot` guards nearly every registry
+        // command and signing boundary in this workspace, and treating it as
+        // one truncated every file at its first use and reported ten present
+        // capabilities as missing.
+        assert!(
+            shipped_source(
+                "#[cfg(feature = \"agent-wallet-testnet-pilot\")]\npub async fn f() { \
+                 m.fund_hvm_registry_channel(w); }"
+            )
+            .contains(".fund_hvm_registry_channel("),
+            "a feature name containing `test` was mistaken for a test gate, which cuts the \
+             shipped code every term is about"
+        );
+        assert!(
+            !predicate_names_test("#[cfg(feature = \"agent-wallet-testnet-pilot\")"),
+            "`testnet` inside a feature name is not the `test` cfg"
+        );
+        assert!(
+            predicate_names_test("#[cfg(test)"),
+            "the bare test cfg must be recognised"
+        );
+        assert!(
+            predicate_names_test("#[cfg(all(test, feature = \"x\"))"),
+            "a compound test cfg must be recognised"
+        );
+        // `any(test, ...)` ships whenever another disjunct holds, and it is
+        // what guards the registry signing methods themselves.
+        assert!(
+            !predicate_names_test("#[cfg(any(test, feature = \"agent-wallet-testnet-pilot\"))"),
+            "`any(test, ...)` is not a test-only gate and cutting there removes shipped code"
+        );
+        assert!(
+            shipped_source(
+                "#[cfg(any(test, feature = \"agent-wallet-testnet-pilot\"))]\n\
+                 pub(crate) fn sign_exact_registry_exit() {}"
+            )
+            .contains("fn sign_exact_registry_exit("),
+            "an `any(test, feature)` gate hid a real signing boundary from its own term"
+        );
+
+        // The narrowing must not eat code it should keep: a lifetime is not a
+        // character literal, and the term that reads a chain-evidence
+        // parameter depends on one surviving.
+        assert!(
+            shipped_source("fn f(chain: &HvmRegistryOpenChainEvidenceV1<'_>,) {}")
+                .contains("chain: &HvmRegistryOpenChainEvidenceV1<'_>,"),
+            "the narrowing ate a lifetime, which would make a real term unsatisfiable"
+        );
+
+        // TOML comments, over an allowlist that was read completely raw.
+        assert!(
+            !shipped_toml("# \"agent_wallet_start_hvm_registry_exit\",")
+                .contains("\"agent_wallet_start_hvm_registry_exit\""),
+            "a commented-out allowlist entry still satisfies the permission term"
+        );
+        assert!(
+            shipped_toml("  \"agent_wallet_start_hvm_registry_exit\", # kept")
+                .contains("\"agent_wallet_start_hvm_registry_exit\""),
+            "the TOML narrowing ate a real allowlist entry"
+        );
+
+        // TypeScript comments, over a renderer that invokes nothing.
+        assert!(
+            !shipped_typescript(
+                "/* invoke(\"agent_wallet_start_hvm_registry_exit\", { walletId }) later */"
+            )
+            .contains("(\"agent_wallet_start_hvm_registry_exit\","),
+            "a commented-out invoke still satisfies the renderer term"
+        );
+        assert!(
+            shipped_typescript("invoke(\"agent_wallet_start_hvm_registry_exit\", { walletId });")
+                .contains("(\"agent_wallet_start_hvm_registry_exit\","),
+            "the TypeScript narrowing ate a real invoke"
         );
     }
 }

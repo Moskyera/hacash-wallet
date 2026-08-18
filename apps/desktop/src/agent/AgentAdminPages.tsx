@@ -29,6 +29,7 @@ import {
   APPROVE_TRANSACTION_WARNING,
   EMERGENCY_STOP_WARNING,
   EXIT_WITHOUT_PROVIDER_WARNING,
+  FUND_PROVIDER_CHANNEL_WARNING,
   OPEN_PROVIDER_CHANNEL_WARNING,
   REJECT_PAYMENT_WARNING,
   REVOKE_AGENT_WARNING,
@@ -43,6 +44,17 @@ import {
   registryOpenView,
   type AgentHvmRegistryOpenStatus,
 } from "./registryOpen";
+import {
+  adoptPressResultLine,
+  channelNoteFromWallet,
+  mergeResumableChannel,
+  clearChannelNote,
+  fundPressResultLine,
+  readChannelNote,
+  registryFundingView,
+  writeChannelNote,
+  type RegistryChannelNote,
+} from "./registryFunding";
 import { strandedWitnessView } from "./strandedWitness";
 
 export type AgentAdminPage = "agents" | "rules" | "activity" | "providers" | "security";
@@ -428,6 +440,38 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
   const [openStatus, setOpenStatus] = useState<AgentHvmRegistryOpenStatus | null>(null);
   const [openReadError, setOpenReadError] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
+  // This desktop's own note of a channel it opened and has not finished, and
+  // the two presses that finish it.
+  //
+  // An open leaves the owner holding a countersigned full refund over a channel
+  // that contains nothing, and the deposit that follows is the press this whole
+  // panel exists to warn about. Without this note the panel would show the
+  // empty open form again on the next visit, which reads as though the first
+  // press never happened and invites a second channel that this wallet would
+  // refuse anyway. The note decides nothing: both presses below re-derive
+  // everything from the wallet's own sealed record.
+  const [channelNote, setChannelNote] = useState<RegistryChannelNote | null>(null);
+  const [confirmFund, setConfirmFund] = useState(false);
+  // Why the last press of an open, a funding or a finish was refused, in the
+  // backend's own words, rendered inside this panel rather than only in the
+  // page banner. A provider that will not countersign is the refusal an owner
+  // is most likely to meet, and it means no channel opened and nothing was
+  // spent: that has to be readable where they are looking.
+  const [channelRefusal, setChannelRefusal] = useState("");
+  // Adoption clears the note, because the wallet's own binding has taken over
+  // as the record of this channel and the panel below it is the exit.
+  useEffect(() => {
+    if (overview.hvm_registry_binding) {
+      clearChannelNote(window.localStorage);
+      setChannelNote(null);
+      return;
+    }
+    setChannelNote(readChannelNote(window.localStorage, overview.wallet_id));
+  }, [overview.wallet_id, overview.hvm_registry_binding]);
+  const rememberChannel = useCallback((note: RegistryChannelNote) => {
+    writeChannelNote(window.localStorage, note);
+    setChannelNote(note);
+  }, []);
   const openDepositZhu = depositHacToZhu(openDepositHac);
   const openInputsReady =
     !overview.hvm_registry_binding &&
@@ -497,6 +541,35 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
     : null;
   const openView = openStatus
     ? registryOpenView(Boolean(overview.hvm_registry_binding), openStatus, formatZhu)
+    : null;
+  // The wallet's own record of an unfinished channel, preferred over this
+  // desktop's note whenever the wallet has one.
+  //
+  // The note came first and was the only source, and that stranded money: it
+  // is a single browser key shared by every Agent Wallet on the machine, it
+  // does not follow a wallet restored elsewhere, and clearing browser data
+  // deletes it. With the note gone and the provider gone, the only control
+  // left was the open form, which asks the provider first and then reports
+  // that nothing was funded and nothing was spent, over a deposit already in
+  // a block.
+  //
+  // The note is kept as the fallback for the moment before the first status
+  // read returns, so the panel does not blink out on a slow read. It is no
+  // longer the only thing that knows, and it can no longer be the reason an
+  // owner cannot reach their money.
+  const walletChannel = channelNoteFromWallet(
+    overview.wallet_id,
+    openHubUrl,
+    openStatus?.channel_in_progress,
+    openStatus?.required_l1_fee_zhu ?? 0,
+  );
+  const resumableChannel = mergeResumableChannel(walletChannel, channelNote);
+  // Reads no Hub and no chain, which is the point: finishing a channel is
+  // exactly what an owner needs when the provider has stopped answering, and a
+  // section that failed to render because a Hub was unreachable would fail
+  // precisely then.
+  const fundingView = resumableChannel
+    ? registryFundingView(resumableChannel, formatZhu)
     : null;
   const rotationPhase = overview.witness_rotation_phase;
   const rotationNeedsAttention = Boolean(rotationPhase && rotationPhase !== "stable");
@@ -591,7 +664,7 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
           Nothing here is behind a <details>. The deposit, the fee and the
           refund guarantee are the three facts that decide this, and a
           disclosure an owner never opens is the same as not saying it. */}
-      {!overview.hvm_registry_binding && overview.pilot_enabled && (
+      {!overview.hvm_registry_binding && overview.pilot_enabled && !resumableChannel && (
         <section className="agent-panel" aria-label="Opening a channel with a provider">
           <span className="agent-eyebrow">Your money, before you commit it</span>
           <h2>Opening a channel with a provider</h2>
@@ -668,16 +741,46 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
                     <>
                       <button type="button" disabled={busy} onClick={() => setConfirmOpen(false)}>Cancel</button>
                       <button type="button" className="agent-danger" disabled={busy} onClick={() => void run(async () => {
-                        const result = await agentWalletApi.openHvmRegistryChannel(
-                          overview.wallet_id,
-                          openHubUrl.trim(),
-                          JSON.parse(openBindingText),
-                          openDepositZhu ?? 0,
-                        );
+                        const depositZhu = openDepositZhu ?? 0;
+                        const feeZhu = openStatus?.required_l1_fee_zhu ?? 0;
+                        let result;
+                        try {
+                          result = await agentWalletApi.openHvmRegistryChannel(
+                            overview.wallet_id,
+                            openHubUrl.trim(),
+                            JSON.parse(openBindingText),
+                            depositZhu,
+                          );
+                        } catch (reason) {
+                          // The refusal an owner is most likely to meet, said
+                          // where they are looking. A provider that will not
+                          // countersign means no channel opened and nothing
+                          // spent, and the backend says exactly that in words
+                          // this screen must not paraphrase or soften.
+                          setConfirmOpen(false);
+                          setChannelRefusal(readableError(reason));
+                          return;
+                        }
                         setConfirmOpen(false);
+                        setChannelRefusal("");
                         setOpenHubUrl("");
                         setOpenDepositHac("");
                         setOpenBindingText("");
+                        // The channel this desktop now has to finish, written
+                        // from the backend's own answer and not from the form.
+                        rememberChannel({
+                          schema: "hpay-desktop-registry-channel-note/1",
+                          wallet_id: overview.wallet_id,
+                          hub_url: result.hub_url,
+                          binding_commitment: result.binding_commitment,
+                          contract_address: result.contract_address,
+                          deposit_zhu: result.deposit_zhu,
+                          refunded_zhu: result.refunded_zhu,
+                          required_l1_fee_zhu: feeZhu,
+                          funding_transaction_hash: null,
+                          funding_confirmed: false,
+                          network_fee_zhu: null,
+                        });
                         // The backend's own numbers, read from the countersigned
                         // bill rather than from what this form was told earlier,
                         // and honest about the deposit not having been sent.
@@ -704,6 +807,145 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
                 : "Enter a provider URL and the deposit you want to lock up. Nothing is asked of the provider and nothing is sent until you have read exactly what this costs."}
             </p>
           )}
+          {/* The refusal, in the backend's own words. Never behind a
+              disclosure and never rewritten: a provider that would not
+              countersign the refund means no channel was opened, nothing was
+              funded and nothing was spent, and the sentence that says so is
+              the one an owner needs before they go looking for money that
+              never left. */}
+          {channelRefusal && (
+            <p className="agent-warning" role="status">{channelRefusal}</p>
+          )}
+        </section>
+      )}
+      {/* The channel that is opened and not yet finished.
+
+          This is the middle of the flow and the only place in this app where a
+          press exists in order to make money irreversible. It replaces the open
+          form rather than sitting beside it, because an owner who already holds
+          a countersigned refund for one channel does not have a second channel
+          to open: this wallet would refuse it, and offering the empty form
+          again would read as though the first press had not happened.
+
+          Nothing here reads a Hub. Finishing is exactly what an owner needs on
+          the day the provider stops answering, so this section renders the same
+          whether the provider is healthy, unreachable or gone.
+
+          Nothing here is behind a <details>. The deposit, the fee and the
+          refund already held are the three facts that decide this press. */}
+      {!overview.hvm_registry_binding && overview.pilot_enabled && fundingView && (
+        <section className="agent-panel" aria-label="Finishing a channel you have opened">
+          <span className="agent-eyebrow">Your money, before it is locked up</span>
+          <h2>{fundingView.heading}</h2>
+          {/* What this note is, said before anything it claims. */}
+          <p role="status">{fundingView.noteLine}</p>
+          {/* The fact that makes the deposit safe, and it is already true. */}
+          <p className="agent-warning" role="status">{fundingView.refundHeldLine}</p>
+          <p className="agent-exact-address">{fundingView.lockUpLine}</p>
+          <p>{fundingView.feeLine}</p>
+          {/* Where this channel has already got to. An owner returning to a
+              laptop they closed between the two presses is the ordinary case,
+              and the wallet never signs a second transfer into one channel. */}
+          {fundingView.resumeLine && (
+            <p className="agent-warning" role="status">{fundingView.resumeLine}</p>
+          )}
+          <p>{fundingView.refusalLine}</p>
+          <p>{fundingView.finishLine}</p>
+          {/* No build gives the phone a Hacash spending key, so this says
+              "never" rather than "not yet". */}
+          <p>{fundingView.phoneLine}</p>
+          <dl className="agent-detail-grid">
+            <Detail label="Provider" value={resumableChannel?.hub_url ?? ""} wide />
+            <Detail label="Channel contract" value={resumableChannel?.contract_address ?? ""} wide />
+          </dl>
+          {fundingView.actionSpendsMoney ? (
+            <>
+              {/* Before the first press, never after it and never collapsed. */}
+              <div className="agent-warning">{FUND_PROVIDER_CHANNEL_WARNING}</div>
+              <div className="agent-confirm-row">
+                {confirmFund ? (
+                  <>
+                    <button type="button" disabled={busy} onClick={() => setConfirmFund(false)}>Cancel</button>
+                    <button type="button" className="agent-danger" disabled={busy} onClick={() => void run(async () => {
+                      let result;
+                      try {
+                        result = await agentWalletApi.fundHvmRegistryChannel(overview.wallet_id);
+                      } catch (reason) {
+                        // A wallet holding no validated countersigned refund
+                        // refuses to fund, and says so. That refusal is the
+                        // gate working, so it is shown rather than retried.
+                        setConfirmFund(false);
+                        setChannelRefusal(readableError(reason));
+                        return;
+                      }
+                      setConfirmFund(false);
+                      setChannelRefusal("");
+                      if (channelNote) {
+                        rememberChannel({
+                          ...channelNote,
+                          funding_transaction_hash: result.transaction_hash,
+                          funding_confirmed: result.confirmed,
+                          network_fee_zhu: result.network_fee_zhu,
+                        });
+                      }
+                      // Sent and unseen is not the same fact as funded, and
+                      // one fixed sentence over both would hide the step that
+                      // is still owed.
+                      onInfo(fundPressResultLine(result, formatZhu));
+                      await Promise.all([load(), onRefreshOverview()]);
+                    })}>{fundingView.stage === "funding_sent" ? "Confirm, carry on sending the deposit" : "Confirm, send the deposit"}</button>
+                  </>
+                ) : (
+                  <button type="button" className="agent-danger" disabled={busy} onClick={() => setConfirmFund(true)}>
+                    {fundingView.stage === "funding_sent"
+                      ? DESKTOP_CONTROLS.continue_funding_provider_channel
+                      : DESKTOP_CONTROLS.fund_provider_channel}
+                  </button>
+                )}
+              </div>
+            </>
+          ) : (
+            // Finishing sends no transaction and spends nothing, so it is one
+            // press. It is also the press the exit refuses without, which is
+            // why it is offered here and not hidden behind the provider.
+            <div className="agent-confirm-row">
+              <button type="button" disabled={busy} onClick={() => void run(async () => {
+                let result;
+                try {
+                  result = await agentWalletApi.adoptHvmRegistryChannel(overview.wallet_id);
+                } catch (reason) {
+                  setChannelRefusal(readableError(reason));
+                  return;
+                }
+                setChannelRefusal("");
+                onInfo(adoptPressResultLine(result));
+                await Promise.all([load(), onRefreshOverview()]);
+              })}>{DESKTOP_CONTROLS.finish_opening_channel}</button>
+            </div>
+          )}
+          {/* The refusal, in the backend's own words, where the press was. */}
+          {channelRefusal && (
+            <p className="agent-warning" role="status">{channelRefusal}</p>
+          )}
+          {/* A note this desktop cannot back is a trap: it hides the open form
+              behind a channel the wallet does not hold. Clearing it moves no
+              money, sends nothing and changes nothing inside the wallet, and
+              the label promises only that. */}
+          <details className="agent-advanced-details">
+            <summary>This is not my channel</summary>
+            <p>
+              Clearing this note only forgets what this desktop wrote down. It sends nothing, spends nothing
+              and cannot cancel a deposit that has already gone: if this wallet really holds a channel, the
+              note comes back the next time you finish it, and if it does not, the form for opening one
+              returns. Your refund receipt lives in the wallet and is untouched either way.
+            </p>
+            <button type="button" disabled={busy} onClick={() => {
+              clearChannelNote(window.localStorage);
+              setChannelNote(null);
+              setConfirmFund(false);
+              setChannelRefusal("");
+            }}>{DESKTOP_CONTROLS.forget_channel_note}</button>
+          </details>
         </section>
       )}
       {/* Getting out of a channel whose provider has stopped answering.
@@ -1052,14 +1294,40 @@ function parseSafeUnixSeconds(raw: string | number): number | null {
 function formatUnits(raw: string): string { const value = unitsToDecimal(raw); return value ? value + " HAC" : "Invalid amount"; }
 function formatDate(raw: string | number): string { const unix = parseSafeUnixSeconds(raw); if (unix === null || unix > Number.MAX_SAFE_INTEGER / 1_000) return "Invalid time"; const date = new Date(unix * 1_000); return Number.isNaN(date.getTime()) ? "Invalid time" : date.toLocaleString(); }
 /**
- * An exact zhu amount as HAC. The registry rail counts in zhu, at 1_000_000 to
- * one HAC, and this is the same conversion `AgentHvmOperationsPanel` uses.
+ * One HAC in chain zhu.
+ *
+ * This is the L1 chain's own unit and not the Agent ledger's. The two differ by
+ * a hundred, and this file previously used the Agent ledger's `1_000_000`
+ * against amounts that arrive in chain zhu, so every deposit, fee and refund on
+ * the registry screens read a hundred times larger than it was and the deposit
+ * an owner typed was a hundred times smaller than they meant.
+ *
+ * Three independent anchors in this repository fix the value, and any one of
+ * them failing should stop this constant from being changed back:
+ *   - `crates/l2-fast-pay-hub/src/node.rs` asserts
+ *     `parse_fin_balance_zhu("1:248") == 100_000_000`, and `1:248` is one HAC;
+ *   - `crates/wallet-core/src/wallet/authorization_service.rs` formats HAC with
+ *     `const ZHU_PER_HAC: u64 = 100_000_000`;
+ *   - `crates/l2-fast-pay-hub/src/readiness.rs` sets
+ *     `ZHU_PER_MILLIMEI = 100_000`, and a millimei is a thousandth of a HAC.
+ *
+ * `AgentHvmOperationsPanel` is deliberately *not* the reference: its
+ * `formatHacUnits` divides by 1_000_000 because it renders `HacUnits`, the
+ * Agent ledger's 1e-6 unit (`crates/agent-wallet-core/src/amount.rs`,
+ * `PER_HAC = 1_000_000`). Copying that formatter onto chain zhu is the mistake
+ * this constant exists to prevent.
  */
-function formatZhu(raw: string): string {
+const ZHU_PER_HAC = 100_000_000n;
+const ZHU_FRACTION_DIGITS = 8;
+/** An exact chain-zhu amount as HAC. */
+export function formatZhu(raw: string): string {
   try {
     const zhu = BigInt(raw);
-    const whole = zhu / 1_000_000n;
-    const fraction = (zhu % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+    const whole = zhu / ZHU_PER_HAC;
+    const fraction = (zhu % ZHU_PER_HAC)
+      .toString()
+      .padStart(ZHU_FRACTION_DIGITS, "0")
+      .replace(/0+$/, "");
     return fraction ? `${whole}.${fraction} HAC` : `${whole} HAC`;
   } catch {
     return "Invalid amount";
@@ -1070,16 +1338,23 @@ function formatZhu(raw: string): string {
  *
  * The inverse of `formatZhu`, and deliberately strict rather than forgiving:
  * this number decides how much of an owner's money stops being theirs to spend,
- * so anything but a plain positive decimal with at most six places is refused
+ * so anything but a plain positive decimal with at most eight places is refused
  * outright instead of being rounded into something the screen never showed
  * them. `Number.MAX_SAFE_INTEGER` bounds it because the value crosses the IPC
  * boundary as a JSON number.
+ *
+ * Eight places, not six, because chain zhu is 1e-8 HAC. At six this returned a
+ * number a hundred times smaller than the owner typed, and Rust then refused
+ * the open outright against `binding.left_deposit_zhu`
+ * (`OPEN_CHANNEL_DEPOSIT_MISMATCH`), so the only way to open a fifty HAC
+ * channel was to type five thousand into a field labelled HAC.
  */
 export function depositHacToZhu(raw: string): number | null {
   const text = raw.trim();
-  if (!/^\d+(?:\.\d{1,6})?$/.test(text)) return null;
+  if (!/^\d+(?:\.\d{1,8})?$/.test(text)) return null;
   const [whole, fraction = ""] = text.split(".");
-  const zhu = BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0"));
+  const zhu =
+    BigInt(whole) * ZHU_PER_HAC + BigInt(fraction.padEnd(ZHU_FRACTION_DIGITS, "0"));
   if (zhu <= 0n || zhu > BigInt(Number.MAX_SAFE_INTEGER)) return null;
   return Number(zhu);
 }

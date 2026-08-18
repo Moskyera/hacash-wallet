@@ -37,6 +37,8 @@ import {
   REGISTRY_EXIT_REASSURANCE,
   REGISTRY_EXIT_ROUTE,
   REGISTRY_EXIT_TITLE,
+  REGISTRY_OPEN_PHONE_CANNOT,
+  REGISTRY_OPEN_ROUTE,
 } from "./registryExitRoute";
 import type {
   AgentCompanionIdentityStatus,
@@ -239,6 +241,14 @@ export function CompanionSecurity({
         <p className="agent-warning-copy" role="status">{REGISTRY_EXIT_LEASE}</p>
         <p className="agent-muted">{REGISTRY_EXIT_PHONE_CANNOT}</p>
         <p>{REGISTRY_EXIT_ROUTE}</p>
+        {/* The desktop can now open a channel and send its deposit, which is
+            the moment an owner starts looking for the same thing here. The
+            answer is a property of this handset and not a missing feature, so
+            it is said in the same breath as the exit and in the same words:
+            this phone holds an approval identity, not a Hacash key, and an
+            approval identity cannot sign either signature a channel needs. */}
+        <p className="agent-muted">{REGISTRY_OPEN_PHONE_CANNOT}</p>
+        <p>{REGISTRY_OPEN_ROUTE}</p>
       </section>
 
       {/* The desktop can refuse this phone forever, and until now the phone

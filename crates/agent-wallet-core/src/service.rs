@@ -77,7 +77,9 @@ pub use hvm_registry::{
     agent_registry_exit_transaction_ceiling_zhu,
 };
 pub use hvm_registry::{AgentHvmRegistryBinding, AgentHvmRegistryExitHead};
-pub use hvm_registry_open::{AgentHvmRegistryChannelOpen, AgentHvmRegistryCountersignedRefund};
+pub use hvm_registry_open::{
+    AgentHvmRegistryChannelOpen, AgentHvmRegistryCountersignedRefund, AgentHvmRegistryFunding,
+};
 use l2::{AgentChannelCloseOperation, AgentChannelSetupOperation};
 pub use l2::{
     AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,

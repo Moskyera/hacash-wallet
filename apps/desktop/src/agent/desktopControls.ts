@@ -94,6 +94,52 @@ export const DESKTOP_CONTROLS = {
    */
   open_provider_channel: "Open a channel with this provider",
   /**
+   * Puts the deposit into the channel the receipt above already covers.
+   *
+   * This is the only control in this app whose whole purpose is to make an
+   * owner's money irreversible. It signs one exact transfer, whose destination,
+   * amount and chain all come out of the countersigned refund rather than out
+   * of anything on screen, makes those bytes durable before any node sees them,
+   * and submits them.
+   *
+   * The label says "the deposit" and not "fund", because the word an owner has
+   * been reading on this panel is deposit, and the press that spends money is
+   * not the place to introduce a second word for it.
+   */
+  fund_provider_channel: "Send the deposit into this channel",
+  /**
+   * The same control, on the second and every later visit.
+   *
+   * A signed funding transfer outlives the app: it is bytes on a network, and
+   * the wallet stored them before any node saw them precisely so that closing
+   * the laptop cannot lose them. Pressing this hands the same bytes over again
+   * and asks the chain what became of them; it never signs a second transfer
+   * into one channel. Offering "Send the deposit" again would describe a
+   * beginning that already happened, and to a person who is worried about
+   * having paid twice that reading is the one that matters.
+   */
+  continue_funding_provider_channel: "Carry on sending the deposit",
+  /**
+   * Writes this wallet's own record of the funded channel, without asking the
+   * provider anything.
+   *
+   * It moves no money and sends no transaction. What it does is the thing the
+   * exit refuses without: a reviewer drove the trap where an honest
+   * countersignature and an honest deposit still left the owner stuck, because
+   * the only writer of the adopted binding needed the provider alive and the
+   * provider was gone.
+   */
+  finish_opening_channel: "Finish opening this channel",
+  /**
+   * Clears this desktop's note of a half-finished channel.
+   *
+   * There is no backend cancel for it, because there is nothing in the wallet
+   * to cancel: the note is this desktop's own record of what it last saw, and
+   * the wallet's sealed record is untouched by clearing it. The label promises
+   * only what it can deliver, the same way `forget_local_agent_code` does.
+   */
+  forget_channel_note: "Forget this note",
+  /**
    * Starts a unilateral close of the HVM registry channel: challenge, then
    * finalize, then the Action 14 payout, all signed by the owner's own key and
    * sent through the owner's own fullnode. The provider is not asked and

@@ -52,6 +52,10 @@ vm = { path = "../../../hacash-fullnodedev/vm" }
 field = { path = "../../../hacash-fullnodedev/field" }
 sys = { path = "../../../hacash-fullnodedev/sys" }
 protocol = { path = "../../../hacash-fullnodedev/protocol" }
+# The transaction trait, so the fullnode double in `registry_channel_press.rs`
+# derives a submitted transaction's hash with the chain's own codec rather than
+# being told what it is.
+basis = { path = "../../../hacash-fullnodedev/basis" }
 
 [features]
 default = []

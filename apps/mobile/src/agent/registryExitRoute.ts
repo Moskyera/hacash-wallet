@@ -45,6 +45,17 @@ export const DESKTOP_EXIT_PAGE = "Security";
  */
 export const DESKTOP_EXIT_SECTION = "Getting your money out without the provider";
 
+/**
+ * The exact label of the desktop control that sends a channel deposit.
+ *
+ * Kept as a literal for the same reason as the exit label above, and checked
+ * against the desktop's own control table by `registryExitRoute.test.ts`.
+ */
+export const DESKTOP_FUND_CONTROL_LABEL = "Send the deposit into this channel";
+
+/** The desktop section an owner opens a channel from, by its heading. */
+export const DESKTOP_OPEN_SECTION = "Opening a channel with a provider";
+
 /** The desktop app, named the way the rest of this phone app names it. */
 export const DESKTOP_APP_NAME = "AI Agent Wallet on HPAY Desktop";
 
@@ -82,3 +93,27 @@ export const REGISTRY_EXIT_ROUTE =
   "That screen shows how much is yours, how long the objection window is, and what it costs. " +
   `This build cannot yet send the exit for you: ${DESKTOP_EXIT_CONTROL_LABEL} is named there but is not pressable yet, and that screen says so in your own words rather than leaving you to find out. ` +
   "Your money is not lost and your receipts are still valid. What matters in the meantime is not letting the record above expire.";
+
+/**
+ * Why opening a channel is not on this phone either, and never will be.
+ *
+ * The desktop can now open a provider channel and send its deposit, which is
+ * the moment an owner starts looking for the same thing here. The answer is
+ * the same as it is for the exit and it is a property of this handset, not a
+ * missing feature: a paired phone holds an approval identity, and an approval
+ * identity cannot sign a Hacash transaction. It can confirm a payment the
+ * desktop has already decided on. It cannot sign the transfer that locks a
+ * deposit into a contract, and it cannot sign the refund receipt that gets the
+ * deposit back either. Both of those signatures are made by the key in the
+ * desktop vault, which has never been on this device.
+ *
+ * "Cannot yet" would be an invitation to wait for a build that is not coming.
+ */
+export const REGISTRY_OPEN_PHONE_CANNOT =
+  "This phone cannot open a provider channel and never will. It holds an approval identity, not a Hacash key, so it cannot sign the transfer that locks up a deposit and it cannot sign the refund receipt that gets the deposit back. Both are signed by the desktop, and nothing on this screen spends anything.";
+
+/** Where opening is actually done, named exactly. */
+export const REGISTRY_OPEN_ROUTE =
+  `Opening one is done on ${DESKTOP_APP_NAME}, on the ${DESKTOP_EXIT_PAGE} page, in the section called ${DESKTOP_OPEN_SECTION}. ` +
+  "That screen names the exact deposit, the network fee and the chain running costs on top of it, and it shows them before anything is asked of your provider. " +
+  `Your provider signs a receipt returning the whole deposit first and the desktop checks that signature itself, so if it will not sign, no channel opens and nothing is spent. Only after that does ${DESKTOP_FUND_CONTROL_LABEL} send the money.`;

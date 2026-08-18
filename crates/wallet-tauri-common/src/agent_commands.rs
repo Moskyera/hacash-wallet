@@ -1263,7 +1263,13 @@ pub async fn agent_wallet_hvm_registry_open_status(
             .map_err(public_error)?;
         let overview =
             serde_json::to_value(overview).map_err(|_| "Agent Wallet response encoding failed")?;
-        Ok(registry_open_status_value(&overview, &hub_url, deposit_zhu).await)
+        let in_progress = manager
+            .hvm_registry_channel_open(&wallet_id, now)
+            .map_err(public_error)?;
+        Ok(
+            registry_open_status_value(&overview, &hub_url, deposit_zhu, in_progress.as_ref())
+                .await,
+        )
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     {
@@ -1491,11 +1497,44 @@ pub async fn fund_hvm_registry_channel(
     wallet_id: &AgentWalletId,
     now: u64,
 ) -> Result<Value, String> {
-    let chain = registry_open_chain(manager, wallet_id, now).await?;
+    fund_hvm_registry_channel_typed(manager, wallet_id, now)
+        .await
+        .map_err(|error| match error {
+            FundingRefusal::Chain(message) => message,
+            FundingRefusal::Wallet(error) => public_error(error),
+        })
+}
+
+/// Why a funding attempt stopped, in a form a caller can branch on.
+///
+/// `fund_hvm_registry_channel` flattens this to a sentence for the screen. The
+/// establish command must not: "the node refused these bytes" and "the bytes
+/// are on the wire and not in a block yet" are the same shape in the durable
+/// record and opposite facts about the owner's money, and the only thing that
+/// separates them is which error the manager returned.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub enum FundingRefusal {
+    /// The wallet could not reach or build against its own fullnode.
+    Chain(String),
+    /// The manager refused, with the reason it refused for.
+    Wallet(agent_wallet_core::AgentWalletError),
+}
+
+/// Everything [`fund_hvm_registry_channel`] does, keeping the manager's own
+/// error type instead of a sentence.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn fund_hvm_registry_channel_typed(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    now: u64,
+) -> Result<Value, FundingRefusal> {
+    let chain = registry_open_chain(manager, wallet_id, now)
+        .await
+        .map_err(FundingRefusal::Chain)?;
     let funding = manager
         .fund_hvm_registry_channel(wallet_id, &chain, now)
         .await
-        .map_err(public_error)?;
+        .map_err(FundingRefusal::Wallet)?;
     Ok(json!({
         "schema": "hpay-agent-registry-funding-result/1",
         "transaction_hash": funding.transaction_hash(),
@@ -1568,6 +1607,375 @@ pub async fn adopt_hvm_registry_channel(
     }))
 }
 
+/// ONE PRESS THAT TAKES A CHANNEL FROM NOTHING TO USABLE, AND CAN BE PRESSED
+/// AGAIN.
+///
+/// # Why this exists on top of the three commands under it
+///
+/// Opening a usable channel is three chain-and-provider hops with a genuine
+/// wait in the middle, and every one of them has to happen in order or the
+/// owner's money is somewhere they cannot reach it. Three separate controls
+/// put that ordering in a person's hands: the screen has to know that funding
+/// is only legal after a countersigned refund, that adoption is only legal
+/// after the deposit is in a block, and what to do when the app is closed
+/// between any two of them. A wallet that leaves that to a renderer will
+/// eventually get a wallet that funds a channel it cannot adopt.
+///
+/// So the ordering lives here, in Rust, next to the state that decides it.
+///
+/// # What one press does
+///
+/// It reads this wallet's own durable record and does the next thing that has
+/// not been done, then keeps going until it either finishes or reaches a wait
+/// nothing can shorten. There is exactly one such wait: the deposit being in a
+/// block. Pressing again from any point continues from that point.
+///
+/// * no countersigned refund yet -> ask the provider for one (nothing is
+///   funded, nothing is spent, and a provider that refuses costs nothing);
+/// * refund held, no deposit in a block -> sign the deposit once, store the
+///   bytes before the wire, submit, and report the wait;
+/// * deposit in a block, no adopted binding -> adopt from the chain alone,
+///   which needs no provider at all;
+/// * adopted -> report that the channel is usable and the exit is available.
+///
+/// # What pressing again can never do
+///
+/// It can never open a second channel, and it can never sign a second deposit.
+/// The first is refused by `begin_hvm_registry_channel_open` once a bundle is
+/// countersigned and by this function before that, and the second by
+/// `AgentWalletManager::fund_hvm_registry_channel`, which re-submits the exact
+/// stored bytes rather than signing new ones. Both of those are proven where
+/// they live; what this adds is that a resumed press does not go back to the
+/// provider at all once the refund is held, because on the day this matters
+/// the provider is the thing that has stopped answering.
+///
+/// # What it may not choose
+///
+/// Not the channel and not the amount. Both are compared against the record
+/// this wallet already holds before anything continues: a second press
+/// carrying a different channel, or the same channel with a different deposit,
+/// is refused rather than reconciled.
+#[tauri::command]
+pub async fn agent_wallet_establish_hvm_registry_channel(
+    wallet_id: String,
+    hub_url: String,
+    binding: Value,
+    deposit_zhu: u64,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        establish_hvm_registry_channel(
+            &mut manager,
+            &wallet_id,
+            &hub_url,
+            binding,
+            deposit_zhu,
+            unix_now()?,
+        )
+        .await
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, hub_url, binding, deposit_zhu, state);
+        Err("Agent HVM registry Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Everything [`agent_wallet_establish_hvm_registry_channel`] does once the
+/// shell has been recognised and the wallet id parsed.
+///
+/// Split out for the same reason the open, the funding and the exit are: a
+/// Tauri command cannot be entered without a real `Webview`, so a command whose
+/// whole body lives behind that attribute can only ever be proven by a test
+/// that reimplements it, which is the "the only caller is a test" failure one
+/// layer up. Everything that decides anything is here, so the sequence a person
+/// triggers and the sequence a test drives are the same code and not two copies
+/// of it.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn establish_hvm_registry_channel(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    hub_url: &str,
+    binding: Value,
+    deposit_zhu: u64,
+    now: u64,
+) -> Result<Value, String> {
+    let wanted: l2_fast_pay_hub::hvm_registry::HvmRegistryBindingV2 =
+        serde_json::from_value(binding.clone()).map_err(|error| {
+            format!(
+                "{OPEN_CHANNEL_UNREADABLE} No channel was opened and no money has moved. ({error})"
+            )
+        })?;
+    wanted.validate().map_err(|error| {
+        format!("{OPEN_CHANNEL_UNREADABLE} No channel was opened and no money has moved. ({error})")
+    })?;
+    // The same comparison the open command makes, made here too. A gate on one
+    // of two doors is this project's own recurring defect, and this is now a
+    // second door onto the same irreversible spend.
+    if wanted.left_deposit_zhu != deposit_zhu {
+        return Err(OPEN_CHANNEL_DEPOSIT_MISMATCH.to_owned());
+    }
+
+    // ---- already finished? ----
+    //
+    // Asked first, because every other stage below would refuse over an
+    // adopted channel and refusing is the wrong answer to "is my channel
+    // ready". `hvm_registry_binding` is written in the same journalled
+    // transition that seeds the exit head, so its presence is exactly the fact
+    // the report is about.
+    let overview = manager
+        .overview(wallet_id, now)
+        .await
+        .map_err(public_error)?;
+    let overview = serde_json::to_value(overview)
+        .map_err(|_| "Agent Wallet response encoding failed".to_owned())?;
+    if let Some(adopted) = overview
+        .get("hvm_registry_binding")
+        .filter(|value| !value.is_null())
+    {
+        let stored = manager
+            .hvm_registry_channel_open(wallet_id, now)
+            .map_err(public_error)?;
+        let funding = stored.as_ref().and_then(|record| record.funding());
+        return Ok(establish_progress_json(
+            ESTABLISH_STAGE_READY,
+            &wanted,
+            adopted
+                .get("hub_url")
+                .and_then(Value::as_str)
+                .unwrap_or(hub_url),
+            true,
+            funding,
+        ));
+    }
+
+    // ---- stage one: the countersigned full refund ----
+    //
+    // Skipped entirely when one is already held. This is the resume that
+    // matters: after the refund exists the provider has nothing left to do,
+    // and on the day a person is pressing this twice the provider is usually
+    // the thing that has stopped answering. Going back to it would turn a
+    // recoverable channel into an error message.
+    let stored = manager
+        .hvm_registry_channel_open(wallet_id, now)
+        .map_err(public_error)?;
+    let held_refund = stored
+        .as_ref()
+        .and_then(|record| record.countersigned_bundle())
+        .is_some();
+    // A press that carries a different channel than the one this wallet is part
+    // way through is refused rather than reconciled: continuing would fund the
+    // stored channel while reporting the pasted one.
+    //
+    // Only once a refund is held, and deliberately not before. An ask nobody
+    // countersigned has cost the owner nothing and may still be replaced, which
+    // is the rule `begin_hvm_registry_channel_open` already applies; refusing
+    // here as well would leave a person who pasted the wrong details with no
+    // way to paste the right ones.
+    if held_refund
+        && stored
+            .as_ref()
+            .is_some_and(|record| record.request().binding != wanted)
+    {
+        return Err(ESTABLISH_DIFFERENT_CHANNEL.to_owned());
+    }
+    // The Hub this channel was actually opened with, once there is one. A
+    // resumed press may not be redirected to a different provider by its own
+    // arguments, and once the refund is held the provider's URL is a stored
+    // fact rather than a caller's claim.
+    let hub_url = match stored.as_ref().filter(|_| held_refund) {
+        Some(record) => record.hub_url().to_owned(),
+        None => hub_url.to_owned(),
+    };
+    if !held_refund {
+        open_hvm_registry_channel(manager, wallet_id, &hub_url, binding, deposit_zhu, now).await?;
+    }
+
+    // ---- stage two: the deposit ----
+    //
+    // The one irreversible hop, and the one genuine wait. `fund_hvm_registry_channel`
+    // signs at most once per channel for the life of the record: on a resume it
+    // re-submits the exact stored bytes and looks for them in a block.
+    let stored = manager
+        .hvm_registry_channel_open(wallet_id, now)
+        .map_err(public_error)?;
+    let already_confirmed = stored
+        .as_ref()
+        .and_then(|record| record.funding())
+        .is_some_and(|funding| funding.is_confirmed());
+    if !already_confirmed
+        && let Err(refusal) = fund_hvm_registry_channel_typed(manager, wallet_id, now).await
+    {
+        // What kind of refusal this is, decided from the manager's own error
+        // and *then* confirmed against the durable record. Both halves are
+        // needed and neither is enough on its own.
+        //
+        // The record alone is not enough, and reading it alone was a real
+        // defect here rather than a theoretical one. The funding bytes are
+        // written durably *before* they are put on the wire, deliberately, so
+        // that a crash cannot lose a signature. That means "a funding record
+        // exists and is unconfirmed" is equally true of bytes travelling
+        // normally and of bytes the node refused outright. Classifying on the
+        // record alone reported a node that had rejected the transfer - a
+        // balance too small for the deposit and its fee, say - as
+        // "signed and sent ... nothing else will happen until it confirms",
+        // over money that had not moved and a block that was never coming. The
+        // shipped funding command, over byte-identical state, refused honestly.
+        // A single press that is less honest than the three commands it
+        // replaces is worse than no single press.
+        //
+        // So the wait is exactly one error: `RegistryFundingNotConfirmed`,
+        // which the manager returns only once the node has the bytes and has
+        // not yet named a block. `NodeRejected` and everything else is a
+        // failure and is reported as one, in the manager's own words.
+        let waiting_on_a_block = matches!(
+            refusal,
+            FundingRefusal::Wallet(
+                agent_wallet_core::AgentWalletError::RegistryFundingNotConfirmed
+            )
+        );
+        let refusal = match refusal {
+            FundingRefusal::Chain(message) => message,
+            FundingRefusal::Wallet(error) => public_error(error),
+        };
+        if !waiting_on_a_block {
+            return Err(refusal);
+        }
+        let after = manager
+            .hvm_registry_channel_open(wallet_id, now)
+            .map_err(public_error)?;
+        return match after.as_ref().and_then(|record| record.funding()) {
+            Some(funding) if !funding.is_confirmed() => Ok(establish_progress_json(
+                ESTABLISH_STAGE_FUNDING,
+                &wanted,
+                &hub_url,
+                false,
+                Some(funding),
+            )),
+            _ => Err(refusal),
+        };
+    }
+
+    // ---- stage three: adoption, which needs no provider ----
+    adopt_hvm_registry_channel(manager, wallet_id, now).await?;
+    let stored = manager
+        .hvm_registry_channel_open(wallet_id, now)
+        .map_err(public_error)?;
+    Ok(establish_progress_json(
+        ESTABLISH_STAGE_READY,
+        &wanted,
+        &hub_url,
+        true,
+        stored.as_ref().and_then(|record| record.funding()),
+    ))
+}
+
+/// Waiting on the provider's countersignature. Nothing has been spent.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const ESTABLISH_STAGE_OPENING: &str = "opening";
+
+/// The deposit is signed and on the wire and not yet in a block.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const ESTABLISH_STAGE_FUNDING: &str = "funding";
+
+/// The channel is adopted, usable, and exitable without the provider.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const ESTABLISH_STAGE_READY: &str = "ready";
+
+/// What an owner is told when they press with a channel that is not the one
+/// this wallet is already part way through opening.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const ESTABLISH_DIFFERENT_CHANNEL: &str = "These are different channel details from the ones this wallet has already started opening, so nothing was continued and nothing was signed. Finish or close the channel already in progress before opening another one.";
+
+/// The whole state of getting a channel open, in the terms a screen has to
+/// speak in.
+///
+/// # Why every number here is derived
+///
+/// A screen that says money is at risk when it is not frightens people out of
+/// a working product, and a screen that says nothing is at risk when a deposit
+/// is in a contract is the more expensive of the two mistakes. So neither is a
+/// judgement made here: `at_risk_zhu` is the deposit exactly when this wallet
+/// has durably signed a transfer of it, and zero before that, and it stays
+/// non-zero after the channel is ready because a funded channel's deposit is
+/// only reachable through the exit.
+///
+/// `refund_guaranteed` is true from the moment the provider countersigns, which
+/// is before any money moves, and that is the sentence the confirmation an
+/// owner is shown has to lead with: the full refund is held from the moment the
+/// channel opens.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn establish_progress_json(
+    stage: &str,
+    binding: &l2_fast_pay_hub::hvm_registry::HvmRegistryBindingV2,
+    hub_url: &str,
+    adopted: bool,
+    funding: Option<&agent_wallet_core::AgentHvmRegistryFunding>,
+) -> Value {
+    let deposit_zhu = binding.left_deposit_zhu;
+    // Signed and durable, whether or not a node has confirmed it. The money
+    // has left the owner's balance from this point and the record is what
+    // makes it recoverable, so this is the moment the screen must stop
+    // describing the deposit as safe on the owner's side.
+    let committed = funding.is_some();
+    let confirmed = funding.is_some_and(|funding| funding.is_confirmed());
+    let network_fee_zhu = funding.map_or(0, |funding| funding.network_fee_zhu());
+    json!({
+        "schema": "hpay-agent-registry-establish-progress/1",
+        "stage": stage,
+        // What pressing again will do, in the words a button can carry.
+        "next_action": match stage {
+            ESTABLISH_STAGE_READY => "",
+            ESTABLISH_STAGE_FUNDING => "Check whether the deposit is in a block yet",
+            _ => "Ask this provider to guarantee your refund",
+        },
+        // Empty exactly when nothing is being waited on, which is exactly when
+        // the stage is `ready`. A screen that reports a wait with no subject is
+        // the failure this object exists to end.
+        "waiting_for": match stage {
+            ESTABLISH_STAGE_READY => "",
+            ESTABLISH_STAGE_FUNDING => "Your deposit transaction has been signed and sent, and this wallet has not yet seen it in a block. Nothing else will happen until it confirms.",
+            _ => "This provider has not yet signed the bill that returns your whole deposit.",
+        },
+        "hub_url": hub_url,
+        "hub_address": binding.right_hub_address,
+        "contract_address": binding.contract_address,
+        "channel_id": binding.channel_id,
+        "deposit_zhu": deposit_zhu,
+        "challenge_blocks": binding.challenge_blocks,
+        // True from the countersignature onwards, which is strictly before any
+        // money moves. The stages after `opening` cannot be reached without it.
+        "refund_guaranteed": stage != ESTABLISH_STAGE_OPENING,
+        // Everything this wallet has durably committed of the owner's balance.
+        // Zero until the deposit transfer is signed, because until then a
+        // refusal anywhere costs nothing at all.
+        "spent_zhu": if committed { deposit_zhu.saturating_add(network_fee_zhu) } else { 0 },
+        "network_fee_zhu": network_fee_zhu,
+        // The deposit, once it is committed, for as long as the channel holds
+        // it. It does not fall back to zero when the channel becomes ready:
+        // a funded channel's deposit comes back through the exit and through
+        // nothing else, which is the whole reason the exit exists.
+        "at_risk_zhu": if committed { deposit_zhu } else { 0 },
+        // What opening can still take out of the main balance from here, on
+        // top of anything already spent. Read from the same per-transaction
+        // ceiling the open screen quotes.
+        "remaining_fee_ceiling_zhu": if committed { 0 } else { OPEN_FEE_CEILING_ZHU },
+        "funding_transaction_hash": funding.map(agent_wallet_core::AgentHvmRegistryFunding::transaction_hash),
+        "funding_confirmed": confirmed,
+        "funding_confirmed_block_height": funding.and_then(agent_wallet_core::AgentHvmRegistryFunding::confirmed_block_height),
+        // True exactly when this wallet holds an adopted binding, which is
+        // written in the same journalled transition that seeds the exit head.
+        "exit_available": adopted,
+    })
+}
+
 /// What an owner is told when the channel they pasted cannot be read.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 const OPEN_CHANNEL_UNREADABLE: &str = "The channel details from your provider could not be read, so nothing was asked of it and nothing was signed.";
@@ -1600,6 +2008,7 @@ fn open_status_json(
     spendable_l1_zhu: u64,
     deposit_zhu: u64,
     challenge_blocks: u64,
+    channel_in_progress: Value,
 ) -> Value {
     let (hub_reachable, hub_address, hub_read_error) = hub;
     json!({
@@ -1615,7 +2024,82 @@ fn open_status_json(
         "required_l1_fee_zhu": OPEN_FEE_CEILING_ZHU,
         "chain_transaction_count": OPEN_CHAIN_TRANSACTION_COUNT,
         "challenge_blocks": challenge_blocks,
+        "channel_in_progress": channel_in_progress,
     })
+}
+
+/// A channel this wallet has begun and not finished, as the wallet itself
+/// records it, or `null` when there is no such channel.
+///
+/// # Why this is on the status object
+///
+/// The desktop had no way to ask this question. The open status reported
+/// `open_ready: true` over a wallet already holding a countersigned refund and
+/// a confirmed deposit, and the overview carried no field for a half-open
+/// channel, so the screen tracked its own progress in a note in
+/// `window.localStorage`.
+///
+/// That note is one key for every Agent Wallet on the machine, it does not
+/// follow a wallet restored somewhere else, and clearing browser data deletes
+/// it. Losing it stranded real money: with the note gone and the provider
+/// gone, the only control still on the screen was the open form, and the open
+/// form asks the provider first and answers
+/// "no channel was opened. Nothing was funded and nothing was spent" over a
+/// deposit sitting in a block. The chain would have paid; nothing on the
+/// screen could ask it to.
+///
+/// So the wallet answers it. Everything here is read from the wallet's own
+/// sealed record, which survives a restore and belongs to one wallet, and
+/// nothing here is a judgement: the two presses re-derive what they do from
+/// that same record, and this only decides what an owner is shown.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn channel_in_progress_json(
+    record: Option<&agent_wallet_core::AgentHvmRegistryChannelOpen>,
+) -> Value {
+    let Some(record) = record else {
+        return Value::Null;
+    };
+    let bundle = record.countersigned_bundle();
+    let funding = record.funding();
+    json!({
+        "schema": "hpay-agent-registry-channel-in-progress/1",
+        // The countersigned full refund this wallet checked and saved. Until
+        // this is true no deposit can be signed at all.
+        "refund_held": bundle.is_some(),
+        "deposit_zhu": bundle.map(|bundle| bundle.binding.left_deposit_zhu),
+        // The deposit transaction, once this wallet has signed one. A channel
+        // with a hash here has had money leave it, whatever the screen knows.
+        "funding_transaction_hash": funding.map(|funding| funding.transaction_hash()),
+        "funding_confirmed": funding.is_some_and(|funding| funding.is_confirmed()),
+        "funding_confirmed_block_height": funding.and_then(|funding| funding.confirmed_block_height()),
+        "network_fee_zhu": funding.map(|funding| funding.network_fee_zhu()),
+    })
+}
+
+/// This wallet's spendable main balance, in the L1 chain's own zhu.
+///
+/// The overview publishes `available_units` in the Agent ledger's `HacUnits`,
+/// which are 1e-6 HAC (`agent_wallet_core::HacUnits::PER_HAC == 1_000_000`).
+/// Every registry amount beside it on those screens - the deposit, the fee
+/// ceiling, the gas reserve - is in chain zhu, which is 1e-8 HAC
+/// (`parse_fin_balance_zhu("1:248") == 100_000_000` in
+/// `l2_fast_pay_hub::node`). Both were previously published under the name
+/// `spendable_l1_zhu` without conversion, so the affordability precondition
+/// compared a 1e-6 number against a 1e-8 total and demanded a hundred times
+/// the balance it should have, and the sentence built from it put two scales
+/// in one line.
+///
+/// Saturating rather than wrapping: this number gates a spend, and a balance
+/// that overflows into a small one would open a door this exists to close.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn spendable_l1_zhu(overview: &Value) -> u64 {
+    const ZHU_PER_HAC_UNIT: u64 = 100_000_000 / agent_wallet_core::HacUnits::PER_HAC;
+    overview
+        .get("available_units")
+        .and_then(Value::as_str)
+        .and_then(|units| units.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_mul(ZHU_PER_HAC_UNIT)
 }
 
 /// Read the open screen's facts: this wallet's balance, its fullnode, and the
@@ -1625,15 +2109,20 @@ fn open_status_json(
 /// and do you run the reviewed profile. It cannot fund anything, cannot sign
 /// anything and cannot be charged for anything by being asked.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-async fn registry_open_status_value(overview: &Value, hub_url: &str, deposit_zhu: u64) -> Value {
-    let spendable_l1_zhu = overview
-        .get("available_units")
-        .and_then(Value::as_str)
-        .and_then(|units| units.parse::<u64>().ok())
-        .unwrap_or(0);
+async fn registry_open_status_value(
+    overview: &Value,
+    hub_url: &str,
+    deposit_zhu: u64,
+    in_progress: Option<&agent_wallet_core::AgentHvmRegistryChannelOpen>,
+) -> Value {
+    let spendable_l1_zhu = spendable_l1_zhu(overview);
     let already_bound = overview
         .get("hvm_registry_binding")
         .is_some_and(|value| !value.is_null());
+    // A deposit this wallet has already signed and handed to the network. Not
+    // "a channel was started" - money has actually left - which is why this
+    // withholds the open control rather than merely warning beside it.
+    let deposit_in_flight = in_progress.is_some_and(|record| record.funding().is_some());
     let fullnode_reachable = match overview.get("node_url").and_then(Value::as_str) {
         Some(node_url) => match l2_fast_pay_hub::node::NodeClient::new(node_url) {
             Ok(client) => client.capabilities().await.is_ok(),
@@ -1644,6 +2133,8 @@ async fn registry_open_status_value(overview: &Value, hub_url: &str, deposit_zhu
     let hub = read_open_hub_identity(hub_url).await;
     let (open_ready, blocked_reason) = if already_bound {
         (false, OPEN_ALREADY_BOUND)
+    } else if deposit_in_flight {
+        (false, OPEN_DEPOSIT_IN_FLIGHT)
     } else {
         (true, "")
     };
@@ -1656,6 +2147,7 @@ async fn registry_open_status_value(overview: &Value, hub_url: &str, deposit_zhu
         spendable_l1_zhu,
         deposit_zhu,
         l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS,
+        channel_in_progress_json(in_progress),
     )
 }
 
@@ -1666,6 +2158,17 @@ async fn registry_open_status_value(overview: &Value, hub_url: &str, deposit_zhu
 /// name, and the exit is the reason any of this is safe.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 const OPEN_ALREADY_BOUND: &str = "This Agent Wallet already has a provider channel. Close that one first: the section below takes your money out of it without needing the provider's permission.";
+
+/// Why the open control is withheld over a deposit that has already left.
+///
+/// This wallet has signed a deposit into a channel and handed it to the
+/// network. Opening a second channel would ask for a second deposit while the
+/// first is still out, and the money that is already gone comes back through
+/// finishing this channel and through nothing else. Said as an instruction
+/// rather than a refusal, because the owner is not stuck: the two controls
+/// that finish it need no provider.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const OPEN_DEPOSIT_IN_FLIGHT: &str = "You have already sent a deposit into a channel with this wallet, and it has not finished opening. Finish that one below before opening another: your deposit comes back out of that channel, and the steps that finish it do not need the provider's help.";
 
 /// The provider's own published identity, or the reason it could not be read.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
@@ -1730,19 +2233,43 @@ pub async fn agent_wallet_execute_approved_hvm(
         let wallet_id = parse_wallet_id(wallet_id)?;
         let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
         let _transition = state.transition.lock().await;
-        let operation = require_manager(&state)?
-            .lock()
-            .await
-            .execute_approved_hvm_payment(&wallet_id, &operation_id, unix_now()?)
-            .await
-            .map_err(public_error)?;
-        serde_json::to_value(operation).map_err(|_| "Agent HVM result encoding failed".to_owned())
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        execute_approved_hvm_payment(&mut manager, &wallet_id, &operation_id, unix_now()?).await
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     {
         let _ = (wallet_id, operation_id, state);
         Err("Agent HVM Fast Pay is disabled in this build".to_owned())
     }
+}
+
+/// Everything [`agent_wallet_execute_approved_hvm`] does once the shell has
+/// been recognised and its two identifiers parsed.
+///
+/// Split out for the same reason `open`, `fund`, `adopt`, `establish` and the
+/// exit are: a Tauri command cannot be entered without a real `Webview`, so a
+/// command whose whole body lives behind that attribute can only ever be
+/// proven by a test that reimplements it, which is the "the only caller is a
+/// test" failure one layer up.
+///
+/// This one was the last hop of the journey with no such body. A reviewer
+/// trying to drive the whole circle - open, fund, **pay**, lose the provider,
+/// exit, get paid - could enter at every hop except this one, so the payment
+/// in the middle could not be demonstrated through the surface a person uses
+/// at all. Nothing about the payment changes here; it becomes enterable.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn execute_approved_hvm_payment(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    operation_id: &OperationId,
+    now: u64,
+) -> Result<Value, String> {
+    let operation = manager
+        .execute_approved_hvm_payment(wallet_id, operation_id, now)
+        .await
+        .map_err(public_error)?;
+    serde_json::to_value(operation).map_err(|_| "Agent HVM result encoding failed".to_owned())
 }
 
 #[tauri::command]
@@ -2242,11 +2769,7 @@ async fn registry_exit_status_value(
     let binding = overview
         .get("hvm_registry_binding")
         .filter(|value| !value.is_null());
-    let spendable_l1_zhu = overview
-        .get("available_units")
-        .and_then(Value::as_str)
-        .and_then(|units| units.parse::<u64>().ok())
-        .unwrap_or(0);
+    let spendable_l1_zhu = spendable_l1_zhu(overview);
     let lease = match binding {
         Some(binding) => read_registry_lease(overview, binding).await,
         None => (None, "this wallet has no provider channel".to_owned()),
@@ -3095,5 +3618,94 @@ mod tests {
         let runtime = body.find("state.runtime.request_shutdown").unwrap();
         let manager = body.find("require_manager(&state)").unwrap();
         assert!(marker < runtime && runtime < manager);
+    }
+}
+
+/// The registry open screen's money facts, which are the ones that were wrong.
+#[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
+mod registry_open_status_tests {
+    use serde_json::json;
+
+    /// The overview counts in the Agent ledger's units; the screen counts in
+    /// the chain's zhu. They differ by a hundred, and publishing one under the
+    /// other's name made the affordability precondition demand a hundred times
+    /// the balance it should have.
+    #[test]
+    fn the_spendable_balance_is_published_in_chain_zhu_and_not_in_agent_units() {
+        // `available_units` is 1e-6 HAC. One HAC is 1_000_000 of them, and it
+        // is 100_000_000 chain zhu.
+        let overview = json!({ "available_units": "1000000" });
+        assert_eq!(super::spendable_l1_zhu(&overview), 100_000_000);
+
+        // A hundred HAC, which is the balance a reviewer was refused a five
+        // HAC channel on.
+        let overview = json!({ "available_units": "100000000" });
+        assert_eq!(super::spendable_l1_zhu(&overview), 10_000_000_000);
+
+        // Missing or unreadable reads as nothing, never as plenty.
+        assert_eq!(super::spendable_l1_zhu(&json!({})), 0);
+        assert_eq!(
+            super::spendable_l1_zhu(&json!({ "available_units": "not a number" })),
+            0
+        );
+
+        // A balance large enough to overflow the conversion must not wrap into
+        // a small one: this number gates a spend.
+        let overview = json!({ "available_units": u64::MAX.to_string() });
+        assert_eq!(super::spendable_l1_zhu(&overview), u64::MAX);
+    }
+
+    /// A deposit that has left is reported, so the screen can finish the
+    /// channel without a note in browser storage.
+    #[test]
+    fn an_unfinished_channel_is_reported_from_the_wallets_own_record() {
+        // No record at all is `null`, and not an object full of falsehoods.
+        assert!(super::channel_in_progress_json(None).is_null());
+    }
+
+    /// The open control is withheld while a deposit is in flight, with a
+    /// reason, and the reason points at the controls that finish the channel.
+    #[test]
+    fn opening_a_second_channel_is_withheld_while_a_deposit_is_out() {
+        let withheld = super::open_status_json(
+            false,
+            super::OPEN_DEPOSIT_IN_FLIGHT,
+            "http://127.0.0.1:8790",
+            (true, "1ADDRESS".to_owned(), String::new()),
+            true,
+            10_000_000_000,
+            500_000_000,
+            8,
+            serde_json::Value::Null,
+        );
+        assert_eq!(withheld["open_ready"], serde_json::Value::Bool(false));
+        let reason = withheld["blocked_reason"].as_str().unwrap_or_default();
+        assert!(
+            !reason.is_empty(),
+            "a withheld irreversible control must always carry a reason"
+        );
+        // The owner is not stuck, and the sentence has to say so: the two
+        // controls that finish the channel need no provider.
+        assert!(reason.contains("Finish that one below"), "{reason}");
+        assert!(reason.contains("do not need the provider"), "{reason}");
+
+        // And the rule the whole panel rests on: a reason exactly when the
+        // control is withheld.
+        let ready = super::open_status_json(
+            true,
+            super::OPEN_DEPOSIT_IN_FLIGHT,
+            "http://127.0.0.1:8790",
+            (true, "1ADDRESS".to_owned(), String::new()),
+            true,
+            10_000_000_000,
+            500_000_000,
+            8,
+            serde_json::Value::Null,
+        );
+        assert_eq!(
+            ready["blocked_reason"],
+            serde_json::Value::String(String::new())
+        );
+        assert_eq!(ready["channel_in_progress"], serde_json::Value::Null);
     }
 }

@@ -6310,6 +6310,7 @@ dependencies = [
  "argon2",
  "axum 0.8.9",
  "base64 0.22.1",
+ "basis",
  "dust-whisper",
  "field",
  "hacash-wallet-core",

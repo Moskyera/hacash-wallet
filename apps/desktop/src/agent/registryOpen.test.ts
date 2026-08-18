@@ -1,12 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DESKTOP_CONTROLS } from "./desktopControls";
+import { formatZhu } from "./AgentAdminPages";
 import {
   DESKTOP_IRREVERSIBLE_ACTIONS,
   OPEN_PROVIDER_CHANNEL_WARNING,
 } from "./irreversibleActions";
 import {
   OPEN_EXIT_CONTROL_LABEL,
+  OPEN_FUND_CONTROL_LABEL,
   OPEN_PHONE_CANNOT,
   openPressResultLine,
   registryOpenView,
@@ -24,12 +26,7 @@ const read = (name: string) =>
 
 const ADMIN = read("AgentAdminPages.tsx");
 
-const formatZhu = (raw: string) => {
-  const zhu = BigInt(raw);
-  const whole = zhu / 1_000_000n;
-  const fraction = (zhu % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction} HAC` : `${whole} HAC`;
-};
+
 
 const READY: AgentHvmRegistryOpenStatus = {
   open_ready: true,
@@ -39,9 +36,10 @@ const READY: AgentHvmRegistryOpenStatus = {
   hub_reachable: true,
   hub_read_error: "",
   fullnode_reachable: true,
-  spendable_l1_zhu: 20_000_000,
-  deposit_zhu: 5_000_000,
-  required_l1_fee_zhu: 1_500_000,
+  channel_in_progress: null,
+  spendable_l1_zhu: 2_000_000_000,
+  deposit_zhu: 500_000_000,
+  required_l1_fee_zhu: 150_000_000,
   chain_transaction_count: 2,
   challenge_blocks: 6,
 };
@@ -115,7 +113,7 @@ describe("the open is withheld with a stated reason, never silently", () => {
   it("refuses when the balance cannot cover the deposit and the fee together", () => {
     const view = registryOpenView(
       false,
-      { ...READY, spendable_l1_zhu: 5_500_000 },
+      { ...READY, spendable_l1_zhu: 550_000_000 },
       formatZhu,
     );
     expect(view?.canOpen).toBe(false);
@@ -162,8 +160,8 @@ describe("the result sentence is the backend's numbers, not the form's", () => {
     hub_url: "http://127.0.0.1:8790",
     hub_address: "1AZDABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
     contract_address: "1AZDDEFGHIJKLMNOPQRSTUVWXYZabcdefg",
-    deposit_zhu: 5_000_000,
-    refunded_zhu: 5_000_000,
+    deposit_zhu: 500_000_000,
+    refunded_zhu: 500_000_000,
     refund_bill_commitment: "c".repeat(64),
     refund_guaranteed: true,
   };
@@ -183,8 +181,14 @@ describe("the result sentence is the backend's numbers, not the form's", () => {
     const line = openPressResultLine(RESULT, formatZhu);
     expect(line).toContain("No money has moved yet");
     expect(line).toContain("has not been sent");
-    expect(line).toContain("this wallet cannot send it for you yet");
     expect(line).not.toContain("locked in the contract");
+    // It used to end "and this wallet cannot send it for you yet", which was
+    // true and is not any more. Saying the deposit has not been sent is only
+    // half an answer: the control that sends it now exists on this page, and
+    // an owner is owed its exact name rather than being left to hunt.
+    expect(line).toContain(OPEN_FUND_CONTROL_LABEL);
+    expect(DESKTOP_CONTROLS.fund_provider_channel).toBe(OPEN_FUND_CONTROL_LABEL);
+    expect(line).not.toMatch(/cannot send it for you/);
   });
 
   it("says nothing moved when the provider did not guarantee the refund", () => {
@@ -243,7 +247,12 @@ describe("funding sits behind the irreversible-action machinery", () => {
 
 describe("the panel only exists where opening is possible", () => {
   it("is hidden once a channel is bound, so the exit owns the screen", () => {
-    expect(ADMIN).toContain("{!overview.hvm_registry_binding && overview.pilot_enabled && (");
+    // And hidden too while a channel this desktop opened is waiting to be
+    // finished: an empty form on that visit reads as though the first press
+    // never happened, and invites a second channel this wallet would refuse.
+    expect(ADMIN).toContain(
+      "{!overview.hvm_registry_binding && overview.pilot_enabled && !resumableChannel && (",
+    );
   });
 
   it("reads the provider only from what the owner typed, and never on load", () => {

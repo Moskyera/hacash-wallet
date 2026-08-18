@@ -5,6 +5,10 @@ import {
 } from "./backupWarning";
 import type { AgentHvmRegistryExitProgress, AgentHvmRegistryExitStatus } from "./registryExit";
 import type { AgentHvmRegistryOpenResult, AgentHvmRegistryOpenStatus } from "./registryOpen";
+import type {
+  AgentHvmRegistryAdoptionResult,
+  AgentHvmRegistryFundingResult,
+} from "./registryFunding";
 
 export type AgentWalletRegistryEntry = {
   wallet_id: string;
@@ -1246,6 +1250,35 @@ export const agentWalletApi = {
       hubUrl,
       binding,
       depositZhu,
+    }),
+  /**
+   * Puts the deposit into the channel the countersigned receipt already covers.
+   *
+   * The destination, the amount and the chain are re-derived in Rust from that
+   * stored receipt and a live reading of this wallet's own fullnode; nothing
+   * here chooses any of them, and there is no argument through which it could.
+   * The signed bytes are made durable before any node sees them, so a crash
+   * between signing and submitting loses nothing.
+   *
+   * Calling it again after a crash re-submits the same bytes and asks the chain
+   * what became of them. It never signs a second transfer into one channel.
+   */
+  fundHvmRegistryChannel: (walletId: string) =>
+    invoke<AgentHvmRegistryFundingResult>("agent_wallet_fund_hvm_registry_channel", {
+      walletId,
+    }),
+  /**
+   * Writes this wallet's own record of the funded channel, asking the provider
+   * nothing at all.
+   *
+   * It is the step the exit refuses without, and it is deliberately reachable
+   * when the provider is gone: the bundle is this wallet's own, the deposit is
+   * one this wallet signed and has seen in a block, and the only other party is
+   * the owner's fullnode. It moves no money and sends no transaction.
+   */
+  adoptHvmRegistryChannel: (walletId: string) =>
+    invoke<AgentHvmRegistryAdoptionResult>("agent_wallet_adopt_hvm_registry_channel", {
+      walletId,
     }),
   /**
    * What the owner's own fullnode says about walking out of the registry

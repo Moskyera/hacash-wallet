@@ -2,12 +2,16 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   DESKTOP_EXIT_CONTROL_LABEL,
+  DESKTOP_FUND_CONTROL_LABEL,
+  DESKTOP_OPEN_SECTION,
   REGISTRY_EXIT_COST,
   REGISTRY_EXIT_LEASE,
   REGISTRY_EXIT_PHONE_CANNOT,
   REGISTRY_EXIT_REASSURANCE,
   REGISTRY_EXIT_ROUTE,
   REGISTRY_EXIT_TITLE,
+  REGISTRY_OPEN_PHONE_CANNOT,
+  REGISTRY_OPEN_ROUTE,
 } from "./registryExitRoute";
 
 const read = (path: string) =>
@@ -38,6 +42,48 @@ describe("the phone names the desktop exit control exactly", () => {
   });
 });
 
+describe("the phone says it can never open a channel either", () => {
+  it("names the desktop control that sends a deposit, exactly", () => {
+    // Same shape as the exit label above: a sentence naming a control that
+    // does not exist is what caused a permanent, unrecoverable revocation
+    // twice in this codebase, and the desktop's own table is the authority.
+    const controls = read("../../../desktop/src/agent/desktopControls.ts");
+    expect(controls).toContain(
+      `fund_provider_channel: "${DESKTOP_FUND_CONTROL_LABEL}"`,
+    );
+    expect(REGISTRY_OPEN_ROUTE).toContain(DESKTOP_FUND_CONTROL_LABEL);
+  });
+
+  it("names a section the desktop really renders", () => {
+    const admin = read("../../../desktop/src/agent/AgentAdminPages.tsx");
+    expect(admin).toContain(DESKTOP_OPEN_SECTION);
+    expect(REGISTRY_OPEN_ROUTE).toContain(DESKTOP_OPEN_SECTION);
+  });
+
+  it("says never, and says why, rather than promising a later build", () => {
+    expect(REGISTRY_OPEN_PHONE_CANNOT).toContain("never will");
+    expect(REGISTRY_OPEN_PHONE_CANNOT).toContain(
+      "approval identity, not a Hacash key",
+    );
+    // Both signatures a channel needs, not just the obvious one.
+    expect(REGISTRY_OPEN_PHONE_CANNOT).toContain("locks up a deposit");
+    expect(REGISTRY_OPEN_PHONE_CANNOT).toContain("refund receipt");
+    expect(REGISTRY_OPEN_PHONE_CANNOT).not.toMatch(/yet|soon|future release/i);
+  });
+
+  it("says a provider that will not sign costs nothing", () => {
+    expect(REGISTRY_OPEN_ROUTE).toContain("no channel opens and nothing is spent");
+  });
+
+  it("is rendered on the companion Security screen, not merely written", () => {
+    for (const token of ["REGISTRY_OPEN_PHONE_CANNOT", "REGISTRY_OPEN_ROUTE"]) {
+      expect(security, `${token} is written but never rendered`).toContain(
+        `{${token}}`,
+      );
+    }
+  });
+});
+
 describe("the phone tells the truth about what it can and cannot do", () => {
   it("never implies this handset can start an exit", () => {
     expect(REGISTRY_EXIT_PHONE_CANNOT).toContain("cannot start it");
@@ -47,6 +93,8 @@ describe("the phone tells the truth about what it can and cannot do", () => {
       REGISTRY_EXIT_LEASE,
       REGISTRY_EXIT_PHONE_CANNOT,
       REGISTRY_EXIT_ROUTE,
+      REGISTRY_OPEN_PHONE_CANNOT,
+      REGISTRY_OPEN_ROUTE,
     ]) {
       expect(copy).not.toMatch(/tap|press this|approve the exit here/i);
     }

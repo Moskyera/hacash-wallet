@@ -28,9 +28,40 @@
  */
 
 /** What the backend reports about opening, before anything is asked of a Hub. */
+/**
+ * A channel this wallet began and has not finished, as the wallet records it.
+ *
+ * The wallet's own answer, not this desktop's note. It survives clearing
+ * browser data, it survives a restore onto another machine, and it belongs to
+ * one wallet rather than to whichever wallet wrote the single note key last.
+ * `null` when the wallet has no unfinished channel.
+ */
+export type AgentHvmRegistryChannelInProgress = {
+  schema: "hpay-agent-registry-channel-in-progress/1";
+  /** The countersigned full refund is saved and checked. */
+  refund_held: boolean;
+  /** What the channel locks up, from that countersigned bill. */
+  deposit_zhu: number | null;
+  /** Set once a deposit transfer exists, in a block or not. */
+  funding_transaction_hash: string | null;
+  /** The wallet has seen that transfer in a block. */
+  funding_confirmed: boolean;
+  funding_confirmed_block_height: number | null;
+  /** What the network charged, once there is a transaction. */
+  network_fee_zhu: number | null;
+};
+
 export type AgentHvmRegistryOpenStatus = {
   /** Can this wallet open a channel at all right now? */
   open_ready: boolean;
+  /**
+   * The unfinished channel this wallet holds, or `null`.
+   *
+   * The screen must prefer this over its own note. A deposit that has left is
+   * recoverable from here with no provider and no browser storage, and losing
+   * the note used to strand exactly that money.
+   */
+  channel_in_progress: AgentHvmRegistryChannelInProgress | null;
   /** The backend's own sentence for why it cannot, or "" when it can. */
   blocked_reason: string;
   /** The provider URL this wallet would ask. */
@@ -99,6 +130,16 @@ export const OPEN_BLOCK_SECONDS = 300;
  * there. `registryOpen.test.ts` checks this against the control table itself.
  */
 export const OPEN_EXIT_CONTROL_LABEL = "Take my money out without the provider";
+
+/**
+ * The label of the control that actually sends the deposit, quoted for the same
+ * reason and checked against the control table by the same test.
+ *
+ * This screen's press does not move money and must never be read as if it did.
+ * Saying so is only half an answer: an owner who has just been told the deposit
+ * has not been sent needs to be told what does send it, on this page, by name.
+ */
+export const OPEN_FUND_CONTROL_LABEL = "Send the deposit into this channel";
 
 /**
  * What the phone can and cannot do about any of this, in every build.
@@ -246,8 +287,8 @@ export function openPressResultLine(
   return (
     `Your provider has signed a receipt returning all ${formatZhu(String(result.refunded_zhu))} of this deposit, ` +
     "and this wallet checked that signature itself and saved it. That receipt does not expire. No money has " +
-    `moved yet: the ${formatZhu(String(result.deposit_zhu))} deposit has not been sent, and this wallet cannot ` +
-    "send it for you yet. When it can, the deposit goes out against the receipt you now hold and never " +
-    "before it."
+    `moved yet: the ${formatZhu(String(result.deposit_zhu))} deposit has not been sent. The next step on this ` +
+    `page, "${OPEN_FUND_CONTROL_LABEL}", is the one that sends it, and it goes out against the receipt you ` +
+    "now hold and never before it."
   );
 }
