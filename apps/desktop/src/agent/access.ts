@@ -37,7 +37,7 @@ export const HPAY_MAINNET = Object.freeze({
  * that does not name the number is not consent to the number.
  */
 export const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT =
-  "I understand that this provider holds my channel funds, and that if it stops answering there is no way yet to recover them without it. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
+  "I understand that this provider holds my channel funds. If it stops answering, or if it puts an old receipt on chain while I am offline, I could lose part or all of what is in this channel. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
 
 export type AgentWalletUiState =
   | "loading"

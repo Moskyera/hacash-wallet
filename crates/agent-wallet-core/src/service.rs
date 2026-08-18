@@ -110,7 +110,7 @@ const ZERO_HASH_HEX: &str = "000000000000000000000000000000000000000000000000000
 /// which was true and told a reader neither the amount at risk nor what
 /// trusted costs them. This names both, because a consent that does not name
 /// the number is not consent to the number.
-pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand that this provider holds my channel funds, and that if it stops answering there is no way yet to recover them without it. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
+pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand that this provider holds my channel funds. If it stops answering, or if it puts an old receipt on chain while I am offline, I could lose part or all of what is in this channel. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
 
 const fn is_false(value: &bool) -> bool {
     !*value
