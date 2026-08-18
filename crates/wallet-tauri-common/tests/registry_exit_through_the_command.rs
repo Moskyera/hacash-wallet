@@ -81,7 +81,7 @@ use tokio::sync::{mpsc, oneshot};
 use vm::ContractAddress;
 use vm::value::Value as VmValue;
 use wallet_tauri_common::agent_commands::{
-    establish_hvm_registry_channel, start_hvm_registry_exit,
+    drive_hvm_registry_exit, establish_hvm_registry_channel, start_hvm_registry_exit,
 };
 
 const PASSPHRASE: &str = "agent wallet passphrase 123";
@@ -1089,6 +1089,66 @@ async fn the_command_an_owner_presses_walks_them_out_with_the_provider_dead() {
         );
         println!("  EXIT GATE CLOSED: {refusal}");
         assert!(!chain.settled().await);
+
+        // THE HALF BEHIND THE GATE, DRIVEN.
+        //
+        // Until the command was split this could not be reached at all: it
+        // refuses unless a constant a human sets is true, and the run that
+        // would justify setting it could not happen without setting it first.
+        // So the code that signs had executed in no build, ever, and the
+        // decision to open the control had to be taken on an argument rather
+        // than on a result.
+        //
+        // This is not the gate being bypassed. The press above still refused,
+        // and refused first; nothing here sets the constant, and the shipped
+        // path reaches this function only through that refusal not firing.
+        // What is being driven is the same body the command hands off to,
+        // with the same arguments it would hand it, on a real chain with the
+        // provider's process dead.
+        let overview = manager
+            .overview(&wallet_id, now)
+            .await
+            .expect("the wallet's own overview");
+        let overview = serde_json::to_value(overview).expect("overview encodes");
+        let binding = overview
+            .get("hvm_registry_binding")
+            .cloned()
+            .filter(|value| !value.is_null())
+            .expect("the adopted channel this exit is for");
+        assert!(
+            chain.failures().await.is_empty(),
+            "nothing should have failed on chain before the exit is driven"
+        );
+        let progress = drive_hvm_registry_exit(&mut manager, &wallet_id, &overview, &binding, now)
+            .await
+            .expect("the half behind the gate drives with the provider dead");
+        println!("  BEHIND THE GATE, pass one: {progress}");
+        // One press drives as far as the chain will take it and stops at the
+        // genuine wait, which here is the objection window: the contract will
+        // not finalize before the deadline it published. Waiting it out and
+        // pressing again is what an owner does, so it is what this does.
+        let deadline = progress["deadline_height"]
+            .as_u64()
+            .expect("a challenge on chain publishes its deadline");
+        chain.mine_empty_to(deadline + 1).await;
+        let now = now + 60;
+        let progress = drive_hvm_registry_exit(&mut manager, &wallet_id, &overview, &binding, now)
+            .await
+            .expect("the second press finalises and claims");
+        println!("  BEHIND THE GATE, pass two: {progress}");
+        assert!(
+            chain.settled().await,
+            "driving past the gate must settle the channel, not report progress it did not make"
+        );
+        // Judged by the chain, not by the progress object: a report that says
+        // it stepped is the thing under test, so it cannot also be the
+        // evidence. `failures` is empty means every transaction this put on
+        // the wire executed rather than aborting.
+        assert!(
+            chain.failures().await.is_empty(),
+            "every transaction the driver signed must have executed: {:?}",
+            chain.failures().await
+        );
 
         // HOW FAR THE PRESS GOT, COUNTED AT THE SOCKET RATHER THAN INFERRED.
         //
