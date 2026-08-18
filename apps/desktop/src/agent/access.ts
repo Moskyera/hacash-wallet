@@ -23,8 +23,21 @@ export const HPAY_MAINNET = Object.freeze({
   blockOne:
     "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
 });
+/**
+ * What the owner is actually agreeing to, said in the words that matter.
+ *
+ * The sentence this replaces was "a trusted bounded pilot and I accept its
+ * recovery limits". True, and opaque: it named neither the amount at risk nor
+ * what "trusted" costs. Somebody reading it understands "limited, probably
+ * fine" rather than "this provider can keep my money".
+ *
+ * Three facts, in the order a person needs them: what trusted means, how much
+ * is on the table, and that they should not exceed what they can lose. The
+ * amount is stated rather than left to a settings screen, because a consent
+ * that does not name the number is not consent to the number.
+ */
 export const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT =
-  "I understand Agent Fast Pay mainnet is a trusted bounded pilot and I accept its recovery limits.";
+  "I understand that this provider holds my channel funds, and that if it stops answering there is no way yet to recover them without it. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
 
 export type AgentWalletUiState =
   | "loading"

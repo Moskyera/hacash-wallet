@@ -101,7 +101,16 @@ const MAX_OPERATIONS_PER_WALLET: usize = 4_096;
 // the 4,096-record cap and the authenticated 30-requests/minute rate limit.
 const MAX_REQUESTS_PER_AGENT_PER_MINUTE: usize = 30;
 const ZERO_HASH_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand Agent Fast Pay mainnet is a trusted bounded pilot and I accept its recovery limits.";
+/// The sentence the owner must have ticked, compared byte for byte at
+/// `service.rs:666`, so it has to stay identical to the one the screen shows
+/// in `apps/desktop/src/agent/access.ts`. If the two drift, consent that was
+/// genuinely given stops being recognised.
+///
+/// It replaces "a trusted bounded pilot and I accept its recovery limits",
+/// which was true and told a reader neither the amount at risk nor what
+/// trusted costs them. This names both, because a consent that does not name
+/// the number is not consent to the number.
+pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand that this provider holds my channel funds, and that if it stops answering there is no way yet to recover them without it. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
 
 const fn is_false(value: &bool) -> bool {
     !*value

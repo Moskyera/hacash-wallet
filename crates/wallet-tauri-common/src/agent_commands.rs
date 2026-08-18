@@ -2765,7 +2765,38 @@ pub async fn start_hvm_registry_exit(
             .unwrap_or(USER_EXIT_DRIVER_MISSING)
             .to_owned());
     }
-    let chain = registry_exit_chain(&overview, &binding)?;
+    drive_hvm_registry_exit(manager, wallet_id, &overview, &binding, now).await
+}
+
+/// Everything the press does once the gate has already said yes.
+///
+/// # Why this is a separate function
+///
+/// It is the half that signs, and until it was split out it had never
+/// executed. `start_hvm_registry_exit` refuses unless
+/// `measure_user_side_unilateral_exit_ready()` is true, and that measurement
+/// reads a constant a human sets - so the run that would justify setting it
+/// could not happen without setting it first. Nothing about the driver was
+/// unproven; what was unproven was reaching it from the command an owner
+/// presses.
+///
+/// This is not a way around the gate. There is no flag here, no argument that
+/// skips a check, and the shipped path still refuses before it ever gets here.
+/// What changed is that "may I" and "do it" are two functions instead of one,
+/// so a test can drive the second without pretending the first said yes. The
+/// ordering guard in this file was rewritten to be stricter about it than the
+/// version that covered the single function: it pins the gate before the call
+/// AND that this function has exactly one caller in shipped source, which
+/// nothing asserted while the two were joined.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn drive_hvm_registry_exit(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    overview: &Value,
+    binding: &Value,
+    now: u64,
+) -> Result<Value, String> {
+    let chain = registry_exit_chain(overview, binding)?;
     // One pass makes at most one unit of progress, so a single press would put
     // one transaction on the wire and stop, and an owner would have to press
     // once per step without ever being told that. Pressing therefore drives as
@@ -3737,11 +3768,25 @@ mod tests {
             .find("USER_EXIT_DRIVER_MISSING")
             .expect("a closed gate refuses in the owner's own words");
         let drive = body
-            .find("advance_hvm_registry_exit")
-            .expect("an open gate drives the shipped driver");
+            .find("drive_hvm_registry_exit(manager, wallet_id")
+            .expect("an open gate hands off to the shipped driver");
         assert!(
             gate < refusal && refusal < drive,
             "the measured gate and its refusal must both come before anything that can sign"
+        );
+        // Stricter than the version that covered one joined function. While
+        // the driving lived inside the body, nothing asserted that no OTHER
+        // production path reached it; splitting it out makes that checkable,
+        // so it is checked. The declaration and this one call are the only
+        // mentions shipped source may hold.
+        let shipped = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source before the test module");
+        assert_eq!(
+            shipped.matches("drive_hvm_registry_exit").count(),
+            2,
+            "the driver is declared once and called once, by the gate that guards it"
         );
         // The gate is measured from the same overview the screen was built
         // from, and never from a second read that could disagree with it.
