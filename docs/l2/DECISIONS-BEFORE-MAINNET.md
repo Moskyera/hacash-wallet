@@ -6,6 +6,11 @@ what to promise users. This file states them, with the evidence measured for
 each, so they can be decided without re-deriving anything.
 
 Written 2026-08-18, after the exit was driven to completion on a real chain.
+Updated 2026-08-19: decision 1 is made and done, and decision 2 no longer rests
+on evidence that did not exist.
+
+Amounts here are in zhu, and **one HAC is 100,000,000 zhu**. Stated because an
+earlier draft was out by a hundred on the number the first decision turns on.
 
 ---
 
@@ -15,9 +20,10 @@ Do not re-litigate these. Each was driven on a chain, through production code,
 not argued.
 
 **A user gets their money back when the provider is gone.** A wallet opened a
-channel, funded it 5,000,000,000 zhu, paid through it, the provider process was
-deleted and its socket asserted dead, and the wallet walked the whole exit alone
-with its own key: 4,969,317,395 zhu returned, the contract left holding zero.
+channel, funded it 5,000,000,000 zhu (50 HAC), paid through it, the provider
+process was deleted and its socket asserted dead, and the wallet walked the whole
+exit alone with its own key: 4,969,317,395 zhu returned - 49.7 HAC - and the
+contract left holding zero.
 
 **The exit survives the app closing.** Killed twice mid-sequence, it resumes
 against the same transaction rather than signing a second one, and a confirmed
@@ -60,9 +66,9 @@ to trust — and one built for this was measured *taking* money from the user it
 was meant to protect before that was fixed.
 
 **B. It is disclosed and the amount is capped.** The user is told plainly what
-they risk and the cap keeps it small. Today the wallet-enforced hard cap is
-1,000,000,000 zhu — a thousand HAC — per channel, which is a large amount to lose
-while asleep.
+they risk and the cap keeps it small. The wallet-enforced hard cap is
+1,000,000,000 zhu per channel, which is **10 HAC** - one HAC is 100,000,000 zhu,
+not 1,000,000, and an earlier draft of this file had that wrong by a hundred.
 
 These are not exclusive. B protects everyone immediately; A protects the users
 who will do it.
