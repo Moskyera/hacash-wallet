@@ -102,11 +102,17 @@ export const ABANDON_STRANDED_PAYMENT_WARNING =
  *    a final claim has to be sent after it;
  *  - the fees are spent even in the case the owner is most afraid of, which is
  *    the provider never coming back at all;
+ *  - the cost is more than network fees. This sentence used to say "three
+ *    network fees", which on a measured exit understated the charge by a
+ *    factor of ten and understated what the owner had to be able to hold by
+ *    considerably more, because a registry call is a contract call and the
+ *    chain reserves its whole gas budget before running it. It now names the
+ *    two parts and points at `feeLine`, which has the exact figures;
  *  - the exact amount is named beside this by `yourMoneyLine`, which knows the
  *    channel; this sentence does not repeat a number it cannot check.
  */
 export const EXIT_WITHOUT_PROVIDER_WARNING =
-  "This closes the channel for good. It cannot be reopened without a new deposit, and no further payments can be made through it. Your money does not arrive straight away: the chain holds an objection window open first, and a final claim is sent after it closes. It costs three network fees from your main balance, and those fees are spent whether or not the provider ever comes back.";
+  "This closes the channel for good. It cannot be reopened without a new deposit, and no further payments can be made through it. Your money does not arrive straight away: the chain holds an objection window open first, and a final claim is sent after it closes. It costs network fees and chain running costs from your main balance, in the exact amount named above this, and what is spent is spent whether or not the provider ever comes back.";
 
 export const DESKTOP_IRREVERSIBLE_ACTIONS: readonly DesktopIrreversibleAction[] =
   [

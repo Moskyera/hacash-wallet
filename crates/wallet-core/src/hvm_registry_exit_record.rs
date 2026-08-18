@@ -205,6 +205,14 @@ pub struct HvmRegistryExitIntentV1 {
     pub claim_payee: Option<String>,
     pub claim_amount_zhu: Option<u64>,
     pub lease_periods: Option<u64>,
+    /// For the two lease renewals only: the live blocks the chain showed on
+    /// the half this step buys, read immediately before it was planned.
+    ///
+    /// This is the number the renewal is bought to move. Without it a wallet
+    /// can pay for a renewal, watch the lease not rise, and plan the identical
+    /// renewal again with no way to notice; see
+    /// [`crate::hvm_registry_exit_driver::advance_registry_exit`].
+    pub pre_step_lease_blocks: Option<u64>,
     pub pre_observed_height: u64,
     pub pre_status: u8,
     pub pre_serial: u64,
@@ -307,6 +315,7 @@ impl HvmRegistryExitIntentV1 {
             claim_payee,
             claim_amount_zhu,
             lease_periods,
+            pre_step_lease_blocks: crate::hvm_registry_exit::lease_blocks_for_step(step, snapshot),
             pre_observed_height: snapshot.observed_height,
             pre_status: snapshot.channel.status.value,
             pre_serial: snapshot.channel.serial.value,
@@ -363,6 +372,11 @@ pub struct PersistedHvmRegistryExitStepV1 {
     pub claim_amount_zhu: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_periods: Option<u64>,
+    /// The lease this renewal was bought to raise, as the chain showed it just
+    /// before the step was planned. `None` on every step that is not a lease
+    /// renewal, and on records written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_step_lease_blocks: Option<u64>,
     pub pre_observed_height: u64,
     pub pre_status: u8,
     pub pre_serial: u64,
@@ -412,6 +426,7 @@ impl PersistedHvmRegistryExitStepV1 {
             claim_payee: intent.claim_payee.clone(),
             claim_amount_zhu: intent.claim_amount_zhu,
             lease_periods: intent.lease_periods,
+            pre_step_lease_blocks: intent.pre_step_lease_blocks,
             pre_observed_height: intent.pre_observed_height,
             pre_status: intent.pre_status,
             pre_serial: intent.pre_serial,

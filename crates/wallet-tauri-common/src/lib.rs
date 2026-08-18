@@ -4,6 +4,11 @@
 ))]
 pub mod agent_commands;
 #[cfg(all(
+    feature = "agent-wallet-testnet-pilot",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod agent_registry_exit;
+#[cfg(all(
     feature = "agent-wallet-admin",
     not(any(target_os = "android", target_os = "ios"))
 ))]

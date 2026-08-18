@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   EXIT_BLOCK_SECONDS,
   EXIT_CHAIN_FEE_COUNT,
+  exitPressResultLine,
   registryExitView,
   type AgentHvmRegistryExitStatus,
 } from "./registryExit";
@@ -117,6 +118,36 @@ const READY: AgentHvmRegistryExitStatus = {
   fullnode_reachable: true,
   spendable_l1_zhu: 300_000,
   required_l1_fee_zhu: 30_000,
+  chain_transaction_count: 3,
+  per_transaction_ceiling_zhu: 10_000,
+  per_transaction_network_fee_zhu: 1_000,
+  per_transaction_gas_reserve_zhu: 9_000,
+  started_steps: [],
+};
+
+/** The same wallet, on the second visit, with an exit already on chain. */
+const RESUMING: AgentHvmRegistryExitStatus = {
+  ...READY,
+  started_steps: [
+    {
+      step: "challenge",
+      attempt: 1,
+      phase: "confirmed",
+      network_fee_zhu: 1_000,
+      transaction_hash: "c".repeat(64),
+      confirmed_block_height: 900,
+      updated_unix: 1_700_000_000,
+    },
+    {
+      step: "finalize",
+      attempt: 1,
+      phase: "submitted",
+      network_fee_zhu: 1_000,
+      transaction_hash: "d".repeat(64),
+      confirmed_block_height: null,
+      updated_unix: 1_700_000_100,
+    },
+  ],
 };
 
 describe("what the exit section states before anything is pressed", () => {
@@ -155,13 +186,106 @@ describe("what the exit section states before anything is pressed", () => {
     expect(view.windowLine).toContain("1 hour");
   });
 
-  it("states that it costs chain fees, and how many, from the main balance", () => {
+  it("states the whole cost, gas included, and the amount to keep available", () => {
     const view = viewOf(binding(), READY, [], formatUnits);
     expect(EXIT_CHAIN_FEE_COUNT).toBe(3);
-    expect(view.feeLine).toContain("3 network fees");
-    expect(flatten(view.feeLine)).toContain(
+    const line = flatten(view.feeLine);
+    expect(line).toContain("3 transactions");
+    // The sentence used to say "3 network fees" and name no amount at all. On
+    // a measured exit that understated the charge tenfold, because a registry
+    // call is a contract call and the chain reserves its whole gas budget from
+    // the main balance before running it. Every one of those numbers now has
+    // to be on the screen.
+    expect(line).toContain("10000 HAC");
+    expect(line).toContain("1000 HAC of network fee");
+    expect(line).toContain("9000 HAC");
+    expect(line).toContain("Keep 30000 HAC available");
+    expect(line).toContain(
+      "it has to be there or the first transaction cannot run",
+    );
+    expect(line).toContain(
       "spent whether or not the provider ever comes back",
     );
+  });
+
+  it("does not describe an exit that is already running as one about to start", () => {
+    const fresh = viewOf(binding(), READY, [], formatUnits);
+    expect(fresh.alreadyStarted).toBe(false);
+    expect(fresh.startLabelKind).toBe("start");
+    expect(fresh.progressSoFarLine).toBe("");
+    expect(fresh.windowLine).toContain("Once you start");
+
+    const resumed = viewOf(binding(), RESUMING, [], formatUnits);
+    expect(resumed.alreadyStarted).toBe(true);
+    expect(resumed.startLabelKind).toBe("continue");
+    // The screen must say which steps have run, what they cost, and that the
+    // window may already be part gone. Saying "Once you start ... your
+    // provider has 12 blocks to object" to someone whose window closed
+    // yesterday is the failure this replaces.
+    const progress = flatten(resumed.progressSoFarLine);
+    expect(progress).toContain("already under way");
+    expect(progress).toContain("asking the chain to settle: done, in a block");
+    expect(progress).toContain(
+      "locking the result: sent to your fullnode, not yet in a block",
+    );
+    expect(progress).toContain("1000 HAC of network fees has been confirmed");
+    expect(progress).toContain("1000 HAC is on transactions this wallet signed");
+    expect(progress).toContain("You do not need to keep this app open");
+    expect(flatten(resumed.windowLine)).not.toContain("Once you start");
+    expect(flatten(resumed.windowLine)).toContain(
+      "some or all of that window may have passed already",
+    );
+  });
+
+  it("reports a press in the backend's own words, never a fixed sentence", () => {
+    const waiting = exitPressResultLine(
+      {
+        schema: "agent-hvm-registry-exit-progress/1",
+        outcome: "waiting",
+        step: null,
+        phase: null,
+        transaction_hash: null,
+        waiting_reason:
+          "this channel holds nothing for this wallet, so closing it would spend network fees to recover zero",
+        observed_height: 900,
+        channel_status: 2,
+        deadline_height: 0,
+        claimed_zhu: null,
+        bill_serial: 4,
+        network_fees_confirmed_zhu: 0,
+        network_fees_at_risk_zhu: 0,
+        steps: [],
+      },
+      formatUnits,
+    );
+    // The old screen printed "The exit has started" over exactly this answer.
+    expect(waiting).toContain("spend network fees to recover zero");
+    expect(waiting).not.toContain("The exit has started");
+    expect(waiting).toContain("Nothing is stuck and nothing is lost");
+
+    const done = exitPressResultLine(
+      {
+        schema: "agent-hvm-registry-exit-progress/1",
+        outcome: "complete",
+        step: null,
+        phase: null,
+        transaction_hash: null,
+        waiting_reason: null,
+        observed_height: 1_000,
+        channel_status: 4,
+        deadline_height: 900,
+        claimed_zhu: 5_000,
+        bill_serial: 4,
+        network_fees_confirmed_zhu: 3_000,
+        network_fees_at_risk_zhu: 0,
+        steps: [],
+      },
+      formatUnits,
+    );
+    expect(done).toContain("closed and settled");
+    expect(done).toContain("5000 HAC has been paid to your own address");
+    expect(done).toContain("3000 HAC of network fees is confirmed in a block");
+    expect(done).toContain("nothing is outstanding");
   });
 
   it("keeps the lease countdown a real number and never hides it", () => {
@@ -332,7 +456,13 @@ describe("the exit control is named once and warned about before the press", () 
     const warning = flatten(EXIT_WITHOUT_PROVIDER_WARNING);
     expect(warning).toContain("cannot be reopened without a new deposit");
     expect(warning).toContain("objection window");
-    expect(warning).toContain("fees are spent whether or not");
+    expect(warning).toContain("spent whether or not the provider ever comes back");
+    // It must not quote a fee count of its own. It did, and it was wrong: the
+    // real cost is network fees plus the gas the chain reserves for a contract
+    // call, which this sentence cannot check and `feeLine` can.
+    expect(warning).not.toContain("three network fees");
+    expect(warning).toContain("chain running costs");
+    expect(warning).toContain("in the exact amount named above this");
   });
 
   it("renders that warning on the Security page, never behind a disclosure", () => {

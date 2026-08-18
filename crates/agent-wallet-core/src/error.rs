@@ -208,6 +208,34 @@ pub enum AgentWalletError {
     OperationNotFound,
     #[error("operation cannot transition from its current state")]
     InvalidOperationState,
+    // The unilateral exit is the one path where a generic refusal is itself a
+    // harm. Every other failure on this rail has an ordinary remedy; this one
+    // is reached by an owner whose provider has vanished, on the screen that
+    // decides whether they get their deposit back, and the driver already
+    // knows precisely what is wrong - which step, which half of the lease,
+    // which block the window ends at, whether a fee was spent. Collapsing all
+    // of that into "operation cannot transition from its current state"
+    // spends the one window they have.
+    //
+    // So the driver's own sentence is carried verbatim. Everything that can
+    // reach here is written in this workspace for a person to read, and none
+    // of it carries a key, a nonce, a device identifier or any other secret:
+    // it is block heights, step names, serials and public transaction hashes.
+    #[error("{0}")]
+    RegistryExitRefused(String),
+    // A fullnode that will not answer, said in the fullnode's own words.
+    //
+    // Four unrelated conditions - no network at all, a tip a day old, a node
+    // thousands of blocks behind, and the network vanishing mid-exit with
+    // signed bytes already on the wire - all reached the owner as the single
+    // sentence "node or network rejected the operation". They have different
+    // remedies and only one of them is "check your internet".
+    //
+    // The node named here is the owner's own pinned fullnode, which the exit
+    // screen already quotes verbatim when a lease read fails, so its words are
+    // not new information being disclosed.
+    #[error("your fullnode did not answer, so nothing was signed and nothing new was sent: {0}")]
+    RegistryExitNodeUnavailable(String),
     #[error("integer arithmetic overflow")]
     IntegerOverflow,
     #[error("secure persistence failed")]

@@ -963,6 +963,166 @@ impl AgentTransactionSigner {
         safety_permit.checkpoint(false)?;
         Ok(signed_request)
     }
+
+    /// Sign the one exit transaction a durable record has already committed
+    /// to, and refuse anything else.
+    ///
+    /// # Why this is narrower than it looks
+    ///
+    /// The other four signers here each verify a transaction *intent* they
+    /// were handed. This one does not accept a transaction at all. It accepts
+    /// a kit, a plan and the wallet's own durable record of that step, and it
+    /// **builds** the bytes itself through
+    /// [`hacash_wallet_core::hvm_registry_exit::build_user_exit_transaction`],
+    /// which re-derives the canonical call source for the step and refuses any
+    /// plan whose call source is not that exact string. There is therefore no
+    /// caller-supplied transaction body for an attacker to smuggle anything
+    /// into: the only inputs that reach the chain are the binding, the bill,
+    /// the step, and three numbers the record already fixed.
+    ///
+    /// # What the key may not be used for
+    ///
+    /// * Any kit whose channel does not pay **this** address
+    ///   (`binding.left_address == self.address`). An exit kit is a bearer
+    ///   proof of entitlement, and this is the check that keeps a kit for
+    ///   somebody else's channel from being signed by this wallet's key.
+    /// * Any record that is not this kit's own channel incarnation.
+    /// * Any step the record does not currently permit signing for. The
+    ///   authority is [`resume_action`]'s own `may_sign`, read here as well as
+    ///   in the driver: two independent readers of the same durable phase, so
+    ///   a driver bug alone cannot produce a second signature for a step whose
+    ///   bytes already exist.
+    /// * Any fee above the per-transaction channel ceiling, or a zero fee, a
+    ///   zero gas ceiling or a zero timestamp. The record is authenticated,
+    ///   but it is authenticated by this wallet, and a wallet that wrote a
+    ///   nonsense fee should not then spend it.
+    /// * A claim payout aimed anywhere but this address. The contract pins the
+    ///   destination too; this is the same refusal one layer earlier, where it
+    ///   costs nothing.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub(crate) fn sign_exact_registry_exit(
+        &self,
+        request: AgentRegistryExitSigningRequest<'_>,
+        safety_permit: &AgentSafetyPermit,
+        now: u64,
+    ) -> AgentWalletResult<
+        l2_fast_pay_hub::hvm_registry_watchtower::SignedHvmRegistryCallTransactionV2,
+    > {
+        use hacash_wallet_core::hvm_registry_exit::HvmRegistryExitPlanV1;
+
+        safety_permit.checkpoint(false)?;
+        if request.wallet_scope != &self.wallet_scope
+            || request.network_mode != self.network_mode
+            || request.signer_epoch != self.signer_epoch
+            || now >= self.unlock_expires_at
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+
+        let kit = request.kit;
+        let record = request.record;
+        let binding = &kit.binding;
+        // The channel this key is being asked to walk out of has to be this
+        // wallet's own, and the money has to land here.
+        if binding.left_address != self.address || binding.right_hub_address == self.address {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        let binding_commitment = binding
+            .commitment()
+            .map_err(|_| AgentWalletError::SigningBlocked)?;
+        if binding_commitment != request.binding_commitment
+            || record.binding_commitment != binding_commitment
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+
+        // The record's own phase decides whether the key may be used at all.
+        if !hacash_wallet_core::hvm_registry_exit_record::resume_action(record).may_sign() {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        if record.network_fee_zhu == 0
+            || record.network_fee_zhu > l2_fast_pay_hub::l1_channel::MAX_CHANNEL_NETWORK_FEE_ZHU
+            || record.gas_max == 0
+            || record.transaction_timestamp == 0
+        {
+            return Err(AgentWalletError::ApprovalCommitmentMismatch);
+        }
+
+        // The plan and the record must be the same step, with the same call
+        // source. `build_user_exit_transaction` re-derives that source from
+        // the binding and refuses a plan that does not match it, so agreeing
+        // here means all three agree.
+        match request.plan {
+            HvmRegistryExitPlanV1::Wait { .. } => {
+                return Err(AgentWalletError::SigningBlocked);
+            }
+            HvmRegistryExitPlanV1::Call { step, call_source } => {
+                if record.step != *step
+                    || &record.call_source != call_source
+                    || record.claim_payee.is_some()
+                    || record.claim_amount_zhu.is_some()
+                {
+                    return Err(AgentWalletError::ApprovalCommitmentMismatch);
+                }
+            }
+            HvmRegistryExitPlanV1::Claim {
+                payee,
+                amount_zhu,
+                call_source,
+            } => {
+                if record.step != hacash_wallet_core::hvm_registry_exit::HvmRegistryExitStep::Claim
+                    || &record.call_source != call_source
+                    || payee != &self.address
+                    || record.claim_payee.as_deref() != Some(self.address.as_str())
+                    || record.claim_amount_zhu != Some(*amount_zhu)
+                    || *amount_zhu == 0
+                {
+                    return Err(AgentWalletError::ApprovalCommitmentMismatch);
+                }
+            }
+        }
+
+        safety_permit.checkpoint(false)?;
+        let encoded = Zeroizing::new(hex::encode(self.secret_key.as_slice()));
+        let account = WalletAccount::from_secret_hex(&encoded)
+            .map_err(|_| AgentWalletError::SigningBlocked)?;
+        if account.address() != self.address {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        let signed = hacash_wallet_core::hvm_registry_exit::build_user_exit_transaction(
+            account.inner(),
+            kit,
+            request.plan,
+            record.network_fee_zhu,
+            record.transaction_timestamp,
+            record.gas_max,
+        )
+        .map_err(|_| AgentWalletError::SigningBlocked)?;
+        if signed.transaction_hash.len() != 64 || signed.signed_transaction_hex.is_empty() {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        safety_permit.checkpoint(false)?;
+        Ok(signed)
+    }
+}
+
+/// Everything the exit signer is allowed to be told, and nothing it is allowed
+/// to be told twice.
+///
+/// Deliberately all borrowed and all read-only: the kit and the record come
+/// out of authenticated wallet state, the plan comes out of the chain, and
+/// this struct exists so a caller cannot substitute one of the three for a
+/// value of its own choosing without it being visible at the call site.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub(crate) struct AgentRegistryExitSigningRequest<'a> {
+    pub(crate) wallet_scope: &'a WalletScope,
+    pub(crate) network_mode: &'a str,
+    pub(crate) signer_epoch: u64,
+    pub(crate) binding_commitment: &'a str,
+    pub(crate) kit: &'a hacash_wallet_core::hvm_registry_exit::HvmRegistryExitKitV1,
+    pub(crate) plan: &'a hacash_wallet_core::hvm_registry_exit::HvmRegistryExitPlanV1,
+    pub(crate) record:
+        &'a hacash_wallet_core::hvm_registry_exit_record::PersistedHvmRegistryExitStepV1,
 }
 
 #[cfg(feature = "agent-wallet-testnet-pilot")]

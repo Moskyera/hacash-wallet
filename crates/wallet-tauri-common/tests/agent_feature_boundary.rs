@@ -60,8 +60,13 @@ fn agent_core_is_optional_and_the_admin_surface_is_feature_gated() {
     ]);
     assert_eq!(actual_dependencies, expected_dependencies);
     let target_guard = "not(any(target_os = \"android\", target_os = \"ios\"))";
-    assert_eq!(library.matches(target_guard).count(), 5);
+    // Six, not five: `agent_registry_exit` is the desktop-only view of a
+    // fullnode that the unilateral exit driver reads a channel through. It is
+    // guarded twice over - by this target guard and by the pilot feature -
+    // because a phone has no Agent Wallet to exit a channel for.
+    assert_eq!(library.matches(target_guard).count(), 6);
     assert!(library.contains("pub mod agent_commands;"));
+    assert!(library.contains("pub mod agent_registry_exit;"));
     assert!(library.contains("pub mod agent_runtime;"));
     assert!(library.contains("pub mod companion_backend;"));
     assert!(library.contains("pub mod companion_runtime;"));

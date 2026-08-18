@@ -308,6 +308,535 @@ impl AgentHvmRegistryBinding {
     }
 }
 
+/// What one press of the exit control did, in the words a screen can render.
+///
+/// # Why this is a record rather than a sentence
+///
+/// The exit is not one action. It is four or five transactions spread across
+/// an objection window measured in blocks, and for most of that window the
+/// correct thing to display is "nothing is happening yet, and here is the
+/// block at which something will". A command that returned only success or
+/// failure would force the screen to invent that sentence, and a screen that
+/// invents progress is exactly how a person ends up believing an exit is
+/// running when it stalled two hours ago.
+///
+/// So every field here is either read from the chain this pass or read from
+/// the wallet's own durable record. Nothing is estimated.
+///
+/// # The two money numbers are deliberately different
+///
+/// `network_fees_confirmed_zhu` is what the chain has definitely taken:
+/// transactions of this wallet's that are in a block. `network_fees_at_risk_zhu`
+/// is what may additionally have been spent — bytes this wallet signed that a
+/// node may be holding right now, or may have mined without this wallet
+/// noticing yet. Collapsing the two into one "spent" figure would have to
+/// round in some direction, and both directions are a lie on the screen a
+/// person reads while deciding whether to press again.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHvmRegistryExitProgress {
+    pub schema: String,
+    /// `waiting`, `stepped` or `complete`.
+    pub outcome: String,
+    /// The step this pass acted on, as its durable slug. Absent while waiting.
+    pub step: Option<String>,
+    /// Where that step's durable record now stands.
+    pub phase: Option<String>,
+    pub transaction_hash: Option<String>,
+    /// What the exit is waiting for, in the chain's own terms.
+    pub waiting_reason: Option<String>,
+    pub observed_height: Option<u64>,
+    pub channel_status: Option<u8>,
+    pub deadline_height: Option<u64>,
+    /// Set only once the channel is settled and this wallet has been paid.
+    pub claimed_zhu: Option<u64>,
+    /// The serial of the receipt this exit is being driven with.
+    pub bill_serial: u64,
+    pub network_fees_confirmed_zhu: u64,
+    pub network_fees_at_risk_zhu: u64,
+    pub steps: Vec<AgentHvmRegistryExitStepProgress>,
+}
+
+/// One durable exit step, flattened for a surface.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHvmRegistryExitStepProgress {
+    pub step: String,
+    pub attempt: u32,
+    pub phase: String,
+    pub network_fee_zhu: u64,
+    pub transaction_hash: Option<String>,
+    pub confirmed_block_height: Option<u64>,
+    pub updated_unix: u64,
+}
+
+/// The fee one exit transaction is allowed to carry.
+///
+/// One number, used by the driver and shown on screen, because a ceiling an
+/// owner was told and a fee the wallet actually spends that differ by even one
+/// zhu make the screen a lie. It is the same per-transaction channel ceiling
+/// the cooperative close is bound by, so an exit cannot cost more per
+/// transaction than the ordinary path it replaces.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub const AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU: u64 =
+    l2_fast_pay_hub::l1_channel::MAX_CHANNEL_NETWORK_FEE_ZHU;
+
+/// The gas ceiling for one exit transaction.
+///
+/// The maximum the byte-encoded budget can express. A registry call that runs
+/// out of gas is a fee spent for nothing and a step that has to be signed
+/// again at a new timestamp, which is strictly worse than a slightly larger
+/// ceiling: the ceiling is a maximum, not a price.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub const AGENT_REGISTRY_EXIT_GAS_MAX: u8 = u8::MAX;
+
+/// Unit-238 amounts per zhu.
+///
+/// The chain prices gas in unit-238 and this workspace quotes money in zhu.
+/// `protocol/src/params.rs` records the conversion in its own words: "50000:238
+/// == 100:244 == 0.000005 HAC per byte", and one zhu is 1e-8 HAC, so one zhu is
+/// a hundred unit-238.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const UNIT238_PER_ZHU: u64 = 100;
+
+/// The gas budget the chain actually grants one exit transaction.
+///
+/// `decode_gas_budget(gas_max_byte.min(TX_GAS_BUDGET_CAP_BYTE))` in
+/// `hacash-fullnodedev/protocol/src/transaction/type3.rs`, with
+/// `TX_GAS_BUDGET_CAP_BYTE = 99` and `decode_gas_budget(99) == 111911`. Asking
+/// for [`AGENT_REGISTRY_EXIT_GAS_MAX`] does not raise it: the chain clamps.
+///
+/// It is quoted here because it is what an owner has to be able to *hold*, not
+/// what they end up spending. `Context::gas_initialize`
+/// (`protocol/src/context/gas.rs`) computes the whole budget's worth of burn
+/// and takes it out of the sender's main balance with `hac_sub` before the
+/// call runs, refunding the unused part in `gas_refund`. A balance that cannot
+/// cover the reserve fails the transaction outright.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub const AGENT_REGISTRY_EXIT_GAS_BUDGET: u64 = 111_911;
+
+/// The chain's own floor on fee purity, in unit-238 per billing byte.
+/// `VM_LOWEST_FEE_PURITY` in `hacash-fullnodedev/protocol/src/params.rs`.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub const AGENT_VM_LOWEST_FEE_PURITY_UNIT238: u64 = 50_000;
+
+/// The smallest an exit transaction gets, in billing bytes.
+///
+/// The gas reserve is `budget * fee / billing_size`, so a *smaller*
+/// transaction reserves *more*. Quoting a requirement therefore needs a lower
+/// bound on the size, and this is one: the three transactions of a measured
+/// exit encode to 187, 421, 210 and 209 bytes
+/// (`the_managers_own_exit_drive_pays_the_owner_on_chain_with_the_hub_dead`
+/// prints them), the smallest being a lease renewal, and that same proof
+/// asserts none is ever smaller than this. Rounded down from the measurement
+/// on purpose, because being wrong in this direction over-states what the
+/// owner needs to hold rather than under-states it, and only the second kind
+/// sends someone into an irreversible press they cannot afford to finish.
+///
+/// The first value tried here was 192, taken from a run that happened not to
+/// need a renewal. The guard in that proof failed on the very next run at 187
+/// bytes, which is the whole reason it is a guard and not a comment.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub const AGENT_REGISTRY_EXIT_MIN_BILLING_BYTES: u64 = 160;
+
+/// What the chain takes out of the owner's main balance before one exit
+/// transaction runs, over and above the network fee.
+///
+/// # Why this exists
+///
+/// The exit screen used to quote three network fees and nothing else: 3,000,000
+/// zhu for the whole exit. A measured exit on a real chain charged 30,682,605
+/// zhu, and the amount the owner had to *hold* while it ran was larger still,
+/// because the gas budget is reserved in full and refunded afterwards. Neither
+/// number was anywhere on the screen, and the affordability precondition went
+/// green at a balance that could not pay for the first transaction.
+///
+/// Mirrors `GasCounter::calc_burn_amount`: `ceil(budget * purity_fee /
+/// purity_size)` with `purity_fee = max(raw_fee, floor * size)`, evaluated at
+/// the smallest size an exit transaction is known to take.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub const fn agent_registry_exit_gas_reserve_zhu() -> u64 {
+    let size = AGENT_REGISTRY_EXIT_MIN_BILLING_BYTES;
+    let raw_fee_238 = AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU * UNIT238_PER_ZHU;
+    let floor_fee_238 = AGENT_VM_LOWEST_FEE_PURITY_UNIT238 * size;
+    let purity_fee_238 = if raw_fee_238 > floor_fee_238 {
+        raw_fee_238
+    } else {
+        floor_fee_238
+    };
+    let reserve_238 = AGENT_REGISTRY_EXIT_GAS_BUDGET
+        .saturating_mul(purity_fee_238)
+        .div_ceil(size);
+    reserve_238.div_ceil(UNIT238_PER_ZHU)
+}
+
+/// Everything one exit transaction can take from the owner's main balance:
+/// the network fee, plus the gas the chain reserves before it runs.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub const fn agent_registry_exit_transaction_ceiling_zhu() -> u64 {
+    AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU.saturating_add(agent_registry_exit_gas_reserve_zhu())
+}
+
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const AGENT_HVM_REGISTRY_EXIT_PROGRESS_SCHEMA: &str = "agent-hvm-registry-exit-progress/1";
+
+/// The wallet's own key, handed to the shipped driver under the durable
+/// record's terms and never under its own.
+///
+/// This adapter holds no authority. Every refusal it can produce belongs to
+/// [`crate::signer::AgentTransactionSigner::sign_exact_registry_exit`]; what
+/// lives here is only the binding of that method to the trait
+/// `hacash_wallet_core::hvm_registry_exit_driver` calls through, plus the
+/// live safety permit so an emergency stop raised mid-exit stops the next
+/// signature rather than the next screen refresh.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+struct AgentRegistryExitSigner<'a> {
+    signer: &'a crate::signer::AgentTransactionSigner,
+    permit: &'a crate::emergency::AgentSafetyPermit,
+    wallet_scope: crate::types::WalletScope,
+    network_mode: String,
+    signer_epoch: u64,
+    binding_commitment: String,
+    now: u64,
+}
+
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+impl hacash_wallet_core::hvm_registry_exit_driver::HvmRegistryExitSignerV1
+    for AgentRegistryExitSigner<'_>
+{
+    fn sign_exit_step(
+        &self,
+        kit: &hacash_wallet_core::hvm_registry_exit::HvmRegistryExitKitV1,
+        plan: &hacash_wallet_core::hvm_registry_exit::HvmRegistryExitPlanV1,
+        record: &hacash_wallet_core::hvm_registry_exit_record::PersistedHvmRegistryExitStepV1,
+    ) -> hacash_wallet_core::WalletResult<
+        l2_fast_pay_hub::hvm_registry_watchtower::SignedHvmRegistryCallTransactionV2,
+    > {
+        self.signer
+            .sign_exact_registry_exit(
+                crate::signer::AgentRegistryExitSigningRequest {
+                    wallet_scope: &self.wallet_scope,
+                    network_mode: &self.network_mode,
+                    signer_epoch: self.signer_epoch,
+                    binding_commitment: &self.binding_commitment,
+                    kit,
+                    plan,
+                    record,
+                },
+                self.permit,
+                self.now,
+            )
+            .map_err(|error| {
+                hacash_wallet_core::WalletError::Policy(format!(
+                    "this wallet refused to sign the exit step: {error}"
+                ))
+            })
+    }
+}
+
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+impl AgentWalletManager {
+    /// Make at most one unit of progress on this wallet's unilateral exit, and
+    /// say truthfully what happened.
+    ///
+    /// This is the production caller of
+    /// [`hacash_wallet_core::hvm_registry_exit_driver::advance_registry_exit`].
+    /// Until it existed, that driver's only caller in the entire tree was a
+    /// test, and this workspace has shipped a mechanism in that shape twice.
+    ///
+    /// # What the caller may not supply
+    ///
+    /// Not the binding, not the bill, not the fee and not the gas ceiling. The
+    /// kit comes from [`Self::hvm_registry_exit_kit`], which reads the
+    /// verified binding and the verified head bill out of this wallet's own
+    /// encrypted state; the terms are constants above. The only thing a caller
+    /// hands in is a view of a chain, and the trait it must satisfy has four
+    /// read-or-submit methods a bare fullnode can answer with the provider's
+    /// process deleted.
+    ///
+    /// # Pressing again after a crash
+    ///
+    /// Continues; it does not restart. The driver plans from the chain and
+    /// then asks the durable record what may be done about that plan through
+    /// `begin_or_resume_exit_step`, and honours that verdict: bytes that
+    /// already exist are looked up on chain and re-submitted rather than
+    /// re-signed, and a step whose signer was entered before the process died
+    /// is re-signed at the record's own timestamp, which is byte-identical.
+    pub async fn advance_hvm_registry_exit<C>(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        chain: &C,
+        now: u64,
+    ) -> AgentWalletResult<AgentHvmRegistryExitProgress>
+    where
+        C: hacash_wallet_core::hvm_registry_exit_driver::HvmRegistryExitChainV1,
+    {
+        self.ensure_session_active(wallet_id, now)?;
+        let (state_master, journal_key) = {
+            let session = self.session(wallet_id)?;
+            (
+                zeroize::Zeroizing::new(*session.state_master),
+                zeroize::Zeroizing::new(*session.journal_key),
+            )
+        };
+        let state = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        let binding = state
+            .hvm_registry_binding
+            .as_ref()
+            .ok_or(AgentWalletError::OperationNotFound)?;
+        if binding.wallet_id() != wallet_id || binding.network_mode != state.network_mode {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+
+        // The exit spends the owner's own fee and is irreversible, so it is
+        // held to the same interlock every other signing path here is: a
+        // permit taken before the key is reachable and re-checked inside the
+        // signer on every step.
+        //
+        // # Why `false` rather than `state.payments_suspended`
+        //
+        // The suspension flag disables *agent* spending, and it is `true` by
+        // default: a wallet is required to have payments suspended at the
+        // moment it adopts a registry channel. Passing it here would mean a
+        // channel adopted and never enabled could never be exited, and that an
+        // owner who paused their agents because they suspected something was
+        // wrong had thereby locked themselves out of the one control that
+        // recovers their principal. That is the exact trap this whole screen
+        // exists to prevent.
+        //
+        // Nothing is loosened by this. `AgentEmergencyController::status`
+        // reads `stopped` from three sources, and only one of them is the
+        // state flag: a real Pause All Agents raises the durable marker and
+        // the in-process request, both of which still refuse here, and a
+        // generation change between the permit and the signature still refuses
+        // at the checkpoint inside the signer. What this argument controls is
+        // solely whether the default-disabled *payment* posture blocks the
+        // owner from recovering their own deposit, and the exit cannot pay
+        // anyone but `binding.left_address` — this wallet's own address —
+        // which the signer refuses to sign without.
+        let permit = self
+            .emergency_controller(wallet_id)?
+            .issue_safety_permit(false)?;
+        permit.checkpoint(false)?;
+
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let bill_serial = kit.latest_bill.serial;
+        let (binding_commitment, mut store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        let session = self.session(wallet_id)?;
+        let exit_signer = AgentRegistryExitSigner {
+            signer: &session.signer,
+            permit: &permit,
+            wallet_scope: session.signer.wallet_scope().clone(),
+            network_mode: state.network_mode.clone(),
+            signer_epoch: state.signer_epoch,
+            binding_commitment: binding_commitment.clone(),
+            now,
+        };
+        let terms = hacash_wallet_core::hvm_registry_exit_driver::HvmRegistryExitTermsV1 {
+            network_fee_zhu: AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU,
+            gas_max: AGENT_REGISTRY_EXIT_GAS_MAX,
+        };
+        let progress = hacash_wallet_core::hvm_registry_exit_driver::advance_registry_exit(
+            &mut store,
+            &kit,
+            chain,
+            &exit_signer,
+            terms,
+        )
+        .await
+        .map_err(classify_exit_drive_error)?;
+        permit.checkpoint(false)?;
+
+        let records = store.exit_step_records(&binding_commitment);
+        Ok(exit_progress_report(&progress, bill_serial, &records))
+    }
+}
+
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+impl AgentWalletManager {
+    /// What this wallet's durable record already says about an exit, without
+    /// touching a chain, a Hub or a key.
+    ///
+    /// # Why a screen needs this before anything is pressed
+    ///
+    /// An exit outlives the app. Most of one is an objection window measured
+    /// in blocks, so the ordinary case is an owner who started an exit, closed
+    /// the laptop, and came back. Until this existed the status object carried
+    /// nothing about that, so the screen greeted them with "Once you start,
+    /// your provider has N blocks to object" when the window might be half
+    /// gone or already closed, offered a control labelled as a beginning, and
+    /// said "The exit has started" all over again on the next press.
+    ///
+    /// The record was there the whole time; nothing read it. This reads it.
+    /// An empty answer means no step of an exit has ever been opened for this
+    /// channel, which is exactly the case where "once you start" is true.
+    pub fn hvm_registry_exit_steps(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Vec<AgentHvmRegistryExitStepProgress>> {
+        self.ensure_session_active(wallet_id, now)?;
+        let (binding_commitment, store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        Ok(store
+            .exit_step_records(&binding_commitment)
+            .into_iter()
+            .map(|record| AgentHvmRegistryExitStepProgress {
+                step: record.step.slug().to_owned(),
+                attempt: record.attempt,
+                phase: exit_phase_slug(record.phase).to_owned(),
+                network_fee_zhu: record.network_fee_zhu,
+                transaction_hash: record.transaction_hash.clone(),
+                confirmed_block_height: record.confirmed_block_height,
+                updated_unix: record.updated_unix,
+            })
+            .collect())
+    }
+}
+
+/// Turn one driver verdict plus the durable record into the object a screen
+/// renders. Split out so it can be tested without a chain.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn exit_progress_report(
+    progress: &hacash_wallet_core::hvm_registry_exit_driver::HvmRegistryExitProgressV1,
+    bill_serial: u64,
+    records: &[hacash_wallet_core::hvm_registry_exit_record::PersistedHvmRegistryExitStepV1],
+) -> AgentHvmRegistryExitProgress {
+    use hacash_wallet_core::hvm_registry_exit_driver::HvmRegistryExitProgressV1 as Progress;
+    use hacash_wallet_core::hvm_registry_exit_record::HvmRegistryExitPhase as Phase;
+
+    let mut report = AgentHvmRegistryExitProgress {
+        schema: AGENT_HVM_REGISTRY_EXIT_PROGRESS_SCHEMA.to_owned(),
+        outcome: String::new(),
+        step: None,
+        phase: None,
+        transaction_hash: None,
+        waiting_reason: None,
+        observed_height: None,
+        channel_status: None,
+        deadline_height: None,
+        claimed_zhu: None,
+        bill_serial,
+        network_fees_confirmed_zhu: 0,
+        network_fees_at_risk_zhu: 0,
+        steps: Vec::new(),
+    };
+    match progress {
+        Progress::Waiting {
+            reason,
+            observed_height,
+            status,
+            deadline,
+        } => {
+            report.outcome = "waiting".to_owned();
+            report.waiting_reason = Some(reason.clone());
+            report.observed_height = Some(*observed_height);
+            report.channel_status = Some(*status);
+            report.deadline_height = Some(*deadline);
+        }
+        Progress::Stepped {
+            step,
+            transaction_hash,
+            phase,
+        } => {
+            report.outcome = "stepped".to_owned();
+            report.step = Some(step.slug().to_owned());
+            report.transaction_hash = Some(transaction_hash.clone());
+            report.phase = Some(exit_phase_slug(*phase).to_owned());
+        }
+        Progress::Complete { claimed_zhu } => {
+            report.outcome = "complete".to_owned();
+            report.claimed_zhu = Some(*claimed_zhu);
+        }
+    }
+    for record in records {
+        match record.phase {
+            Phase::Confirmed => {
+                report.network_fees_confirmed_zhu = report
+                    .network_fees_confirmed_zhu
+                    .saturating_add(record.network_fee_zhu);
+            }
+            // Bytes exist, or may exist, and a node may already hold them.
+            // Nothing here has been observed in a block, so it is not
+            // reported as spent; it is reported as at risk of being spent,
+            // which is the truth.
+            Phase::SignatureMayExist | Phase::Signed | Phase::Submitted => {
+                report.network_fees_at_risk_zhu = report
+                    .network_fees_at_risk_zhu
+                    .saturating_add(record.network_fee_zhu);
+            }
+            // A step somebody else paid for cost this wallet nothing, and a
+            // bare intent has never touched the key.
+            Phase::SettledElsewhere | Phase::IntentPersisted => {}
+        }
+        report.steps.push(AgentHvmRegistryExitStepProgress {
+            step: record.step.slug().to_owned(),
+            attempt: record.attempt,
+            phase: exit_phase_slug(record.phase).to_owned(),
+            network_fee_zhu: record.network_fee_zhu,
+            transaction_hash: record.transaction_hash.clone(),
+            confirmed_block_height: record.confirmed_block_height,
+            updated_unix: record.updated_unix,
+        });
+    }
+    report
+}
+
+/// Stable lowercase names for the durable phases, for the same reason
+/// `HvmRegistryExitStep::slug` exists: a screen and a support conversation
+/// must not depend on a `Debug` rendering that a rename can move.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn exit_phase_slug(
+    phase: hacash_wallet_core::hvm_registry_exit_record::HvmRegistryExitPhase,
+) -> &'static str {
+    use hacash_wallet_core::hvm_registry_exit_record::HvmRegistryExitPhase as Phase;
+    match phase {
+        Phase::IntentPersisted => "intent_persisted",
+        Phase::SignatureMayExist => "signature_may_exist",
+        Phase::Signed => "signed",
+        Phase::Submitted => "submitted",
+        Phase::Confirmed => "confirmed",
+        Phase::SettledElsewhere => "settled_elsewhere",
+    }
+}
+
+/// Route a failure from one pass of the driver.
+///
+/// The driver mixes two unrelated kinds of failure and they need opposite
+/// answers on screen. A fullnode that will not answer is a network problem an
+/// owner fixes by reconnecting; a durable record that refuses is a state
+/// problem, and telling someone to check their internet when their record is
+/// blocked wastes the one window they have.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn classify_exit_drive_error(error: hacash_wallet_core::WalletError) -> AgentWalletError {
+    let message = error.to_string();
+    if message.contains(hacash_wallet_core::hvm_registry_exit_record::REFUSAL_EXIT_STEP_BLOCKED)
+        || message
+            .contains(hacash_wallet_core::hvm_registry_exit_record::REFUSAL_EXIT_RECORD_INVALID)
+    {
+        return classify_exit_record_error(error);
+    }
+    match error {
+        // The node's own words, not a category. See
+        // `AgentWalletError::RegistryExitNodeUnavailable`.
+        hacash_wallet_core::WalletError::Node(_)
+        | hacash_wallet_core::WalletError::NodeHttpStatus { .. }
+        | hacash_wallet_core::WalletError::L2(_) => {
+            AgentWalletError::RegistryExitNodeUnavailable(message)
+        }
+        // Everything the planner and the driver refuse for is already a
+        // sentence written for the owner: an objection window whose lease
+        // floor this chain can never grant, a renewal that is not taking
+        // effect, a channel that holds nothing, a response window too short to
+        // answer safely. Carry it rather than replacing it with a category.
+        hacash_wallet_core::WalletError::Policy(_) => {
+            AgentWalletError::RegistryExitRefused(message)
+        }
+        other => classify_exit_record_error(other),
+    }
+}
+
 /// Route a durable-exit refusal to the variant whose remedy is the right one.
 ///
 /// The two failures below have opposite answers and must never be collapsed.
@@ -793,6 +1322,12 @@ impl AgentWalletManager {
         Ok(candidate)
     }
 }
+
+/// The manager's own exit drive, against a real deployed contract in real
+/// blocks with the Hub killed. Behind its own feature because it needs the
+/// Hub crate's registry deployment builders in the graph.
+#[cfg(all(test, feature = "on-chain-exit-proof"))]
+mod exit_on_chain_tests;
 
 #[cfg(test)]
 mod tests {

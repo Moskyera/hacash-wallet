@@ -67,6 +67,14 @@ pub use companion::{
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 pub use companion::{StrandedWitnessRecovery, WitnessRotationControls};
 pub use hvm::AgentHvmChannelBinding;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use hvm_registry::{
+    AGENT_REGISTRY_EXIT_GAS_BUDGET, AGENT_REGISTRY_EXIT_GAS_MAX,
+    AGENT_REGISTRY_EXIT_MIN_BILLING_BYTES, AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU,
+    AGENT_VM_LOWEST_FEE_PURITY_UNIT238, AgentHvmRegistryExitProgress,
+    AgentHvmRegistryExitStepProgress, agent_registry_exit_gas_reserve_zhu,
+    agent_registry_exit_transaction_ceiling_zhu,
+};
 pub use hvm_registry::{AgentHvmRegistryBinding, AgentHvmRegistryExitHead};
 use l2::{AgentChannelCloseOperation, AgentChannelSetupOperation};
 pub use l2::{

@@ -50,6 +50,14 @@ pub use service::{
     AgentWalletBackupAcknowledgement, AgentWalletBackupFile, AgentWalletBackupMetadata,
     AgentWalletBackupPreview, AgentWalletBackupWarning, AgentWalletRestoreOutcome,
 };
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use service::{
+    AGENT_REGISTRY_EXIT_GAS_BUDGET, AGENT_REGISTRY_EXIT_GAS_MAX,
+    AGENT_REGISTRY_EXIT_MIN_BILLING_BYTES, AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU,
+    AGENT_VM_LOWEST_FEE_PURITY_UNIT238, AgentHvmRegistryExitProgress,
+    AgentHvmRegistryExitStepProgress, StrandedWitnessRecovery, WitnessRotationControls,
+    agent_registry_exit_gas_reserve_zhu, agent_registry_exit_transaction_ceiling_zhu,
+};
 pub use service::{
     AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
     AgentChannelSetupReview, AgentCompanionPairingAttempt, AgentCompletedCompanionPairing,
@@ -58,6 +66,4 @@ pub use service::{
     MAX_PAIRING_REQUEST_ATTEMPTS, UnlockedAgentWalletStatus,
     WITNESS_PENDING_OPERATION_STATUS_NAMES,
 };
-#[cfg(feature = "agent-wallet-testnet-pilot")]
-pub use service::{StrandedWitnessRecovery, WitnessRotationControls};
 pub use types::{AgentId, AgentWalletId, OperationId, WalletScope};

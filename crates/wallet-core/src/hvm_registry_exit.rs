@@ -189,6 +189,22 @@ pub fn exit_lease_floor_blocks(binding: &HvmRegistryBindingV2) -> u64 {
         .saturating_add(HVM_REGISTRY_EXIT_LEASE_SLACK_BLOCKS)
 }
 
+/// The observed lease on whichever half a renewal step buys.
+///
+/// Paired with [`HvmRegistryExitStep::is_lease_renewal`] so a caller holding a
+/// renewal step and a snapshot can ask "did the last one work" without
+/// re-deciding which of the two halves it was.
+pub fn lease_blocks_for_step(
+    step: HvmRegistryExitStep,
+    snapshot: &HvmRegistryLiveSnapshotV2,
+) -> Option<u64> {
+    match step {
+        HvmRegistryExitStep::RenewRegistryLease => Some(registry_lease_blocks(snapshot)),
+        HvmRegistryExitStep::RenewChannelLease => Some(channel_lease_blocks(snapshot)),
+        _ => None,
+    }
+}
+
 /// Live blocks left on the six **shared** registry globals.
 ///
 /// Separate from the channel's own twelve because the two halves are renewed
@@ -279,6 +295,26 @@ pub fn plan_user_exit_step(
     // lapse, every channel in the deployment becomes unreachable, not just
     // this one.
     let floor = exit_lease_floor_blocks(binding);
+    // A floor above the chain's own ceiling is a floor no renewal can ever
+    // reach, and the rule below answers a short lease by renewing. Together
+    // that is an unbounded fee drain: every press buys another renewal, the
+    // lease never reaches the floor, and the exit never starts. Measured at
+    // roughly 234,000,000 zhu a press against a 5,000,000,000 zhu deposit.
+    //
+    // `HvmRegistryBindingV2::validate` now refuses such a binding outright, so
+    // this is unreachable through adoption. It is still checked here because
+    // `validate` is a rule about new bindings and this is the function that
+    // spends money, and because refusing for free is the only honest answer
+    // when the two ever disagree.
+    if floor > l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS {
+        return Err(WalletError::Policy(format!(
+            "this channel's objection window is {} blocks, so an exit would need {floor} blocks of \
+             storage lease and this chain never grants a key more than {}; no number of renewals \
+             can reach it, so nothing here will spend a fee trying",
+            binding.challenge_blocks,
+            l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS
+        )));
+    }
     if registry_lease_blocks(snapshot) < floor {
         return Ok(HvmRegistryExitPlanV1::Call {
             step: HvmRegistryExitStep::RenewRegistryLease,
@@ -533,4 +569,67 @@ fn registry_wait_reason(
 
 fn hub_error(error: l2_fast_pay_hub::error::HubError) -> WalletError {
     WalletError::L2(error.to_string())
+}
+
+#[cfg(test)]
+mod exit_lease_bound_tests {
+    use super::*;
+    use l2_fast_pay_hub::hvm_registry::{
+        HPAY_REGISTRY_EXIT_LEASE_OVERHEAD_BLOCKS, HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS,
+        HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS,
+    };
+
+    /// The bound that decides which channels may be opened and the floor that
+    /// decides when an exit may start are two numbers in two crates, and they
+    /// have to be the same number.
+    ///
+    /// If the overhead here ever grows past the allowance the binding bound
+    /// reserves, a channel could be adopted whose exit floor is unreachable,
+    /// which is the exact drain this pair exists to close.
+    #[test]
+    fn the_exit_lease_floor_and_the_binding_bound_agree() {
+        assert_eq!(
+            HVM_REGISTRY_RESPONSE_MARGIN_BLOCKS + HVM_REGISTRY_EXIT_LEASE_SLACK_BLOCKS,
+            HPAY_REGISTRY_EXIT_LEASE_OVERHEAD_BLOCKS,
+            "the user-side exit reserves a different lease overhead than the binding bound \
+             allows for, so a channel the Hub crate accepts could have an exit floor no \
+             renewal can ever reach"
+        );
+        assert_eq!(
+            HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS + HPAY_REGISTRY_EXIT_LEASE_OVERHEAD_BLOCKS,
+            HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS,
+            "the largest admissible objection window must leave exactly the rest of the exit \
+             sequence inside the chain's live-block ceiling"
+        );
+    }
+
+    /// The widest channel the binding rules admit is still one the driver will
+    /// plan for rather than refuse, and one block wider is not.
+    #[test]
+    fn the_widest_admissible_window_has_a_reachable_floor() {
+        let mut binding = l2_fast_pay_hub::hvm_registry::HvmRegistryBindingV2 {
+            schema: String::new(),
+            settlement_profile: String::new(),
+            network_mode: "testnet".into(),
+            chain_id: 7,
+            network_instance_id: String::new(),
+            contract_address: String::new(),
+            deployment_tx_hash: String::new(),
+            deployment_height: 1,
+            bytecode_sha3: String::new(),
+            channel_id: String::new(),
+            reuse_version: 1,
+            left_address: String::new(),
+            right_hub_address: String::new(),
+            left_deposit_zhu: 1,
+            right_hub_deposit_zhu: 0,
+            challenge_blocks: HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS,
+        };
+        assert_eq!(
+            exit_lease_floor_blocks(&binding),
+            HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS
+        );
+        binding.challenge_blocks += 1;
+        assert!(exit_lease_floor_blocks(&binding) > HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS);
+    }
 }

@@ -59,8 +59,64 @@ export type AgentHvmRegistryExitStatus = {
   fullnode_reachable: boolean;
   /** Ordinary L1 balance available to pay the exit's network fees. */
   spendable_l1_zhu: number;
-  /** The reviewed ceiling for all three of them together. */
+  /**
+   * Everything the whole exit can take from the main balance: the network fee
+   * and the gas the chain reserves, for each of the transactions below.
+   *
+   * This used to be three network fees and nothing else, which understated a
+   * measured exit by a factor of ten and understated what the owner had to
+   * *hold* by considerably more. A registry call is an HVM contract call, and
+   * the chain takes the whole gas budget out of the main balance before the
+   * call runs, handing back what was not used.
+   */
   required_l1_fee_zhu: number;
+  /** How many chain transactions an ordinary exit sends. */
+  chain_transaction_count: number;
+  /** Fee plus gas reserve for one of them. */
+  per_transaction_ceiling_zhu: number;
+  /** The network fee half of that. */
+  per_transaction_network_fee_zhu: number;
+  /** The gas half: reserved before the call runs, mostly refunded after. */
+  per_transaction_gas_reserve_zhu: number;
+  /**
+   * Steps of an exit this wallet has already opened for this channel, from its
+   * own durable record. Empty means no exit has ever been started here, and
+   * that is the only case in which the screen may speak about starting one.
+   */
+  started_steps: readonly AgentHvmRegistryExitStepProgress[];
+};
+
+/** One step of an exit, as this wallet's durable record holds it. */
+export type AgentHvmRegistryExitStepProgress = {
+  step: string;
+  attempt: number;
+  phase: string;
+  network_fee_zhu: number;
+  transaction_hash: string | null;
+  confirmed_block_height: number | null;
+  updated_unix: number;
+};
+
+/** What one press of the exit control actually did. */
+export type AgentHvmRegistryExitProgress = {
+  schema: string;
+  /** "stepped", "waiting" or "complete". */
+  outcome: string;
+  step: string | null;
+  phase: string | null;
+  transaction_hash: string | null;
+  /** Why it stopped, naming the block it is waiting for. */
+  waiting_reason: string | null;
+  observed_height: number | null;
+  channel_status: number | null;
+  deadline_height: number | null;
+  claimed_zhu: number | null;
+  bill_serial: number;
+  /** Fees this wallet has watched land in a block. */
+  network_fees_confirmed_zhu: number;
+  /** Fees on bytes that exist and have not been seen in a block. */
+  network_fees_at_risk_zhu: number;
+  steps: readonly AgentHvmRegistryExitStepProgress[];
 };
 
 export type ExitPrecondition = {
@@ -88,6 +144,15 @@ export type RegistryExitView = {
   canStart: boolean;
   /** Why the start is withheld, or "" when it is offered. */
   startWithheldReason: string;
+  /** True when this wallet has already opened a step of this exit. */
+  alreadyStarted: boolean;
+  /**
+   * What the durable record says has happened so far, or "" before anything
+   * has. Never invented: every clause comes from a stored step.
+   */
+  progressSoFarLine: string;
+  /** What the control should say: a beginning, or a continuation. */
+  startLabelKind: "start" | "continue";
 };
 
 /** Payments that provably left this channel and can never be undone. */
@@ -141,6 +206,8 @@ export function registryExitView(
   const lease = status.lease_blocks_remaining;
   const recover = status.lease_recover_blocks_remaining;
 
+  const started = status.started_steps ?? [];
+  const alreadyStarted = started.length > 0;
   const feesAffordable = status.spendable_l1_zhu >= status.required_l1_fee_zhu;
   const preconditions: ExitPrecondition[] = [
     {
@@ -176,16 +243,32 @@ export function registryExitView(
       `${formatZhu(String(Math.min(deposit, spent)))} this wallet has recorded as already paid out of it. ` +
       "The exact figure is fixed by the newest receipt the provider co-signed, not by this sum, so treat " +
       "it as close rather than final.",
-    windowLine:
-      `Once you start, your provider has ${plural(windowBlocks, "block")} (about ${blocksAsHours(windowBlocks)}) ` +
-      "to object with a newer receipt. That is normal and it is how the chain decides which receipt is the " +
-      "true one. Your money arrives after that window closes, not before.",
+    windowLine: alreadyStarted
+      ? `Your provider has ${plural(windowBlocks, "block")} (about ${blocksAsHours(windowBlocks)}) from the moment ` +
+        "your first transaction was mined to object with a newer receipt. This exit is already under way, so " +
+        "some or all of that window may have passed already. Continuing below carries on from where it " +
+        "stopped and does not start it over."
+      : `Once you start, your provider has ${plural(windowBlocks, "block")} (about ${blocksAsHours(windowBlocks)}) ` +
+        "to object with a newer receipt. That is normal and it is how the chain decides which receipt is the " +
+        "true one. Your money arrives after that window closes, not before.",
+    // The fee sentence used to say "three network fees" and name no amount at
+    // all. A measured exit was charged ten times that, and what an owner has
+    // to be able to HOLD is larger again: a registry call is an HVM contract
+    // call, and the chain takes the whole gas budget out of the main balance
+    // before the call runs, handing back what was not used. So the reserve is
+    // quoted, because the reserve is what decides whether the first
+    // transaction can execute at all.
     feeLine:
-      `This costs ${plural(EXIT_CHAIN_FEE_COUNT, "network fee")} from your main balance, one for each ` +
-      "transaction it sends. Those fees are spent whether or not the provider ever comes back. " +
-      "If this channel's record is close to expiring it is extended first, which costs one or two " +
-      "more, and if your provider answers your first transaction before it is mined that one is " +
-      "spent for nothing and is sent again.",
+      `This sends ${plural(status.chain_transaction_count ?? EXIT_CHAIN_FEE_COUNT, "transaction")}, and each one can ` +
+      `take up to ${formatZhu(String(status.per_transaction_ceiling_zhu ?? 0))} from your main balance: ` +
+      `${formatZhu(String(status.per_transaction_network_fee_zhu ?? 0))} of network fee, plus up to ` +
+      `${formatZhu(String(status.per_transaction_gas_reserve_zhu ?? 0))} that the chain holds while the contract ` +
+      "runs and gives most of back afterwards. Keep " +
+      `${formatZhu(String(status.required_l1_fee_zhu))} available; you will not usually be charged all of it, ` +
+      "and it has to be there or the first transaction cannot run. What is spent is spent whether or not the " +
+      "provider ever comes back. If this channel's record is close to expiring it is extended first, and if " +
+      "your provider answers your first transaction before it is mined then that one is spent for nothing and " +
+      "is sent again; each of those is one more transaction at the same ceiling.",
     leaseLine:
       lease === null
         ? "This channel's record on chain has an expiry, and it could not be read just now. " +
@@ -206,7 +289,113 @@ export function registryExitView(
     preconditions,
     canStart: !firstUnmet,
     startWithheldReason: firstUnmet ? firstUnmet.detail : "",
+    alreadyStarted,
+    progressSoFarLine: progressSoFarLine(started, formatZhu),
+    startLabelKind: alreadyStarted ? "continue" : "start",
   };
+}
+
+/** Human names for the durable step slugs. */
+const STEP_NAMES: Readonly<Record<string, string>> = {
+  renew_registry_lease: "extending the shared record on chain",
+  renew_channel_lease: "extending this channel's record on chain",
+  challenge: "asking the chain to settle",
+  respond: "answering your provider's receipt",
+  finalize: "locking the result",
+  claim: "sending your money home",
+};
+
+/** What each durable phase means for the owner's money. */
+const PHASE_NAMES: Readonly<Record<string, string>> = {
+  intent_persisted: "prepared, nothing sent and nothing spent",
+  signature_may_exist: "being signed",
+  signed: "signed, not yet sent",
+  submitted: "sent to your fullnode, not yet in a block",
+  confirmed: "done, in a block",
+  settled_elsewhere: "already done by someone else, at no cost to you",
+};
+
+function stepName(slug: string): string {
+  return STEP_NAMES[slug] ?? slug;
+}
+
+function phaseName(slug: string): string {
+  return PHASE_NAMES[slug] ?? slug;
+}
+
+/**
+ * What this wallet's own record says has happened, or "" before anything has.
+ *
+ * Built only from stored steps. There is no client-side "I pressed it" flag
+ * anywhere in this file and there must not be: the one situation resume exists
+ * for is the app having been closed, and a flag held in memory is exactly the
+ * thing that does not survive that.
+ */
+export function progressSoFarLine(
+  steps: readonly AgentHvmRegistryExitStepProgress[],
+  formatZhu: (zhu: string) => string,
+): string {
+  if (steps.length === 0) return "";
+  const spent = steps
+    .filter((step) => step.phase === "confirmed")
+    .reduce((total, step) => total + step.network_fee_zhu, 0);
+  const atRisk = steps
+    .filter(
+      (step) =>
+        step.phase === "signed" ||
+        step.phase === "submitted" ||
+        step.phase === "signature_may_exist",
+    )
+    .reduce((total, step) => total + step.network_fee_zhu, 0);
+  const lines = steps.map((step) => `${stepName(step.step)}: ${phaseName(step.phase)}`);
+  const money =
+    `${formatZhu(String(spent))} of network fees has been confirmed in a block` +
+    (atRisk > 0
+      ? `, and ${formatZhu(String(atRisk))} is on transactions this wallet signed and has not yet seen in one.`
+      : ", and nothing is outstanding.");
+  return (
+    `This exit is already under way on chain. So far: ${lines.join("; ")}. ${money} ` +
+    "You do not need to keep this app open. Every step is picked up from where it stopped."
+  );
+}
+
+/**
+ * The one sentence to show after a press, built from what the press returned.
+ *
+ * The screen used to print a fixed "The exit has started" whatever came back,
+ * including on the answer that says this channel holds nothing and closing it
+ * would spend fees to recover zero. Everything below is the backend's own
+ * report; nothing here decides anything.
+ */
+export function exitPressResultLine(
+  progress: AgentHvmRegistryExitProgress,
+  formatZhu: (zhu: string) => string,
+): string {
+  const money =
+    `${formatZhu(String(progress.network_fees_confirmed_zhu))} of network fees is confirmed in a block` +
+    (progress.network_fees_at_risk_zhu > 0
+      ? `, and ${formatZhu(String(progress.network_fees_at_risk_zhu))} is on bytes not yet seen in one.`
+      : ", and nothing is outstanding.");
+  if (progress.outcome === "complete") {
+    const paid =
+      progress.claimed_zhu === null
+        ? "Your payout has been made."
+        : `${formatZhu(String(progress.claimed_zhu))} has been paid to your own address.`;
+    return `This channel is closed and settled. ${paid} ${money}`;
+  }
+  if (progress.outcome === "waiting") {
+    const reason = progress.waiting_reason ?? "the chain is not ready for the next step yet";
+    return (
+      `Nothing further can be sent right now: ${reason}. Nothing is stuck and nothing is lost. You can ` +
+      `close this app and come back. ${money}`
+    );
+  }
+  const step = progress.step ? stepName(progress.step) : "the next step";
+  const phase = progress.phase ? phaseName(progress.phase) : "sent";
+  return (
+    `This exit moved forward: ${step} is ${phase}. It continues in the steps above and you can close this ` +
+    `app between them. ${money}`
+  );
 }
 
 /**

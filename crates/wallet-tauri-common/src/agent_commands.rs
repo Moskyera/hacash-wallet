@@ -1491,15 +1491,43 @@ pub async fn agent_wallet_retry_hvm_exact(
     }
 }
 
-/// The reviewed ceiling for one L1 network fee, reused here because the exit's
-/// three transactions are ordinary L1 transactions and nothing in this
-/// workspace prices a registry call any higher.
+/// How many chain transactions an ordinary exit sends: challenge, finalize,
+/// and the Action 14 payout.
 ///
-/// `l1_channel::MAX_CHANNEL_NETWORK_FEE_ZHU` is the number the channel builders
-/// already refuse to exceed, so quoting three of them is an upper bound the
-/// owner can rely on rather than an estimate.
+/// The screen names the same three in the same order
+/// (`apps/desktop/src/agent/registryExit.ts`), so the count the owner reads
+/// and the count this ceiling is built from are one number.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-const EXIT_FEE_CEILING_ZHU: u64 = l2_fast_pay_hub::l1_channel::MAX_CHANNEL_NETWORK_FEE_ZHU * 3;
+const EXIT_CHAIN_TRANSACTION_COUNT: u64 = 3;
+
+/// Everything an ordinary exit can take out of the owner's main balance.
+///
+/// # What this used to be, and why that was a false statement about money
+///
+/// It was `MAX_CHANNEL_NETWORK_FEE_ZHU * 3` — 3,000,000 zhu — on the reasoning
+/// that the exit sends three ordinary L1 transactions and the channel builders
+/// already refuse to exceed that fee per transaction. The fee half of that is
+/// right. The rest was missing: a registry call is an HVM contract call, and
+/// `Context::gas_initialize` in
+/// `hacash-fullnodedev/protocol/src/context/gas.rs` takes the *entire* gas
+/// budget's worth of burn out of the sender's main balance with `hac_sub`
+/// before the call executes, refunding the unused part afterwards. None of
+/// that appeared anywhere in the quote.
+///
+/// Measured on a real chain, a completed exit was charged 30,682,605 zhu
+/// against a quote of 3,000,000, and the amount the owner had to hold while it
+/// ran was larger again. An owner holding exactly the quoted figure saw the
+/// affordability precondition go green and could not have paid for the first
+/// transaction: `hac_sub` fails, the challenge dies, and they have already
+/// pressed a two-step irreversible control.
+///
+/// So the quote is now fee plus reserve, per transaction, times the three
+/// transactions an ordinary exit sends. Lease renewals are extra and the
+/// screen says so separately, because they are conditional and this number is
+/// the one an owner is asked to have in hand before pressing.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const EXIT_FEE_CEILING_ZHU: u64 =
+    agent_wallet_core::agent_registry_exit_transaction_ceiling_zhu() * EXIT_CHAIN_TRANSACTION_COUNT;
 
 /// What the owner's own fullnode says about walking out of an HVM registry
 /// channel without the provider.
@@ -1523,15 +1551,25 @@ pub async fn agent_wallet_hvm_registry_exit_status(
     #[cfg(feature = "agent-wallet-testnet-pilot")]
     {
         let wallet_id = parse_wallet_id(wallet_id)?;
-        let overview = require_manager(&state)?
-            .lock()
-            .await
-            .overview(&wallet_id, unix_now()?)
+        let now = unix_now()?;
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        let overview = manager
+            .overview(&wallet_id, now)
             .await
             .map_err(public_error)?;
+        // What this wallet's own durable record already says about an exit.
+        // A wallet with no channel, or one that has never opened a step, has
+        // nothing here and the screen speaks about starting; anything else and
+        // it speaks about continuing. A read that fails is not allowed to take
+        // the whole screen down with it, because this screen is read on the
+        // day everything else is failing.
+        let started_steps = manager
+            .hvm_registry_exit_steps(&wallet_id, now)
+            .unwrap_or_default();
         let overview = serde_json::to_value(overview)
             .map_err(|_| "Agent Wallet response encoding failed".to_owned())?;
-        Ok(registry_exit_status_value(&overview).await)
+        Ok(registry_exit_status_value(&overview, started_steps).await)
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     {
@@ -1543,30 +1581,34 @@ pub async fn agent_wallet_hvm_registry_exit_status(
 /// Starts the unilateral close of an HVM registry channel with the owner's own
 /// key, through the owner's own fullnode.
 ///
-/// It refuses whenever
-/// [`l2_fast_pay_hub::readiness::measure_user_side_unilateral_exit_ready`] is
-/// false, and that is still the state this workspace is in — but the reason has
-/// moved, and the sentence an owner is shown had to move with it.
+/// **This is the thing a person presses.** For a long time it was not: this
+/// command rendered the section, read the chain and then refused, because
+/// nothing under `agent-wallet-core` could sign an exit transaction. That gap
+/// is closed by `AgentTransactionSigner::sign_exact_registry_exit`, and this
+/// command now runs the shipped driver,
+/// `hacash_wallet_core::hvm_registry_exit_driver::advance_registry_exit`,
+/// through [`agent_wallet_core::AgentWalletManager::advance_hvm_registry_exit`].
+/// Until that call existed the driver's only caller in the whole tree was a
+/// test, which is a shape this workspace has shipped twice and had caught
+/// twice.
 ///
-/// **What is no longer missing.** The builders are role aware, and the exit is
-/// proven end to end on a real chain with the Hub genuinely dead:
-/// `crates/wallet-core/tests/dead_hub_user_exit_on_chain.rs` funds a channel,
-/// spends part of it, aborts the Hub's server, verifies the socket is closed,
-/// and then walks challenge, finalize and the Action 14 payout with the user's
-/// own key, ending with the user's L1 balance up by exactly the balance they
-/// were owed. That half of the problem is finished.
+/// **What this command may not choose.** Neither the channel, nor the receipt,
+/// nor the fee. The binding and the head bill are read from the wallet's own
+/// encrypted state inside the manager, and the fee and gas ceilings are the
+/// constants an owner is shown on the same screen. What is passed in from here
+/// is a view of the owner's own pinned fullnode and nothing else.
 ///
-/// **What is missing.** A signing path from this shell to that driver.
-/// `AgentWalletSigner` exposes `sign_exact_channel_open`,
-/// `sign_exact_channel_close` and the two payment signers, each with its own
-/// intent verification, safety permit and approval commitment; there is no
-/// `sign_exact_registry_exit`, and inventing one here without those gates would
-/// be handing the owner a signing surface weaker than the ones it sits beside.
+/// **It is still bounded by the measurement.** The refusal above the drive is
+/// unchanged and still reads
+/// [`l2_fast_pay_hub::readiness::measure_user_side_unilateral_exit_ready`],
+/// which is a constant a human sets *and* a probe that drives the real
+/// builders with a real non-Hub key. Neither alone opens this command.
 ///
-/// So the refusal below is not a placeholder for a decision nobody made. It
-/// reports the real remaining gap in the owner's own words, and it is bounded
-/// by a measurement rather than a literal, so it cannot be opened by an edit
-/// that has not also moved the thing being measured.
+/// **One press, then honesty.** Each pass makes at most one unit of progress,
+/// so one press drives as far as the chain will currently take it and then
+/// returns what it is waiting for. Most of an exit is an objection window
+/// measured in blocks, which no amount of pressing shortens; the returned
+/// object names the block it ends at rather than spinning.
 #[tauri::command]
 pub async fn agent_wallet_start_hvm_registry_exit(
     wallet_id: String,
@@ -1578,34 +1620,119 @@ pub async fn agent_wallet_start_hvm_registry_exit(
     {
         let wallet_id = parse_wallet_id(wallet_id)?;
         let _transition = state.transition.lock().await;
-        let overview = require_manager(&state)?
-            .lock()
-            .await
-            .overview(&wallet_id, unix_now()?)
-            .await
-            .map_err(public_error)?;
-        let overview = serde_json::to_value(overview)
-            .map_err(|_| "Agent Wallet response encoding failed".to_owned())?;
-        if overview
-            .get("hvm_registry_binding")
-            .is_none_or(Value::is_null)
-        {
-            return Err("this Agent Wallet has no provider channel to close".to_owned());
-        }
-        let status = registry_exit_status_value(&overview).await;
-        if status["driver_ready"] != Value::Bool(true) {
-            return Err(status["blocked_reason"]
-                .as_str()
-                .unwrap_or(USER_EXIT_DRIVER_MISSING)
-                .to_owned());
-        }
-        Err(USER_EXIT_DRIVER_MISSING.to_owned())
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        start_hvm_registry_exit(&mut manager, &wallet_id, unix_now()?).await
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     {
         let _ = (wallet_id, state);
         Err("Agent HVM Fast Pay is disabled in this build".to_owned())
     }
+}
+
+/// Everything [`agent_wallet_start_hvm_registry_exit`] does once the shell has
+/// been recognised and the wallet id parsed.
+///
+/// Split out for one reason: a Tauri command cannot be entered without a real
+/// `Webview`, so a command whose whole body lives behind that attribute can
+/// only ever be proven by a test that reimplements it — which is the same
+/// "the only caller is a test" failure one layer up. Everything that decides
+/// anything is here, and the on-chain proof enters through this function, so
+/// the sequence a person triggers and the sequence a test drives are the same
+/// code and not two copies of it.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn start_hvm_registry_exit(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    now: u64,
+) -> Result<Value, String> {
+    let overview = manager
+        .overview(wallet_id, now)
+        .await
+        .map_err(public_error)?;
+    let overview = serde_json::to_value(overview)
+        .map_err(|_| "Agent Wallet response encoding failed".to_owned())?;
+    let Some(binding) = overview
+        .get("hvm_registry_binding")
+        .filter(|value| !value.is_null())
+        .cloned()
+    else {
+        return Err("this Agent Wallet has no provider channel to close".to_owned());
+    };
+    let started_steps = manager
+        .hvm_registry_exit_steps(wallet_id, now)
+        .unwrap_or_default();
+    let status = registry_exit_status_value(&overview, started_steps).await;
+    if status["driver_ready"] != Value::Bool(true) {
+        return Err(status["blocked_reason"]
+            .as_str()
+            .unwrap_or(USER_EXIT_DRIVER_MISSING)
+            .to_owned());
+    }
+    let chain = registry_exit_chain(&overview, &binding)?;
+    // One pass makes at most one unit of progress, so a single press would put
+    // one transaction on the wire and stop, and an owner would have to press
+    // once per step without ever being told that. Pressing therefore drives as
+    // far as the chain will currently take it and stops at the genuine wait.
+    //
+    // The budget exists because a loop that only ends when a remote node says
+    // so is a loop a remote node controls. Every pass that does not end the
+    // loop has already put a transaction on the wire, so eight is more
+    // transactions than a whole exit needs.
+    let mut progress = manager
+        .advance_hvm_registry_exit(wallet_id, &chain, now)
+        .await
+        .map_err(public_error)?;
+    let mut passes = 1_u8;
+    while progress.outcome == "stepped" && passes < EXIT_PASS_BUDGET {
+        passes += 1;
+        progress = manager
+            .advance_hvm_registry_exit(wallet_id, &chain, now)
+            .await
+            .map_err(public_error)?;
+    }
+    serde_json::to_value(progress).map_err(|_| "Agent Wallet response encoding failed".to_owned())
+}
+
+/// How many driver passes one press of the exit control is allowed to make.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const EXIT_PASS_BUDGET: u8 = 8;
+
+/// The owner's own pinned fullnode, as the exit driver needs to see it.
+///
+/// Built from the same two places the lease read above uses — the wallet's
+/// `node_url` and the stored binding — so the node this exit is driven against
+/// is the node the screen reported on, and not a second one chosen here.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn registry_exit_chain(
+    overview: &Value,
+    binding: &Value,
+) -> Result<crate::agent_registry_exit::FullnodeRegistryExitChain, String> {
+    let node_url = overview
+        .get("node_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "this wallet is not pinned to a fullnode yet".to_owned())?;
+    let contract = binding
+        .get("recovery_bundle")
+        .and_then(|bundle| bundle.get("binding"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let contract: l2_fast_pay_hub::hvm_registry::HvmRegistryBindingV2 =
+        serde_json::from_value(contract)
+            .map_err(|error| format!("stored channel binding is unreadable: {error}"))?;
+    crate::agent_registry_exit::FullnodeRegistryExitChain::new(
+        node_url,
+        contract,
+        binding
+            .get("minimum_required_live_blocks")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        binding
+            .get("minimum_required_recover_blocks")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    )
 }
 
 /// The one sentence an owner is given when their money is reachable on chain
@@ -1629,7 +1756,10 @@ const USER_EXIT_DRIVER_MISSING: &str = "This wallet cannot yet send a channel ex
 /// Split out so both commands read exactly the same facts, and so the lease
 /// read has one home rather than two that could drift.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-async fn registry_exit_status_value(overview: &Value) -> Value {
+async fn registry_exit_status_value(
+    overview: &Value,
+    started_steps: Vec<agent_wallet_core::AgentHvmRegistryExitStepProgress>,
+) -> Value {
     let driver_ready = l2_fast_pay_hub::readiness::measure_user_side_unilateral_exit_ready();
     let binding = overview
         .get("hvm_registry_binding")
@@ -1643,7 +1773,7 @@ async fn registry_exit_status_value(overview: &Value) -> Value {
         Some(binding) => read_registry_lease(overview, binding).await,
         None => (None, "this wallet has no provider channel".to_owned()),
     };
-    exit_status_json(driver_ready, spendable_l1_zhu, lease)
+    exit_status_json(driver_ready, spendable_l1_zhu, lease, started_steps)
 }
 
 /// The status object itself, with every input already resolved.
@@ -1657,6 +1787,7 @@ fn exit_status_json(
     driver_ready: bool,
     spendable_l1_zhu: u64,
     (lease, lease_read_error): (Option<RegistryLease>, String),
+    started_steps: Vec<agent_wallet_core::AgentHvmRegistryExitStepProgress>,
 ) -> Value {
     json!({
         "driver_ready": driver_ready,
@@ -1667,6 +1798,20 @@ fn exit_status_json(
         "fullnode_reachable": lease.is_some(),
         "spendable_l1_zhu": spendable_l1_zhu,
         "required_l1_fee_zhu": EXIT_FEE_CEILING_ZHU,
+        // Broken out so the screen can say what one more transaction costs
+        // without doing arithmetic of its own, and so the gas half is nameable
+        // rather than folded invisibly into a single figure. A lease renewal
+        // or a re-sent step is exactly one more of these.
+        "chain_transaction_count": EXIT_CHAIN_TRANSACTION_COUNT,
+        "per_transaction_ceiling_zhu":
+            agent_wallet_core::agent_registry_exit_transaction_ceiling_zhu(),
+        "per_transaction_network_fee_zhu": agent_wallet_core::AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU,
+        "per_transaction_gas_reserve_zhu": agent_wallet_core::agent_registry_exit_gas_reserve_zhu(),
+        // Empty exactly when no step of an exit has ever been opened for this
+        // channel, which is the only case in which the screen may speak about
+        // starting one. Read from this wallet's own durable record; no chain
+        // and no provider is involved.
+        "started_steps": started_steps,
     })
 }
 
@@ -2334,7 +2479,7 @@ mod tests {
     #[test]
     fn the_exit_gate_is_the_measurement_and_never_a_literal() {
         let measured = l2_fast_pay_hub::readiness::measure_user_side_unilateral_exit_ready();
-        let status = super::exit_status_json(measured, 0, (None, String::new()));
+        let status = super::exit_status_json(measured, 0, (None, String::new()), Vec::new());
         assert_eq!(status["driver_ready"], serde_json::json!(measured));
         // Today that measurement is false, because the only builders in this
         // workspace refuse every signer that is not the Hub. If this assertion
@@ -2358,7 +2503,7 @@ mod tests {
     #[cfg(feature = "agent-wallet-testnet-pilot")]
     #[test]
     fn an_unavailable_exit_always_carries_its_reason() {
-        let blocked = super::exit_status_json(false, 0, (None, String::new()));
+        let blocked = super::exit_status_json(false, 0, (None, String::new()), Vec::new());
         let reason = blocked["blocked_reason"].as_str().expect("a reason");
         assert!(reason.len() > 80, "the reason must be a sentence");
         // It must reassure about the deposit and name the one thing that is
@@ -2383,6 +2528,7 @@ mod tests {
                 }),
                 String::new(),
             ),
+            Vec::new(),
         );
         assert_eq!(ready["blocked_reason"], serde_json::json!(""));
         assert_eq!(ready["lease_blocks_remaining"], serde_json::json!(9_999));
@@ -2397,27 +2543,60 @@ mod tests {
         );
     }
 
-    /// The start command must never succeed while the gate is closed.
+    /// The start command must never reach the driver while the gate is closed.
     ///
     /// This is the shape of failure this project has shipped twice: a
     /// mechanism whose only caller was a test. Here the caller is the desktop
     /// Security page, and this pins the other end, so the refusal cannot be
     /// removed without also removing the measurement it reads.
+    ///
+    /// **What changed and why this is not weaker.** The command used to end in
+    /// an unconditional `Err(USER_EXIT_DRIVER_MISSING)`, and this test pinned
+    /// that literal. It no longer does, because the command now actually
+    /// drives the exit — so the assertion moved from "the command always
+    /// refuses" to the thing that statement was standing in for: **the
+    /// measurement is read, and the refusal it produces comes strictly before
+    /// anything that could sign.** A literal cannot satisfy that ordering, and
+    /// deleting the gate does not make it pass.
     #[cfg(feature = "agent-wallet-testnet-pilot")]
     #[test]
     fn the_start_command_refuses_while_the_gate_is_closed() {
         let source = include_str!("agent_commands.rs");
-        let body = source
+        let command = source
             .split("pub async fn agent_wallet_start_hvm_registry_exit")
             .nth(1)
             .expect("the start command")
-            .split("/// The one sentence an owner is given")
+            .split("/// Everything [`agent_wallet_start_hvm_registry_exit`] does")
             .next()
             .expect("the command body");
-        assert!(body.contains("state.transition.lock().await"));
-        assert!(body.contains("registry_exit_status_value(&overview).await"));
-        assert!(body.contains("status[\"driver_ready\"] != Value::Bool(true)"));
-        assert!(body.contains("Err(USER_EXIT_DRIVER_MISSING.to_owned())"));
+        // The exit is irreversible, so it is serialised against every other
+        // irreversible transition exactly as it always was.
+        assert!(command.contains("state.transition.lock().await"));
+        assert!(command.contains("start_hvm_registry_exit(&mut manager, &wallet_id"));
+
+        let body = source
+            .split("pub async fn start_hvm_registry_exit")
+            .nth(1)
+            .expect("the start body")
+            .split("/// How many driver passes one press")
+            .next()
+            .expect("the start body");
+        let gate = body
+            .find("status[\"driver_ready\"] != Value::Bool(true)")
+            .expect("the measured gate is read");
+        let refusal = body
+            .find("USER_EXIT_DRIVER_MISSING")
+            .expect("a closed gate refuses in the owner's own words");
+        let drive = body
+            .find("advance_hvm_registry_exit")
+            .expect("an open gate drives the shipped driver");
+        assert!(
+            gate < refusal && refusal < drive,
+            "the measured gate and its refusal must both come before anything that can sign"
+        );
+        // The gate is measured from the same overview the screen was built
+        // from, and never from a second read that could disagree with it.
+        assert!(body.contains("registry_exit_status_value(&overview,"));
         assert!(
             !body.contains("build_signed_hvm_registry"),
             "the wallet shell must not grow its own transaction builder"

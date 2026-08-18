@@ -3,7 +3,7 @@ import {
   requireSealedAcknowledgement,
   type SealedAcknowledgement,
 } from "./backupWarning";
-import type { AgentHvmRegistryExitStatus } from "./registryExit";
+import type { AgentHvmRegistryExitProgress, AgentHvmRegistryExitStatus } from "./registryExit";
 
 export type AgentWalletRegistryEntry = {
   wallet_id: string;
@@ -1228,7 +1228,7 @@ export const agentWalletApi = {
    * owner's fullnode that carries it; the provider is not asked.
    */
   startHvmRegistryExit: (walletId: string) =>
-    invoke<AgentHvmRegistryExitStatus>("agent_wallet_start_hvm_registry_exit", {
+    invoke<AgentHvmRegistryExitProgress>("agent_wallet_start_hvm_registry_exit", {
       walletId,
     }),
   listPendingApprovals: (walletId: string) =>

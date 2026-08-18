@@ -83,6 +83,18 @@ export const DESKTOP_CONTROLS = {
    * channel" because that is the only reason an owner would ever look for it.
    */
   start_exit_without_provider: "Take my money out without the provider",
+  /**
+   * The same control, on the second and every later visit.
+   *
+   * An exit outlives the app: most of one is an objection window measured in
+   * blocks, so the ordinary case is an owner reopening a laptop they closed
+   * mid-exit. Offering them "Take my money out" again describes a beginning
+   * that already happened, and the two readings differ in a way that matters
+   * to a frightened person: one of them implies the first attempt failed.
+   * Which label is shown is decided by this wallet's own durable record, never
+   * by anything held in memory.
+   */
+  continue_exit_without_provider: "Carry on taking my money out",
   review_exact_transaction: "Review exact transaction",
   approve_exact_transaction: "Approve exact transaction",
   reject_payment: "Reject",

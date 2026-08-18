@@ -33,6 +33,7 @@ import {
   REVOKE_AGENT_WARNING,
 } from "./irreversibleActions";
 import {
+  exitPressResultLine,
   registryExitView,
   type AgentHvmRegistryExitStatus,
 } from "./registryExit";
@@ -563,6 +564,14 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
               <p className="agent-warning" role="status">{exitView.leaseLine}</p>
               <p>{exitView.windowLine}</p>
               <p>{exitView.feeLine}</p>
+              {/* An exit outlives the app. Most of one is an objection window
+                  measured in blocks, so an owner coming back to a laptop they
+                  closed is the ordinary case, not an edge one. This is that
+                  owner's answer, and it is read from the wallet's own durable
+                  record rather than from anything held in this component. */}
+              {exitView.alreadyStarted && (
+                <p className="agent-warning" role="status">{exitView.progressSoFarLine}</p>
+              )}
               <h3>What happens after you press it</h3>
               <ol className="agent-security-list">
                 {exitView.steps.map((step) => <li key={step}>{step}</li>)}
@@ -586,40 +595,39 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
                     <>
                       <button type="button" disabled={busy} onClick={() => setConfirmExit(false)}>Cancel</button>
                       <button type="button" className="agent-danger" disabled={busy} onClick={() => void run(async () => {
-                        await agentWalletApi.startHvmRegistryExit(overview.wallet_id);
+                        const progress = await agentWalletApi.startHvmRegistryExit(overview.wallet_id);
                         setConfirmExit(false);
-                        // Do not promise resumption. The premise of this comment
-                        // has moved and the conclusion has not, so both are
-                        // written out rather than left to be re-derived by
-                        // whoever reads it next.
+                        // Say what the press did, in the backend's own words.
                         //
-                        // The durable per-step record now exists
-                        // (crates/wallet-core/src/hvm_registry_exit_record.rs)
-                        // and so does the loop that uses it
-                        // (crates/wallet-core/src/hvm_registry_exit_driver.rs),
-                        // and together they are proven to survive the app being
-                        // closed mid-exit against a real chain. What does not
-                        // exist is a path from this button to either of them:
-                        // agent_wallet_start_hvm_registry_exit still ends in a
-                        // refusal because nothing in agent-wallet-core can sign
-                        // an exit. So resumption is true of the store and false
-                        // of the app, and this sentence describes the app.
-                        //
-                        // Change it when, and only when, this button reaches
-                        // advance_registry_exit.
-                        onInfo("The exit has started. It runs in the four steps above, and each one has to be sent from this wallet, so leave it open until the last step is done.");
+                        // This used to be one fixed sentence printed whatever
+                        // came back: "The exit has started ... leave it open
+                        // until the last step is done." Both halves were
+                        // wrong. The press can answer that the objection window
+                        // is open and name the block it ends at, or that this
+                        // channel holds nothing and closing it would spend fees
+                        // to recover zero, and the fixed sentence overwrote all
+                        // of it. And the record survives the app closing, which
+                        // is exactly what kill_mid_exit_on_chain.rs proves, so
+                        // asking a person to sit in front of a laptop through
+                        // an objection window measured in hours was asking for
+                        // nothing.
+                        onInfo(exitPressResultLine(progress, formatZhu));
                         await Promise.all([load(), onRefreshOverview()]);
-                      })}>Confirm, close this channel</button>
+                      })}>{exitView.startLabelKind === "continue" ? "Confirm, continue closing this channel" : "Confirm, close this channel"}</button>
                     </>
                   ) : (
                     <button type="button" className="agent-danger" disabled={busy} onClick={() => setConfirmExit(true)}>
-                      {DESKTOP_CONTROLS.start_exit_without_provider}
+                      {exitView.startLabelKind === "continue"
+                        ? DESKTOP_CONTROLS.continue_exit_without_provider
+                        : DESKTOP_CONTROLS.start_exit_without_provider}
                     </button>
                   )}
                 </div>
               ) : (
                 <p className="agent-warning" role="status">
-                  {DESKTOP_CONTROLS.start_exit_without_provider} is not available yet. {exitView.startWithheldReason}
+                  {exitView.startLabelKind === "continue"
+                    ? DESKTOP_CONTROLS.continue_exit_without_provider
+                    : DESKTOP_CONTROLS.start_exit_without_provider} is not available yet. {exitView.startWithheldReason}
                 </p>
               )}
             </>

@@ -63,6 +63,56 @@ pub const HVM_REGISTRY_CHANNEL_KEY_COUNT: u64 = 12;
 /// exactly it.
 pub const HPAY_REGISTRY_MAX_RENT_STEP: u64 = 150;
 
+/// The most live credit any single storage key on this chain can hold at once.
+///
+/// `SpaceCap::storage_live_max_blocks()` is `storage_period *
+/// storage_live_max_periods` — `100 * 30000` in
+/// `hacash-fullnodedev/vm/src/rt/cap.rs` — and
+/// `hacash-fullnodedev/vm/src/field/state.rs` aborts a rent call that would
+/// push a key past it with "live block budget exceeded". It is a hard chain
+/// ceiling, not a policy this workspace chooses, so no sequence of renewals of
+/// any length can carry a key above it.
+///
+/// It is quoted here because it decides whether a channel can be walked out of
+/// at all: [`HvmRegistryBindingV2::validate`] refuses a binding whose objection
+/// window would demand more lease than the chain can ever grant.
+pub const HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS: u64 = 100 * 30_000;
+
+/// Lease the exit sequence needs *beyond* the objection window itself: the
+/// watchtower's response margin plus the slack the user-side driver reserves
+/// for the finalize and the Action 14 claim that follow the deadline.
+///
+/// Mirrors `HVM_REGISTRY_RESPONSE_MARGIN_BLOCKS + 24`, which
+/// `hacash_wallet_core::hvm_registry_exit::exit_lease_floor_blocks` adds to
+/// `challenge_blocks`. Named here rather than imported because this crate is
+/// the one that decides whether a binding is admissible, and the wallet crate
+/// depends on this one rather than the other way round;
+/// `the_exit_lease_floor_and_the_binding_bound_agree` in
+/// `crates/wallet-core/src/hvm_registry_exit.rs` fails if the two ever drift.
+pub const HPAY_REGISTRY_EXIT_LEASE_OVERHEAD_BLOCKS: u64 = 3 + 24;
+
+/// The longest objection window a channel may be opened with.
+///
+/// # Why there is an upper bound at all
+///
+/// `challenge_blocks` is chosen by the provider at open, and until this bound
+/// existed the only rule was `!= 0`. The user-side exit refuses to *start*
+/// until the channel's storage keys hold `challenge_blocks +
+/// HPAY_REGISTRY_EXIT_LEASE_OVERHEAD_BLOCKS` blocks of live credit, and
+/// answers a shortfall by buying more. A provider who picked a window at or
+/// above [`HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS`] therefore made that floor
+/// unreachable by construction: every press would plan another renewal, pay
+/// another fee, and never begin the exit. Measured on a real chain that is
+/// roughly 234,000,000 zhu per press against a 5,000,000,000 zhu deposit, with
+/// nothing to stop it.
+///
+/// So a binding whose exit could never lawfully begin is not a binding this
+/// software will adopt, sign against, or build a commitment for. The bound is
+/// derived from the chain's own ceiling rather than chosen: it is exactly the
+/// largest window that leaves room for the rest of the exit sequence.
+pub const HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS: u64 =
+    HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS - HPAY_REGISTRY_EXIT_LEASE_OVERHEAD_BLOCKS;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HvmRegistryBindingV2 {
@@ -103,6 +153,11 @@ impl HvmRegistryBindingV2 {
             || self.left_deposit_zhu == 0
             || self.right_hub_deposit_zhu != 0
             || self.challenge_blocks == 0
+            // An objection window this long makes the user-side exit's lease
+            // floor unreachable on this chain, which turns the one control an
+            // owner has into an unbounded fee drain. See
+            // `HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS`.
+            || self.challenge_blocks > HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS
         {
             return Err(HubError::Node(
                 "HVM registry binding does not match the reviewed shared V2 profile".into(),
@@ -725,6 +780,41 @@ mod tests {
                 challenge_blocks: 12,
             },
         )
+    }
+
+    /// An objection window nobody could ever walk out of is not a channel.
+    ///
+    /// The user-side exit refuses to start until the channel's storage keys
+    /// hold `challenge_blocks` plus the rest of the sequence in live credit,
+    /// and answers a shortfall by buying more. Past the chain's own ceiling
+    /// that floor is unreachable by any number of renewals, so every press
+    /// would buy another renewal and the exit would never begin. Measured by a
+    /// reviewer at roughly 234,000,000 zhu a press against a 5,000,000,000 zhu
+    /// deposit. The provider picks this number, so it is bounded here, where a
+    /// binding first becomes admissible, and not only where the fee is spent.
+    #[test]
+    fn an_objection_window_with_an_unreachable_exit_floor_is_not_adoptable() {
+        let (_, _, mut binding) = fixture();
+        binding.challenge_blocks = HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS;
+        binding
+            .validate()
+            .expect("the widest window whose exit can still start is admissible");
+        binding.commitment().expect("and it still commits");
+
+        binding.challenge_blocks = HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS + 1;
+        assert!(
+            binding.validate().is_err(),
+            "a window whose exit lease floor is above {} live blocks must be refused",
+            HPAY_REGISTRY_STORAGE_LIVE_MAX_BLOCKS
+        );
+        // The commitment is derived through `validate`, so an inadmissible
+        // binding cannot be signed over or stored either.
+        assert!(binding.commitment().is_err());
+
+        binding.challenge_blocks = u64::MAX;
+        assert!(binding.validate().is_err());
+        binding.challenge_blocks = 0;
+        assert!(binding.validate().is_err(), "zero was already refused");
     }
 
     fn entry<T>(value: T, recover_blocks: u64) -> HvmStorageEntry<T> {

@@ -184,6 +184,7 @@ where
     let step = match &plan {
         HvmRegistryExitPlanV1::Wait { reason } => {
             if snapshot.channel.status.value == 4 && snapshot.channel.left_claimed.value {
+                settle_finished_exit_records(store, kit, chain, &binding_commitment).await?;
                 return Ok(HvmRegistryExitProgressV1::Complete {
                     claimed_zhu: snapshot.channel.left_balance.value,
                 });
@@ -210,6 +211,42 @@ where
     let existing = store.exit_step_record(&binding_commitment, step);
     let attempt = match &existing {
         Some(record) if record.phase.is_terminal() && step.is_lease_renewal() => {
+            // A renewal is the only step this wallet will ever pay for twice,
+            // and until this check it was the only step it would pay for
+            // without limit. The rule above answers a short lease by renewing,
+            // and a renewal whose effect never appears leaves the lease short,
+            // so the next pass plans the identical renewal at a fresh
+            // timestamp and a fresh fee. Measured on a real chain at roughly
+            // 234,000,000 zhu a press against a 5,000,000,000 zhu deposit,
+            // with the exit never starting. The authors closed one cause of
+            // that loop — renewing the wrong half — and the class stayed open.
+            //
+            // So the terminal attempt has to have *worked* before another one
+            // is bought. The record remembers the lease this half showed
+            // before it was renewed; if the chain does not now show more than
+            // that, the renewal bought nothing and a second one at the same
+            // price will buy nothing either. Refuse, name it, and spend no fee.
+            //
+            // This never blocks a channel whose lease is genuinely climbing:
+            // a confirmed renewal adds `lease_periods` periods at once, so the
+            // observed lease is strictly higher on the next pass even after
+            // several blocks of decay, and an exit that legitimately needs
+            // many renewals to reach a distant floor makes one of these checks
+            // per renewal and passes every one.
+            let observed = crate::hvm_registry_exit::lease_blocks_for_step(step, &snapshot);
+            match (observed, record.pre_step_lease_blocks) {
+                (Some(now_blocks), Some(before)) if now_blocks <= before => {
+                    return Err(WalletError::Policy(format!(
+                        "this wallet has already paid for {} {} transaction(s) and the chain still \
+                         reports {now_blocks} live blocks on that half, no more than the \
+                         {before} it showed before the last one; the renewal is not taking \
+                         effect, so no further fee will be spent on it",
+                        record.attempt,
+                        step.slug()
+                    )));
+                }
+                _ => (),
+            }
             record.attempt.saturating_add(1)
         }
         Some(record) => record.attempt,
@@ -313,6 +350,61 @@ where
         transaction_hash,
         phase: HvmRegistryExitPhase::Submitted,
     })
+}
+
+/// Close the books on an exit the chain has finished.
+///
+/// # The false statement this removes
+///
+/// The driver reports `Complete` off the snapshot alone: status 4 with the
+/// left balance claimed is the end, whatever any record says. The records
+/// themselves were left wherever the last pass put them, which for every step
+/// that this wallet submitted and never re-sighted is `Submitted`. A finished,
+/// fully paid exit therefore reported *zero* network fees confirmed and the
+/// whole three of them still at risk, on the one screen whose entire purpose
+/// is telling an owner the truth about money they are trying to recover.
+///
+/// So the last pass sights each step whose bytes are still in flight and
+/// records what the chain says. Bounded by construction: at most one lookup
+/// per step, once, on a path that has already ended.
+///
+/// **Nothing here signs, submits, or invents a confirmation.** A hash the node
+/// cannot place in a block is left exactly as it was and stays counted as at
+/// risk, which is what it is. A node that will not answer at all fails the
+/// pass rather than being read as agreement, for the same reason
+/// `transaction_sighting` never treats unreachable as `Unknown`.
+async fn settle_finished_exit_records<C>(
+    store: &mut ClientL2Safety,
+    kit: &HvmRegistryExitKitV1,
+    chain: &C,
+    binding_commitment: &str,
+) -> WalletResult<()>
+where
+    C: HvmRegistryExitChainV1,
+{
+    for record in store.exit_step_records(binding_commitment) {
+        if !record.phase.may_have_bytes_in_flight() {
+            continue;
+        }
+        let Some(hash) = record.transaction_hash.clone() else {
+            continue;
+        };
+        if let HvmRegistryExitSightingV1::Mined {
+            block_height,
+            block_hash,
+        } = chain.transaction_sighting(&hash).await?
+        {
+            store.mark_exit_step_confirmed(
+                kit,
+                binding_commitment,
+                record.step,
+                &hash,
+                block_height,
+                &block_hash,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The chain is asking for a step this wallet's record has already retired.

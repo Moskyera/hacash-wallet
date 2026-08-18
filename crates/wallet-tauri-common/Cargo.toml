@@ -40,6 +40,18 @@ hpay-companion-lan-runtime = { path = "../companion-lan-runtime", optional = tru
 
 [dev-dependencies]
 tempfile = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# The fullnode's own in-memory chain and the contract types that read it. Same
+# dependency, and for the same reason, as `wallet-core`'s on-chain exit proofs:
+# it is how the bytes this crate's own command produces get executed by the
+# real block executor against real HVM contract state, rather than asserted
+# about against a hand-built snapshot.
+testkit = { path = "../../../hacash-fullnodedev/testkit" }
+vm = { path = "../../../hacash-fullnodedev/vm" }
+field = { path = "../../../hacash-fullnodedev/field" }
+sys = { path = "../../../hacash-fullnodedev/sys" }
+protocol = { path = "../../../hacash-fullnodedev/protocol" }
 
 [features]
 default = []
@@ -49,6 +61,15 @@ agent-wallet-testnet-pilot = [
     "agent-wallet-admin",
     "agent-wallet-core/agent-wallet-testnet-pilot",
     "hpay-companion-protocol/agent-wallet-testnet-pilot",
+]
+# Brings the Hub crate's registry deployment / init / funding builders into the
+# graph so the *command an owner presses* can be proven against a real deployed
+# contract in real blocks. Test-only in practice - nothing in this crate's own
+# source is gated on it - and it cannot live in `[dev-dependencies]` because
+# the feature belongs to a normal dependency.
+on-chain-exit-proof = [
+    "agent-wallet-testnet-pilot",
+    "l2-fast-pay-hub/local-pilot-tools",
 ]
 agent-wallet-bounded-mainnet-pilot = [
     "agent-wallet-testnet-pilot",
