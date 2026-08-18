@@ -230,9 +230,19 @@ impl MainnetReadinessV1 {
         let node_reported_unilateral_exit =
             measure_node_reported_unilateral_exit(capabilities.as_ref().ok());
         let user_side_unilateral_exit_ready = measure_user_side_unilateral_exit_ready();
+        // The same three terms `measure_l1_dispute_path_ready` ANDs, plus the
+        // fourth, re-derived here against the evidence this very document
+        // publishes so a reader can check the flag against the blocks beside
+        // it. Two places computing one property is how a term gets forgotten -
+        // this one was, and lifting the driver constant published
+        // `unilateral_l1_enforceable` through the gap while the sleeping owner
+        // stayed exactly as exposed. Anything added to that function belongs
+        // here too.
+        let offline_user_defended = measure_offline_user_defended();
         let l1_dispute_path_ready = l1_dispute_path_ready
             && node_reported_unilateral_exit
-            && user_side_unilateral_exit_ready;
+            && user_side_unilateral_exit_ready
+            && offline_user_defended;
         let mut blockers = Vec::new();
         if !hub_operational_ready {
             blockers.push("hub_signer_authenticated_storage_or_recovery_gate_is_not_ready".into());
@@ -252,6 +262,14 @@ impl MainnetReadinessV1 {
             // countersigned bill still has no instrument to present it with.
             if !user_side_unilateral_exit_ready {
                 blockers.push("wallet_cannot_build_a_unilateral_exit_without_the_hub".into());
+            }
+            // And the half that stays missing after the wallet can leave: a
+            // provider can settle an old receipt while the owner is offline,
+            // and nothing here answers the window for them. Named separately
+            // because it fails for a different reason than the two above and
+            // is not fixed by either of them.
+            if !offline_user_defended {
+                blockers.push("no_watcher_answers_for_an_offline_owner".into());
             }
         }
         let is_mainnet_pilot = is_mainnet_pilot_profile(profile);
@@ -320,6 +338,12 @@ impl MainnetReadinessV1 {
                     && blocker.as_str() != "external_monotonic_rollback_anchor_is_not_ready"
                     && blocker.as_str() != "unilateral_l1_dispute_path_is_not_ready"
                     && blocker.as_str() != "wallet_cannot_build_a_unilateral_exit_without_the_hub"
+                    // Closing is the owner's way out and must never be the
+                    // thing a missing guarantee takes away. A watcher answers
+                    // a window during a dispute; it has nothing to do with
+                    // whether a cooperative close may proceed, and blocking
+                    // close over it would strand people to protect them.
+                    && blocker.as_str() != "no_watcher_answers_for_an_offline_owner"
                     && blocker.as_str()
                         != "fullnode_does_not_report_verified_registry_unilateral_exit"
                     && !blocker.starts_with("mainnet payment cap")
@@ -876,7 +900,7 @@ pub fn measure_external_rollback_anchor_ready(
 ///   will start an exit, and renews *the half that is short* — the six shared
 ///   globals and the twelve channel keys are separate calls, and renewing the
 ///   wrong one is a fee spent to stand still.
-pub const USER_SIDE_UNILATERAL_EXIT_DRIVER_READY: bool = false;
+pub const USER_SIDE_UNILATERAL_EXIT_DRIVER_READY: bool = true;
 
 #[cfg(test)]
 mod user_side_exit_readiness_tests {
@@ -1734,7 +1758,39 @@ pub fn measure_user_side_unilateral_exit_ready() -> bool {
 /// about a node. It is not evidence that a user can get their money out, and
 /// only the third term is about the user at all.
 pub fn measure_l1_dispute_path_ready(capabilities: Option<&FullnodeCapabilitiesV1>) -> bool {
-    measure_node_reported_unilateral_exit(capabilities) && measure_user_side_unilateral_exit_ready()
+    measure_node_reported_unilateral_exit(capabilities)
+        && measure_user_side_unilateral_exit_ready()
+        && measure_offline_user_defended()
+}
+
+/// Whether a user who is **asleep** is defended, which is a different question
+/// from whether an awake one can leave.
+///
+/// The exit answers the provider that stops answering. It does not answer the
+/// provider that puts an OLD receipt on chain at the moment the owner is
+/// offline: there is a fixed window to reply with the newer one, and if nobody
+/// replies the stale split settles. Measured on a real chain, that took 300,000
+/// zhu from a channel owing 900,000.
+///
+/// This is its own term because the two used to be one. Lifting the user-side
+/// driver constant satisfied `l1_dispute_path_ready` and, through it, published
+/// `trustless_finality` — while the sleeping owner was exactly as exposed as
+/// before. Five readiness tests caught it the moment the constant moved, which
+/// is what they are for.
+///
+/// It is **false**, and not as a placeholder. The owner chose disclosure and a
+/// bounded amount over running watchtowers, so this gap is disclosed in the
+/// consent the owner ticks rather than closed in the protocol. That is a
+/// legitimate product decision and it is not trustless finality, so this
+/// refuses to call it that.
+///
+/// What would make it true: a response watcher attested for this deployment, so
+/// somebody answers the window while the owner sleeps. The watcher exists
+/// (`hpay-registry-response-watch`) and is not wired to a readiness attestation,
+/// because nobody has been asked to run one. When that exists, this reads it —
+/// it does not become another constant somebody sets by hand.
+pub const fn measure_offline_user_defended() -> bool {
+    false
 }
 
 /// The fullnode half of the dispute-path measurement, on its own.
@@ -2157,7 +2213,7 @@ mod tests {
         assert!(
             full.blockers
                 .iter()
-                .any(|it| it == "wallet_cannot_build_a_unilateral_exit_without_the_hub")
+                .any(|it| it == "no_watcher_answers_for_an_offline_owner")
         );
         assert!(
             full.require_payment_ready(HacAmount::from_millimeis(1))
@@ -2390,9 +2446,21 @@ mod tests {
                     ),
             "the fixture must be the fully green fullnode report, or this proves nothing"
         );
+        // The driver ships now, and this test's point survives that: a
+        // perfect node report is still not a unilateral exit. What holds it is
+        // the term below rather than the one above, and asserting both is what
+        // keeps this honest the next time one of them moves.
         assert!(
-            !measure_user_side_unilateral_exit_ready(),
-            "no user-side exit driver ships today"
+            measure_user_side_unilateral_exit_ready(),
+            "the wallet-side exit driver ships and is proven on chain"
+        );
+        assert!(
+            !measure_offline_user_defended(),
+            "an owner who is offline is still undefended, so this is not finality"
+        );
+        assert!(
+            !measure_l1_dispute_path_ready(Some(&node)),
+            "a fully green fullnode plus a shipped driver is still not a dispute path"
         );
         assert!(
             !measure_l1_dispute_path_ready(Some(&node)),
@@ -2411,9 +2479,10 @@ mod tests {
         );
         assert!(!readiness.unilateral_l1_enforceable);
         assert!(
-            readiness.blockers.iter().any(|blocker| {
-                blocker == "wallet_cannot_build_a_unilateral_exit_without_the_hub"
-            }),
+            readiness
+                .blockers
+                .iter()
+                .any(|blocker| { blocker == "no_watcher_answers_for_an_offline_owner" }),
             "the document must name the real reason, not only the generic one"
         );
         // Cooperative close is a different question and stays available: this
@@ -2634,7 +2703,7 @@ mod tests {
             "trustless finality must not be claimed while the user has no exit"
         );
         assert!(
-            !measure_user_side_unilateral_exit_ready(),
+            !measure_offline_user_defended(),
             "and this is the part that is missing"
         );
 
@@ -2741,14 +2810,17 @@ mod tests {
         );
 
         // And what remains is the honest reason, named. `trustless_finality` is
-        // still false with a perfect anchor and a perfect fullnode, because the
-        // user still has no way out on their own.
+        // still false with a perfect anchor, a perfect fullnode AND a shipped
+        // exit driver, because an owner who is offline when a stale receipt
+        // lands is still undefended. That is a different missing part from the
+        // one this comment used to name, and naming the wrong one would be the
+        // same wrong guarantee in a friendlier voice.
         assert!(!with.trustless_finality);
         assert!(!with.unilateral_l1_enforceable);
         assert!(
             with.blockers
                 .iter()
-                .any(|it| it == "wallet_cannot_build_a_unilateral_exit_without_the_hub")
+                .any(|it| it == "no_watcher_answers_for_an_offline_owner")
         );
     }
 
