@@ -1074,8 +1074,15 @@ async fn the_command_an_owner_presses_walks_them_out_with_the_provider_dead() {
             ),
             "the measured half of the exit gate is failing, which is a real regression: this              software can no longer put an exit transaction in a user's hands"
         );
+        // Read through `black_box` so the assertion survives: the constant is
+        // a literal, so clippy folds it and rejects the assert as constant.
+        // The check is not constant in meaning - it is the statement that the
+        // refusal came from this term and not from one this test cannot see -
+        // so it is kept and made opaque rather than deleted or silenced.
         assert!(
-            !l2_fast_pay_hub::readiness::USER_SIDE_UNILATERAL_EXIT_DRIVER_READY,
+            !std::hint::black_box(
+                l2_fast_pay_hub::readiness::USER_SIDE_UNILATERAL_EXIT_DRIVER_READY
+            ),
             "the constant is up but the command still refused, which can only mean the gate              grew a term this test does not know about"
         );
         println!(

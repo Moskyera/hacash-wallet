@@ -1619,7 +1619,6 @@ impl AgentWalletManager {
 ///   not a signer: there is no argument that makes it produce a transfer, a
 ///   bill, or an exit. The key is read, used and dropped inside the body and
 ///   is never returned.
-#[cfg(feature = "on-chain-exit-proof")]
 impl AgentWalletManager {
     // Ten, and every one of them is a value this function must NOT invent.
     // The whole safety argument above rests on it building one exact shape of
