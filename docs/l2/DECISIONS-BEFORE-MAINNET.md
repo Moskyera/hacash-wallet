@@ -67,20 +67,30 @@ while asleep.
 These are not exclusive. B protects everyone immediately; A protects the users
 who will do it.
 
-### What is recommended
+### Decided: disclosure and a bounded amount
 
-Do both, in this order. Lower the cap first — it is one constant, enforced by the
-wallet so a lying provider cannot raise it, and it bounds the loss for every user
-today. Then offer the watcher to those who want it, with its posture stated
-honestly rather than as a guarantee.
+The owner chose B on 2026-08-19. Both halves are done.
 
-The consent text needs to change either way. It currently reads:
+The cap needed no change: it was already 10 HAC per channel. It had been
+reported here as a thousand, which was a unit error - `parse_amount_mei` returns
+millimeis and the conversion multiplies by 100,000, so one HAC is 100,000,000
+zhu. A test caught it.
 
-> "I understand Agent Fast Pay mainnet is a trusted bounded pilot and I accept
-> its recovery limits."
+The consent now reads:
 
-That is technically true and practically opaque. It does not say how much is at
-risk, and it does not say that "trusted" means the provider can keep the money.
+> "I understand that this provider holds my channel funds. If it stops
+> answering, or if it puts an old receipt on chain while I am offline, I could
+> lose part or all of what is in this channel. At most 10 HAC per channel is at
+> risk. I will not put in more than I can afford to lose."
+
+Both failures named, then the number, then the sentence that matters. The
+sleeping-user risk is in it deliberately: it is the one the cap is actually for,
+and a disclosure that omits the failure it bounds is not the choice that was
+made. The string exists in two places - the screen shows one, the backend
+compares the other byte for byte - and they are checked identical.
+
+A watchtower remains available to whoever wants to run one, and is not a
+guarantee this promises.
 
 ---
 
@@ -95,17 +105,33 @@ place in shipped code, and it is what makes the exit control refuse.
 Setting it true does not mark a milestone. It makes a real-money button live in
 the desktop builds that ship.
 
-### Why it cannot be decided by measurement alone
+### The circularity, and how it was broken
 
-The exit command refuses unless the flag is true, and the flag is what a proving
-run through that command is meant to justify. So three lines — the chain view,
-the first driver pass and the pass budget — have never executed from their own
-call site, and no test can reach them while the flag is down.
+This used to be undecidable by measurement. The command refused unless the flag
+was true, and the flag was what a proving run through the command was meant to
+justify, so the three lines that sign had executed in no build, ever.
 
-Everything up to the gate has run on a real chain with the provider dead. The
-gate itself executed and refused correctly. The measured half of the gate — the
-probe that drives the real builders with a real non-Hub key — already reads
-**true**. The constant is the only unmet term.
+That is no longer the case. The command is two functions now: one asks whether
+it may, one does the work. The shipped path still refuses first and nothing
+sets the constant — but a test can drive the second half without pretending the
+first said yes, and it has:
+
+    challenge  confirmed at height 765436
+    finalize   confirmed at height 765444
+    claim      confirmed at height 765445
+    outcome complete, 5,000,000,000 zhu claimed, provider process dead
+
+Two presses, because one press drives as far as the chain allows and stops at
+the objection window the contract publishes. Waiting it out and pressing again
+is what an owner does.
+
+The ordering guard was rewritten stricter rather than weakened: it pins the
+gate before the hand-off, and that the driver has exactly one caller in shipped
+source — which nothing asserted while the two were joined.
+
+The measured half of the gate already reads **true**. The constant is the only
+unmet term, and it is now the only thing between a proven mechanism and a
+person being able to reach it.
 
 ### What two independent reviewers said
 
@@ -118,15 +144,27 @@ differed, and the second is the one to act on:
   narrower ones remain and are recorded as known limits, both requiring write
   access to the repository — a different threat, with cheaper routes.
 
-### What would earn it
+### What it now rests on
 
-One run entering at the Tauri command that ends with the owner paid on chain.
-That needs the gate open while it runs, which is the circularity above. It is a
-deliberate act by a person: open it, run it, and either keep it open because the
-run passed or close it because it did not.
+The run has happened, so the question has changed shape. It was "open it to find
+out whether it works", which asked you to take a risk in order to learn
+something. It is now "open it for users", which is an ordinary product decision
+with the evidence already in front of it.
 
-Do the run first, then the flag. Four rounds of this file have now been the other
-way round.
+What is still true and worth weighing:
+
+* the exit is proven against a chain with the provider deleted, entered from the
+  command's own body, and it survives the app closing mid-sequence;
+* the consent now names both failures - the provider that stops answering, which
+  the exit answers, and the old receipt settled while the owner sleeps, which it
+  does not - and names the amount;
+* the cap is 10 HAC per channel, enforced by the wallet independently of
+  anything the provider claims;
+* what has never run is a release binary doing this against Hacash mainnet,
+  because the contract is not deployed there. Deploying is the separate
+  three-step matter below.
+
+Do the run first, then the flag. The run is done.
 
 ---
 
