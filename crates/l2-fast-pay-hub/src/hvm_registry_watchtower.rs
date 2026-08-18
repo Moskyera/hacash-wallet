@@ -846,6 +846,139 @@ pub fn require_registry_caller(
     Ok(())
 }
 
+/// Which calls a stated role may build, checked against the reasoning that
+/// authorises that role rather than against the caller's word.
+///
+/// [`require_registry_caller`] answers "is this signer who it claims to be".
+/// It never sees the call, so on its own it lets a role build anything. For
+/// [`HvmRegistryCallerRole::ThirdPartyFeePayer`] that gap matters: its safety
+/// argument is specifically that `respond` and `finalize` carry no signer check
+/// in the contract, so a stranger paying the fee for one buys nothing but
+/// inclusion, and that renewals are permissionless and can only extend a lease
+/// somebody else's deposit depends on.
+///
+/// `challenge` is not in that argument and must not be in the permission.
+/// Opening the objection window puts a bill on chain and starts a clock; a
+/// stranger handed a stale but fully-signed bill could open it against the
+/// channel's own party. The Hub can already do that with its own key, so this
+/// is not a new capability being removed - it is the code being narrowed to the
+/// reasoning that justifies it, so the next reader who trusts the comment is
+/// right to.
+///
+/// This is an allowlist and that is deliberate. A blacklist of dangerous calls
+/// would be a list of the escapes somebody already thought of; a list of the
+/// calls a role is *authorised* to make is the policy itself, and a new call
+/// added to the contract is refused until somebody decides it belongs here.
+fn require_role_may_build_this_call(
+    role: HvmRegistryCallerRole,
+    call_source: &str,
+) -> HubResult<()> {
+    if role != HvmRegistryCallerRole::ThirdPartyFeePayer {
+        return Ok(());
+    }
+    // `registry_contract_call_source` writes
+    //     lib Registry = 1: <address>
+    //     var result = Registry.<call>
+    //     assert result == 0
+    //     end
+    // so the call is a whole line, not a prefix of the source and not a bare
+    // substring. Reading the line and matching its remainder is checkable;
+    // `contains` would pass on the word appearing anywhere, including inside
+    // an address or a future comment.
+    const RESPONDER_MAY_BUILD: [&str; 4] =
+        ["respond(", "finalize(", "renew_channel(", "renew_registry("];
+    const CALL_LINE: &str = "var result = Registry.";
+    let called = call_source
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(CALL_LINE));
+    if called.is_some_and(|called| {
+        RESPONDER_MAY_BUILD
+            .iter()
+            .any(|allowed| called.starts_with(allowed))
+    }) {
+        return Ok(());
+    }
+    Err(HubError::State(format!(
+        "a fee-paying responder may only build respond, finalize or a lease renewal;          this call is not one of those and nothing here will sign it: {}",
+        call_source.chars().take(40).collect::<String>()
+    )))
+}
+
+#[cfg(test)]
+mod responder_scope_tests {
+    use super::*;
+
+    fn source(call: &str) -> String {
+        format!(
+            "lib Registry = 1: RANtcryCFFBJiiopsSTeJm
+var result = Registry.{call}
+assert result == 0
+end"
+        )
+    }
+
+    #[test]
+    fn a_responder_may_answer_and_settle_and_pay_rent() {
+        for call in [
+            "respond(1ABC, 2, 900000, 100000, aa, bb)",
+            "finalize(1ABC)",
+            "renew_channel(1ABC, 150)",
+            "renew_registry(150)",
+        ] {
+            require_role_may_build_this_call(
+                HvmRegistryCallerRole::ThirdPartyFeePayer,
+                &source(call),
+            )
+            .unwrap_or_else(|error| panic!("a responder must be able to build {call}: {error}"));
+        }
+    }
+
+    /// The refusal this scope exists for.
+    ///
+    /// `challenge` is the one call in the set that STARTS an arbitration
+    /// window rather than answering one, and nothing in the responder's
+    /// safety argument covers it. A stranger handed a stale but fully signed
+    /// bill could otherwise open a window against the channel's own party.
+    #[test]
+    fn a_responder_may_not_open_an_arbitration_window() {
+        let error = require_role_may_build_this_call(
+            HvmRegistryCallerRole::ThirdPartyFeePayer,
+            &source("challenge(1ABC, 2, 900000, 100000, aa, bb)"),
+        )
+        .expect_err("a responder must not be able to open a challenge");
+        assert!(
+            error.to_string().contains("fee-paying responder"),
+            "the refusal must name the role that is being refused: {error}"
+        );
+    }
+
+    /// The scope is the responder's alone. Widening it to the other two roles
+    /// would be a different change with a different argument, and this fails
+    /// if somebody makes it by accident.
+    #[test]
+    fn the_hub_and_the_channel_party_are_not_narrowed_by_this() {
+        for role in [
+            HvmRegistryCallerRole::Hub,
+            HvmRegistryCallerRole::ChannelLeft,
+        ] {
+            require_role_may_build_this_call(role, &source("challenge(1ABC, 2, 9, 1, aa, bb)"))
+                .expect("only the responder role is scoped here");
+        }
+    }
+
+    /// A source that carries no recognisable call line is refused rather than
+    /// waved through. `find_map` returning `None` must not read as permission.
+    #[test]
+    fn a_source_with_no_call_line_is_refused_not_ignored() {
+        require_role_may_build_this_call(
+            HvmRegistryCallerRole::ThirdPartyFeePayer,
+            "lib Registry = 1: RANtcryCFFBJiiopsSTeJm
+end",
+        )
+        .expect_err("absence of a call line is not permission");
+    }
+}
+
 pub fn build_signed_hvm_registry_call_transaction(
     signer: &Account,
     binding: &HvmRegistryBindingV2,
@@ -857,6 +990,7 @@ pub fn build_signed_hvm_registry_call_transaction(
 ) -> HubResult<SignedHvmRegistryCallTransactionV2> {
     binding.validate()?;
     require_registry_caller(signer, binding, role)?;
+    require_role_may_build_this_call(role, &call_source)?;
     if network_fee_zhu == 0 || timestamp == 0 || gas_max == 0 {
         return Err(HubError::State(
             "registry call fee, timestamp or gas limit is invalid".into(),
