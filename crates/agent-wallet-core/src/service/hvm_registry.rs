@@ -1621,6 +1621,15 @@ impl AgentWalletManager {
 ///   is never returned.
 #[cfg(feature = "on-chain-exit-proof")]
 impl AgentWalletManager {
+    // Ten, and every one of them is a value this function must NOT invent.
+    // The whole safety argument above rests on it building one exact shape of
+    // transaction from parameters handed in and verified, rather than
+    // assembling them itself: the contract, the network, the channel
+    // parameters, the fee, the timestamp and the gas all come from the caller
+    // and are passed straight to the Hub crate's reviewed builder. Grouping
+    // them into a struct would hide that, and a struct this function
+    // constructed would be the first place it could start choosing.
+    #[allow(clippy::too_many_arguments)]
     pub fn provider_side_registry_channel_init(
         &self,
         wallet_id: &AgentWalletId,
