@@ -117,7 +117,11 @@ const READY: AgentHvmRegistryExitStatus = {
   lease_read_error: "",
   fullnode_reachable: true,
   spendable_l1_zhu: 300_000,
-  required_l1_fee_zhu: 30_000,
+  // What must be held: every transaction one press can send, including the
+  // lease renewals and the re-send. Deliberately larger than three times the
+  // per-transaction ceiling, because that is the shape of the real numbers.
+  required_l1_fee_zhu: 60_000,
+  ordinary_run_ceiling_zhu: 30_000,
   chain_transaction_count: 3,
   per_transaction_ceiling_zhu: 10_000,
   per_transaction_network_fee_zhu: 1_000,
@@ -199,7 +203,14 @@ describe("what the exit section states before anything is pressed", () => {
     expect(line).toContain("10000 HAC");
     expect(line).toContain("1000 HAC of network fee");
     expect(line).toContain("9000 HAC");
-    expect(line).toContain("Keep 30000 HAC available");
+    // The amount to keep is the whole press, not the three ordinary steps. A
+    // press renews a short lease before it challenges, and quoting only the
+    // three let an owner through who would have stalled at the third
+    // transaction with the objection window already running. Both numbers are
+    // on the screen, because "keep this" and "it will probably cost this" are
+    // two different facts and folding them into one is how this went wrong.
+    expect(line).toContain("Keep 60000 HAC available");
+    expect(line).toContain("the usual three come to about 30000 HAC");
     expect(line).toContain(
       "it has to be there or the first transaction cannot run",
     );

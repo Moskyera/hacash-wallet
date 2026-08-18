@@ -1951,26 +1951,91 @@ fn validate_hvm_capabilities_for_binding(
     Ok(())
 }
 
+/// Does the node this Hub talks to answer for the network this binding names,
+/// and can it do the things an exit through that binding needs?
+///
+/// # Why each term speaks for itself
+///
+/// These eight terms used to be one `if` with one message - "fullnode cannot
+/// verify and execute the exact shared HVM registry profile" - which names a
+/// profile rather than a fact. That was measured to matter, not guessed:
+/// driven against the real mainnet fullnode running on the owner's own machine,
+/// exactly one of these terms fails today, and it is
+/// `hpay_channel_registry_query`. The node build in production does not publish
+/// that capability at all, so a mainnet operator's refusal never reached the
+/// deployment terms below and never named anything they could act on. The
+/// deployment half had already been turned from a slogan into a measurement;
+/// this half had not, and it is the half a real node actually hits.
+///
+/// Nothing here is relaxed. Every term is the same term, checked in the same
+/// order, and any one of them still refuses; what changed is that the refusal
+/// says which one.
 fn validate_hvm_registry_capabilities_for_binding(
     capabilities: &FullnodeCapabilitiesV1,
     binding: &HvmRegistryBindingV2,
 ) -> HubResult<()> {
     binding.validate()?;
     let expected_mainnet = binding.network_mode == "mainnet";
-    if capabilities.mainnet != expected_mainnet
-        || capabilities.chain_id != binding.chain_id
-        || capabilities.network_instance_id.as_deref() != Some(binding.network_instance_id.as_str())
-        || capabilities.height < binding.deployment_height
-        || !capabilities.transaction_submit_bound
-        || !capabilities.hpay_channel_registry_query
-        || capabilities.enabled_transactions.binary_search(&3).is_err()
-        || [1_u16, 14, 40, 41, 44, 0x0411, 0x0414]
-            .iter()
-            .any(|kind| !capabilities.action_enabled(*kind))
-    {
+    if capabilities.mainnet != expected_mainnet {
+        return Err(HubError::Node(format!(
+            "fullnode is {} and this binding is for {}",
+            if capabilities.mainnet {
+                "on mainnet"
+            } else {
+                "not on mainnet"
+            },
+            binding.network_mode
+        )));
+    }
+    if capabilities.chain_id != binding.chain_id {
+        return Err(HubError::Node(format!(
+            "fullnode is on chain {} and this binding names chain {}",
+            capabilities.chain_id, binding.chain_id
+        )));
+    }
+    if capabilities.network_instance_id.as_deref() != Some(binding.network_instance_id.as_str()) {
         return Err(HubError::Node(
-            "fullnode cannot verify and execute the exact shared HVM registry profile".into(),
+            "fullnode is a different instance of this network than the one this binding was \
+             made against, so its history is not the history this channel lives in"
+                .into(),
         ));
+    }
+    if capabilities.height < binding.deployment_height {
+        return Err(HubError::Node(format!(
+            "fullnode is at height {} and has not yet reached the height {} this binding was \
+             deployed at, so it cannot see the channel at all",
+            capabilities.height, binding.deployment_height
+        )));
+    }
+    if !capabilities.transaction_submit_bound {
+        return Err(HubError::Node(
+            "fullnode does not accept transaction submission bound to this network, so an exit \
+             could be built and never sent"
+                .into(),
+        ));
+    }
+    if !capabilities.hpay_channel_registry_query {
+        return Err(HubError::Node(
+            "fullnode does not answer shared HVM registry channel queries, so nothing could \
+             read this channel's state on chain to decide or check an exit"
+                .into(),
+        ));
+    }
+    if capabilities.enabled_transactions.binary_search(&3).is_err() {
+        return Err(HubError::Node(
+            "fullnode does not enable type 3 transactions, which is the kind every shared HVM \
+             registry call is sent as"
+                .into(),
+        ));
+    }
+    if let Some(kind) = [1_u16, 14, 40, 41, 44, 0x0411, 0x0414]
+        .into_iter()
+        .find(|kind| !capabilities.action_enabled(*kind))
+    {
+        return Err(HubError::Node(format!(
+            "fullnode does not enable action {kind}, which a shared HVM registry channel needs \
+             to open, settle or pay out"
+        )));
     }
     if expected_mainnet {
         validate_mainnet_hvm_registry_deployment(capabilities, binding)?;
@@ -1995,9 +2060,10 @@ fn validate_hvm_registry_capabilities_for_binding(
 /// [`crate::readiness::measure_node_reported_unilateral_exit`], which asks only
 /// whether some verified deployment exists. Money moves against one binding, so
 /// the verified deployment has to be the one the binding names: same contract
-/// address, same deploying transaction, same height, same network instance.
-/// Without those four terms a Hub could hand over a binding for a contract
-/// nobody verified while riding a node that verified a different one.
+/// address, same deploying transaction, same height, same network instance,
+/// same deploying Hub. Without those five terms a Hub could hand over a binding
+/// for a contract nobody verified while riding a node that verified a different
+/// one.
 ///
 /// `external_audit_complete` is carried in the evidence and deliberately not a
 /// term here, for the reason given on
@@ -2062,6 +2128,23 @@ fn validate_mainnet_hvm_registry_deployment(
         return Err(HubError::Node(
             "verified shared HVM registry is constructed for a different network than this \
              mainnet binding"
+                .into(),
+        ));
+    }
+    // The deploying Hub is not metadata: the contract's constructor writes its
+    // own transaction's main signer into `g_hub`, and `open_channel` will not
+    // execute without that address's signature, while `PermitHAC` pays the Hub
+    // share to it and nobody else. A binding naming a different Hub therefore
+    // names a registry that can never hold this channel.
+    // `HvmRegistryLiveSnapshot::validate_runtime_binding` already refuses that
+    // state, but only once there is a channel on chain to read; this is the
+    // same term, weighed before anything is signed or funded.
+    if evidence.on_chain_verification.hub_address.as_deref()
+        != Some(binding.right_hub_address.as_str())
+    {
+        return Err(HubError::Node(
+            "verified shared HVM registry was deployed by a different Hub than this mainnet \
+             binding names"
                 .into(),
         ));
     }
@@ -3089,6 +3172,148 @@ mod tests {
         );
     }
 
+    /// Every capability term has to name itself, including the one a real
+    /// mainnet node fails today.
+    ///
+    /// The deployment terms were turned from a slogan into a measurement first,
+    /// and that left a gap nobody could see from a unit test: driven against
+    /// the real mainnet fullnode on this machine, the refusal an operator
+    /// actually receives comes from the capability check *above* the deployment
+    /// check, and it said "fullnode cannot verify and execute the exact shared
+    /// HVM registry profile" - the name of a profile, not the missing fact.
+    /// Exactly one term fails there, `hpay_channel_registry_query`, because the
+    /// shipped node build publishes no such key.
+    ///
+    /// Every fixture below is the fully verified mainnet document with one
+    /// capability broken, so each case can only fail on the term it is about.
+    /// The last case is the load bearing one: with nothing broken the gate
+    /// stops objecting, which is what stops this from being a blanket refusal
+    /// wearing eight messages.
+    #[test]
+    fn every_registry_capability_term_names_itself() {
+        let binding = mainnet_registry_binding();
+        let ready = || {
+            let mut capabilities = registry_capabilities(&binding);
+            capabilities.channel_registry_unilateral_exit = true;
+            capabilities.channel_registry_unilateral_exit_evidence =
+                Some(verified_registry_evidence(&binding));
+            capabilities
+        };
+        let refusal = |mutate: &dyn Fn(&mut FullnodeCapabilitiesV1)| {
+            let mut capabilities = ready();
+            mutate(&mut capabilities);
+            validate_hvm_registry_capabilities_for_binding(&capabilities, &binding)
+                .expect_err("a broken capability term was accepted")
+                .to_string()
+        };
+
+        // The term a real mainnet fullnode fails today. Named first because it
+        // is the one an operator will actually read.
+        let message = refusal(&|capabilities| capabilities.hpay_channel_registry_query = false);
+        assert!(
+            message.contains("does not answer shared HVM registry channel queries"),
+            "refusal does not name the registry query capability: {message}"
+        );
+
+        /// One capability term, and the way to break exactly that one.
+        type BreakOneTerm<'a> = (&'a str, &'a dyn Fn(&mut FullnodeCapabilitiesV1));
+        let terms: [BreakOneTerm; 8] = [
+            ("mainnet", &|c| c.mainnet = false),
+            ("chain", &|c| c.chain_id += 1),
+            ("network instance", &|c| {
+                c.network_instance_id = Some("77".repeat(32))
+            }),
+            ("height", &|c| c.height = 0),
+            ("submission", &|c| c.transaction_submit_bound = false),
+            ("registry query", &|c| c.hpay_channel_registry_query = false),
+            ("type 3", &|c| c.enabled_transactions = vec![2]),
+            ("action", &|c| c.enabled_actions.retain(|kind| *kind != 14)),
+        ];
+
+        let mut messages = Vec::new();
+        for (label, mutate) in terms {
+            let message = refusal(mutate);
+            assert!(
+                !message.contains("the exact shared HVM registry profile"),
+                "the {label} term still refuses with the name of a profile: {message}"
+            );
+            assert!(
+                !message.contains("not enabled yet"),
+                "the {label} term describes this codebase rather than the node: {message}"
+            );
+            messages.push(message);
+        }
+
+        // Each of those messages is different from the others, so an operator
+        // reading one learns which term it was.
+        let mut unique = messages.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            messages.len(),
+            "two capability terms refuse with the same words, so one of them cannot be told \
+             apart from the other: {messages:?}"
+        );
+
+        // And with nothing broken it stops objecting. Without this the eight
+        // messages above would just be a blanket refusal in better clothes.
+        validate_hvm_registry_capabilities_for_binding(&ready(), &binding)
+            .expect("a fully matching mainnet deployment must pass the capability gate");
+    }
+
+    /// The refusal a mainnet operator receives *today*, from a document shaped
+    /// like the one the shipped fullnode actually publishes.
+    ///
+    /// Read from the real mainnet node running beside this workspace
+    /// (`127.0.0.1:8080`, `GET /query/capabilities`, height 774355, chain 0,
+    /// `network.kind = "mainnet"`), its `api` object is exactly
+    /// `balance_query, contract_sandbox_query, reconciliation_by_tx_hash,
+    /// transaction_query, transaction_submit, transaction_submit_bound` - no
+    /// `hpay_channel_registry_query` - and its `features` object carries no
+    /// `channel_registry_unilateral_exit` at all. `parse` reads both absences
+    /// as `false`, so the registry-query term is the one a real operator hits,
+    /// before any of the deployment terms are ever weighed.
+    ///
+    /// The fixture below has the same shape - an `api` block that does not
+    /// mention the key - which is why this test is about the shipped node and
+    /// not about a hand-set boolean. It asserts the absence explicitly first,
+    /// so it fails loudly rather than silently if the fixture ever drifts into
+    /// publishing the key.
+    #[test]
+    fn a_shipped_mainnet_node_is_refused_by_name_and_not_by_profile() {
+        let binding = mainnet_registry_binding();
+        let mut document = capabilities(vec![1_u16, 14, 40, 41, 44, 0x0411, 0x0414]);
+        assert!(
+            document["api"].get("hpay_channel_registry_query").is_none(),
+            "this test is about a node that does not publish the key at all"
+        );
+        // Type 3 is enabled here only so the refusal cannot be the *later*
+        // term instead of the one this test is about.
+        document["transactions"]["enabled"] = serde_json::json!([2, 3]);
+        document["transactions"]["registered"] = serde_json::json!([2, 3]);
+
+        let capabilities = FullnodeCapabilitiesV1::parse(&document)
+            .expect("the shipped mainnet document parses; it is the registry profile it lacks");
+        assert!(
+            !capabilities.hpay_channel_registry_query,
+            "an absent api key must read as absent, never as present"
+        );
+
+        let message = validate_hvm_registry_capabilities_for_binding(&capabilities, &binding)
+            .expect_err("no mainnet node deploys the shared registry today")
+            .to_string();
+        assert!(
+            message.contains("does not answer shared HVM registry channel queries"),
+            "the refusal a real operator gets still does not name the missing term: {message}"
+        );
+        assert!(
+            !message.contains("the exact shared HVM registry profile"),
+            "the refusal a real operator gets still names a profile: {message}"
+        );
+        assert!(!message.contains("not enabled yet"), "{message}");
+    }
+
     /// A verified deployment somewhere is not a verified deployment *here*.
     ///
     /// Money moves against one binding, so the deployment the node verified has
@@ -3133,6 +3358,57 @@ mod tests {
             validate_hvm_registry_capabilities_for_binding(&other_network, &binding).is_err(),
             "a registry constructed for another network was accepted"
         );
+    }
+
+    /// A registry somebody else deployed is not this Hub's registry.
+    ///
+    /// The reviewed contract's constructor writes its own deploying
+    /// transaction's main signer into `g_hub`
+    /// (`hacash-fullnodedev/vm/contracts/hpay_channel_registry_v2.fitsh:44`,
+    /// `var hub = tx_main_addr()` then `storage_new("g_hub", hub, ...)`), and
+    /// that stored address is the only one the contract will accept as the Hub
+    /// side of any channel: `open_channel` asserts
+    /// `check_signature(storage_load("g_hub"))` and `PermitHAC` pays the Hub
+    /// share only to `g_hub`. The evidence document carries exactly that
+    /// address as `on_chain_verification.hub_address`.
+    ///
+    /// So a mainnet binding whose `right_hub_address` is not the Hub that
+    /// deployed the verified registry names a contract that can never hold
+    /// this channel. `HvmRegistryLiveSnapshot::validate_runtime_binding`
+    /// already refuses that state on chain
+    /// (`crates/l2-fast-pay-hub/src/hvm_registry.rs:604`), but only once a
+    /// channel exists to read; this is the same term weighed before anything is
+    /// signed or funded.
+    #[test]
+    fn mainnet_registry_binding_refuses_a_registry_another_hub_deployed() {
+        let binding = mainnet_registry_binding();
+        let mut capabilities = registry_capabilities(&binding);
+        let mut evidence = verified_registry_evidence(&binding);
+        evidence.on_chain_verification.hub_address =
+            Some(Address::create_privakey([9; 20]).to_readable());
+        capabilities.channel_registry_unilateral_exit = true;
+        capabilities.channel_registry_unilateral_exit_evidence = Some(evidence);
+
+        assert_ne!(
+            evidence_hub_of(&capabilities),
+            binding.right_hub_address,
+            "fixture must actually name a different deploying Hub"
+        );
+        let message = validate_hvm_registry_capabilities_for_binding(&capabilities, &binding)
+            .expect_err("the verified registry was deployed by a different Hub")
+            .to_string();
+        assert!(
+            message.contains("deployed by a different Hub"),
+            "refusal does not name the deploying Hub: {message}"
+        );
+    }
+
+    fn evidence_hub_of(capabilities: &FullnodeCapabilitiesV1) -> String {
+        capabilities
+            .channel_registry_unilateral_exit_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.on_chain_verification.hub_address.clone())
+            .expect("fixture carries a deploying Hub")
     }
 
     /// And the other direction: a node that really does see the reviewed

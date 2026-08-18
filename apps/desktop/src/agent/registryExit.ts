@@ -70,6 +70,17 @@ export type AgentHvmRegistryExitStatus = {
    * call runs, handing back what was not used.
    */
   required_l1_fee_zhu: number;
+  /**
+   * What the three ordinary steps cost when nothing conditional happens, which
+   * is what usually happens.
+   *
+   * Named separately from `required_l1_fee_zhu` because they are two different
+   * facts and folding them into one number is how this screen got it wrong
+   * twice. This one is the likely bill; that one is what must be sitting there
+   * before the press, and it covers the lease renewals and the re-send that a
+   * press can also need.
+   */
+  ordinary_run_ceiling_zhu?: number;
   /** How many chain transactions an ordinary exit sends. */
   chain_transaction_count: number;
   /** Fee plus gas reserve for one of them. */
@@ -258,17 +269,27 @@ export function registryExitView(
     // before the call runs, handing back what was not used. So the reserve is
     // quoted, because the reserve is what decides whether the first
     // transaction can execute at all.
+    //
+    // The order of the sentences is load bearing. "Keep X available" used to
+    // come before the paragraph about extensions and re-sends, and X was the
+    // three ordinary transactions only, so an owner who read carefully was
+    // told a number that did not cover the run this screen was describing to
+    // them. X is now every transaction one press can send, which is more than
+    // three times the per-transaction ceiling; the conditional steps are named
+    // first so the larger number reads as what it is.
     feeLine:
       `This sends ${plural(status.chain_transaction_count ?? EXIT_CHAIN_FEE_COUNT, "transaction")}, and each one can ` +
       `take up to ${formatZhu(String(status.per_transaction_ceiling_zhu ?? 0))} from your main balance: ` +
       `${formatZhu(String(status.per_transaction_network_fee_zhu ?? 0))} of network fee, plus up to ` +
       `${formatZhu(String(status.per_transaction_gas_reserve_zhu ?? 0))} that the chain holds while the contract ` +
-      "runs and gives most of back afterwards. Keep " +
-      `${formatZhu(String(status.required_l1_fee_zhu))} available; you will not usually be charged all of it, ` +
+      "runs and gives most of back afterwards. If this channel's record is close to expiring it is extended " +
+      "first, and if your provider answers your first transaction before it is mined then that one is spent " +
+      "for nothing and is sent again; each of those is one more transaction at the same ceiling. Keep " +
+      `${formatZhu(String(status.required_l1_fee_zhu))} available, which is enough for all of them together ` +
+      `even though the usual three come to about ${formatZhu(String(status.ordinary_run_ceiling_zhu ?? 0))}; ` +
+      "you will not usually be charged anything like it, " +
       "and it has to be there or the first transaction cannot run. What is spent is spent whether or not the " +
-      "provider ever comes back. If this channel's record is close to expiring it is extended first, and if " +
-      "your provider answers your first transaction before it is mined then that one is spent for nothing and " +
-      "is sent again; each of those is one more transaction at the same ceiling.",
+      "provider ever comes back.",
     leaseLine:
       lease === null
         ? "This channel's record on chain has an expiry, and it could not be read just now. " +

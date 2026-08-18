@@ -18,6 +18,7 @@ pub mod hip23;
 pub mod history;
 mod http_client;
 pub mod hvm_registry_exit;
+pub mod hvm_registry_exit_cost;
 pub mod hvm_registry_exit_driver;
 pub mod hvm_registry_exit_record;
 pub mod hvm_registry_open;

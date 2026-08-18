@@ -2502,8 +2502,23 @@ pub async fn agent_wallet_retry_hvm_exact(
 /// The screen names the same three in the same order
 /// (`apps/desktop/src/agent/registryExit.ts`), so the count the owner reads
 /// and the count this ceiling is built from are one number.
+///
+/// Read from the priced list rather than typed, so the count on the screen and
+/// the steps the quote is summed over cannot drift apart.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-const EXIT_CHAIN_TRANSACTION_COUNT: u64 = 3;
+const EXIT_CHAIN_TRANSACTION_COUNT: u64 =
+    hacash_wallet_core::hvm_registry_exit_cost::EXIT_RUN_STEPS.len() as u64;
+
+/// The fee one exit transaction carries, and therefore the fee every figure
+/// below is priced at.
+///
+/// The same constant the driver signs with
+/// (`agent_wallet_core::AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU`, handed to the
+/// driver as `HvmRegistryExitTermsV1::network_fee_zhu`), because a quote
+/// priced at one fee and a transaction signed at another is the screen telling
+/// the owner a different number than the chain will charge.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const EXIT_NETWORK_FEE_ZHU: u64 = agent_wallet_core::AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU;
 
 /// Everything an ordinary exit can take out of the owner's main balance.
 ///
@@ -2526,13 +2541,61 @@ const EXIT_CHAIN_TRANSACTION_COUNT: u64 = 3;
 /// transaction: `hac_sub` fails, the challenge dies, and they have already
 /// pressed a two-step irreversible control.
 ///
-/// So the quote is now fee plus reserve, per transaction, times the three
-/// transactions an ordinary exit sends. Lease renewals are extra and the
-/// screen says so separately, because they are conditional and this number is
-/// the one an owner is asked to have in hand before pressing.
+/// So the quote is fee plus reserve. What it no longer is, is *one* reserve
+/// applied to all three.
+///
+/// # Why the flat version was still wrong
+///
+/// The reserve is `ceil(budget * purity_fee / billing_size)`, so it moves with
+/// the size of the transaction, and a **smaller** transaction reserves
+/// **more**. The first fix quoted the single smallest transaction observed
+/// anywhere in a measured run — a lease renewal, 187 billing bytes, rounded
+/// down to 160 — and applied it to every step. That over-stated the
+/// requirement by about 17% on the smallest step of the run and about 2.6x on
+/// the largest, and an over-quote is not free: it turns the affordability
+/// precondition red, and withholds the exit control beside it, from an owner
+/// who could have finished.
+///
+/// So each step is now priced at its own measured size.
+/// `hacash_wallet_core::hvm_registry_exit_cost` holds the floors and
+/// `crates/wallet-core/tests/exit_fee_quote_per_step.rs` is where they come
+/// from: it builds every one of the six exit transactions with the shipped
+/// builder and reads `billing_size()` off the signed bytes. Nothing here is
+/// estimated, and every floor sits at or below the size that was measured, so
+/// the remaining error is an over-quote and never an under-quote.
+///
+/// # Why this is the whole press and not the ordinary run
+///
+/// The first per-step version of this constant was `exit_run_ceiling_zhu` — the
+/// three ordinary steps — and that was a second under-quote in the same place
+/// as the first. A press is not always three transactions:
+/// `plan_user_exit_step` renews the registry lease when it is short, then the
+/// channel lease, before it challenges at all, and it can plan a response. Each
+/// is a real transaction out of the same balance.
+///
+/// Walked one transaction at a time at full burn, an owner holding exactly the
+/// three-step quote with a short registry lease clears the renewal
+/// (609,211,957) and the challenge (275,291,667) and then cannot pay for
+/// `finalize` — stranded part-way through an irreversible press with the
+/// objection window already running. The flat quote this replaced happened to
+/// have enough accidental slack to cover one renewal; it did not cover two.
+/// Neither number was ever designed to.
+///
+/// So this is `exit_worst_press_ceiling_zhu`: every step one press can send,
+/// each still priced at its own measured size. The tightening GAP 1 asked for
+/// is not undone — the ordinary run is still quoted at 1,353,358,975 rather
+/// than the flat 2,101,331,250, and it is published beside this one as
+/// `ordinary_run_ceiling_zhu` — but the number the affordability precondition
+/// gates on is now the number a press can actually need.
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 const EXIT_FEE_CEILING_ZHU: u64 =
-    agent_wallet_core::agent_registry_exit_transaction_ceiling_zhu() * EXIT_CHAIN_TRANSACTION_COUNT;
+    hacash_wallet_core::hvm_registry_exit_cost::exit_worst_press_ceiling_zhu(EXIT_NETWORK_FEE_ZHU);
+
+/// What the three ordinary steps cost, published beside the press ceiling so a
+/// screen can name both without doing arithmetic of its own.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const EXIT_ORDINARY_RUN_CEILING_ZHU: u64 =
+    hacash_wallet_core::hvm_registry_exit_cost::exit_run_ceiling_zhu(EXIT_NETWORK_FEE_ZHU);
 
 /// What the owner's own fullnode says about walking out of an HVM registry
 /// channel without the provider.
@@ -2798,22 +2861,80 @@ fn exit_status_json(
         "lease_read_error": lease_read_error,
         "fullnode_reachable": lease.is_some(),
         "spendable_l1_zhu": spendable_l1_zhu,
+        // Every step one press can send, each at its own measured size. Not
+        // the three ordinary ones: the planner renews a short lease before it
+        // challenges, and an owner holding only the three-step figure would
+        // clear the renewal and the challenge and then be unable to pay for
+        // `finalize`, stranded mid-press with the objection window running.
         "required_l1_fee_zhu": EXIT_FEE_CEILING_ZHU,
+        // What the ordinary path costs when nothing conditional happens, which
+        // is what usually happens. Published so the screen can name the likely
+        // number as well as the number that must be available.
+        "ordinary_run_ceiling_zhu": EXIT_ORDINARY_RUN_CEILING_ZHU,
         // Broken out so the screen can say what one more transaction costs
         // without doing arithmetic of its own, and so the gas half is nameable
         // rather than folded invisibly into a single figure. A lease renewal
         // or a re-sent step is exactly one more of these.
+        //
+        // The ceiling is taken over *every* step an exit can send, not only
+        // the three an ordinary run sends, because the screen offers this
+        // number for exactly the conditional ones: "if this channel's record
+        // is close to expiring it is extended first ... each of those is one
+        // more transaction at the same ceiling". The most expensive step is a
+        // registry lease renewal - the shortest transaction of the six, and
+        // therefore the one that reserves the most gas - so quoting the run's
+        // own largest here would understate the step the sentence is about.
         "chain_transaction_count": EXIT_CHAIN_TRANSACTION_COUNT,
         "per_transaction_ceiling_zhu":
-            agent_wallet_core::agent_registry_exit_transaction_ceiling_zhu(),
-        "per_transaction_network_fee_zhu": agent_wallet_core::AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU,
-        "per_transaction_gas_reserve_zhu": agent_wallet_core::agent_registry_exit_gas_reserve_zhu(),
+            hacash_wallet_core::hvm_registry_exit_cost::exit_largest_step_ceiling_zhu(
+                EXIT_NETWORK_FEE_ZHU,
+            ),
+        "per_transaction_network_fee_zhu": EXIT_NETWORK_FEE_ZHU,
+        "per_transaction_gas_reserve_zhu":
+            hacash_wallet_core::hvm_registry_exit_cost::exit_largest_step_ceiling_zhu(
+                EXIT_NETWORK_FEE_ZHU,
+            ) - EXIT_NETWORK_FEE_ZHU,
+        // Every step, priced at its own measured size, so a surface can show
+        // the owner where the number came from instead of asking them to trust
+        // one total. `billing_floor_bytes` is the measurement each line is
+        // computed from; the run total above is the sum of the three lines
+        // whose `in_ordinary_run` is true.
+        "exit_step_costs": exit_step_costs_json(),
         // Empty exactly when no step of an exit has ever been opened for this
         // channel, which is the only case in which the screen may speak about
         // starting one. Read from this wallet's own durable record; no chain
         // and no provider is involved.
         "started_steps": started_steps,
     })
+}
+
+/// What each step of an exit can take from the owner's main balance, one line
+/// per step.
+///
+/// The screen has always had to say "up to" about a number it could not break
+/// down, which is the shape of sentence people stop believing. These are the
+/// pieces: the measured size the step encodes to, the fee it carries, and the
+/// gas the chain holds while it runs. Nothing is computed here — every figure
+/// comes from `hacash_wallet_core::hvm_registry_exit_cost`, whose floors are
+/// measured by `crates/wallet-core/tests/exit_fee_quote_per_step.rs`.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn exit_step_costs_json() -> Value {
+    use hacash_wallet_core::hvm_registry_exit_cost as cost;
+    Value::Array(
+        cost::EXIT_ALL_STEPS
+            .iter()
+            .map(|step| {
+                json!({
+                    "step": step.slug(),
+                    "billing_floor_bytes": cost::exit_step_billing_floor_bytes(*step),
+                    "network_fee_zhu": EXIT_NETWORK_FEE_ZHU,
+                    "gas_reserve_zhu": cost::exit_step_gas_reserve_zhu(*step, EXIT_NETWORK_FEE_ZHU),
+                    "ceiling_zhu": cost::exit_step_ceiling_zhu(*step, EXIT_NETWORK_FEE_ZHU),
+                    "in_ordinary_run": cost::EXIT_RUN_STEPS.contains(step),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Both halves of a storage lease, because only both together decide whether a
@@ -3618,6 +3739,184 @@ mod tests {
         let runtime = body.find("state.runtime.request_shutdown").unwrap();
         let manager = body.find("require_manager(&state)").unwrap();
         assert!(marker < runtime && runtime < manager);
+    }
+
+    /// THE EXIT QUOTE IS PRICED PER STEP, AND STILL REFUSES A RUN THE OWNER
+    /// CANNOT PAY FOR.
+    ///
+    /// # What was wrong
+    ///
+    /// The quote applied one assumed transaction size - the smallest
+    /// transaction seen anywhere in a whole exit - to every transaction of the
+    /// run. The chain reserves gas as `budget * purity_fee / billing_size`
+    /// (`GasCounter::calc_burn_amount`,
+    /// `hacash-fullnodedev/protocol/src/context/gas.rs:124`), so a smaller
+    /// assumed size means a larger assumed reserve, and the flat assumption
+    /// over-stated the requirement by about 17% on the smallest step of the
+    /// run and about 2.6x on the largest. Wrong in the safe direction, but
+    /// wrong: an over-quote shows a red affordability precondition, and the
+    /// exit control beside it stays withheld, from an owner who could in fact
+    /// have completed the exit.
+    ///
+    /// # What this pins
+    ///
+    /// Both edges, because only one of them is cheap to get wrong.
+    ///
+    /// * The quote is never below what the chain can actually take at the
+    ///   sizes these transactions were **measured** at. That is the edge that
+    ///   walks somebody into a two-step irreversible press whose first
+    ///   transaction cannot execute.
+    /// * The quote is below the flat assumption it replaced, and an owner
+    ///   holding 14 HAC - enough for the whole run at the measured sizes, and
+    ///   not enough under the flat assumption - is no longer refused.
+    ///
+    /// The reserve arithmetic below is written out again rather than imported,
+    /// on purpose: it is the chain's rule stated independently of the model
+    /// under test, so this checks the quote against the chain and not against
+    /// itself. The measured sizes it is evaluated at come from
+    /// `crates/wallet-core/tests/exit_fee_quote_per_step.rs`, which builds
+    /// each of these transactions with the shipped builder and reads
+    /// `billing_size()` off the signed bytes.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    #[test]
+    fn the_exit_quote_is_priced_per_step_and_still_refuses_what_cannot_be_afforded() {
+        /// `ceil(budget * max(raw_fee, floor * size) / size)`, in whole zhu.
+        fn chain_gas_reserve_zhu(billing_size_bytes: u64, network_fee_zhu: u64) -> u64 {
+            const GAS_BUDGET: u64 = 111_911;
+            const LOWEST_FEE_PURITY_UNIT238: u64 = 50_000;
+            const UNIT238_PER_ZHU: u64 = 100;
+            let raw_fee_238 = network_fee_zhu * UNIT238_PER_ZHU;
+            let floor_fee_238 = LOWEST_FEE_PURITY_UNIT238 * billing_size_bytes;
+            let purity_fee_238 = raw_fee_238.max(floor_fee_238);
+            (GAS_BUDGET * purity_fee_238)
+                .div_ceil(billing_size_bytes)
+                .div_ceil(UNIT238_PER_ZHU)
+        }
+        const NETWORK_FEE_ZHU: u64 = 1_000_000;
+        // The measured minimum billing size of each transaction an ordinary
+        // run sends: challenge, finalize, and the Action 14 claim.
+        let true_run_cost = [414_u64, 210, 209]
+            .into_iter()
+            .map(|size| NETWORK_FEE_ZHU + chain_gas_reserve_zhu(size, NETWORK_FEE_ZHU))
+            .sum::<u64>();
+        assert_eq!(true_run_cost, 1_341_685_281);
+        // What the flat assumption quoted for the same three transactions.
+        let flat_quote = 3 * (NETWORK_FEE_ZHU + chain_gas_reserve_zhu(160, NETWORK_FEE_ZHU));
+        assert_eq!(flat_quote, 2_101_331_250);
+
+        let status = |spendable_l1_zhu: u64| {
+            super::exit_status_json(true, spendable_l1_zhu, (None, String::new()), Vec::new())
+        };
+        let quote = status(0)["required_l1_fee_zhu"]
+            .as_u64()
+            .expect("the exit quote is a number");
+        let ordinary_run = status(0)["ordinary_run_ceiling_zhu"]
+            .as_u64()
+            .expect("the ordinary run ceiling is a number");
+
+        assert!(
+            quote >= true_run_cost,
+            "the quote {quote} is below the {true_run_cost} the chain can take at the sizes \
+             these transactions were measured at, so an owner could pass the affordability \
+             precondition and be unable to execute the first transaction"
+        );
+        // The tightening GAP 1 asked for, checked where it is claimed: the
+        // *ordinary run* is priced from the six measured sizes and is well
+        // under the flat smallest-transaction assumption it replaced.
+        assert!(
+            ordinary_run >= true_run_cost && ordinary_run < flat_quote,
+            "the ordinary run {ordinary_run} is either below what the chain can take \
+             ({true_run_cost}) or still the flat assumption ({flat_quote}) applied to every step"
+        );
+
+        // But the number the precondition gates on is not the ordinary run,
+        // and this is the hole a verifier found after the first fix. The
+        // planner renews a short registry lease *before* it challenges
+        // (`crates/wallet-core/src/hvm_registry_exit.rs`), so the press can be
+        // four transactions, or five with the channel lease too. Walked one
+        // transaction at a time at full burn — before each one the balance must
+        // cover that transaction's own fee and whole reserve, and what the
+        // earlier ones took is gone — the quote has to survive the longest
+        // sequence, not the shortest.
+        let ceiling = |size: u64| NETWORK_FEE_ZHU + chain_gas_reserve_zhu(size, NETWORK_FEE_ZHU);
+        // Measured sizes: registry renewal 187, channel renewal 214, challenge
+        // 414, finalize 210, claim 209.
+        let renewal_then_run = [187_u64, 214, 414, 210, 209];
+        let mut spent = 0;
+        let mut needed = 0;
+        for size in renewal_then_run {
+            needed = std::cmp::max(needed, spent + ceiling(size));
+            spent += ceiling(size);
+        }
+        assert!(
+            ordinary_run < needed,
+            "this test claims the three-step quote could strand a press; if it now covers \
+             {needed} the claim is stale and must be re-derived rather than deleted"
+        );
+        assert!(
+            quote >= needed,
+            "the quote {quote} does not cover a press that renews a short lease first, which \
+             needs {needed} held up front: an owner would clear the renewal and the challenge \
+             and then be unable to pay for finalize, stranded part-way through an irreversible \
+             press with the objection window already running"
+        );
+
+        // The precondition the desktop applies, verbatim from
+        // `apps/desktop/src/agent/registryExit.ts`:
+        //   `status.spendable_l1_zhu >= status.required_l1_fee_zhu`.
+        let affordable = |spendable_l1_zhu: u64| {
+            let status = status(spendable_l1_zhu);
+            status["spendable_l1_zhu"].as_u64().unwrap()
+                >= status["required_l1_fee_zhu"].as_u64().unwrap()
+        };
+        // It still refuses. An owner who cannot cover the run at its measured
+        // cost is told so, exactly as before.
+        assert!(!affordable(true_run_cost - 1));
+        assert!(!affordable(quote - 1));
+        assert!(affordable(quote));
+
+        // And it refuses the case that was the whole point of the second fix:
+        // 14 HAC covers the three ordinary transactions at their measured
+        // sizes, and does not cover a press that has to renew a short lease
+        // first. The earlier, three-step version of this quote let that owner
+        // through. It must not.
+        assert!(1_400_000_000 > true_run_cost && 1_400_000_000 < needed);
+        assert!(
+            !affordable(1_400_000_000),
+            "an owner holding 1400000000 zhu cannot pay for a press that renews a short lease \
+             before it challenges, and must not be told they can"
+        );
+
+        // Said plainly, because it is the uncomfortable half: this quote is
+        // *larger* than the flat assumption it replaced, not smaller. The flat
+        // assumption was not a safe over-quote that got tightened; it was
+        // 2.6x too high on the steps it priced and still too low for a press
+        // that renews a lease, which is a shape of wrongness no single number
+        // can be talked out of. What the measurement bought is not a smaller
+        // gate but a true one, and the two figures beside it are where the
+        // tightening shows: the ordinary run and the per-transaction ceiling
+        // are both below what the flat assumption claimed for them.
+        assert!(quote > flat_quote);
+        assert!(ordinary_run < flat_quote);
+
+        // One more transaction - a response, or a lease renewal - is quoted at
+        // the per-transaction ceiling the same screen shows. A registry lease
+        // renewal is the *shortest* transaction an exit can send, measured at
+        // 187 billing bytes, so it reserves the most gas of any step; the
+        // ceiling has to cover that one and not merely the run's own largest.
+        let per_transaction = status(0)["per_transaction_ceiling_zhu"]
+            .as_u64()
+            .expect("the per-transaction ceiling is a number");
+        assert!(
+            per_transaction >= NETWORK_FEE_ZHU + chain_gas_reserve_zhu(187, NETWORK_FEE_ZHU),
+            "the per-transaction ceiling {per_transaction} does not cover a lease renewal, \
+             which the screen tells the owner to expect as one more transaction at this ceiling"
+        );
+        assert!(
+            per_transaction < NETWORK_FEE_ZHU + chain_gas_reserve_zhu(160, NETWORK_FEE_ZHU),
+            "the per-transaction ceiling {per_transaction} is still the flat \
+             smallest-transaction assumption rather than the measured registry renewal"
+        );
     }
 }
 
