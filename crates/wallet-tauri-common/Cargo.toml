@@ -74,6 +74,7 @@ agent-wallet-testnet-pilot = [
 on-chain-exit-proof = [
     "agent-wallet-testnet-pilot",
     "l2-fast-pay-hub/local-pilot-tools",
+    "agent-wallet-core/on-chain-exit-proof",
 ]
 agent-wallet-bounded-mainnet-pilot = [
     "agent-wallet-testnet-pilot",

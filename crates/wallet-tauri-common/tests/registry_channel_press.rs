@@ -33,7 +33,9 @@
 //!   through and asserted dead.
 //! * A fullnode on a real socket, so `FullnodeRegistryOpenChain` does the
 //!   reqwest, the status codes and the JSON exactly as it would against a
-//!   person's own node.
+//!   person's own node. It holds one height and answers both registry
+//!   questions from it, so its tip and its storage read describe the same
+//!   chain rather than two.
 //!
 //! # What this file does not claim
 //!
@@ -57,6 +59,7 @@ use agent_wallet_core::{AgentWalletId, AgentWalletManager, CreateAgentWallet};
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use hacash_wallet_core::hvm_registry_exit_driver::HvmRegistryExitChainV1;
 use l2_fast_pay_hub::HubState;
 use l2_fast_pay_hub::hvm_pilot::HvmLocalPilotNetwork;
 use l2_fast_pay_hub::hvm_registry::{
@@ -65,19 +68,29 @@ use l2_fast_pay_hub::hvm_registry::{
     HvmRegistryChannelStorageV2, HvmRegistryGlobalStorageV2, HvmRegistryLiveSnapshotV2,
 };
 use l2_fast_pay_hub::hvm_registry_pilot::build_hvm_registry_pilot_deployment;
+use l2_fast_pay_hub::hvm_registry_watchtower::{
+    HVM_REGISTRY_MAX_SNAPSHOT_TIP_DRIFT_BLOCKS, require_fresh_registry_evidence,
+};
 use l2_fast_pay_hub::node::HvmStorageEntry;
 use serde_json::{Value, json};
 use sys::Account;
 use wallet_tauri_common::agent_commands::{
     establish_hvm_registry_channel, open_hvm_registry_channel, start_hvm_registry_exit,
 };
+use wallet_tauri_common::agent_registry_exit::FullnodeRegistryExitChain;
 
 const PASSPHRASE: &str = "agent wallet passphrase 123";
 const DEPOSIT_ZHU: u64 = 5_000_000_000;
 const CHALLENGE_BLOCKS: u64 = 6;
 const SETUP_FEE_ZHU: u64 = 500_000;
 const CHANNEL_ID: &str = "5151515151515151515151515151515f";
-const FUNDED_BLOCK_HEIGHT: u64 = 4_242;
+/// The block the registry deployment is in, and the floor every later height
+/// in this file is measured from.
+const DEPLOYMENT_HEIGHT: u64 = 100;
+/// Where this node's chain stands when the test starts: a few blocks past the
+/// deployment, which is where a person pasting a freshly published channel
+/// would find it.
+const FIRST_HEIGHT: u64 = DEPLOYMENT_HEIGHT + 4;
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -95,14 +108,40 @@ fn now_unix() -> u64 {
 /// It corroborates exactly one channel and answers about nothing else, which
 /// is the point: the wallet's pre-funding gate is judging this node, and a node
 /// that agrees with whatever it is asked would make the gate untestable.
-#[derive(Default)]
+///
+/// # Why the height lives here and nowhere else
+///
+/// A fullnode answers the wallet's two registry questions from one chain:
+/// `/query/capabilities` reports the tip, `/query/hpay/channel-registry`
+/// reports the height its storage read was taken at, and every deadline the
+/// exit reasons about is the difference between the two. This double used to
+/// state those two heights as separate literals - a tip of 4252 and a storage
+/// read at 104 - which is not a slow node, it is two nodes wearing one socket.
+/// `require_fresh_registry_evidence` is entitled to refuse that and did.
+///
+/// So `height` is the single fact, both routes read it, and a block is mined
+/// by moving it. There is nothing left in this file that can say a height
+/// without saying this one.
 struct NodeFacts {
     channel: Option<HvmRegistryBindingV2>,
     /// Every transaction hex this node has been handed, keyed by hash.
     submitted: Vec<(String, String)>,
-    /// True once the deposit is in a block, which is also the moment the
-    /// channel's own storage stops being the unfunded one.
-    funded: bool,
+    /// This node's chain tip.
+    height: u64,
+    /// The block the deposit is in, once a block carries it. `Some` is also
+    /// the moment the channel's own storage stops being the unfunded one.
+    funding_block: Option<u64>,
+}
+
+impl Default for NodeFacts {
+    fn default() -> Self {
+        Self {
+            channel: None,
+            submitted: Vec::new(),
+            height: FIRST_HEIGHT,
+            funding_block: None,
+        }
+    }
 }
 
 struct Fullnode {
@@ -119,6 +158,24 @@ impl Fullnode {
             }
         }
         seen
+    }
+
+    fn height(&self) -> u64 {
+        self.facts.lock().unwrap().height
+    }
+
+    /// Blocks arrive. Everything this node says moves with them.
+    fn mine_empty_blocks(&self, blocks: u64) {
+        self.facts.lock().unwrap().height += blocks;
+    }
+
+    /// The deposit lands in the next block, and that block's height is
+    /// returned rather than assumed by whoever asked.
+    fn mine_the_deposit(&self) -> u64 {
+        let mut facts = self.facts.lock().unwrap();
+        facts.height += 1;
+        facts.funding_block = Some(facts.height);
+        facts.height
     }
 }
 
@@ -139,7 +196,15 @@ fn entry<T>(value: T) -> HvmStorageEntry<T> {
 /// becomes the deposit, and the registry's own locked total and open count take
 /// account of it. Everything the binding names is identical in both, because
 /// nothing the binding names is allowed to change.
-fn snapshot(binding: &HvmRegistryBindingV2, funded: bool) -> HvmRegistryLiveSnapshotV2 {
+///
+/// `height` is this node's own tip, handed in rather than invented here, so
+/// the height this answer is stamped with is the height the same node's
+/// capabilities route is about to report.
+fn snapshot(
+    binding: &HvmRegistryBindingV2,
+    height: u64,
+    funded: bool,
+) -> HvmRegistryLiveSnapshotV2 {
     let total = binding.left_deposit_zhu + binding.right_hub_deposit_zhu;
     HvmRegistryLiveSnapshotV2 {
         ret: 0,
@@ -147,8 +212,8 @@ fn snapshot(binding: &HvmRegistryBindingV2, funded: bool) -> HvmRegistryLiveSnap
         settlement_profile: HPAY_REGISTRY_SETTLEMENT_PROFILE.into(),
         chain_id: binding.chain_id,
         network_instance_id: binding.network_instance_id.clone(),
-        observed_height: binding.deployment_height + 4,
-        evaluation_height: binding.deployment_height + 5,
+        observed_height: height,
+        evaluation_height: height + 1,
         contract_address: binding.contract_address.clone(),
         deployment_tx_hash: binding.deployment_tx_hash.clone(),
         deployment_height: binding.deployment_height,
@@ -188,13 +253,14 @@ fn snapshot(binding: &HvmRegistryBindingV2, funded: bool) -> HvmRegistryLiveSnap
 
 async fn capabilities_route(State(node): State<Arc<Fullnode>>) -> Json<Value> {
     let network = &node.network;
+    let height = node.height();
     Json(json!({
         "ret": 0,
         "api_version": 1,
         "chain": {
             "id": network.chain_id,
-            "height": FUNDED_BLOCK_HEIGHT + 10,
-            "next_height": FUNDED_BLOCK_HEIGHT + 11,
+            "height": height,
+            "next_height": height + 1,
             "mainnet": false,
         },
         "network": {
@@ -237,7 +303,14 @@ async fn registry_route(
     {
         return Json(json!({ "ret": 1, "err": "this node holds no such registry channel" }));
     }
-    Json(serde_json::to_value(snapshot(binding, facts.funded)).expect("snapshot encodes"))
+    Json(
+        serde_json::to_value(snapshot(
+            binding,
+            facts.height,
+            facts.funding_block.is_some(),
+        ))
+        .expect("snapshot encodes"),
+    )
 }
 
 async fn transaction_route(
@@ -261,11 +334,14 @@ async fn transaction_route(
         "signatures": [{ "publickey": "", "signature": "" }],
         "body": body,
     });
-    if facts.funded {
+    if let Some(block) = facts.funding_block {
         answer["pending"] = json!(false);
-        answer["confirm"] = json!(6);
+        // Depth, counted rather than asserted: a node that reported a fixed
+        // confirmation count while its own tip moved would be the same lie
+        // in a smaller place.
+        answer["confirm"] = json!(facts.height.saturating_sub(block) + 1);
         answer["block"] = json!({
-            "height": FUNDED_BLOCK_HEIGHT,
+            "height": block,
             "hash": "ab".repeat(32),
         });
     } else {
@@ -424,8 +500,14 @@ fn channel_for(
     left_address: &str,
     network: &HvmLocalPilotNetwork,
 ) -> HvmRegistryBindingV2 {
-    let deployment =
-        build_hvm_registry_pilot_deployment(hub, network, SETUP_FEE_ZHU, 100, u8::MAX).unwrap();
+    let deployment = build_hvm_registry_pilot_deployment(
+        hub,
+        network,
+        SETUP_FEE_ZHU,
+        DEPLOYMENT_HEIGHT,
+        u8::MAX,
+    )
+    .unwrap();
     let binding = HvmRegistryBindingV2 {
         schema: l2_fast_pay_hub::hvm_registry::HVM_REGISTRY_BINDING_SCHEMA.into(),
         settlement_profile: HPAY_REGISTRY_SETTLEMENT_PROFILE.into(),
@@ -434,7 +516,7 @@ fn channel_for(
         network_instance_id: network.network_instance_id.clone(),
         contract_address: deployment.contract_address.clone(),
         deployment_tx_hash: deployment.transaction.transaction_hash.clone(),
-        deployment_height: 100,
+        deployment_height: DEPLOYMENT_HEIGHT,
         bytecode_sha3: deployment.bytecode_sha3.clone(),
         channel_id: CHANNEL_ID.into(),
         reuse_version: 0,
@@ -566,8 +648,9 @@ async fn one_press_opens_funds_and_adopts_and_a_resumed_press_needs_no_provider(
         "pressing again must never sign a second transfer into one channel"
     );
 
-    // ---- the deposit lands ----
-    node.facts.lock().unwrap().funded = true;
+    // ---- the deposit lands, and the chain keeps going afterwards ----
+    let funding_block = node.mine_the_deposit();
+    node.mine_empty_blocks(9);
 
     // ---- PRESS THREE: adoption, with nothing left to ask ----
     let ready = establish_hvm_registry_channel(
@@ -592,7 +675,7 @@ async fn one_press_opens_funds_and_adopts_and_a_resumed_press_needs_no_provider(
     );
     assert_eq!(
         ready["funding_confirmed_block_height"].as_u64(),
-        Some(FUNDED_BLOCK_HEIGHT),
+        Some(funding_block),
         "a confirmation that cannot name its block is not a confirmation"
     );
 
@@ -606,6 +689,67 @@ async fn one_press_opens_funds_and_adopts_and_a_resumed_press_needs_no_provider(
     assert_eq!(
         kit.latest_bill.left_balance_zhu, DEPOSIT_ZHU,
         "the bill this wallet holds returns the entire deposit"
+    );
+
+    // ---- THIS NODE'S TWO ANSWERS ARE ONE VIEW OF ONE CHAIN ----
+    //
+    // The exit reads this node twice and subtracts one answer from the other:
+    // `/query/capabilities` for the tip, `/query/hpay/channel-registry` for
+    // the height the channel's storage was read at. Every deadline it then
+    // reasons about is that difference, so a node whose storage read stands
+    // still while its own tip advances turns the whole calculation into
+    // fiction - and `require_fresh_registry_evidence` is the rule that
+    // refuses to reason on it.
+    //
+    // This is asserted here, on the fixture itself, rather than being left to
+    // surface only on the day the exit gate below opens. It is judged by the
+    // shipped view the command builds
+    // (`agent_commands::registry_exit_chain`) and by the shipped rule the
+    // planner applies (`hacash_wallet_core::hvm_registry_exit`), not by
+    // anything restated in this file. The lease floor is passed as zero on
+    // purpose: a short lease is a lease question, and this is about whether
+    // the two heights describe the same chain.
+    let node_view =
+        FullnodeRegistryExitChain::new(&node_url, binding.clone(), 0, 0).expect("a chain view");
+    let (tip, tip_age) = node_view.chain_tip().await.expect("the node's own tip");
+    let live = node_view
+        .registry_snapshot()
+        .await
+        .expect("this channel's live storage");
+    assert_eq!(
+        tip,
+        node.height(),
+        "the tip this node reports is the chain it is standing in front of"
+    );
+    assert_eq!(
+        live.observed_height, tip,
+        "one node, one chain: the storage read and the tip are the same height"
+    );
+    require_fresh_registry_evidence(&live, tip, tip_age)
+        .expect("a node whose two answers agree is fresh evidence by the shipped rule");
+
+    // And it tracks rather than coincides. The drift the rule tolerates is
+    // one block, so a chain moved far past that is exactly the case the old
+    // fixture failed: it kept answering 104 while its own tip said 4252.
+    node.mine_empty_blocks(HVM_REGISTRY_MAX_SNAPSHOT_TIP_DRIFT_BLOCKS + 4_000);
+    let (moved_tip, moved_age) = node_view.chain_tip().await.expect("the tip moved");
+    let moved = node_view
+        .registry_snapshot()
+        .await
+        .expect("storage read again");
+    assert_eq!(
+        moved_tip,
+        tip + HVM_REGISTRY_MAX_SNAPSHOT_TIP_DRIFT_BLOCKS + 4_000
+    );
+    assert_eq!(
+        moved.observed_height, moved_tip,
+        "the snapshot followed the chain instead of standing still"
+    );
+    require_fresh_registry_evidence(&moved, moved_tip, moved_age)
+        .expect("evidence that follows the chain stays fresh however far the chain goes");
+    println!(
+        "  NODE VIEW: tip {tip} -> {moved_tip}, storage read at {}",
+        moved.observed_height
     );
 
     // ---- PRESS FOUR: a finished channel reports itself finished ----

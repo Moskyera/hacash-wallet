@@ -1586,6 +1586,75 @@ impl AgentWalletManager {
     }
 }
 
+/// The provider's half of a registry channel whose left party is this wallet.
+///
+/// # Why this exists at all, and why it is not a signing capability
+///
+/// A registry `init` is the one transaction in this system that needs the
+/// owner's key and is *not* the owner's to send: the contract asserts
+/// `check_signature(left)` **and** `check_signature(g_hub)`
+/// (`hpay_channel_registry_v2.fitsh:216-217`), so a channel whose left party
+/// is an Agent Wallet cannot exist on any chain unless that wallet co-signs
+/// the provider's opening transaction. Nothing in the shipped product does
+/// this - a person is handed a channel that already exists - which is exactly
+/// why no proof outside this crate could ever have a real one to walk out of.
+///
+/// [`exit_on_chain_tests`] already opens the vault for this, inline, because
+/// it lives here. The command an owner actually presses does not live here,
+/// and a test of *that* command cannot be a `#[cfg(test)]` module of this
+/// crate: the crate that owns the command depends on this one, so a unit test
+/// linking both would hold two incompatible copies of every type in this file.
+/// So the same setup step is named here once, and the proof that needs it
+/// lives beside the command.
+///
+/// # What this may and may not do
+///
+/// * It is compiled only under `on-chain-exit-proof`, a feature no shipped
+///   build enables and which exists for exactly this purpose.
+/// * It demands the passphrase, so it is no weaker a gate than the vault's
+///   own. A caller that could call this could already unlock the wallet.
+/// * It returns **one shape of transaction** - the registry `init` for a
+///   channel this wallet is the left party of, built by the Hub crate's
+///   reviewed builder from parameters this function does not invent. It is
+///   not a signer: there is no argument that makes it produce a transfer, a
+///   bill, or an exit. The key is read, used and dropped inside the body and
+///   is never returned.
+#[cfg(feature = "on-chain-exit-proof")]
+impl AgentWalletManager {
+    pub fn provider_side_registry_channel_init(
+        &self,
+        wallet_id: &AgentWalletId,
+        passphrase: &str,
+        hub: &sys::Account,
+        contract_address: &str,
+        network: &l2_fast_pay_hub::hvm_pilot::HvmLocalPilotNetwork,
+        parameters: &l2_fast_pay_hub::hvm_registry_pilot::HvmRegistryPilotChannelParameters,
+        network_fee_zhu: u64,
+        timestamp: u64,
+        gas_max: u8,
+    ) -> AgentWalletResult<l2_fast_pay_hub::hvm_pilot::HvmPilotSignedTransaction> {
+        let paths = self.storage.paths(wallet_id)?;
+        let vault = crate::vault::AgentEncryptedVault::load(&paths.vault_path())?;
+        let secrets = vault.unlock(passphrase)?;
+        let left = hacash_wallet_core::account::WalletAccount::from_secret_hex(
+            secrets.blockchain_secret_hex(),
+        )
+        .map_err(|_| AgentWalletError::SigningBlocked)?;
+        drop(secrets);
+        l2_fast_pay_hub::hvm_registry_pilot::build_hvm_registry_pilot_channel_init(
+            left.inner(),
+            hub,
+            contract_address,
+            network,
+            parameters,
+            network_fee_zhu,
+            timestamp,
+            gas_max,
+        )
+        .map_err(|_| AgentWalletError::SigningBlocked)
+    }
+}
+
 /// The manager's own exit drive, against a real deployed contract in real
 /// blocks with the Hub killed. Behind its own feature because it needs the
 /// Hub crate's registry deployment builders in the graph.
