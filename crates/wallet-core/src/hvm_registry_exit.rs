@@ -406,6 +406,21 @@ pub fn plan_user_exit_step(
             // The amount is read straight off live contract storage, never
             // inferred from the bill: `PermitHAC` rejects anything that is not
             // exactly `c_left_balance_`.
+            //
+            // Carried into the plan and re-derived at build time from the same
+            // captured number rather than re-read. That is safe because this
+            // arm is reachable only at status 4, which means `finalize` has
+            // already run and the settlement is fixed - nothing moves
+            // `c_left_balance_` afterwards except this payout itself.
+            //
+            // One race remains and it is benign: a third party may claim
+            // between the plan and the signature, because the payout is
+            // permissionless. The user's own transaction then aborts and the
+            // fee is spent - but the coin has already landed on the user,
+            // since `PermitHAC` pins the destination to the channel's left
+            // party and a stranger cannot redirect it. Losing a fee while
+            // being paid is the right side of that trade, and re-reading here
+            // would narrow the window without closing it.
             let payee = binding.left_address.clone();
             let amount_zhu = snapshot.channel.left_balance.value;
             Ok(HvmRegistryExitPlanV1::Claim {
