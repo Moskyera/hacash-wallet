@@ -736,6 +736,8 @@ async fn registry_route(
     State(node): State<Arc<Node>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Json<Value> {
+    node.registry_reads
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let Reply::Snapshot(Some(snapshot)) = node.chain.ask(AskKind::Snapshot).await else {
         return Json(json!({ "ret": 1, "err": "this node holds no such registry channel" }));
     };
@@ -747,6 +749,8 @@ async fn registry_route(
     {
         return Json(json!({ "ret": 1, "err": "this node holds no such registry channel" }));
     }
+    node.registry_snapshots
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     Json(serde_json::to_value(&*snapshot).expect("snapshot encodes"))
 }
 
@@ -830,6 +834,17 @@ async fn submit_route(
 struct Node {
     chain: Chain,
     network: HvmLocalPilotNetwork,
+    /// Every `/query/hpay/channel-registry` this node was asked, and every one
+    /// it answered with a snapshot rather than a refusal.
+    ///
+    /// These exist so this file can say *how far into the command body a press
+    /// got* rather than inferring it from the fact that it returned an error.
+    /// `start_hvm_registry_exit` reads the pinned node before it consults the
+    /// exit gate and throws the whole read away when the gate is down
+    /// (`agent_commands.rs:2734-2740`), so a refused press is otherwise
+    /// indistinguishable from one that never touched the network.
+    registry_reads: std::sync::atomic::AtomicU64,
+    registry_snapshots: std::sync::atomic::AtomicU64,
 }
 
 async fn spawn_fullnode(node: Arc<Node>) -> String {
@@ -914,11 +929,13 @@ async fn the_command_an_owner_presses_walks_them_out_with_the_provider_dead() {
     });
     let chain = Chain(asks);
 
-    let node_url = spawn_fullnode(Arc::new(Node {
+    let node = Arc::new(Node {
         chain: chain.clone(),
         network: network.clone(),
-    }))
-    .await;
+        registry_reads: std::sync::atomic::AtomicU64::new(0),
+        registry_snapshots: std::sync::atomic::AtomicU64::new(0),
+    });
+    let node_url = spawn_fullnode(node.clone()).await;
 
     // ---- a real Agent Wallet, created and unlocked through the manager ----
     let root = tempfile::tempdir().unwrap();
@@ -1049,15 +1066,55 @@ async fn the_command_an_owner_presses_walks_them_out_with_the_provider_dead() {
         // that is asserted here so this file states whichever answer the
         // measurement gives rather than having to be edited on the day it
         // flips.
+        let reads_before = node
+            .registry_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let snapshots_before = node
+            .registry_snapshots
+            .load(std::sync::atomic::Ordering::SeqCst);
         let refusal = start_hvm_registry_exit(&mut manager, &wallet_id, now)
             .await
             .expect_err("the exit gate is the project's own measurement");
+        let reads = node
+            .registry_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+            - reads_before;
+        let snapshots = node
+            .registry_snapshots
+            .load(std::sync::atomic::Ordering::SeqCst)
+            - snapshots_before;
         assert!(
             refusal.contains("This wallet cannot yet send a channel exit for you"),
             "the refusal must name this app's own gap: {refusal}"
         );
         println!("  EXIT GATE CLOSED: {refusal}");
         assert!(!chain.settled().await);
+
+        // HOW FAR THE PRESS GOT, COUNTED AT THE SOCKET RATHER THAN INFERRED.
+        //
+        // A refusal string alone cannot distinguish a press that consulted the
+        // owner's own pinned fullnode from one that failed before it ever
+        // opened a connection - and the difference is the whole question this
+        // file exists to answer. `start_hvm_registry_exit` reads the overview,
+        // finds the binding, collects the started steps and builds the status
+        // (`agent_commands.rs:2718-2734`); building the status reads this
+        // node's `/query/hpay/channel-registry` for the channel's storage
+        // lease (`read_registry_lease`, `agent_commands.rs:2973`). Only then
+        // does it consult the gate. So a refused press must have made a real,
+        // successful round trip to this socket, and if it did not, the run
+        // stopped somewhere earlier than the gate - which would be a defect,
+        // not the brake.
+        assert!(
+            reads >= 1,
+            "the refused press never asked the owner's own pinned fullnode anything; it stopped              before the gate, which is a defect and not the brake"
+        );
+        assert_eq!(
+            reads, snapshots,
+            "the pinned fullnode refused a read this command made: {snapshots} of {reads} answered"
+        );
+        println!(
+            "  THE PRESS REACHED THE GATE: {reads} pinned-node registry read(s), {snapshots}              answered with a live snapshot, before the refusal"
+        );
 
         // WHICH HALF OF THE GATE IS DOWN, MEASURED RATHER THAN ASSUMED.
         //
@@ -1087,6 +1144,136 @@ async fn the_command_an_owner_presses_walks_them_out_with_the_provider_dead() {
         );
         println!(
             "  THE ONLY UNMET TERM IS THE CONSTANT A HUMAN SETS:              USER_SIDE_UNILATERAL_EXIT_DRIVER_READY = false; the builders probe reads true"
+        );
+
+        // -------------------------------------------------------------------
+        // WHAT IS BEHIND THE BRAKE, DRIVEN. THIS IS NOT THE PROOF.
+        // -------------------------------------------------------------------
+        //
+        // Read the label before the result. The press above stopped at
+        // `agent_commands.rs:2735`. The three things it never reached are
+        // `registry_exit_chain` (`:2741`) and the driver loop (`:2751-2762`),
+        // and they cannot be reached from the command while the gate is down.
+        // So this block is NOT "the command drove an exit". It is the
+        // narrowest possible answer to the only question the owner needs
+        // before deciding whether to lift the brake: *if the gate opened,
+        // would the rest of the press work?*
+        //
+        // What makes it worth having rather than a second copy of the command:
+        // `FullnodeRegistryExitChain` is the chain view the command builds,
+        // and NOTHING IN THIS TREE HAS EVER DRIVEN AN EXIT THROUGH IT. The
+        // manager's on-chain proof uses its own `MemChainExitView`
+        // (`agent-wallet-core/src/service/hvm_registry/exit_on_chain_tests.rs:518`)
+        // and `kill_mid_exit_on_chain.rs:548` uses `RigChain`; both talk to a
+        // chain directly. `registry_exit_chain_http.rs` builds this view and
+        // asks it questions, but never makes it carry a whole exit. Its only
+        // production caller is the line behind the gate. So the reqwest, the
+        // status codes, the JSON, and above all the two-read lease fallback in
+        // `registry_snapshot` have never once been exercised by a running
+        // exit, on any chain.
+        //
+        // Every input below is read out of the wallet's own overview by the
+        // same expressions `registry_exit_chain` uses (`:2776-2800`) - the
+        // `node_url`, the stored binding, and the two lease floors. Nothing
+        // here is a literal chosen by this test, and the Hub is still dead.
+        let overview = serde_json::to_value(manager.overview(&wallet_id, now).await.unwrap())
+            .expect("the overview encodes");
+        let stored = overview
+            .get("hvm_registry_binding")
+            .cloned()
+            .expect("an adopted channel");
+        let view = wallet_tauri_common::agent_registry_exit::FullnodeRegistryExitChain::new(
+            overview["node_url"].as_str().expect("a pinned node"),
+            serde_json::from_value(stored["recovery_bundle"]["binding"].clone())
+                .expect("the stored binding is readable"),
+            stored["minimum_required_live_blocks"].as_u64().unwrap_or(0),
+            stored["minimum_required_recover_blocks"]
+                .as_u64()
+                .unwrap_or(0),
+        )
+        .expect("the command's own chain view, built from the command's own inputs");
+
+        let mut presses = 0_u32;
+        let claimed = loop {
+            presses += 1;
+            assert!(presses < 30, "the exit behind the brake did not terminate");
+            // One press is up to `EXIT_PASS_BUDGET` driver passes, which is
+            // what the loop at `:2756` does; anything less would be a kinder
+            // caller than the command and would not answer the question.
+            let mut progress = manager
+                .advance_hvm_registry_exit(&wallet_id, &view, now)
+                .await
+                .expect("the driver advances over the wallet's own pinned node");
+            let mut passes = 1_u8;
+            while progress.outcome == "stepped" && passes < 8 {
+                passes += 1;
+                progress = manager
+                    .advance_hvm_registry_exit(&wallet_id, &view, now)
+                    .await
+                    .expect("the driver advances over the wallet's own pinned node");
+            }
+            let progress = serde_json::to_value(progress).expect("progress encodes");
+            println!(
+                "  BEHIND-THE-BRAKE PRESS {presses}: outcome {} step {:?} waiting {:?} status               {:?} deadline {:?}",
+                progress["outcome"],
+                progress["step"],
+                progress["waiting_reason"],
+                progress["channel_status"],
+                progress["deadline_height"],
+            );
+            match progress["outcome"].as_str().expect("an outcome") {
+                "complete" => {
+                    break progress["claimed_zhu"]
+                        .as_u64()
+                        .expect("a complete exit names its payout");
+                }
+                "stepped" => continue,
+                "waiting" => {
+                    let status = progress["channel_status"].as_u64();
+                    let deadline = progress["deadline_height"].as_u64();
+                    let height = chain.height().await;
+                    if status == Some(3)
+                        && let Some(deadline) = deadline
+                        && deadline > height
+                    {
+                        // The objection window passing. A laptop cannot mine.
+                        chain.mine_empty_to(deadline).await;
+                        continue;
+                    }
+                    panic!("the exit behind the brake stalled: {progress}");
+                }
+                other => panic!("unknown outcome {other}"),
+            }
+        };
+
+        assert!(
+            chain.settled().await,
+            "the channel is FINAL and the payout is made"
+        );
+        assert_eq!(
+            claimed, DEPOSIT_ZHU,
+            "the exit pays this wallet its whole settled balance"
+        );
+        assert_eq!(
+            chain.zhu(AskKind::ContractBalance).await,
+            0,
+            "the deposit left the contract"
+        );
+        let after = chain.zhu(AskKind::Balance(created.address.clone())).await;
+        assert!(
+            after > before,
+            "the exit has to leave the owner better off than not running it: {before} -> {after}"
+        );
+        let failed = chain.failures().await;
+        assert!(
+            failed.is_empty(),
+            "the chain failed transactions this node accepted: {failed:?}"
+        );
+        println!(
+            "  BEHIND THE BRAKE, THE OWNER IS PAID: {} -> {} (+{}) after {presses} press-equivalents,               contract 0. THE COMMAND ITSELF STILL STOPS AT agent_commands.rs:2735.",
+            before,
+            after,
+            after - before
         );
         return;
     }

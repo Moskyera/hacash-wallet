@@ -12,10 +12,16 @@
 //! It reads the wallet's blockchain secret. That is the whole reason this file
 //! exists.
 //!
-//! # Four guards, and why one is not enough
+//! # Five guards, and why one is not enough
 //!
 //! There are three separate ways this seam can end up in a shipped build, and
 //! a guard for one of them is blind to the other two.
+//!
+//! Three of the guards below were rewritten after review drove a working
+//! escape through each of them with the whole file green. What each one was
+//! blind to is recorded at the assertion that now catches it, because the
+//! failure mode this project keeps hitting is not an absent guard — it is a
+//! guard everybody believes is enforcing a boundary it is not enforcing.
 //!
 //! 1. **The `#[cfg]` is removed or loosened.** Caught by
 //!    [`without_the_feature`], which is compiled *only when the feature is
@@ -30,20 +36,32 @@
 //!    dependency line of an app. Guard 1 is *blind* to this: turn the feature
 //!    on and guard 1 switches itself off. So
 //!    [`the_seam_feature_is_reachable_from_nothing_a_shipped_build_turns_on`]
-//!    resolves the real feature graph out of the real manifests, across five
-//!    crates and both apps, and asserts the exact set of `(crate, feature)`
-//!    pairs that reach it.
+//!    resolves the feature graph out of **every workspace member**, and
+//!    asserts the exact set of `(crate, feature)` pairs that reach it, plus
+//!    that no shipped dependency line names a reaching feature. It read five
+//!    hand-written manifest paths once; `crates/agent-wallet-runtime` was not
+//!    one of them, and one line in it put the seam into the desktop build.
 //!
 //! 3. **The seam widens** — a second method behind the same gate, a second
-//!    builder call, a return type that hands back key material. Guards 1 and 2
-//!    would both stay green.
+//!    builder call, a return type that hands back key material, or a body that
+//!    writes the key somewhere while the return type stays honest. Guards 1
+//!    and 2 would all stay green.
 //!    [`the_gated_block_holds_one_method_that_builds_one_shape_of_transaction`]
-//!    counts what is inside the gated `impl` block.
+//!    names each rule and then pins the whole body exactly, because two of the
+//!    three demonstrated escapes were bodies it had no rule for.
+//!
+//! 4. **The manifests say one thing and cargo resolves another** — a `[patch]`,
+//!    a `.cargo/config.toml` passing `--cfg`, a release workflow's own
+//!    `--features`. Guard 2 reads TOML; it does not resolve it.
+//!    [`cargo_itself_resolves_the_seam_feature_off_in_every_build_that_ships`]
+//!    asks cargo, about the default build *and* every configuration a release
+//!    really builds with, and proves its own detector on a resolution that
+//!    turns the feature on.
 //!
 //! And one more, because a guard that names a symbol nobody has can pass
 //! forever while guarding nothing — this project has shipped three of those:
 //! [`with_the_feature`] fails to compile if the seam is renamed or deleted, so
-//! the name the other three guards are written against is a name that exists.
+//! the name the other four guards are written against is a name that exists.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -176,22 +194,264 @@ fn features_of(manifest: &str) -> BTreeMap<String, BTreeSet<String>> {
     out
 }
 
-/// Every crate whose manifest could possibly turn the seam on, plus both app
-/// shells, which are the only two things anybody ships.
+/// The `name = "..."` of a manifest's `[package]` table.
+fn package_name(manifest: &str) -> String {
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("name = ") {
+            return rest.trim().trim_matches('"').to_owned();
+        }
+    }
+    panic!("a workspace member manifest declares no package name");
+}
+
+/// Every workspace member as `(package name, manifest path)`, taken from the
+/// workspace root's own `members` list.
+///
+/// This used to be five manifest paths written out here, and that is precisely
+/// how a guard stops guarding: `crates/agent-wallet-runtime` was not one of
+/// the five, it depends on `agent-wallet-core`, and `agent-wallet-admin` pulls
+/// it into the desktop build (`crates/wallet-tauri-common/Cargo.toml`, the
+/// `dep:agent-wallet-runtime` entry). One line in a manifest this file never
+/// opened put the seam's feature into the app people install, with every
+/// assertion below still green. The list is the workspace's now, so a crate
+/// added tomorrow is covered without anyone remembering to come here.
+fn workspace_members() -> Vec<(String, String)> {
+    let root = read("Cargo.toml");
+    let start = root
+        .find("members = [")
+        .expect("the workspace root declares its members");
+    let after = &root[start + "members = [".len()..];
+    let close = after.find(']').expect("the members list closes");
+    let members: Vec<String> = after[..close]
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_end_matches(',')
+                .trim_matches('"')
+                .to_owned()
+        })
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    assert!(
+        members.len() >= 12,
+        "the workspace member list parsed to {} entries, which is not this workspace; the \
+         parser is looking at the wrong thing and every assertion built on it is empty",
+        members.len()
+    );
+    members
+        .into_iter()
+        .map(|member| {
+            let manifest = format!("{member}/Cargo.toml");
+            (package_name(&read(&manifest)), manifest)
+        })
+        .collect()
+}
+
+/// The `[features]` table of every workspace member, keyed by package name.
 fn feature_graph() -> BTreeMap<String, BTreeMap<String, BTreeSet<String>>> {
-    [
-        ("agent-wallet-core", "crates/agent-wallet-core/Cargo.toml"),
-        ("hacash-wallet-core", "crates/wallet-core/Cargo.toml"),
-        (
-            "wallet-tauri-common",
-            "crates/wallet-tauri-common/Cargo.toml",
-        ),
-        ("hacash-wallet", "apps/desktop/src-tauri/Cargo.toml"),
-        ("hacash-wallet-mobile", "apps/mobile/src-tauri/Cargo.toml"),
-    ]
-    .into_iter()
-    .map(|(name, path)| (name.to_owned(), features_of(&read(path))))
-    .collect()
+    let graph: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = workspace_members()
+        .into_iter()
+        .map(|(name, manifest)| (name, features_of(&read(&manifest))))
+        .collect();
+    for expected in [
+        "agent-wallet-core",
+        "wallet-tauri-common",
+        "agent-wallet-runtime",
+    ] {
+        assert!(
+            graph.contains_key(expected),
+            "the member walk did not reach {expected}, so nothing below says anything about it"
+        );
+    }
+    graph
+}
+
+/// Every feature named on a **non-dev** dependency line of a workspace member,
+/// as `(member, dependency, feature)`, with comments stripped.
+///
+/// These are on whenever the depending crate is in the graph at all, so they
+/// are invisible to a walk that starts from a feature name — which is the
+/// other half of the same hole: `agent-wallet-core = { path = "..", features =
+/// ["on-chain-exit-proof"] }` is not a feature of anything and would never
+/// appear in the reaching set.
+///
+/// `[dev-dependencies]` and `[build-dependencies]` are skipped deliberately
+/// and not by accident: neither is ever in a shipped build, and a test crate
+/// that needs the seam is allowed to ask for it. That is what the feature is
+/// for.
+fn unconditional_dependency_features() -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for (member, manifest) in workspace_members() {
+        let text = read(&manifest);
+        let mut shipped = String::new();
+        let mut inside = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                // Every shape of dependency table, not just `[dependencies]`:
+                // `[target.'cfg(unix)'.dependencies]` and the sub-table form
+                // `[dependencies.agent-wallet-core]` both carry a `features`
+                // list, and a check that only matched a header *ending* in
+                // `dependencies]` would walk straight past the second one.
+                // That is the same blind spot this whole function exists to
+                // close, one level down.
+                let inner = trimmed.trim_start_matches('[').trim_end_matches(']');
+                inside = inner.contains("dependencies")
+                    && !inner.contains("dev-dependencies")
+                    && !inner.contains("build-dependencies");
+                continue;
+            }
+            if !inside || trimmed.starts_with('#') {
+                continue;
+            }
+            shipped.push_str(trimmed);
+            shipped.push(' ');
+        }
+        let mut rest = shipped.as_str();
+        while let Some(at) = rest.find("features = [") {
+            let before = &rest[..at];
+            let dependency = before
+                .rsplit_once("= {")
+                .map_or(before, |(head, _)| head)
+                .split_whitespace()
+                .next_back()
+                .unwrap_or_default()
+                .to_owned();
+            let after = &rest[at + "features = [".len()..];
+            let close = after.find(']').expect("a dependency features list closes");
+            for feature in after[..close].split(',') {
+                let feature = feature.trim().trim_matches('"');
+                if !feature.is_empty() {
+                    out.push((member.clone(), dependency.clone(), feature.to_owned()));
+                }
+            }
+            rest = &after[close + 1..];
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "no workspace member names a feature on any dependency line, which this workspace does \
+         in several places; the parser found nothing and is guarding nothing"
+    );
+    out
+}
+
+/// The features cargo really resolves for `package` in one build.
+///
+/// `-e normal` is the graph that becomes a binary: no dev-dependencies, which
+/// is where a test crate is entitled to ask for the seam, and no build
+/// scripts. `-f "{p} FEATURES={f}"` is what makes this an answer rather than a
+/// picture — `-e features` renders manifest feature *edges*, so a feature
+/// arriving from anywhere else does not print.
+///
+/// `None` means the package is not in that graph at all, which is a stronger
+/// answer than an empty feature set and is why this is an `Option` rather than
+/// an assertion: the mobile app's default build does not contain
+/// `agent-wallet-core` in any form.
+fn cargo_resolved_features(package: &str, arguments: &[&str]) -> Option<BTreeSet<String>> {
+    let cargo = std::env::var("CARGO").expect("cargo runs this test and names itself in CARGO");
+    let output = std::process::Command::new(cargo)
+        .current_dir(workspace_root())
+        .args([
+            "tree",
+            "--offline",
+            "--locked",
+            "-e",
+            "normal",
+            "-f",
+            "{p} FEATURES={f}",
+        ])
+        .args(arguments)
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "cargo tree {arguments:?} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let marker = format!("{package} v");
+    let mut features = BTreeSet::new();
+    let mut found = false;
+    for line in text.lines() {
+        let Some(at) = line.find(&marker) else {
+            continue;
+        };
+        let Some((_, tail)) = line[at..].split_once("FEATURES=") else {
+            continue;
+        };
+        found = true;
+        let list = tail.split_whitespace().next().unwrap_or_default();
+        for feature in list.split(',') {
+            let feature = feature.trim();
+            if !feature.is_empty() {
+                features.insert(feature.to_owned());
+            }
+        }
+    }
+    found.then_some(features)
+}
+
+fn files_under(root: &Path, extension: &str, into: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries {
+        let path = entry.expect("directory entry").path();
+        if path.is_dir() {
+            files_under(&path, extension, into);
+        } else if path.extension().is_some_and(|found| found == extension) {
+            into.push(path);
+        }
+    }
+}
+
+/// Every feature string a release configuration hands to an app build.
+///
+/// The default build is not what ships: every workflow and script that
+/// produces an installable artifact passes `--features` on the tauri build
+/// line. Reading them here rather than checking `default` alone is the
+/// difference between "the seam is off in a build nobody makes" and "the seam
+/// is off in the build people install". These files were named as unaudited by
+/// two rounds of review; they are read now.
+fn release_build_features() -> BTreeSet<String> {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    files_under(&root.join(".github/workflows"), "yml", &mut files);
+    files_under(&root.join("apps"), "ps1", &mut files);
+    let mut out = BTreeSet::new();
+    for file in &files {
+        let Ok(text) = fs::read_to_string(file) else {
+            continue;
+        };
+        for line in text.lines() {
+            if !line.contains("tauri") {
+                continue;
+            }
+            let Some((_, tail)) = line.split_once("--features ") else {
+                continue;
+            };
+            for feature in tail
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .split(',')
+            {
+                let feature = feature.trim();
+                if !feature.is_empty() {
+                    out.insert(feature.to_owned());
+                }
+            }
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "no release configuration was found to pass `--features` to an app build, so the \
+         release-configuration check is empty. Looked in {} files.",
+        files.len()
+    );
+    out
 }
 
 /// Does turning on `feature` of `crate_name` end up turning on the seam?
@@ -268,14 +528,24 @@ fn the_seam_feature_is_reachable_from_nothing_a_shipped_build_turns_on() {
     // Said again from the other direction, because the set above would also be
     // satisfied by a manifest that stopped declaring `default` at all.
     for (crate_name, table) in &graph {
+        // A crate with no `[features]` table at all has an implicit empty
+        // `default` and nothing to say here. A crate that has a table and no
+        // `default` in it is the case this catches: the walk below would pass
+        // by finding nothing rather than by finding nothing wrong.
         assert!(
-            table.contains_key("default"),
-            "{crate_name} stopped declaring a default feature set, so the assertion above no \
-             longer says anything about a default build"
+            table.is_empty() || table.contains_key("default"),
+            "{crate_name} declares features but no longer declares `default`, so the walk below \
+             says nothing about its default build"
         );
         assert!(
             !reaches_the_seam(&graph, crate_name, "default"),
             "{crate_name}'s default features now reach the seam"
+        );
+    }
+    for named in ["agent-wallet-core", "wallet-tauri-common"] {
+        assert!(
+            graph[named].contains_key("default"),
+            "{named} stopped declaring a default feature set"
         );
     }
 
@@ -310,6 +580,136 @@ fn the_seam_feature_is_reachable_from_nothing_a_shipped_build_turns_on() {
                 );
             }
         }
+    }
+
+    // And the shape neither check above can see: a features list on a plain
+    // dependency line. It is not a feature of anything, so it is in nobody's
+    // reaching set, and one such line in a manifest this file did not open put
+    // the seam into the desktop build with every assertion above still green.
+    // Judged conservatively on purpose — a feature name that reaches the seam
+    // in *any* crate may not be named on any shipped dependency line of any
+    // member — so it holds without having to resolve which package each line
+    // refers to.
+    let reaching_names: BTreeSet<String> = reaching
+        .iter()
+        .filter_map(|pair| pair.split_once("::").map(|(_, name)| name.to_owned()))
+        .collect();
+    assert!(
+        !reaching_names.is_empty(),
+        "no feature reaches the seam at all, so the dependency-line check below is empty"
+    );
+    for (member, dependency, feature) in unconditional_dependency_features() {
+        assert!(
+            !reaching_names.contains(&feature),
+            "{member}'s dependency line for `{dependency}` enables `{feature}`, which reaches \
+             the provider-side seam. A dependency line is on whenever that crate is in the \
+             graph at all, so this puts the seam into every build containing {member}."
+        );
+    }
+}
+
+/// GUARD 5. Cargo's answer, rather than this file's reading of the manifests.
+///
+/// Guard 2 parses TOML. Cargo resolves it, and the two can disagree — through
+/// a `[patch]`, a `.cargo/config.toml`, a workspace-level default, or simply a
+/// manifest shape this file does not model. The previous round wrote that gap
+/// down as a known limit and left it open; a limit that is only written down
+/// is still a limit. So this asks cargo directly, about the two things anybody
+/// ships, resolved with default features.
+///
+/// The positive control is the point of it. A grep that can only ever find
+/// nothing passes forever while meaning nothing — the exact failure this
+/// project has now shipped three of — so the same detector is pointed at a
+/// resolution that *does* enable the feature and is required to find it there.
+#[test]
+fn cargo_itself_resolves_the_seam_feature_off_in_every_build_that_ships() {
+    let seam = seam_feature();
+
+    // The detector first, so a broken detector fails here rather than handing
+    // out a column of silent all-clears below it. `wallet-tauri-common` is the
+    // crate whose own test-only feature forwards to the seam's, so this is a
+    // resolution that really does turn it on, measured by the same function.
+    let control = cargo_resolved_features(
+        "agent-wallet-core",
+        &["-p", "wallet-tauri-common", "--features", &seam],
+    )
+    .expect("the control resolution contains agent-wallet-core");
+    assert!(
+        control.contains(&seam),
+        "the detector cannot see `{seam}` even in a resolution that turns it on, so every \
+         assertion below says nothing. It saw: {control:#?}"
+    );
+
+    let apps = [
+        ("desktop", "apps/desktop/src-tauri/Cargo.toml"),
+        ("mobile", "apps/mobile/src-tauri/Cargo.toml"),
+    ];
+    let graph = feature_graph();
+    let release = release_build_features();
+    let mut release_configurations_checked = 0usize;
+    let mut resolutions_actually_containing_the_crate = 0usize;
+
+    for (name, manifest) in apps {
+        let app_package = package_name(&read(manifest));
+        let declared = &graph[&app_package];
+
+        // The default build, and every configuration a release really builds
+        // with — which is not the default one.
+        let mut configurations: Vec<Vec<&str>> = vec![vec!["--manifest-path", manifest]];
+        for feature in &release {
+            if !declared.contains_key(feature) {
+                continue;
+            }
+            release_configurations_checked += 1;
+            configurations.push(vec!["--manifest-path", manifest, "--features", feature]);
+        }
+
+        for arguments in configurations {
+            // `None` is the strongest possible pass: agent-wallet-core is not
+            // in that graph at all.
+            let Some(resolved) = cargo_resolved_features("agent-wallet-core", &arguments) else {
+                continue;
+            };
+            resolutions_actually_containing_the_crate += 1;
+            assert!(
+                !resolved.contains(&seam),
+                "cargo resolves `{seam}` ON for the {name} app built as {arguments:?} — the \
+                 seam is in the binary people install. agent-wallet-core resolved to: \
+                 {resolved:#?}"
+            );
+        }
+    }
+    assert!(
+        release_configurations_checked >= 2,
+        "only {release_configurations_checked} release configuration(s) were resolved; the \
+         release configurations found ({release:#?}) match no feature either app declares, so \
+         this test checked the default build and nothing else"
+    );
+    assert!(
+        resolutions_actually_containing_the_crate >= 2,
+        "agent-wallet-core appeared in only {resolutions_actually_containing_the_crate} of the \
+         resolutions above, so almost nothing was measured"
+    );
+
+    // A cargo config cannot enable a cargo feature, but `[build] rustflags`
+    // can pass `--cfg feature="..."`, which is the same thing to the `#[cfg]`
+    // on the seam and is invisible to every other check in this file.
+    for candidate in [
+        ".cargo/config.toml",
+        ".cargo/config",
+        "apps/desktop/src-tauri/.cargo/config.toml",
+        "apps/mobile/src-tauri/.cargo/config.toml",
+        "crates/agent-wallet-core/.cargo/config.toml",
+    ] {
+        let path = workspace_root().join(candidate);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        assert!(
+            !text.contains(&seam),
+            "{candidate} names `{seam}`. A cargo config can hand `--cfg feature=\"{seam}\"` to \
+             rustc, which switches the seam on with every manifest untouched."
+        );
     }
 }
 
@@ -461,16 +861,68 @@ fn the_gated_block_holds_one_method_that_builds_one_shape_of_transaction() {
         "the one function behind the gate is no longer the seam:\n{block}"
     );
 
-    // One builder call, and it is the channel `init`. Anything else behind
-    // this gate is a second shape of transaction the wallet's key can sign.
+    // One builder call OF ANY KIND, and it is the channel `init`.
+    //
+    // This counted `build_hvm_registry_pilot_` and nothing else, and that is a
+    // prefix rather than a rule: `l2_fast_pay_hub::hvm_pilot::
+    // build_hvm_pilot_exact_funding` is a plain HAC transfer to a caller-named
+    // address, returns the identical `HvmPilotSignedTransaction`, skips the
+    // canonical-deployment check the init path applies, and does not match
+    // that prefix. Added behind this gate it compiled, linked and left every
+    // assertion in this file green. So the count is on `build_` now.
     assert_eq!(
-        block.matches("build_hvm_registry_pilot_").count(),
+        block.matches("build_").count(),
         1,
-        "the gated block calls more than one transaction builder:\n{block}"
+        "the gated block calls more than one builder. Every one of them is a shape of \
+         transaction this wallet's key can be made to sign:\n{block}"
     );
     assert!(
         block.contains("build_hvm_registry_pilot_channel_init("),
         "the gated block no longer builds the registry channel init:\n{block}"
+    );
+
+    // The secret is read once, and the only thing it is handed to is the
+    // account constructor.
+    //
+    // The `-> {forbidden}` checks below are about the return type, and a
+    // return type cannot see `fs::write(path, secrets.blockchain_secret_hex())`
+    // in the body. That leaves the wallet's raw private key in plaintext on
+    // disk with the signature, the return type and every other assertion here
+    // untouched; it was tried, and it passed.
+    assert_eq!(
+        block.matches("blockchain_secret_hex").count(),
+        1,
+        "the gated block reads the blockchain secret more than once. It needs it exactly once, \
+         to build the account that signs:\n{block}"
+    );
+    assert_eq!(
+        block.matches("secrets").count(),
+        3,
+        "the unlocked secrets handle must be bound once, read once and dropped — three \
+         mentions. It now has {}:\n{block}",
+        block.matches("secrets").count()
+    );
+    let flat = block.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("WalletAccount::from_secret_hex( secrets.blockchain_secret_hex(), )"),
+        "the one read of the blockchain secret is no longer the argument to the account \
+         constructor, so the key now goes somewhere else as well:\n{block}"
+    );
+    assert!(
+        flat.contains("drop(secrets);"),
+        "the gated block no longer drops the unlocked secrets:\n{block}"
+    );
+
+    // The three-way agreement between registry entry, vault and wallet_id that
+    // `create_agent_wallet_backup` demands before it will open a vault at all
+    // (service/backup.rs). The seam did not have it, which made it a weaker
+    // door than the shipped code beside it on the one axis its whole safety
+    // argument rests on. Pinned here so it cannot be quietly dropped again.
+    assert!(
+        block.contains("vault.wallet_id() != wallet_id || vault.address() != entry.address"),
+        "the seam stopped checking that the vault it opened belongs to the wallet it was asked \
+         about, so a vault file swapped under a wallet directory now signs an `init` under a \
+         wallet_id it does not belong to:\n{block}"
     );
 
     // It is no weaker a gate than the vault's own, and the key it reads does
@@ -503,4 +955,49 @@ fn the_gated_block_holds_one_method_that_builds_one_shape_of_transaction() {
              {block}"
         );
     }
+
+    // And finally the whole body, pinned exactly.
+    //
+    // Every assertion above names one rule, and every one of them was written
+    // after somebody found the way around the last one. Two of the three ways
+    // around this guard that have been demonstrated were bodies it had no rule
+    // for, and there is no reason to think the list of rules is finished. This
+    // is the catch-all: twenty lines that should never change, and if they do,
+    // changing them is a decision somebody makes here in the open rather than
+    // a diff nobody re-reads.
+    //
+    // If this fires and the change was deliberate: read the new body against
+    // the claims in the doc comment above the seam, satisfy yourself that each
+    // one still holds, then update the text below. Do not delete this.
+    let expected = [
+        "{ #[allow(clippy::too_many_arguments)]",
+        "pub fn provider_side_registry_channel_init(",
+        "&self, wallet_id: &AgentWalletId, passphrase: &str, hub: &sys::Account,",
+        "contract_address: &str,",
+        "network: &l2_fast_pay_hub::hvm_pilot::HvmLocalPilotNetwork,",
+        "parameters: &l2_fast_pay_hub::hvm_registry_pilot::HvmRegistryPilotChannelParameters,",
+        "network_fee_zhu: u64, timestamp: u64, gas_max: u8, )",
+        "-> AgentWalletResult<l2_fast_pay_hub::hvm_pilot::HvmPilotSignedTransaction> {",
+        "let registry = self.storage.load_registry()?;",
+        "let entry = registry .wallet(wallet_id)",
+        ".ok_or(AgentWalletError::AgentWalletNotFound)?;",
+        "let paths = self.storage.paths(wallet_id)?;",
+        "let vault = crate::vault::AgentEncryptedVault::load(&paths.vault_path())?;",
+        "if vault.wallet_id() != wallet_id || vault.address() != entry.address {",
+        "return Err(AgentWalletError::SigningBlocked); }",
+        "let secrets = vault.unlock(passphrase)?;",
+        "let left = hacash_wallet_core::account::WalletAccount::from_secret_hex(",
+        "secrets.blockchain_secret_hex(), )",
+        ".map_err(|_| AgentWalletError::SigningBlocked)?;",
+        "drop(secrets);",
+        "l2_fast_pay_hub::hvm_registry_pilot::build_hvm_registry_pilot_channel_init(",
+        "left.inner(), hub, contract_address, network, parameters, network_fee_zhu,",
+        "timestamp, gas_max, ) .map_err(|_| AgentWalletError::SigningBlocked) } }",
+    ]
+    .join(" ");
+    assert_eq!(
+        flat, expected,
+        "the body behind the test-only gate is not the body this guard was written about. \
+         Nothing above may be assumed to still mean what it says."
+    );
 }

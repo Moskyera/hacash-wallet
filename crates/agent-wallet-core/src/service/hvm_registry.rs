@@ -1619,6 +1619,18 @@ impl AgentWalletManager {
 ///   not a signer: there is no argument that makes it produce a transfer, a
 ///   bill, or an exit. The key is read, used and dropped inside the body and
 ///   is never returned.
+/// * It is **not free**, and the exact claim matters. The transaction it
+///   builds is paid for by this wallet: `network_fee_zhu` is a caller-chosen
+///   debit and the Hub builder checks only a fee *floor*
+///   (`HVM_PILOT_MIN_FEE_PURITY`), never a ceiling. The honest statement is
+///   that no argument makes it move value to a destination the caller picks,
+///   since `parameters.left_deposit_zhu` is declared in the `init` argv and
+///   not transferred; but a caller who can already unlock this vault can spend
+///   an unbounded amount of it as miner fee through this door, exactly as they
+///   could by signing by hand.
+/// * It demands the same three-way agreement between registry entry, vault
+///   and wallet_id that `create_agent_wallet_backup` demands before it will
+///   open a vault at all.
 #[cfg(feature = "on-chain-exit-proof")]
 impl AgentWalletManager {
     // Ten, and every one of them is a value this function must NOT invent.
@@ -1642,8 +1654,20 @@ impl AgentWalletManager {
         timestamp: u64,
         gas_max: u8,
     ) -> AgentWalletResult<l2_fast_pay_hub::hvm_pilot::HvmPilotSignedTransaction> {
+        // The same three-way agreement `create_agent_wallet_backup` demands
+        // before it will open a vault (service/backup.rs). Without it a vault
+        // file swapped under a wallet directory, plus that vault's own
+        // passphrase, signs an `init` under a wallet_id it does not belong to.
+        // The seam must not be a weaker door than the shipped code beside it.
+        let registry = self.storage.load_registry()?;
+        let entry = registry
+            .wallet(wallet_id)
+            .ok_or(AgentWalletError::AgentWalletNotFound)?;
         let paths = self.storage.paths(wallet_id)?;
         let vault = crate::vault::AgentEncryptedVault::load(&paths.vault_path())?;
+        if vault.wallet_id() != wallet_id || vault.address() != entry.address {
+            return Err(AgentWalletError::SigningBlocked);
+        }
         let secrets = vault.unlock(passphrase)?;
         let left = hacash_wallet_core::account::WalletAccount::from_secret_hex(
             secrets.blockchain_secret_hex(),

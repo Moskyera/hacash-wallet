@@ -2687,6 +2687,25 @@ pub async fn agent_wallet_start_hvm_registry_exit(
     #[cfg(feature = "agent-wallet-testnet-pilot")]
     {
         let wallet_id = parse_wallet_id(wallet_id)?;
+        // BOTH LOCKS ARE HELD FOR THE WHOLE DRIVE, AND THAT IS THE INTENDED
+        // BEHAVIOUR RATHER THAN AN ACCIDENT OF WHERE THE `await`s FELL.
+        //
+        // Today the brake is down and the body below returns after one refusal,
+        // so this costs nothing and nobody has felt it. When the brake lifts,
+        // one press drives up to the pass budget's worth of chain
+        // transactions, each with a round trip, and every other Agent Wallet
+        // command queues behind these two locks for the duration.
+        //
+        // That is the trade taken deliberately: an exit is the one operation
+        // where a second concurrent command could sign against state this one
+        // is midway through changing, and a frozen screen is a cheaper failure
+        // than two presses racing over the same channel. The durable record is
+        // what makes it safe to be interrupted — `kill_mid_exit_on_chain`
+        // proves a half-finished drive resumes — so the cost of holding is
+        // bounded and the cost of not holding is not.
+        //
+        // If this is ever revisited, the thing to change is what the owner
+        // sees while it is held, not whether it is held.
         let _transition = state.transition.lock().await;
         let manager = require_manager(&state)?;
         let mut manager = manager.lock().await;
@@ -2728,9 +2747,17 @@ pub async fn start_hvm_registry_exit(
     else {
         return Err("this Agent Wallet has no provider channel to close".to_owned());
     };
+    // Not `unwrap_or_default()`. A failed read of the started-steps ledger is
+    // not the same fact as an empty one, and folding them together tells an
+    // owner "nothing has been sent yet" about a wallet whose record of what
+    // has been sent could not be opened. Every way this can fail once the
+    // overview above has succeeded — an unverifiable state file, an L2 store
+    // that will not open — is a reason to stop rather than a reason to report
+    // no progress. The binding is known to exist here: the null check above
+    // reads it from the same state.
     let started_steps = manager
         .hvm_registry_exit_steps(wallet_id, now)
-        .unwrap_or_default();
+        .map_err(public_error)?;
     let status = registry_exit_status_value(&overview, started_steps).await;
     if status["driver_ready"] != Value::Bool(true) {
         return Err(status["blocked_reason"]
