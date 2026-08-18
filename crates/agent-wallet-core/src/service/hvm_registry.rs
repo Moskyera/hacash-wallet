@@ -308,6 +308,34 @@ impl AgentHvmRegistryBinding {
     }
 }
 
+/// Route a durable-exit refusal to the variant whose remedy is the right one.
+///
+/// The two failures below have opposite answers and must never be collapsed.
+/// A step that is simply further along than the caller thought is *not* a
+/// wallet that needs recovering — telling an owner mid-exit to run a recovery
+/// procedure would be telling them to do the one thing that cannot help. A
+/// record that does not re-derive genuinely is a store integrity failure.
+///
+/// Matched on the stable markers wallet-core tags its refusals with, exactly
+/// as [`super::hvm::classify_anchor_error`] matches on
+/// `ANCHOR_WITNESS_DECISION_REQUIRED`.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn classify_exit_record_error(error: hacash_wallet_core::WalletError) -> AgentWalletError {
+    let message = error.to_string();
+    if message.contains(hacash_wallet_core::hvm_registry_exit_record::REFUSAL_EXIT_STEP_BLOCKED) {
+        AgentWalletError::InvalidOperationState
+    } else if message
+        .contains(hacash_wallet_core::hvm_registry_exit_record::REFUSAL_EXIT_RECORD_INVALID)
+    {
+        AgentWalletError::RecoveryRequired
+    } else {
+        // Everything else here is a malformed request from the driver — a
+        // zero fee, a missing timestamp, a plan that says Wait. Refusing as a
+        // state error keeps it out of the recovery funnel too.
+        AgentWalletError::InvalidOperationState
+    }
+}
+
 fn is_lower_hash(value: &str) -> bool {
     value.len() == 64
         && value
@@ -386,6 +414,219 @@ impl AgentWalletManager {
         };
         head.validate(binding)?;
         Ok(Some((head.bill().serial, head.accepted_at())))
+    }
+
+    // =====================================================================
+    // The durable exit, from this wallet's side.
+    //
+    // Everything below is a thin, checked shell over
+    // `hacash_wallet_core::l2_safety`'s exit-step store. The rules live there,
+    // beside the lock, the authenticated journal and the state commitment;
+    // this layer's whole job is to hand that store the *verified* binding and
+    // the *verified* head bill from this wallet's own encrypted state, so a
+    // caller cannot pass a binding or a bill of its own choosing.
+    //
+    // Nothing here signs, submits or talks to a node. The driver above does
+    // that, and it must call these in order: `begin_hvm_registry_exit_step`,
+    // then `mark_hvm_registry_exit_signing` immediately before the key, then
+    // `record_hvm_registry_exit_signature` with the exact bytes, then submit,
+    // then confirm.
+    // =====================================================================
+
+    /// What reopening this wallet should do about one exit step.
+    ///
+    /// `Ok(None)` means this wallet has never started that step, so there is
+    /// nothing in flight and planning it fresh is safe.
+    pub fn hvm_registry_exit_resume(
+        &self,
+        wallet_id: &AgentWalletId,
+        step: hacash_wallet_core::hvm_registry_exit::HvmRegistryExitStep,
+    ) -> AgentWalletResult<
+        Option<hacash_wallet_core::hvm_registry_exit_record::HvmRegistryExitResumeV1>,
+    > {
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let (binding_commitment, store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        store
+            .resume_exit_step(&kit, &binding_commitment, step)
+            .map_err(classify_exit_record_error)
+    }
+
+    /// Every exit step this wallet has recorded for its current channel
+    /// incarnation, for a screen that has to say where the exit stands.
+    pub fn hvm_registry_exit_records(
+        &self,
+        wallet_id: &AgentWalletId,
+    ) -> AgentWalletResult<
+        Vec<hacash_wallet_core::hvm_registry_exit_record::PersistedHvmRegistryExitStepV1>,
+    > {
+        let (binding_commitment, store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        Ok(store.exit_step_records(&binding_commitment))
+    }
+
+    /// Make one exit step durable before anything is signed, or resume the one
+    /// already there.
+    ///
+    /// The plan and the snapshot it was decided from are turned into the
+    /// durable intent by
+    /// [`hacash_wallet_core::hvm_registry_exit_record::HvmRegistryExitIntentV1::from_plan`],
+    /// which re-derives the plan's own call source before accepting it. The
+    /// returned value is the only authority for whether the key may be used.
+    pub fn begin_hvm_registry_exit_step(
+        &self,
+        wallet_id: &AgentWalletId,
+        plan: &hacash_wallet_core::hvm_registry_exit::HvmRegistryExitPlanV1,
+        snapshot: &l2_fast_pay_hub::hvm_registry::HvmRegistryLiveSnapshotV2,
+        network_fee_zhu: u64,
+        transaction_timestamp: u64,
+        gas_max: u8,
+    ) -> AgentWalletResult<hacash_wallet_core::hvm_registry_exit_record::HvmRegistryExitResumeV1>
+    {
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let intent =
+            hacash_wallet_core::hvm_registry_exit_record::HvmRegistryExitIntentV1::from_plan(
+                &kit,
+                plan,
+                snapshot,
+                network_fee_zhu,
+                transaction_timestamp,
+                gas_max,
+            )
+            .map_err(classify_exit_record_error)?;
+        let (_, mut store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        store
+            .begin_or_resume_exit_step(&kit, &intent)
+            .map_err(classify_exit_record_error)
+    }
+
+    /// Record that the signing key is about to be used for this step. Called
+    /// immediately before the signer and never after it.
+    pub fn mark_hvm_registry_exit_signing(
+        &self,
+        wallet_id: &AgentWalletId,
+        step: hacash_wallet_core::hvm_registry_exit::HvmRegistryExitStep,
+    ) -> AgentWalletResult<()> {
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let (binding_commitment, mut store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        store
+            .mark_exit_step_signature_may_exist(&kit, &binding_commitment, step)
+            .map(|_| ())
+            .map_err(classify_exit_record_error)
+    }
+
+    /// Make the exact signed bytes and their transaction hash durable, before
+    /// they are handed to any node.
+    pub fn record_hvm_registry_exit_signature(
+        &self,
+        wallet_id: &AgentWalletId,
+        step: hacash_wallet_core::hvm_registry_exit::HvmRegistryExitStep,
+        signed_transaction_hex: &str,
+        transaction_hash: &str,
+    ) -> AgentWalletResult<()> {
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let (binding_commitment, mut store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        store
+            .persist_exit_step_signature(
+                &kit,
+                &binding_commitment,
+                step,
+                signed_transaction_hex,
+                transaction_hash,
+            )
+            .map(|_| ())
+            .map_err(classify_exit_record_error)
+    }
+
+    /// Record that the durable bytes were handed to a node.
+    pub fn mark_hvm_registry_exit_submitted(
+        &self,
+        wallet_id: &AgentWalletId,
+        step: hacash_wallet_core::hvm_registry_exit::HvmRegistryExitStep,
+    ) -> AgentWalletResult<()> {
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let (binding_commitment, mut store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        store
+            .mark_exit_step_submitted(&kit, &binding_commitment, step)
+            .map(|_| ())
+            .map_err(classify_exit_record_error)
+    }
+
+    /// Record that this wallet's own transaction for a step was found on
+    /// chain. The hash is checked against the stored one inside the store.
+    pub fn mark_hvm_registry_exit_confirmed(
+        &self,
+        wallet_id: &AgentWalletId,
+        step: hacash_wallet_core::hvm_registry_exit::HvmRegistryExitStep,
+        transaction_hash: &str,
+        block_height: u64,
+        block_hash: &str,
+    ) -> AgentWalletResult<()> {
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let (binding_commitment, mut store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        store
+            .mark_exit_step_confirmed(
+                &kit,
+                &binding_commitment,
+                step,
+                transaction_hash,
+                block_height,
+                block_hash,
+            )
+            .map(|_| ())
+            .map_err(classify_exit_record_error)
+    }
+
+    /// Record that a permissionless step was found already done by somebody
+    /// else. `finalize` and the Action 14 payout can both be pressed by
+    /// anybody, and the payout's destination is pinned by the contract, so
+    /// this is an ordinary ending rather than a failure.
+    pub fn mark_hvm_registry_exit_settled_elsewhere(
+        &self,
+        wallet_id: &AgentWalletId,
+        step: hacash_wallet_core::hvm_registry_exit::HvmRegistryExitStep,
+        observed_height: u64,
+    ) -> AgentWalletResult<()> {
+        let kit = self.hvm_registry_exit_kit(wallet_id)?;
+        let (binding_commitment, mut store) = self.open_hvm_registry_exit_store(wallet_id)?;
+        store
+            .mark_exit_step_settled_elsewhere(&kit, &binding_commitment, step, observed_height)
+            .map(|_| ())
+            .map_err(classify_exit_record_error)
+    }
+
+    /// Open the authenticated per-channel store that holds this wallet's exit
+    /// records, keyed by the registry binding's own commitment.
+    ///
+    /// Same store, same key derivation and same lock as the rollback-anchor
+    /// memory in [`super::hvm`]: one channel incarnation, one file, one owner
+    /// process. Keyed by `binding_commitment` rather than by channel id
+    /// because the commitment carries the reuse version, and a new incarnation
+    /// is a genuinely new channel whose exit starts empty.
+    fn open_hvm_registry_exit_store(
+        &self,
+        wallet_id: &AgentWalletId,
+    ) -> AgentWalletResult<(String, hacash_wallet_core::l2_safety::ClientL2Safety)> {
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let binding = state
+            .hvm_registry_binding
+            .as_ref()
+            .ok_or(AgentWalletError::OperationNotFound)?;
+        let binding_commitment = binding.binding_commitment().to_owned();
+        let hub_address = binding.hub_address().to_owned();
+        let l2_root = self.storage.paths(wallet_id)?.l2_dir();
+        let wallet_scope = session.signer.wallet_scope().as_str().to_owned();
+        let store =
+            hacash_wallet_core::l2_safety::ClientL2Safety::open_scoped_with_key_provider_for_network(
+                &session.signer,
+                &l2_root,
+                &wallet_scope,
+                "testnet",
+                &hub_address,
+                &binding_commitment,
+            )
+            .map_err(|_| AgentWalletError::RecoveryRequired)?;
+        Ok((binding_commitment, store))
     }
 
     /// Adopt one exact operational shared-registry channel. This flow is

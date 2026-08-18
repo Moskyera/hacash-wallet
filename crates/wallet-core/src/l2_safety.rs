@@ -26,6 +26,12 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::account::WalletAccount;
 use crate::error::{WalletError, WalletResult};
+use crate::hvm_registry_exit::{HvmRegistryExitKitV1, HvmRegistryExitStep};
+use crate::hvm_registry_exit_record::{
+    HvmRegistryExitIntentV1, HvmRegistryExitPhase, HvmRegistryExitResumeV1,
+    PersistedHvmRegistryExitStepV1, REFUSAL_EXIT_STEP_BLOCKED, exit_record_key, resume_action,
+    validate_persisted_exit_step,
+};
 use crate::l2_signer::FastPayJournalKeyProvider;
 use crate::l2_storage_scope::validate_scoped_l2_storage;
 use crate::paths::{secure_write, wallet_data_root};
@@ -157,6 +163,24 @@ struct ClientL2State {
     /// previous version wrote.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     anchor_witness_memory: BTreeMap<String, ChannelAnchorMemoryV1>,
+    /// One durable record per `(binding_commitment, step)` of a user-side
+    /// unilateral registry exit, keyed by
+    /// [`crate::hvm_registry_exit_record::exit_record_key`].
+    ///
+    /// This is what makes an exit survive the wallet closing. Everything the
+    /// resume path needs is here — the call source and its commitment, the
+    /// exact signed bytes, the transaction hash, the chain as it was read
+    /// before signing, and the phase — so a reopened wallet can find out
+    /// whether the transaction it signed last time was mined instead of
+    /// signing a second one.
+    ///
+    /// `skip_serializing_if` is load bearing for the same reason it is on
+    /// `anchor_witness_memory`: every store already on disk was written
+    /// without this key, and emitting an empty map would change
+    /// `state_commitment` for all of them and make [`initialize_state`] refuse
+    /// to open them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    exit_operations: BTreeMap<String, PersistedHvmRegistryExitStepV1>,
 }
 
 pub struct RecipientOperationInput<'a> {
@@ -1335,6 +1359,606 @@ impl ClientL2Safety {
         )
     }
 
+    // =====================================================================
+    // The durable user-side registry exit.
+    //
+    // An exit runs for hours: `binding.challenge_blocks` plus the response
+    // margin plus the lease slack, at a 300s block target. A wallet that is
+    // closed halfway through is the ordinary case, so every step of it is
+    // written here first, in this store, under this object's exclusive lock
+    // and inside `state_commitment`.
+    //
+    // Nothing below trusts a stored record. Every one of these methods loads
+    // the record and runs `validate_persisted_exit_step` against the caller's
+    // exit kit before it looks at a phase, which re-derives the call source
+    // from the binding and the wallet's own head bill using the Hub's own
+    // encoders. This is the wallet's peer of
+    // `validate_hvm_registry_chain_operations_v2`.
+    // =====================================================================
+
+    /// Read one step's record without deciding anything about it. For a
+    /// screen that wants to say where an exit stands.
+    pub fn exit_step_record(
+        &self,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+    ) -> Option<PersistedHvmRegistryExitStepV1> {
+        self.state
+            .exit_operations
+            .get(&exit_record_key(binding_commitment, step))
+            .cloned()
+    }
+
+    /// Every exit step this wallet has ever recorded for one channel
+    /// incarnation, in step order.
+    pub fn exit_step_records(
+        &self,
+        binding_commitment: &str,
+    ) -> Vec<PersistedHvmRegistryExitStepV1> {
+        let prefix = format!("{binding_commitment}:");
+        self.state
+            .exit_operations
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(_, record)| record.clone())
+            .collect()
+    }
+
+    /// What reopening the wallet should do about a step, decided from the
+    /// durable record and refusing outright if that record does not re-derive.
+    ///
+    /// `Ok(None)` means this wallet has never started this step.
+    pub fn resume_exit_step(
+        &self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+    ) -> WalletResult<Option<HvmRegistryExitResumeV1>> {
+        let Some(record) = self.exit_step_record(binding_commitment, step) else {
+            return Ok(None);
+        };
+        validate_persisted_exit_step(&record, kit)?;
+        Ok(Some(resume_action(&record)))
+    }
+
+    /// Make a step durable before anything is signed, or resume the one that
+    /// is already there.
+    ///
+    /// This never overwrites an unresolved step. A record whose phase says
+    /// bytes may exist comes back as
+    /// [`HvmRegistryExitResumeV1::AwaitChain`] or
+    /// [`HvmRegistryExitResumeV1::ResignExact`], and in neither case may the
+    /// caller build a fresh transaction — which is the entire point. The one
+    /// exception is a lease renewal whose previous attempt is *terminal*: a
+    /// long objection window can outlive the lease bought at its start, and a
+    /// proven-mined previous attempt cannot be duplicated by a new one. Its
+    /// transaction hash is carried forward, never dropped.
+    pub fn begin_or_resume_exit_step(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        intent: &HvmRegistryExitIntentV1,
+    ) -> WalletResult<HvmRegistryExitResumeV1> {
+        let key = intent.record_key();
+        let now = unix_timestamp();
+        let fresh = PersistedHvmRegistryExitStepV1::open(intent, now);
+        // Validate the record we are about to write by the same rule that
+        // guards the ones already written. A record this store would refuse to
+        // read back must never be written.
+        validate_persisted_exit_step(&fresh, kit)?;
+
+        let Some(existing) = self.state.exit_operations.get(&key).cloned() else {
+            self.write_exit_step(fresh.clone(), JournalPhase::HvmChainIntentPersisted)?;
+            return Ok(HvmRegistryExitResumeV1::SignFresh { record: fresh });
+        };
+        validate_persisted_exit_step(&existing, kit)?;
+
+        if existing.phase.is_terminal() {
+            if !intent.step.is_lease_renewal() {
+                return Ok(HvmRegistryExitResumeV1::Done { record: existing });
+            }
+            let next = existing.supersede(intent, now);
+            validate_persisted_exit_step(&next, kit)?;
+            self.write_exit_step(next.clone(), JournalPhase::HvmChainIntentPersisted)?;
+            return Ok(HvmRegistryExitResumeV1::SignFresh { record: next });
+        }
+
+        // Unresolved. The stored terms are the terms; a caller arriving with
+        // different ones is a caller who would have signed a second, different
+        // transaction for a step that may already be mined.
+        if existing.call_source != intent.call_source {
+            // Unreachable through a coherent chain: a claim's amount is pinned
+            // to the settled balance its own snapshot read and to status 4, a
+            // challenge's and a response's source is pinned to the serial of
+            // the bill this wallet holds, and the other three sources depend on
+            // the binding alone. So a differing source means the record and the
+            // kit disagree about the world in a way validation did not catch,
+            // and quietly overwriting it is the one thing that must not happen.
+            return Err(blocked_exit_step(format!(
+                "this exit step is already recorded for a different call and may already be on \
+                 chain: the stored {} does not match the one just planned",
+                intent.step.slug()
+            )));
+        }
+        if existing.transaction_timestamp != intent.transaction_timestamp
+            || existing.network_fee_zhu != intent.network_fee_zhu
+            || existing.gas_max != intent.gas_max
+        {
+            // This used to overwrite the record whenever it was still at
+            // `IntentPersisted`, on the reasoning that nothing was signed yet.
+            // The reasoning holds only for a driver that obeys the protocol,
+            // and the record's whole job is to be right about a driver that
+            // did not: a process that signed *before* announcing it, and died,
+            // leaves bytes on somebody's wire and a record that says
+            // `IntentPersisted`. Re-planning that record onto a new clock made
+            // those bytes unaccountable and authorised a second, different
+            // transaction for the same step — measured, with the first hash on
+            // the wire and nothing on chain to stop it.
+            //
+            // So the terms are sticky from the moment the step is opened.
+            // Re-signing them is deterministic and reproduces whatever was
+            // already produced, which is the only outcome that cannot double
+            // anything. Refusing instead would trap the exit; overwriting
+            // would duplicate it; keeping them does neither.
+            if existing.phase == HvmRegistryExitPhase::IntentPersisted {
+                return Ok(HvmRegistryExitResumeV1::SignFresh { record: existing });
+            }
+            return Err(blocked_exit_step(format!(
+                "this exit step is already recorded on different terms and may already be on \
+                 chain: {} was signed at timestamp {} for fee {} zhu",
+                intent.step.slug(),
+                existing.transaction_timestamp,
+                existing.network_fee_zhu
+            )));
+        }
+        Ok(resume_action(&existing))
+    }
+
+    /// Replace a lease renewal whose bytes are on the wire and are not being
+    /// mined, at a strictly higher fee.
+    ///
+    /// # Why this door exists and why it is only this wide
+    ///
+    /// Retiring a step whose signature is live is the single operation in this
+    /// store that can put two payable transactions on the wire, so
+    /// [`Self::mark_exit_step_settled_elsewhere`] refuses to do it. That
+    /// refusal is right for `challenge`, `respond`, `finalize` and the Action
+    /// 14 claim, because for those the contract itself makes the second
+    /// transaction a no-op: the status has already moved, or `c_left_claimed_`
+    /// is already true, so a duplicate costs a fee and cannot pay twice.
+    ///
+    /// A lease renewal is the exception in both directions. Two renewals both
+    /// *execute*, so a careless second one really is money. And a renewal that
+    /// never mines is the only failure in this system that destroys a deposit
+    /// outright — when the storage keys lapse, `c_status_` reads Nil and every
+    /// entry point aborts, with nobody able to reach the coin. Refusing a
+    /// replacement is therefore not the safe answer; it is the expensive one.
+    ///
+    /// So the door is opened by evidence rather than by intent: the step must
+    /// be a lease renewal, its bytes must already have been handed to a node,
+    /// the caller must have looked the hash up and found that neither a block
+    /// nor the node's own mempool carries it, the replacement must pay strictly
+    /// more, and it must be a different transaction. The superseded hash is
+    /// carried forward, never dropped, so "did we already put something on the
+    /// wire for this" stays answerable afterwards.
+    ///
+    /// What is deliberately **not** a term is elapsed wall-clock time. It reads
+    /// like extra safety and is not: the honest signal is the node's own
+    /// answer, which this call already demands, and a clock term would be
+    /// untestable here while a caller in a hurry could simply wait it out. The
+    /// worst case this door permits is two renewals both executing, which costs
+    /// a second fee and buys a longer lease. The worst case of not having it is
+    /// the storage keys lapsing, which destroys the deposit for everyone
+    /// forever.
+    pub fn supersede_stuck_lease_renewal(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        intent: &HvmRegistryExitIntentV1,
+        chain_carries_the_stuck_transaction: bool,
+    ) -> WalletResult<HvmRegistryExitResumeV1> {
+        if !intent.step.is_lease_renewal() {
+            return Err(blocked_exit_step(
+                "only a storage lease renewal may be replaced while its bytes are live".into(),
+            ));
+        }
+        if chain_carries_the_stuck_transaction {
+            return Err(blocked_exit_step(
+                "this lease renewal is on chain and must be confirmed, not replaced".into(),
+            ));
+        }
+        let existing = self.require_exit_step(kit, &intent.binding_commitment, intent.step)?;
+        if existing.phase != HvmRegistryExitPhase::Submitted {
+            return Err(blocked_exit_step(format!(
+                "a lease renewal can only be replaced once its bytes were handed to a node: it is {}",
+                phase_label(existing.phase)
+            )));
+        }
+        let now = unix_timestamp();
+        if intent.network_fee_zhu <= existing.network_fee_zhu {
+            return Err(blocked_exit_step(format!(
+                "a replacement lease renewal must pay more than the {} zhu already offered",
+                existing.network_fee_zhu
+            )));
+        }
+        if intent.transaction_timestamp == existing.transaction_timestamp {
+            return Err(blocked_exit_step(
+                "a replacement lease renewal must be a different transaction from the one it \
+                 replaces"
+                    .into(),
+            ));
+        }
+        let next = existing.supersede(intent, now);
+        validate_persisted_exit_step(&next, kit)?;
+        self.write_exit_step(next.clone(), JournalPhase::HvmChainIntentPersisted)?;
+        Ok(HvmRegistryExitResumeV1::SignFresh { record: next })
+    }
+
+    /// Record that the signing key is about to be used for this step.
+    ///
+    /// Called **before** the signer, so that a process killed inside it leaves
+    /// a state this store can name. Its peer on the Fast Pay path is
+    /// [`Self::persist_before_signing`], and the reason is identical: an
+    /// unrecorded signature is a transaction nobody can account for.
+    pub fn mark_exit_step_signature_may_exist(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+    ) -> WalletResult<PersistedHvmRegistryExitStepV1> {
+        let mut record = self.require_exit_step(kit, binding_commitment, step)?;
+        match record.phase {
+            HvmRegistryExitPhase::SignatureMayExist => return Ok(record),
+            HvmRegistryExitPhase::IntentPersisted => {}
+            other => {
+                return Err(blocked_exit_step(format!(
+                    "this exit step is past signing: it is {}",
+                    phase_label(other)
+                )));
+            }
+        }
+        record.phase = HvmRegistryExitPhase::SignatureMayExist;
+        record.updated_unix = unix_timestamp();
+        self.write_exit_step(record.clone(), JournalPhase::HvmChainSignatureMayExist)?;
+        Ok(record)
+    }
+
+    /// Make the exact signed bytes and their transaction hash durable.
+    ///
+    /// The bytes are write-once. A second call carrying anything different is
+    /// refused, because the first transaction may already be mined and a
+    /// second one for the same step is either a wasted fee or a double
+    /// payout attempt the contract will reject after the fee is spent.
+    pub fn persist_exit_step_signature(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+        signed_transaction_hex: &str,
+        transaction_hash: &str,
+    ) -> WalletResult<PersistedHvmRegistryExitStepV1> {
+        if signed_transaction_hex.trim().is_empty() {
+            return Err(WalletError::L2(
+                "an exit step signature needs its exact bytes".into(),
+            ));
+        }
+        require_anchor_hash(transaction_hash, "exit step transaction hash")?;
+        let mut record = self.require_exit_step(kit, binding_commitment, step)?;
+        // The bytes are checked against the record rather than believed.
+        //
+        // This used to take the caller's word for both halves: any hex, any
+        // hash, as long as the phase was right. Measured, that was the gap a
+        // rolled-back store walked through — the record came back at its
+        // original terms, the caller signed at a *different* timestamp, and the
+        // store wrote down a second transaction for a payout it had already
+        // watched mine. The record stores the complete set of non-deterministic
+        // inputs precisely so this is checkable, and now it is checked.
+        exit_bytes_match_record(signed_transaction_hex, transaction_hash, &record)?;
+        match record.phase {
+            HvmRegistryExitPhase::Signed | HvmRegistryExitPhase::Submitted => {
+                let same = record.transaction_hash.as_deref() == Some(transaction_hash)
+                    && record.signed_transaction_hex.as_deref() == Some(signed_transaction_hex);
+                if same {
+                    return Ok(record);
+                }
+                return Err(blocked_exit_step(format!(
+                    "a different transaction is already durable for this exit step: {} may \
+                     already be on chain",
+                    record.transaction_hash.as_deref().unwrap_or("unknown")
+                )));
+            }
+            HvmRegistryExitPhase::SignatureMayExist => {}
+            other => {
+                return Err(blocked_exit_step(format!(
+                    "an exit step signature cannot be recorded from {}",
+                    phase_label(other)
+                )));
+            }
+        }
+        record.signed_transaction_hex = Some(signed_transaction_hex.to_owned());
+        record.transaction_hash = Some(transaction_hash.to_owned());
+        record.phase = HvmRegistryExitPhase::Signed;
+        record.updated_unix = unix_timestamp();
+        self.write_exit_step(record.clone(), JournalPhase::HvmChainSigned)?;
+        Ok(record)
+    }
+
+    /// Record that the durable bytes were handed to a node.
+    pub fn mark_exit_step_submitted(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+    ) -> WalletResult<PersistedHvmRegistryExitStepV1> {
+        let mut record = self.require_exit_step(kit, binding_commitment, step)?;
+        let now = unix_timestamp();
+        match record.phase {
+            HvmRegistryExitPhase::Submitted => return Ok(record),
+            HvmRegistryExitPhase::Signed => {}
+            other => {
+                return Err(blocked_exit_step(format!(
+                    "an exit step cannot be submitted from {}",
+                    phase_label(other)
+                )));
+            }
+        }
+        record.phase = HvmRegistryExitPhase::Submitted;
+        record.submitted_unix = Some(now);
+        record.updated_unix = now;
+        self.write_exit_step(record.clone(), JournalPhase::HvmChainSubmitted)?;
+        Ok(record)
+    }
+
+    /// Record that **our own** transaction for this step was observed on
+    /// chain.
+    ///
+    /// The hash is checked against the stored one rather than taken as given.
+    /// A confirmation for some other transaction is not evidence about this
+    /// step, and accepting one would retire a record whose bytes are still
+    /// live.
+    pub fn mark_exit_step_confirmed(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+        transaction_hash: &str,
+        block_height: u64,
+        block_hash: &str,
+    ) -> WalletResult<PersistedHvmRegistryExitStepV1> {
+        require_anchor_hash(transaction_hash, "exit step transaction hash")?;
+        require_anchor_hash(block_hash, "exit step block hash")?;
+        if block_height == 0 {
+            return Err(WalletError::L2(
+                "an exit step confirmation needs the height it was mined at".into(),
+            ));
+        }
+        let mut record = self.require_exit_step(kit, binding_commitment, step)?;
+        if record.transaction_hash.as_deref() != Some(transaction_hash) {
+            return Err(WalletError::L2(
+                "this confirmation is for a different transaction than the one this step signed"
+                    .into(),
+            ));
+        }
+        match record.phase {
+            HvmRegistryExitPhase::Confirmed => {
+                if record.confirmed_block_height == Some(block_height)
+                    && record.confirmed_block_hash.as_deref() == Some(block_hash)
+                {
+                    return Ok(record);
+                }
+                return Err(blocked_exit_step(
+                    "this exit step was already confirmed in a different block: the chain \
+                     reorganised under it"
+                        .into(),
+                ));
+            }
+            HvmRegistryExitPhase::Signed | HvmRegistryExitPhase::Submitted => {}
+            other => {
+                return Err(blocked_exit_step(format!(
+                    "an exit step cannot be confirmed from {}",
+                    phase_label(other)
+                )));
+            }
+        }
+        record.phase = HvmRegistryExitPhase::Confirmed;
+        record.confirmed_block_height = Some(block_height);
+        record.confirmed_block_hash = Some(block_hash.to_owned());
+        record.updated_unix = unix_timestamp();
+        self.write_exit_step(record.clone(), JournalPhase::HvmChainConfirmed)?;
+        Ok(record)
+    }
+
+    /// Record that this step's effect was found already done on chain without
+    /// our transaction being the cause.
+    ///
+    /// `finalize` and the Action 14 payout are permissionless: anybody may
+    /// press them, and the payout's destination is pinned by the contract, so
+    /// a third party finishing first pays the same user the same amount. It is
+    /// an ordinary ending and never an error — but it owns no block of ours,
+    /// so it must not claim one.
+    pub fn mark_exit_step_settled_elsewhere(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+        observed_height: u64,
+    ) -> WalletResult<PersistedHvmRegistryExitStepV1> {
+        if observed_height == 0 {
+            return Err(WalletError::L2(
+                "an exit step settled elsewhere needs the height it was observed at".into(),
+            ));
+        }
+        let mut record = self.require_exit_step(kit, binding_commitment, step)?;
+        match record.phase {
+            HvmRegistryExitPhase::SettledElsewhere => {
+                if record.settled_elsewhere_height == Some(observed_height) {
+                    return Ok(record);
+                }
+                return Err(WalletError::L2(
+                    "this exit step was already recorded settled at a different height".into(),
+                ));
+            }
+            HvmRegistryExitPhase::Confirmed => {
+                return Err(blocked_exit_step(
+                    "this exit step is confirmed in a block of its own and was not settled by \
+                     anybody else"
+                        .into(),
+                ));
+            }
+            // The arm that used to be `_ => {}`, which quietly accepted
+            // `Signed` and `Submitted` too. Retiring a step whose own bytes are
+            // live is the one transition in this store that can produce two
+            // payable transactions: it moves the record to a terminal phase,
+            // and a terminal phase is what
+            // [`Self::begin_or_resume_exit_step`] treats as permission to open
+            // a fresh attempt at a lease renewal. Measured through the public
+            // API, that turned one submitted renewal into two payable ones with
+            // no tampering and no filesystem access.
+            //
+            // Someone else finishing a permissionless step first is still an
+            // ordinary ending — it is simply not this call's business once our
+            // own signature exists. Our bytes either mine (confirm them) or
+            // they do not, and a renewal that does not has
+            // [`Self::supersede_stuck_lease_renewal`], which asks for evidence.
+            phase @ (HvmRegistryExitPhase::SignatureMayExist
+            | HvmRegistryExitPhase::Signed
+            | HvmRegistryExitPhase::Submitted) => {
+                return Err(blocked_exit_step(format!(
+                    "this exit step cannot be retired while its own transaction {} may still \
+                     execute: it is {}",
+                    record.transaction_hash.as_deref().unwrap_or("unknown"),
+                    phase_label(phase)
+                )));
+            }
+            HvmRegistryExitPhase::IntentPersisted => {}
+        }
+        record.phase = HvmRegistryExitPhase::SettledElsewhere;
+        record.settled_elsewhere_height = Some(observed_height);
+        record.updated_unix = unix_timestamp();
+        self.write_exit_step(record.clone(), JournalPhase::HvmChainConfirmed)?;
+        Ok(record)
+    }
+
+    /// Take a confirmation back because the chain took the block back.
+    ///
+    /// # The wedge this ends
+    ///
+    /// [`Self::mark_exit_step_confirmed`] refuses a second confirmation in a
+    /// different block, on the correct reasoning that a step cannot be mined
+    /// twice. Paired with a `Confirmed` phase that nothing could leave, that
+    /// turned an ordinary reorg into a permanent trap: confirm a payout one
+    /// block deep, watch the chain reorganise it away, and the record says
+    /// `Done` for a transaction the chain no longer carries.
+    /// `mark_exit_step_settled_elsewhere` refuses from `Confirmed` and
+    /// `begin_or_resume_exit_step` answers `Done`, so the deposit is stranded
+    /// by the wallet's own bookkeeping while the contract still holds it.
+    ///
+    /// The way out cannot be a new signature — that is the thing this whole
+    /// module exists to prevent — so it is not one. The record keeps its exact
+    /// bytes and its exact hash and simply goes back to `Submitted`, which is
+    /// what it truthfully is: bytes handed to a node, fate unknown. The driver
+    /// then does what it does with any `AwaitChain`, which is look the hash up
+    /// and re-submit *those same bytes* if the chain does not have them.
+    ///
+    /// The caller must name the block it is disowning, and it must be the
+    /// block the record recorded. A caller that cannot say which block it
+    /// watched vanish has not watched anything.
+    pub fn mark_exit_step_reorged_out(
+        &mut self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+        vanished_block_height: u64,
+        vanished_block_hash: &str,
+    ) -> WalletResult<PersistedHvmRegistryExitStepV1> {
+        require_anchor_hash(vanished_block_hash, "exit step block hash")?;
+        let mut record = self.require_exit_step(kit, binding_commitment, step)?;
+        if record.phase != HvmRegistryExitPhase::Confirmed {
+            return Err(blocked_exit_step(format!(
+                "only a confirmed exit step can be reorganised out of its block: it is {}",
+                phase_label(record.phase)
+            )));
+        }
+        if record.confirmed_block_height != Some(vanished_block_height)
+            || record.confirmed_block_hash.as_deref() != Some(vanished_block_hash)
+        {
+            return Err(WalletError::L2(
+                "this reorg names a block this exit step was never confirmed in".into(),
+            ));
+        }
+        let now = unix_timestamp();
+        record.phase = HvmRegistryExitPhase::Submitted;
+        record.confirmed_block_height = None;
+        record.confirmed_block_hash = None;
+        record.submitted_unix = Some(record.submitted_unix.unwrap_or(now));
+        record.updated_unix = now;
+        self.write_exit_step(record.clone(), JournalPhase::HvmChainSubmitted)?;
+        Ok(record)
+    }
+
+    fn require_exit_step(
+        &self,
+        kit: &HvmRegistryExitKitV1,
+        binding_commitment: &str,
+        step: HvmRegistryExitStep,
+    ) -> WalletResult<PersistedHvmRegistryExitStepV1> {
+        let record = self
+            .exit_step_record(binding_commitment, step)
+            .ok_or_else(|| {
+                WalletError::L2(format!(
+                    "this wallet has no durable record of the {} step of this exit",
+                    step.slug()
+                ))
+            })?;
+        validate_persisted_exit_step(&record, kit)?;
+        Ok(record)
+    }
+
+    /// The single durable write for an exit step. Goes through the same
+    /// [`Self::commit`] as every other write in this store, so the record is
+    /// inside `state_commitment` and carries an authenticated journal entry.
+    fn write_exit_step(
+        &mut self,
+        record: PersistedHvmRegistryExitStepV1,
+        phase: JournalPhase,
+    ) -> WalletResult<()> {
+        let mut next = self.state.clone();
+        next.schema_version = 1;
+        let key = record.record_key();
+        let operation_id = format!("registry-exit:{key}");
+        let idempotency_key = format!("registry-exit:{key}:{}", record.attempt);
+        let expected_bill_number = record.bill_serial;
+        let recipient = record.claim_payee.clone().unwrap_or_default();
+        let request_commitment = record.call_source_commitment.clone();
+        let operation_type = if record.step.is_lease_renewal() {
+            JournalOperationType::HvmLeaseRenewal
+        } else {
+            JournalOperationType::HvmWatchtower
+        };
+        let created_at = record.updated_unix;
+        next.exit_operations.insert(key, record);
+        self.commit(
+            next,
+            JournalEvent {
+                wallet_scope: self.wallet_scope.clone(),
+                hub_or_provider_identity: self.hub_identity.clone(),
+                channel_id: self.channel_id.clone(),
+                channel_reuse_version: 0,
+                operation_id,
+                operation_type,
+                operation_phase: phase,
+                amount_units: 0,
+                sender: self.local_address.clone(),
+                recipient,
+                previous_state_commitment: String::new(),
+                new_state_commitment: String::new(),
+                idempotency_key,
+                request_commitment,
+                expected_bill_number,
+                unsigned_state_commitment: None,
+                created_at,
+            },
+        )
+    }
+
     pub fn mark_submitted(&mut self, operation_id: &str) -> WalletResult<()> {
         self.set_status(
             operation_id,
@@ -1506,6 +2130,72 @@ impl ClientL2Safety {
 
     fn binding_channel_id(&self) -> WalletResult<String> {
         Ok(self.channel_id.clone())
+    }
+}
+
+/// Tag a refusal that is about *this step's phase* rather than about a
+/// record's integrity: what was asked cannot be done from where the step
+/// already stands. The marker is what lets a caller above wallet-core tell
+/// "your exit is further along than you thought" apart from "your durable
+/// record is broken". Those have opposite remedies, and collapsing them would
+/// route an owner whose exit is simply in flight into a recovery procedure.
+/// Do these bytes actually say what this record says they say?
+///
+/// Two facts, both cheap and both load bearing:
+///
+/// * the transaction hash is **recomputed from the bytes**, so a caller cannot
+///   file one transaction under another one's name; and
+/// * the transaction's own timestamp equals the record's, which is the whole
+///   set of non-deterministic input the record carries. Signing is RFC 6979
+///   deterministic, so bytes that agree with the record on the timestamp, the
+///   fee and the call are the bytes the record committed to and no others.
+///
+/// Refusing here is what makes the sticky terms in
+/// [`ClientL2Safety::begin_or_resume_exit_step`] worth having: sticky terms
+/// stop the record moving, and this stops a signature that ignored it.
+fn exit_bytes_match_record(
+    signed_transaction_hex: &str,
+    transaction_hash: &str,
+    record: &PersistedHvmRegistryExitStepV1,
+) -> WalletResult<()> {
+    crate::protocol_init::ensure_protocol_setup();
+    let raw = hex::decode(signed_transaction_hex)
+        .map_err(|error| WalletError::L2(format!("exit step bytes are not hex: {error}")))?;
+    let (transaction, consumed) = protocol::transaction::transaction_create(&raw)
+        .map_err(|error| WalletError::L2(format!("exit step bytes do not parse: {error}")))?;
+    if consumed != raw.len() {
+        return Err(WalletError::L2(
+            "exit step bytes carry trailing rubbish".into(),
+        ));
+    }
+    if hex::encode(transaction.hash().as_bytes()) != transaction_hash {
+        return Err(blocked_exit_step(
+            "these exit step bytes do not hash to the transaction hash filed with them".into(),
+        ));
+    }
+    if transaction.timestamp().uint() != record.transaction_timestamp {
+        return Err(blocked_exit_step(format!(
+            "these exit step bytes were signed at timestamp {} and this step is recorded at {}",
+            transaction.timestamp().uint(),
+            record.transaction_timestamp
+        )));
+    }
+    Ok(())
+}
+
+fn blocked_exit_step(message: String) -> WalletError {
+    WalletError::L2(format!("{REFUSAL_EXIT_STEP_BLOCKED}: {message}"))
+}
+
+/// Plain English for a phase, for refusals a person has to act on.
+fn phase_label(phase: HvmRegistryExitPhase) -> &'static str {
+    match phase {
+        HvmRegistryExitPhase::IntentPersisted => "recorded but unsigned",
+        HvmRegistryExitPhase::SignatureMayExist => "part way through signing",
+        HvmRegistryExitPhase::Signed => "signed and waiting to be submitted",
+        HvmRegistryExitPhase::Submitted => "submitted and waiting for a block",
+        HvmRegistryExitPhase::Confirmed => "confirmed on chain",
+        HvmRegistryExitPhase::SettledElsewhere => "already settled by somebody else",
     }
 }
 

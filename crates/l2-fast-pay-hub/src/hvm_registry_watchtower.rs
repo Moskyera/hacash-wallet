@@ -290,9 +290,105 @@ pub fn decide_user_exit_action(
     if hub_view == HvmRegistryWatchtowerDecisionV2::RespondWithLatestBill
         && !registry_respond_defends_left_payout(snapshot, latest)
     {
-        return Ok(HvmRegistryWatchtowerDecisionV2::NoAction);
+        // The chain is already paying this wallet at least what its own bill
+        // does, so answering would hand money back. Sitting still is right
+        // *inside* the window — and used to be the last thing this chair ever
+        // said, because once the window closed the very same standing
+        // challenge fell through to `RecoveryRequired` below and the exit
+        // stopped forever. Take the ordinary ending instead: wait the window
+        // out, then finalize what is standing.
+        return Ok(finish_whatever_is_standing(snapshot));
+    }
+    if hub_view == HvmRegistryWatchtowerDecisionV2::RecoveryRequired {
+        return Ok(user_view_of_a_disagreeing_chain(snapshot));
     }
     Ok(hub_view)
+}
+
+/// What the *left party* should do about a chain that does not match the bill
+/// they hold.
+///
+/// # Why this is not the Hub's answer
+///
+/// [`decide_registry_watchtower_action`] answers `RecoveryRequired` whenever
+/// the chain and the durable bill disagree, and from the Hub's chair that is
+/// right: the Hub is claiming what it earned, and a chain that disagrees means
+/// its own accounting is wrong and a human must look.
+///
+/// From the left party's chair the same fact means something completely
+/// different, and answering `RecoveryRequired` there was measured to strand a
+/// user with reachable money. Every state a registry channel can be in on
+/// chain was put there by a bill **this wallet signed** — `challenge` and
+/// `respond` both verify both signatures — so a disagreeing chain is never a
+/// forgery. It is one of exactly two things:
+///
+/// * the chain is *older* than the wallet's head bill, which on this
+///   one-directional rail pays the user **more** than their own receipt does;
+///   or
+/// * the chain is *newer*, which means this wallet lost state and the chain is
+///   the truth about what it is owed.
+///
+/// In both, the money on chain is the user's and the way to it is the same:
+/// let the objection window run out, `finalize`, and take the Action 14
+/// payout. Both of those calls are permissionless and neither can change who
+/// is paid — [`registry_claim_payout_source`] pins the payee to
+/// `binding.left_address` and the contract's `PermitHAC` hook pins the amount
+/// to `c_left_balance_`. So this is not a weakened check; it is the same check
+/// read from the chair it was always meant to be read from.
+///
+/// What stays `RecoveryRequired` is a channel in a status this contract has no
+/// exit from — a `c_status_` that is not 2, 3 or 4 is a state neither party
+/// can name, and guessing at it is exactly what a recovery procedure is for.
+fn user_view_of_a_disagreeing_chain(
+    snapshot: &HvmRegistryLiveSnapshotV2,
+) -> HvmRegistryWatchtowerDecisionV2 {
+    match snapshot.channel.status.value {
+        3 | 4 => finish_whatever_is_standing(snapshot),
+        // OPEN with a chain serial the wallet cannot beat: `challenge` demands
+        // a strictly newer bill than the one the contract holds, so there is
+        // nothing to sign and no window to wait for.
+        _ => HvmRegistryWatchtowerDecisionV2::RecoveryRequired,
+    }
+}
+
+/// Wait the objection window out, then finalize, then claim — whatever split
+/// happens to be standing on chain.
+fn finish_whatever_is_standing(
+    snapshot: &HvmRegistryLiveSnapshotV2,
+) -> HvmRegistryWatchtowerDecisionV2 {
+    match snapshot.channel.status.value {
+        3 if snapshot.observed_height >= snapshot.channel.deadline.value => {
+            HvmRegistryWatchtowerDecisionV2::Finalize
+        }
+        3 => HvmRegistryWatchtowerDecisionV2::NoAction,
+        4 if !snapshot.channel.left_claimed.value && snapshot.channel.left_balance.value > 0 => {
+            HvmRegistryWatchtowerDecisionV2::ClaimLeftPayout
+        }
+        4 => HvmRegistryWatchtowerDecisionV2::NoAction,
+        _ => HvmRegistryWatchtowerDecisionV2::RecoveryRequired,
+    }
+}
+
+/// How much less than its own head bill the chain would pay this wallet, if
+/// the split standing on chain were settled as it is.
+///
+/// `None` means the chain pays the same or more, which is the ordinary case
+/// and the only one on the shipped one-directional rail. `Some(n)` means this
+/// wallet holds a receipt for `n` zhu more than the contract is holding for
+/// it, which can only happen when the chain carries a *newer* bill this wallet
+/// no longer has — a wallet restored from an old backup, not an attack.
+///
+/// It exists so a surface can say that out loud rather than have the driver
+/// quietly take the smaller number. Nothing consults it to decide anything:
+/// the alternative to taking what is on chain is taking nothing.
+pub fn registry_left_payout_shortfall_zhu(
+    snapshot: &HvmRegistryLiveSnapshotV2,
+    latest: &HvmRegistryBillV2,
+) -> Option<u64> {
+    latest
+        .left_balance_zhu
+        .checked_sub(snapshot.channel.left_balance.value)
+        .filter(|shortfall| *shortfall > 0)
 }
 
 /// Would answering this challenge with our bill leave the left party no worse
@@ -1222,6 +1318,98 @@ mod tests {
                 left_claimed: entry(false),
             },
         }
+    }
+
+    /// A challenge somebody else opened, on a bill this wallet did not put
+    /// there, must still end with this wallet paid.
+    ///
+    /// This is the ordinary hostile move on any payment channel: the provider
+    /// posts an old state. On this one-directional rail an old state pays the
+    /// user MORE, so declining to argue with it is right — and it used to be
+    /// the last thing the user's chair ever said. Once the objection window
+    /// closed, the very same standing challenge fell through to
+    /// `RecoveryRequired` and the exit stopped forever, with the coin sitting
+    /// reachable in the contract and both remaining calls permissionless.
+    ///
+    /// Measured on chain in
+    /// `crates/wallet-core/tests/kill_mid_exit_on_chain.rs`; asserted here
+    /// where it is cheap, so the rule cannot regress without a fast test
+    /// noticing.
+    #[test]
+    fn the_users_chair_finishes_a_challenge_it_did_not_open() {
+        crate::protocol_registry::ensure_hacash_protocol_setup();
+        let (_hub, binding, bill) = fixture();
+        // The chain carries serial 1, paying the user 950_000 — more than
+        // their own serial-2 bill's 800_000.
+        let inside = challenged_snapshot(&binding, 1, 950_000, 50_000, 100, 112, 3);
+        assert_eq!(
+            decide_user_exit_action(&inside, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::NoAction,
+            "inside the window, answering would hand money back"
+        );
+
+        let closed = challenged_snapshot(&binding, 1, 950_000, 50_000, 112, 112, 3);
+        assert_eq!(
+            decide_registry_watchtower_action(&closed, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::RecoveryRequired,
+            "the Hub's own chair is unchanged and still says recover"
+        );
+        assert_eq!(
+            decide_user_exit_action(&closed, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::Finalize,
+            "past the deadline the left party finishes what is standing"
+        );
+
+        let mut settled = challenged_snapshot(&binding, 1, 950_000, 50_000, 113, 112, 4);
+        assert_eq!(
+            decide_user_exit_action(&settled, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::ClaimLeftPayout,
+            "and then takes the payout the contract is holding for it"
+        );
+        settled.channel.left_claimed.value = true;
+        assert_eq!(
+            decide_user_exit_action(&settled, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::NoAction,
+            "a payout already taken is nothing to do, not something to repeat"
+        );
+        assert_eq!(
+            registry_left_payout_shortfall_zhu(&settled, &bill),
+            None,
+            "the chain is paying more than the wallet's own receipt, so there is no shortfall"
+        );
+    }
+
+    /// The other direction: the chain carries a bill this wallet no longer
+    /// holds, which pays it LESS than its own stale receipt.
+    ///
+    /// Taking what is on chain is still the right move — the alternative is
+    /// taking nothing — but the difference is reported rather than swallowed.
+    #[test]
+    fn a_chain_ahead_of_this_wallet_is_finished_and_the_shortfall_is_named() {
+        crate::protocol_registry::ensure_hacash_protocol_setup();
+        let (_hub, binding, bill) = fixture();
+        let ahead = challenged_snapshot(&binding, 5, 600_000, 400_000, 112, 112, 3);
+        assert_eq!(
+            decide_registry_watchtower_action(&ahead, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::RecoveryRequired
+        );
+        assert_eq!(
+            decide_user_exit_action(&ahead, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::Finalize
+        );
+        assert_eq!(
+            registry_left_payout_shortfall_zhu(&ahead, &bill),
+            Some(200_000),
+            "800_000 on the receipt against 600_000 on chain"
+        );
+
+        // A status this contract has no exit from stays a recovery, because
+        // there is genuinely nothing to sign for it.
+        let open_but_ahead = challenged_snapshot(&binding, 5, 600_000, 400_000, 112, 0, 2);
+        assert_eq!(
+            decide_user_exit_action(&open_but_ahead, &binding, &bill).unwrap(),
+            HvmRegistryWatchtowerDecisionV2::RecoveryRequired
+        );
     }
 
     /// The exact Action 14 payout: Type 3, non-zero gas, a chain guard bound

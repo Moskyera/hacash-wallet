@@ -470,18 +470,59 @@ fn a_window_that_cannot_be_answered_in_time_is_refused_not_attempted() {
     .expect_err("the builder must refuse a response that cannot land in time");
 }
 
-/// A chain serial ahead of the kit means the kit is stale. The watcher stops
-/// rather than guessing, because on this rail a stale kit pays the Hub.
+/// A chain serial ahead of the kit means the kit is stale. The watcher never
+/// argues with it — but it does not abandon the money either.
+///
+/// # What changed and why it is not a weakened check
+///
+/// This used to assert `RecoveryRequired`, which is what the *Hub's* chair
+/// says about any chain that disagrees with its own accounting. Taken from the
+/// left party's chair it was measured stranding a user: the watcher stopped,
+/// the objection window closed with the user's own signed split standing, and
+/// `finalize` and the Action 14 payout — both permissionless, both unable to
+/// change who is paid — were never pressed by anyone.
+///
+/// A chain ahead of the kit cannot be a forgery: `challenge` and `respond`
+/// both verify *both* signatures, so whatever is standing was signed by this
+/// user. Stale kit therefore means "this wallet forgot a payment it made", and
+/// the chain is the truth about what it is owed. The watcher's answer is to
+/// wait the window out and then finish, which is what it now does.
+///
+/// What it still must not do is *respond*, because responding with a bill that
+/// pays the user less is the one move that costs its own user money.
 #[test]
-fn a_stale_kit_stops_the_watcher() {
+fn a_stale_kit_never_argues_and_still_finishes() {
     let (left, hub, _watcher) = accounts();
     let binding = binding(&left, &hub);
     let stale_head = signed_bill(&binding, &left, &hub, 2, 800_000);
     let kit = kit(&binding, &stale_head);
 
-    let ahead = snapshot(&binding, 3, 5, 100_000, 1_000, 1_009, false);
+    // Inside the window: nothing to do. Notably NOT `Respond`.
+    let inside = snapshot(&binding, 3, 5, 100_000, 1_000, 1_009, false);
     assert_eq!(
-        decide_response_watch_action(&ahead, &kit).unwrap(),
+        decide_response_watch_action(&inside, &kit).unwrap(),
+        HvmRegistryResponseWatchActionV1::Nothing
+    );
+
+    // Past the deadline: finish what is standing.
+    let closed = snapshot(&binding, 3, 5, 100_000, 1_009, 1_009, false);
+    assert_eq!(
+        decide_response_watch_action(&closed, &kit).unwrap(),
+        HvmRegistryResponseWatchActionV1::Act(HvmRegistryResponseWatchStepV1::Finalize)
+    );
+
+    // Settled: take the payout the contract is holding for the left party.
+    let settled = snapshot(&binding, 4, 5, 100_000, 1_010, 1_009, false);
+    assert_eq!(
+        decide_response_watch_action(&settled, &kit).unwrap(),
+        HvmRegistryResponseWatchActionV1::Act(HvmRegistryResponseWatchStepV1::ClaimLeftPayout)
+    );
+
+    // An OPEN channel whose chain serial this kit cannot beat has no exit path
+    // to walk, and that genuinely is a recovery.
+    let open_ahead = snapshot(&binding, 2, 5, 100_000, 1_010, 0, false);
+    assert_eq!(
+        decide_response_watch_action(&open_ahead, &kit).unwrap(),
         HvmRegistryResponseWatchActionV1::RecoveryRequired
     );
 }

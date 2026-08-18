@@ -817,6 +817,21 @@ pub fn measure_external_rollback_anchor_ready(
 ///    signers, each with its own transaction-intent verification, safety permit
 ///    and approval commitment; there is no `sign_exact_registry_exit`. A driver
 ///    nobody can call is still not an exit.
+///
+///    **What is no longer part of this gap.** The driver itself now exists as
+///    shipped code —
+///    `hacash_wallet_core::hvm_registry_exit_driver::advance_registry_exit` —
+///    rather than as a loop written inside a test. It plans from the chain,
+///    consults the durable per-step record, announces the signature before the
+///    key is used, makes the exact bytes durable before any node sees them, and
+///    resumes from disk after the process dies.
+///    `crates/wallet-core/tests/kill_mid_exit_on_chain.rs`
+///    (`the_shipped_driver_is_closed_mid_exit_and_the_user_is_still_paid`)
+///    funds a channel, spends part of it, aborts the Hub, closes the wallet
+///    twice mid-exit — once holding a durable signature no node had seen — and
+///    ends with the user paid on chain, one signature and one transaction per
+///    step. What is missing is strictly the signing surface above it and a
+///    caller in the app, which is what the two checks below now demand.
 /// 3. **The evidence in the user's hands.** Partly met. The wallet now keeps an
 ///    explicit monotone `hvm_registry_exit_head`, seeded at adoption from the
 ///    binding's own serial-1 refund bill and falling back to it when absent, so
@@ -865,6 +880,26 @@ mod user_side_exit_readiness_tests {
              way to sign an exit. The builders work and the chain accepts them, but a user \
              cannot reach either, and a flag that reads true while a user is trapped is worse \
              than red forever."
+        );
+        // The signer alone was too narrow a tripwire. Adding
+        // `sign_exact_registry_exit` and nothing else would let this flag go
+        // true, render a pressable button, and land the owner on the
+        // unconditional refusal at the end of
+        // `agent_wallet_start_hvm_registry_exit` — a contradiction that reads
+        // to a user as the app breaking rather than as the app being honest.
+        //
+        // So the second term is a *caller*: the shipped driver must actually be
+        // driven from the command an owner presses. `advance_registry_exit` is
+        // the only entry point into that loop, so naming it here cannot be
+        // satisfied by a comment or by a helper nobody calls.
+        let commands = include_str!("../../wallet-tauri-common/src/agent_commands.rs");
+        assert!(
+            commands.contains("advance_registry_exit")
+                || commands.contains("advance_hvm_registry_exit"),
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while nothing an owner can \
+             press reaches `hvm_registry_exit_driver::advance_registry_exit`. A driver whose \
+             only caller is a test has shipped from this workspace twice; this assertion is \
+             here so it cannot happen a third time behind a green flag."
         );
     }
 }

@@ -588,13 +588,25 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
                       <button type="button" className="agent-danger" disabled={busy} onClick={() => void run(async () => {
                         await agentWalletApi.startHvmRegistryExit(overview.wallet_id);
                         setConfirmExit(false);
-                        // Do not promise resumption. There is no durable
-                        // per-step record in the wallet yet - no peer of the
-                        // Hub's PersistedHvmRegistryChainOperation - so a crash
-                        // between steps leaves nothing that knows which step was
-                        // already signed. Saying otherwise would be a guarantee
-                        // the code does not keep, on the screen where that
-                        // matters most.
+                        // Do not promise resumption. The premise of this comment
+                        // has moved and the conclusion has not, so both are
+                        // written out rather than left to be re-derived by
+                        // whoever reads it next.
+                        //
+                        // The durable per-step record now exists
+                        // (crates/wallet-core/src/hvm_registry_exit_record.rs)
+                        // and so does the loop that uses it
+                        // (crates/wallet-core/src/hvm_registry_exit_driver.rs),
+                        // and together they are proven to survive the app being
+                        // closed mid-exit against a real chain. What does not
+                        // exist is a path from this button to either of them:
+                        // agent_wallet_start_hvm_registry_exit still ends in a
+                        // refusal because nothing in agent-wallet-core can sign
+                        // an exit. So resumption is true of the store and false
+                        // of the app, and this sentence describes the app.
+                        //
+                        // Change it when, and only when, this button reaches
+                        // advance_registry_exit.
                         onInfo("The exit has started. It runs in the four steps above, and each one has to be sent from this wallet, so leave it open until the last step is done.");
                         await Promise.all([load(), onRefreshOverview()]);
                       })}>Confirm, close this channel</button>

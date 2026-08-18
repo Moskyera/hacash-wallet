@@ -1944,8 +1944,96 @@ fn validate_hvm_registry_capabilities_for_binding(
         ));
     }
     if expected_mainnet {
+        validate_mainnet_hvm_registry_deployment(capabilities, binding)?;
+    }
+    Ok(())
+}
+
+/// The mainnet half of the binding check: does the node this Hub talks to
+/// actually see the reviewed shared registry deployed, and is it the same
+/// deployment this binding names?
+///
+/// This was a blanket refusal - "shared HVM registry mainnet deployment
+/// evidence is not enabled yet" - and that was the honest answer while there
+/// was no V2 evidence document to weigh. [`RegistryUnilateralExitEvidence`] is
+/// that document, so the refusal is now a measurement. With nothing deployed it
+/// refuses in exactly the same place; what changes is that it names the fact
+/// that is missing instead of describing the state of this codebase, and that
+/// it stops refusing on the day the registry is really on mainnet and this
+/// binding names *that* deployment.
+///
+/// Deliberately stricter than
+/// [`crate::readiness::measure_node_reported_unilateral_exit`], which asks only
+/// whether some verified deployment exists. Money moves against one binding, so
+/// the verified deployment has to be the one the binding names: same contract
+/// address, same deploying transaction, same height, same network instance.
+/// Without those four terms a Hub could hand over a binding for a contract
+/// nobody verified while riding a node that verified a different one.
+///
+/// `external_audit_complete` is carried in the evidence and deliberately not a
+/// term here, for the reason given on
+/// [`RegistryUnilateralExitDeployment::external_audit_complete`]: an audit is a
+/// judgement, and every term of this function is a fact the node re-derives
+/// from its own block store.
+fn validate_mainnet_hvm_registry_deployment(
+    capabilities: &FullnodeCapabilitiesV1,
+    binding: &HvmRegistryBindingV2,
+) -> HubResult<()> {
+    let evidence = capabilities
+        .channel_registry_unilateral_exit_evidence
+        .as_ref()
+        .ok_or_else(|| {
+            HubError::Node(
+                "fullnode publishes no shared HVM registry deployment evidence, so a mainnet \
+                 channel would have no proven contract to exit through"
+                    .into(),
+            )
+        })?;
+    // Cheap on a document that already passed this on parse, and the only
+    // thing standing between a caller that builds capabilities another way and
+    // an unchecked evidence document.
+    evidence.validate_candidate()?;
+    if !evidence.deployment_verified {
         return Err(HubError::Node(
-            "shared HVM registry mainnet deployment evidence is not enabled yet".into(),
+            "shared HVM registry contract is not deployed and verified on mainnet: the fullnode \
+             carries the reviewed registry artifact with no confirmed deployment of it"
+                .into(),
+        ));
+    }
+    if !capabilities.channel_registry_unilateral_exit {
+        return Err(HubError::Node(
+            "fullnode does not execute the shared HVM registry unilateral-exit lifecycle, so a \
+             mainnet channel could not be left without this Hub"
+                .into(),
+        ));
+    }
+    if evidence.deployment.contract_address.as_deref() != Some(binding.contract_address.as_str()) {
+        return Err(HubError::Node(
+            "mainnet binding names a shared HVM registry contract address the fullnode has not \
+             verified"
+                .into(),
+        ));
+    }
+    if evidence.deployment.deployment_tx_hash.as_deref()
+        != Some(binding.deployment_tx_hash.as_str())
+        || evidence.deployment.deployment_height != Some(binding.deployment_height)
+    {
+        return Err(HubError::Node(
+            "mainnet binding names a shared HVM registry deploying transaction the fullnode has \
+             not verified"
+                .into(),
+        ));
+    }
+    if evidence
+        .on_chain_verification
+        .constructor_network_instance_id
+        .as_deref()
+        != Some(binding.network_instance_id.as_str())
+    {
+        return Err(HubError::Node(
+            "verified shared HVM registry is constructed for a different network than this \
+             mainnet binding"
+                .into(),
         ));
     }
     Ok(())
@@ -2779,6 +2867,259 @@ mod tests {
         let mut unregistered = capabilities(vec![3]);
         unregistered["actions"]["enabled"] = serde_json::json!([3, 23]);
         assert!(FullnodeCapabilitiesV1::parse(&unregistered).is_err());
+    }
+
+    /// A mainnet shared-registry binding, for the mainnet-gate tests below.
+    fn mainnet_registry_binding() -> HvmRegistryBindingV2 {
+        HvmRegistryBindingV2 {
+            schema: crate::hvm_registry::HVM_REGISTRY_BINDING_SCHEMA.to_owned(),
+            settlement_profile: crate::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE.to_owned(),
+            network_mode: "mainnet".to_owned(),
+            chain_id: HACASH_MAINNET_CHAIN_ID,
+            network_instance_id: "11".repeat(32),
+            contract_address: ContractAddress::from_unchecked(Address::create_contract([9_u8; 20]))
+                .to_readable(),
+            deployment_tx_hash: "44".repeat(32),
+            deployment_height: HACASH_MAINNET_MIN_SAFE_HEIGHT,
+            bytecode_sha3: crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3.to_owned(),
+            channel_id: "33".repeat(16),
+            reuse_version: 0,
+            left_address: Address::create_privakey([4; 20]).to_readable(),
+            right_hub_address: Address::create_privakey([5; 20]).to_readable(),
+            left_deposit_zhu: 1_000_000,
+            right_hub_deposit_zhu: 0,
+            challenge_blocks: 12,
+        }
+    }
+
+    /// A node that can do everything the shared registry profile needs and has
+    /// nothing at all to say about a registry deployment - which is the state
+    /// of every real mainnet node today.
+    fn registry_capabilities(binding: &HvmRegistryBindingV2) -> FullnodeCapabilitiesV1 {
+        let actions = vec![1_u16, 14, 40, 41, 44, 0x0411, 0x0414];
+        let now = now_unix();
+        FullnodeCapabilitiesV1 {
+            observed_unix: now,
+            api_version: FULLNODE_CAPABILITIES_API_V1,
+            chain_id: binding.chain_id,
+            height: binding.deployment_height,
+            next_height: binding.deployment_height + 1,
+            mainnet: binding.network_mode == "mainnet",
+            network_kind: binding.network_mode.clone(),
+            node_profile_id: "hacash-mainnet".to_owned(),
+            block_1_hash: HACASH_MAINNET_BLOCK_ONE_HASH.to_owned(),
+            network_instance_id: Some(binding.network_instance_id.clone()),
+            transaction_format_version: 2,
+            tip_timestamp_unix: now,
+            tip_age_seconds: 0,
+            registered_actions: actions.clone(),
+            enabled_actions: actions,
+            enabled_transactions: vec![2, 3],
+            transaction_submit_bound: true,
+            hpay_channel_registry_query: true,
+            channel_unilateral_exit: false,
+            channel_unilateral_exit_evidence: None,
+            channel_registry_unilateral_exit: false,
+            channel_registry_unilateral_exit_evidence: None,
+        }
+    }
+
+    /// Evidence of a fully verified mainnet deployment of the reviewed shared
+    /// registry, describing exactly the contract `binding` names.
+    ///
+    /// It describes a deployment that does not exist. That is the point: it
+    /// lets these tests prove each term of the gate is load bearing without
+    /// anything being deployed, the same way the readiness fixture does.
+    fn verified_registry_evidence(
+        binding: &HvmRegistryBindingV2,
+    ) -> RegistryUnilateralExitEvidence {
+        RegistryUnilateralExitEvidence {
+            schema: crate::hvm_registry::HVM_REGISTRY_EXIT_EVIDENCE_SCHEMA.to_owned(),
+            manifest_valid: true,
+            contract_name: crate::hvm_registry::HPAY_REGISTRY_CONTRACT_NAME.to_owned(),
+            protocol_domain: crate::hvm_registry::HPAY_REGISTRY_PROTOCOL_DOMAIN.to_owned(),
+            settlement_profile: crate::hvm_registry::HPAY_REGISTRY_SETTLEMENT_PROFILE.to_owned(),
+            source_sha256: "33".repeat(32),
+            bytecode_sha3: crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3.to_owned(),
+            required_action_kinds: crate::hvm_registry::HPAY_REGISTRY_REQUIRED_ACTION_KINDS
+                .to_vec(),
+            channel_model: RegistryUnilateralExitChannelModel {
+                left_deposit: "positive".to_owned(),
+                right_hub_deposit: "exactly_zero".to_owned(),
+                maximum_active_channels_per_left_address: 1,
+                first_reuse: 0,
+            },
+            registry_key_count: crate::hvm_registry::HVM_REGISTRY_STORAGE_KEY_COUNT,
+            channel_key_count: crate::hvm_registry::HVM_REGISTRY_CHANNEL_KEY_COUNT,
+            must_renew_every_registry_key: true,
+            must_renew_every_channel_key: true,
+            maximum_renewal_step_periods: crate::hvm_registry::HPAY_REGISTRY_MAX_RENT_STEP,
+            deployment: RegistryUnilateralExitDeployment {
+                enabled: true,
+                contract_address: Some(binding.contract_address.clone()),
+                deployment_tx_hash: Some(binding.deployment_tx_hash.clone()),
+                deployment_height: Some(binding.deployment_height),
+                independently_verified: true,
+                external_audit_complete: false,
+            },
+            on_chain_verification: RegistryUnilateralExitOnChainVerification {
+                observed_height: Some(binding.deployment_height),
+                confirmed_tx_height: Some(binding.deployment_height),
+                deployment_tx_confirmed: true,
+                contract_code_sha3: Some(
+                    crate::hvm_registry::HPAY_REGISTRY_BYTECODE_SHA3.to_owned(),
+                ),
+                contract_code_matches: true,
+                deployment_action_verified: true,
+                hub_address: Some(Address::create_privakey([5; 20]).to_readable()),
+                constructor_network_instance_id: Some(binding.network_instance_id.clone()),
+                node_network_instance_id: Some(binding.network_instance_id.clone()),
+                network_binding_matches: true,
+            },
+            deployment_verified: true,
+        }
+    }
+
+    /// The same document with every trace of deployment authority removed -
+    /// what an honest node that has verified the artifact but seen no
+    /// deployment publishes.
+    fn unverified_registry_evidence(
+        binding: &HvmRegistryBindingV2,
+    ) -> RegistryUnilateralExitEvidence {
+        let mut evidence = verified_registry_evidence(binding);
+        evidence.deployment = RegistryUnilateralExitDeployment {
+            enabled: false,
+            contract_address: None,
+            deployment_tx_hash: None,
+            deployment_height: None,
+            independently_verified: false,
+            external_audit_complete: false,
+        };
+        evidence.on_chain_verification = RegistryUnilateralExitOnChainVerification {
+            observed_height: None,
+            confirmed_tx_height: None,
+            deployment_tx_confirmed: false,
+            contract_code_sha3: None,
+            contract_code_matches: false,
+            deployment_action_verified: false,
+            hub_address: None,
+            constructor_network_instance_id: None,
+            node_network_instance_id: None,
+            network_binding_matches: false,
+        };
+        evidence.deployment_verified = false;
+        evidence
+    }
+
+    /// The mainnet gate must be a measurement, not a slogan.
+    ///
+    /// It used to refuse every mainnet binding with "shared HVM registry
+    /// mainnet deployment evidence is not enabled yet", which said something
+    /// about this codebase rather than about the chain. With nothing deployed
+    /// it must still refuse - and it must name the fact that is missing.
+    #[test]
+    fn mainnet_registry_binding_refuses_and_names_what_is_missing() {
+        let binding = mainnet_registry_binding();
+
+        // 1. A node with nothing to say about a registry deployment.
+        let capabilities = registry_capabilities(&binding);
+        let message = validate_hvm_registry_capabilities_for_binding(&capabilities, &binding)
+            .expect_err("nothing is deployed on mainnet")
+            .to_string();
+        assert!(
+            !message.contains("not enabled yet"),
+            "refusal still describes this codebase rather than the chain: {message}"
+        );
+        assert!(
+            message.contains("no shared HVM registry deployment evidence"),
+            "refusal does not name the missing evidence: {message}"
+        );
+
+        // 2. A node that has verified the artifact and seen no deployment.
+        let mut unverified = registry_capabilities(&binding);
+        unverified.channel_registry_unilateral_exit_evidence =
+            Some(unverified_registry_evidence(&binding));
+        let message = validate_hvm_registry_capabilities_for_binding(&unverified, &binding)
+            .expect_err("the registry is not deployed on mainnet")
+            .to_string();
+        assert!(
+            message.contains("is not deployed and verified on mainnet"),
+            "refusal does not name the missing deployment: {message}"
+        );
+
+        // 3. A verified deployment the node cannot actually drive.
+        let mut no_lifecycle = registry_capabilities(&binding);
+        no_lifecycle.channel_registry_unilateral_exit_evidence =
+            Some(verified_registry_evidence(&binding));
+        let message = validate_hvm_registry_capabilities_for_binding(&no_lifecycle, &binding)
+            .expect_err("the node does not run the exit lifecycle")
+            .to_string();
+        assert!(
+            message.contains("does not execute the shared HVM registry unilateral-exit lifecycle"),
+            "refusal does not name the missing lifecycle: {message}"
+        );
+    }
+
+    /// A verified deployment somewhere is not a verified deployment *here*.
+    ///
+    /// Money moves against one binding, so the deployment the node verified has
+    /// to be the one the binding names.
+    #[test]
+    fn mainnet_registry_binding_refuses_evidence_for_another_deployment() {
+        let binding = mainnet_registry_binding();
+        let ready = |mutate: fn(&mut RegistryUnilateralExitEvidence)| {
+            let mut capabilities = registry_capabilities(&binding);
+            let mut evidence = verified_registry_evidence(&binding);
+            mutate(&mut evidence);
+            capabilities.channel_registry_unilateral_exit = true;
+            capabilities.channel_registry_unilateral_exit_evidence = Some(evidence);
+            capabilities
+        };
+
+        let other_contract = ready(|evidence| {
+            evidence.deployment.contract_address = Some(
+                ContractAddress::from_unchecked(Address::create_contract([8_u8; 20])).to_readable(),
+            );
+        });
+        let message = validate_hvm_registry_capabilities_for_binding(&other_contract, &binding)
+            .expect_err("the verified contract is not the one this binding names")
+            .to_string();
+        assert!(message.contains("contract address"), "{message}");
+
+        let other_transaction = ready(|evidence| {
+            evidence.deployment.deployment_tx_hash = Some("55".repeat(32));
+        });
+        assert!(
+            validate_hvm_registry_capabilities_for_binding(&other_transaction, &binding).is_err(),
+            "a different deploying transaction was accepted"
+        );
+
+        let other_network = ready(|evidence| {
+            evidence
+                .on_chain_verification
+                .constructor_network_instance_id = Some("22".repeat(32));
+            evidence.on_chain_verification.node_network_instance_id = Some("22".repeat(32));
+        });
+        assert!(
+            validate_hvm_registry_capabilities_for_binding(&other_network, &binding).is_err(),
+            "a registry constructed for another network was accepted"
+        );
+    }
+
+    /// And the other direction: a node that really does see the reviewed
+    /// registry deployed at exactly the address, transaction, height and
+    /// network this binding names, and that runs the exit lifecycle, passes.
+    /// Without this the check would just be the old blanket refusal wearing a
+    /// better message.
+    #[test]
+    fn mainnet_registry_binding_accepts_the_deployment_it_names() {
+        let binding = mainnet_registry_binding();
+        let mut capabilities = registry_capabilities(&binding);
+        capabilities.channel_registry_unilateral_exit = true;
+        capabilities.channel_registry_unilateral_exit_evidence =
+            Some(verified_registry_evidence(&binding));
+        validate_hvm_registry_capabilities_for_binding(&capabilities, &binding)
+            .expect("a verified mainnet deployment this binding names must be usable");
     }
 
     #[test]

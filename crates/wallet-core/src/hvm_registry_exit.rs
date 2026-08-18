@@ -64,9 +64,10 @@ use l2_fast_pay_hub::hvm_registry_watchtower::{
     build_signed_hvm_registry_claim_transaction, decide_user_exit_action,
     read_exact_registry_claim_transaction, registry_challenge_call_source,
     registry_claim_payout_source, registry_finalize_call_source,
-    registry_renew_channel_call_source, registry_renew_registry_call_source,
-    registry_respond_call_source, registry_response_window_blocks,
-    registry_response_window_is_safe, require_fresh_registry_evidence,
+    registry_left_payout_shortfall_zhu, registry_renew_channel_call_source,
+    registry_renew_registry_call_source, registry_respond_call_source,
+    registry_response_window_blocks, registry_response_window_is_safe,
+    require_fresh_registry_evidence,
 };
 use serde::{Deserialize, Serialize};
 use sys::Account;
@@ -132,6 +133,32 @@ pub enum HvmRegistryExitStep {
     /// do this, and if the globals lapse every channel in the deployment is
     /// affected, not just one.
     RenewRegistryLease,
+}
+
+impl HvmRegistryExitStep {
+    /// Stable lowercase name, used as half of a durable record's key.
+    ///
+    /// Written out rather than derived from the `Debug` or serde
+    /// representation because it is a *storage* key: a rename of the variant
+    /// must not silently orphan every record already on disk under the old
+    /// name.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Challenge => "challenge",
+            Self::Respond => "respond",
+            Self::Finalize => "finalize",
+            Self::Claim => "claim",
+            Self::RenewChannelLease => "renew_channel_lease",
+            Self::RenewRegistryLease => "renew_registry_lease",
+        }
+    }
+
+    /// True for the two lease renewals, which are the only steps a single exit
+    /// can legitimately need more than once: a long objection window can
+    /// outlive the lease bought at its start.
+    pub fn is_lease_renewal(self) -> bool {
+        matches!(self, Self::RenewChannelLease | Self::RenewRegistryLease)
+    }
 }
 
 /// The exact next thing to do, with the exact call source that does it.
@@ -337,13 +364,34 @@ pub fn plan_user_exit_step(
             })
         }
         HvmRegistryWatchtowerDecisionV2::NoAction => Ok(HvmRegistryExitPlanV1::Wait {
-            reason: registry_wait_reason(snapshot),
+            reason: registry_wait_reason(snapshot, &kit.latest_bill),
         }),
-        HvmRegistryWatchtowerDecisionV2::RecoveryRequired => Err(WalletError::Policy(
-            "RecoveryRequired: the chain carries registry state newer than this wallet's own record"
-                .into(),
-        )),
+        // Only a status this contract has no exit from reaches here now; see
+        // the user-chair rules in
+        // [`l2_fast_pay_hub::hvm_registry_watchtower::decide_user_exit_action`].
+        // The sentence used to say the chain was newer than the wallet, and
+        // said it in the one situation where the chain was *older* — the exact
+        // case a hostile Hub creates on purpose by challenging with a stale
+        // bill. Report the two serials instead of asserting a direction.
+        HvmRegistryWatchtowerDecisionV2::RecoveryRequired => Err(WalletError::Policy(format!(
+            "RecoveryRequired: this channel is in registry status {} on chain, which has no exit \
+             path; the contract holds serial {} and this wallet holds serial {}",
+            snapshot.channel.status.value, snapshot.channel.serial.value, kit.latest_bill.serial
+        ))),
     }
+}
+
+/// How much less than its own head bill the chain would pay this wallet.
+///
+/// Re-exported from the Hub crate's
+/// [`registry_left_payout_shortfall_zhu`] so a wallet surface can warn about a
+/// smaller payout without importing the Hub's watchtower directly. `None` is
+/// the ordinary answer; see that function for when it is not.
+pub fn exit_payout_shortfall_zhu(
+    kit: &HvmRegistryExitKitV1,
+    snapshot: &HvmRegistryLiveSnapshotV2,
+) -> Option<u64> {
+    registry_left_payout_shortfall_zhu(snapshot, &kit.latest_bill)
 }
 
 /// Build and sign the planned step with the user's own key.
@@ -448,11 +496,26 @@ pub fn build_user_exit_transaction(
     }
 }
 
-fn registry_wait_reason(snapshot: &HvmRegistryLiveSnapshotV2) -> String {
+fn registry_wait_reason(
+    snapshot: &HvmRegistryLiveSnapshotV2,
+    latest: &HvmRegistryBillV2,
+) -> String {
     match snapshot.channel.status.value {
         2 => "this channel is open and nothing on chain is disputing it".into(),
-        3 => format!(
+        // The old single sentence claimed the standing challenge carried this
+        // wallet's own bill. That is the common case and not the only one: a
+        // provider can put an *older* bill on chain, which on this rail pays
+        // this wallet more, and there is nothing to argue with. Saying "your
+        // bill is already the one on chain" there would be a lie on the one
+        // screen a person reads when they suspect they are being cheated.
+        3 if snapshot.channel.serial.value == latest.serial => format!(
             "the objection window is open and this wallet's bill is already the one on chain; finalize becomes available at block {}",
+            snapshot.channel.deadline.value
+        ),
+        3 => format!(
+            "the objection window is open on a receipt this wallet did not put there; it pays this wallet {} zhu against its own receipt of {} zhu, and finalize becomes available at block {}",
+            snapshot.channel.left_balance.value,
+            latest.left_balance_zhu,
             snapshot.channel.deadline.value
         ),
         // Distinguish the two settled endings. `settle()` marks a zero left
