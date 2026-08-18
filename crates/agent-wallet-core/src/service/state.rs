@@ -341,6 +341,18 @@ pub(super) fn validate_state(
     {
         return Err(AgentWalletError::RecoveryRequired);
     }
+    if let Some(open) = state.hvm_registry_open.as_ref() {
+        open.validate(expected_wallet_id, &state.address, &state.network_mode)?;
+        // An adopted binding and the open record that produced it must be the
+        // same channel. Anything else means this wallet is carrying a refund
+        // for one channel while believing it is bound to another, which is the
+        // exact shape of holding a worthless exit kit.
+        if let Some(binding) = state.hvm_registry_binding.as_ref()
+            && binding.binding_commitment() != open.binding_commitment()
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+    }
     validate_node_url(&state.node_url).map_err(|_| AgentWalletError::RecoveryRequired)?;
     validate_stored_anchor(&state.network_mode, &state.block_one_fingerprint)?;
     for (key, operation) in &state.operations {

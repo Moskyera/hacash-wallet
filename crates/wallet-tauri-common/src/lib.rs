@@ -8,6 +8,7 @@ pub mod agent_commands;
     not(any(target_os = "android", target_os = "ios"))
 ))]
 pub mod agent_registry_exit;
+pub mod agent_registry_open;
 #[cfg(all(
     feature = "agent-wallet-admin",
     not(any(target_os = "android", target_os = "ios"))

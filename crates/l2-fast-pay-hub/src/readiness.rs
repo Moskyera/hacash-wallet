@@ -956,6 +956,143 @@ mod user_side_exit_readiness_tests {
              one, so every wallet reaching this screen is told it has no provider channel to \
              close. The exit is finished; the way in is not."
         );
+
+        // Fourth term: A CHANNEL WITH MONEY IN IT.
+        //
+        // Two reviewers, independently, reported the same thing about this
+        // test: all three terms above now pass, and the capability they stand
+        // for still did not exist. The guard that had caught this project three
+        // times was spent, and the flag was held down only by human restraint.
+        //
+        // What was missing was the hop between the countersigned refund and a
+        // channel: nothing shipped could put the deposit in. A refund for an
+        // empty channel is not a way out of anything, and a flag that says a
+        // user can walk out over a channel no shipped surface can fund is the
+        // same lie in a new shape.
+        //
+        // So the funding signing boundary is named the way the exit signer and
+        // the open signer were named here before they existed.
+        assert!(
+            signer_source.contains("sign_exact_registry_funding"),
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while no Agent Wallet can put \
+             money into the channel it opened. The refund exists, the permission exists, and \
+             nothing shipped spends it, so every channel a user could exit is empty."
+        );
+
+        // Fifth term: A PRESS THAT REACHES IT, and one that reaches the
+        // provider-free adoption.
+        //
+        // Same failure the second term exists for, one hop further along. A
+        // funding method whose only caller is a test funds nothing, and an
+        // adopted binding is what the exit refuses without: a reviewer drove
+        // the exact trap where an honest countersignature and an honest
+        // deposit still left the owner stuck, because the only writer of the
+        // adopted binding needed the provider alive four times and the
+        // provider was gone. The chain would have paid.
+        let shipped_commands = shipped_source(commands);
+        assert!(
+            shipped_commands.contains(".fund_hvm_registry_channel("),
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while nothing an owner can \
+             press puts the deposit into the channel. A funding method whose only caller is a \
+             test is the shape this workspace has shipped three times."
+        );
+        assert!(
+            shipped_commands.contains(".adopt_hvm_registry_channel_from_chain("),
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the only route to an \
+             adopted binding needs the provider alive. The exit refuses without that binding, \
+             so a provider that vanishes between the deposit and the adoption traps the owner \
+             in a channel the chain would happily pay them out of."
+        );
+
+        // Sixth term: AND THE WAY IN IS SAFE.
+        //
+        // The five terms above are about reachability, and reachability alone
+        // is what makes this flag dangerous rather than useful. A reviewer
+        // deployed a contract of their own at the address a channel named,
+        // published the reviewed bytecode digest beside it, had an entirely
+        // honest Hub countersign the full refund, took the deposit on chain and
+        // withdrew it - because nothing on the path from the owner's press to
+        // the funding gate read a chain at all. Every check that would have
+        // caught it lived in adoption, on the far side of the spend.
+        //
+        // A pressable, fundable, exitable channel that can be pointed at a
+        // stranger's contract is worse than no channel, so the gate is required
+        // to demand chain evidence in its own signature. Named as the
+        // parameter, because a parameter cannot be satisfied by a comment and
+        // cannot be forgotten by a caller.
+        let open_gate = shipped_source(include_str!("../../wallet-core/src/hvm_registry_open.rs"));
+        assert!(
+            open_gate.contains("chain: &HvmRegistryOpenChainEvidenceV1<'_>,")
+                && open_gate.contains("validate_prefunding_binding("),
+            "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while funding permission could \
+             be produced without reading the wallet's own fullnode. A refund that names a \
+             contract nobody checked is a refund for something that is not the registry, and a \
+             reviewer took a whole deposit through that gap in real blocks."
+        );
+
+        // Seventh term: THE SHELL ACTUALLY CARRIES THE COMMANDS.
+        //
+        // The five reachability terms above all read `agent_commands.rs`, and
+        // that file is a library. A `#[tauri::command]` in it is not reachable
+        // by anybody until the desktop shell registers it in its invoke
+        // handler and its capability allowlist; until then the button calls a
+        // command the runtime has never heard of. That is the same
+        // "only caller is a test" failure wearing the shape of a build
+        // configuration, and it is the one shape the earlier terms could not
+        // see - which is exactly how this tripwire came to have three terms
+        // that all passed over a capability nobody had.
+        //
+        // So the shell is read too, and both halves of it: registration and
+        // permission. Neither alone makes a command pressable.
+        let shell = include_str!("../../../apps/desktop/src-tauri/src/lib.rs");
+        let permissions = include_str!("../../../apps/desktop/src-tauri/permissions/wallet.toml");
+        for command in [
+            "agent_wallet_open_hvm_registry_channel",
+            "agent_wallet_fund_hvm_registry_channel",
+            "agent_wallet_adopt_hvm_registry_channel",
+            "agent_wallet_start_hvm_registry_exit",
+        ] {
+            assert!(
+                shell.contains(&format!("wallet_tauri_common::agent_commands::{command},")),
+                "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the desktop shell \
+                 does not register `{command}`. A Tauri command the invoke handler has never \
+                 heard of is a button that returns an error, and every term above would still \
+                 pass."
+            );
+            assert!(
+                permissions.contains(&format!("\"{command}\"")),
+                "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while the desktop \
+                 capability allowlist does not permit `{command}`. Registration without \
+                 permission is a button that is denied rather than one that works."
+            );
+        }
+
+        // Eighth term: A SCREEN.
+        //
+        // The seventh term closed the "registered but never called" hole one
+        // layer down. This closes it one layer up, and it is the layer that
+        // decides whether an ordinary person can do this at all: a command
+        // that is registered, permitted and never invoked by the renderer is a
+        // capability that exists for whoever reads the source and for nobody
+        // else.
+        //
+        // Named as the `invoke` call rather than as a button, because a button
+        // is a rendering detail and the invoke is the fact.
+        let renderer = shipped_source(include_str!("../../../apps/desktop/src/agent/api.ts"));
+        for command in [
+            "agent_wallet_open_hvm_registry_channel",
+            "agent_wallet_fund_hvm_registry_channel",
+            "agent_wallet_adopt_hvm_registry_channel",
+            "agent_wallet_start_hvm_registry_exit",
+        ] {
+            assert!(
+                renderer.contains(&format!("(\"{command}\",")),
+                "USER_SIDE_UNILATERAL_EXIT_DRIVER_READY was set true while nothing an owner can \
+                 see calls `{command}`. Every term above can pass over a capability that only \
+                 exists for someone reading the source, and this flag is a promise made to \
+                 people who are not reading the source."
+            );
+        }
     }
 
     /// Everything in a source file that a build actually ships: no comments,

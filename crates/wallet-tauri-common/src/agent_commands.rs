@@ -1214,6 +1214,484 @@ pub async fn agent_wallet_bind_hvm_registry(
     }
 }
 
+/// How many chain transactions opening a registry channel sends from the
+/// owner's own balance: `init` and the funding transfer.
+///
+/// The deployment is the provider's, paid for by the provider, and is already
+/// on chain before an owner ever sees this screen.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const OPEN_CHAIN_TRANSACTION_COUNT: u64 = 2;
+
+/// Everything opening a channel can take out of the owner's main balance on
+/// top of the deposit.
+///
+/// Built from the same per-transaction ceiling the exit quotes, and for the
+/// same reason: an `init` is an HVM contract call, and the chain takes the
+/// whole gas budget out of the main balance with `hac_sub` before the call
+/// runs, refunding the unused part afterwards. Quoting the network fee alone
+/// understated a measured exit by a factor of ten, and an owner who holds
+/// exactly a quote that is too small watches an affordability check go green
+/// and then cannot pay for the first transaction.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const OPEN_FEE_CEILING_ZHU: u64 =
+    agent_wallet_core::agent_registry_exit_transaction_ceiling_zhu() * OPEN_CHAIN_TRANSACTION_COUNT;
+
+/// What this wallet can see about opening a channel with one provider, before
+/// anything is asked of that provider and before anything is signed.
+///
+/// It is a read. Nothing here signs, nothing here funds, and a failure of any
+/// part of it costs the owner nothing, which is why the screen it feeds may
+/// state a refusal plainly rather than hiding the control.
+#[tauri::command]
+pub async fn agent_wallet_hvm_registry_open_status(
+    wallet_id: String,
+    hub_url: String,
+    deposit_zhu: u64,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let now = unix_now()?;
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        let overview = manager
+            .overview(&wallet_id, now)
+            .await
+            .map_err(public_error)?;
+        let overview =
+            serde_json::to_value(overview).map_err(|_| "Agent Wallet response encoding failed")?;
+        Ok(registry_open_status_value(&overview, &hub_url, deposit_zhu).await)
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, hub_url, deposit_zhu, state);
+        Err("Agent HVM Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Opens one provider channel: the wallet left-signs a bill returning its
+/// entire deposit, the provider countersigns it, this wallet verifies that
+/// countersignature against its own binding, and the whole thing is made
+/// durable before any money is allowed anywhere near the channel.
+///
+/// **The order is the product, not a preference.** The chain cannot enforce it:
+/// `PayableHAC` accepts a correctly sized transfer from the left address while
+/// the channel is in FUNDING and has no view of any off-chain signature. So it
+/// is enforced by there being no way to spell "funding" without first holding
+/// a value that only a verified countersigned refund can produce. Both doors
+/// carry that check on their first line:
+/// [`agent_wallet_core::AgentWalletManager::hvm_registry_funding_authorization`],
+/// whose only constructor is
+/// `hacash_wallet_core::hvm_registry_open::authorize_registry_funding`, and
+/// `l2_fast_pay_hub::hvm_registry_pilot::build_hvm_registry_pilot_exact_funding`,
+/// which derives the contract, the Hub and the amount from the bundle rather
+/// than from its arguments.
+///
+/// **What this command may not choose.** Not the channel and not the amount.
+/// The binding is the *wallet's* statement of the channel and the Hub gets no
+/// field through which to restate any of it, and the deposit the owner typed is
+/// compared with the deposit inside that binding here, before anything is
+/// signed. A pasted channel description that quietly names a larger deposit
+/// than the screen showed is refused by this command rather than by the owner's
+/// attention.
+///
+/// **A provider that refuses costs nothing.** The whole exchange happens before
+/// any funding transaction is built, so a refusal leaves no channel, no
+/// reservation and no fee, and `RegistryOpenHubRefused` says so in those words.
+#[tauri::command]
+pub async fn agent_wallet_open_hvm_registry_channel(
+    wallet_id: String,
+    hub_url: String,
+    binding: Value,
+    deposit_zhu: u64,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        open_hvm_registry_channel(
+            &mut manager,
+            &wallet_id,
+            &hub_url,
+            binding,
+            deposit_zhu,
+            unix_now()?,
+        )
+        .await
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, hub_url, binding, deposit_zhu, state);
+        Err("Agent HVM registry Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Everything [`agent_wallet_open_hvm_registry_channel`] does once the shell
+/// has been recognised and the wallet id parsed.
+///
+/// Split out for the same reason the exit is: a Tauri command cannot be entered
+/// without a real `Webview`, so a command whose whole body lives behind that
+/// attribute can only ever be proven by a test that reimplements it, which is
+/// the "the only caller is a test" failure one layer up. Everything that
+/// decides anything is here, so the sequence a person triggers and the sequence
+/// a test drives are the same code and not two copies of it.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn open_hvm_registry_channel(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    hub_url: &str,
+    binding: Value,
+    deposit_zhu: u64,
+    now: u64,
+) -> Result<Value, String> {
+    let binding: l2_fast_pay_hub::hvm_registry::HvmRegistryBindingV2 =
+        serde_json::from_value(binding).map_err(|error| {
+            format!(
+                "{OPEN_CHANNEL_UNREADABLE} No channel was opened and no money has moved. ({error})"
+            )
+        })?;
+    binding.validate().map_err(|error| {
+        format!("{OPEN_CHANNEL_UNREADABLE} No channel was opened and no money has moved. ({error})")
+    })?;
+    // The owner typed an amount and the pasted channel carries one. They are
+    // two independent statements of the same fact and this is the only place
+    // they can be compared, because from here on the deposit is read out of the
+    // binding by everything that touches it.
+    if binding.left_deposit_zhu != deposit_zhu {
+        return Err(OPEN_CHANNEL_DEPOSIT_MISMATCH.to_owned());
+    }
+    // The wallet's own pinned fullnode, and nothing the provider supplied.
+    //
+    // Everything the wallet is about to do turns on whether the contract this
+    // channel names is really the reviewed registry, on this wallet's chain,
+    // carrying this exact unfunded channel. Only a node can answer that, and
+    // until this argument existed the answer was never asked for: a reviewer
+    // took a full deposit through the gap, on chain, with an entirely honest
+    // provider.
+    let chain = registry_open_chain(manager, wallet_id, now).await?;
+    let bundle = manager
+        .open_hvm_registry_channel(wallet_id, hub_url, binding, &chain, now)
+        .await
+        .map_err(public_error)?;
+    // Re-derived, never assumed. The value this returns is the only permission
+    // to fund that exists anywhere in this tree, and asking for it here means
+    // the answer this command reports is the same answer funding will get.
+    let authorization = manager
+        .hvm_registry_funding_authorization(wallet_id, &chain, now)
+        .await
+        .map_err(public_error)?;
+    // Two facts, from two different places, about the money. The authorization
+    // is derived from the stored bundle; the deposit is what the owner was
+    // shown. A disagreement here is not something to report as a success.
+    if authorization.amount_zhu() != deposit_zhu
+        || authorization.contract_address() != bundle.binding.contract_address
+        || authorization.hub_address() != bundle.binding.right_hub_address
+    {
+        return Err(OPEN_CHANNEL_DEPOSIT_MISMATCH.to_owned());
+    }
+    Ok(json!({
+        "schema": "hpay-agent-registry-open-result/1",
+        "binding_commitment": authorization.binding_commitment(),
+        "hub_url": hub_url,
+        "hub_address": authorization.hub_address(),
+        "contract_address": authorization.contract_address(),
+        "deposit_zhu": deposit_zhu,
+        // Read out of the countersigned bill rather than echoed from the
+        // request, so the screen reports what the provider actually signed.
+        "refunded_zhu": bundle.initial_recovery_bill.left_balance_zhu,
+        "refund_bill_commitment": authorization.refund_bill_commitment(),
+        // True exactly when this wallet holds a refund that would authorise
+        // funding. It is the fact the whole screen is about, and it is derived
+        // rather than set.
+        "refund_guaranteed": true,
+    }))
+}
+
+/// The wallet's own pinned fullnode, as opening and funding need to see it.
+///
+/// Built from the wallet's own recorded `node_url` and network mode. The
+/// manager does not take even this on trust: it compares the identity this
+/// node reports with the block-1 fingerprint the wallet recorded when it was
+/// created, so a node pointed somewhere else cannot supply evidence about
+/// somewhere else.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+async fn registry_open_chain(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    now: u64,
+) -> Result<crate::agent_registry_open::FullnodeRegistryOpenChain, String> {
+    let overview = manager
+        .overview(wallet_id, now)
+        .await
+        .map_err(public_error)?;
+    let overview = serde_json::to_value(overview)
+        .map_err(|_| "Agent Wallet response encoding failed".to_owned())?;
+    let node_url = overview
+        .get("node_url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "this wallet is not pinned to a fullnode yet".to_owned())?;
+    let network_mode = overview
+        .get("network_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("testnet");
+    crate::agent_registry_open::FullnodeRegistryOpenChain::new(node_url, network_mode)
+}
+
+/// Put the deposit into the channel this wallet has already been guaranteed a
+/// way out of.
+///
+/// # What one press does, and what it can never do
+///
+/// It re-derives funding permission from the stored countersigned refund and a
+/// live reading of this wallet's own node, signs the exact transfer through
+/// `AgentTransactionSigner::sign_exact_registry_funding`, makes those bytes
+/// durable **before** any node sees them, and submits them. It cannot choose a
+/// destination, an amount or a chain: all three come out of the refund bill the
+/// provider signed, and the permission that reaches the signer has private
+/// fields, no `Deserialize` and exactly one constructor.
+///
+/// Pressing again after a crash re-submits the same bytes and looks for them in
+/// a block. It never signs a second transfer into one channel.
+#[tauri::command]
+pub async fn agent_wallet_fund_hvm_registry_channel(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        fund_hvm_registry_channel(&mut manager, &wallet_id, unix_now()?).await
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent HVM registry Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Everything [`agent_wallet_fund_hvm_registry_channel`] does once the shell is
+/// recognised, split out for the same reason the open and the exit are: so the
+/// sequence a person triggers and the sequence a test drives are the same code.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn fund_hvm_registry_channel(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    now: u64,
+) -> Result<Value, String> {
+    let chain = registry_open_chain(manager, wallet_id, now).await?;
+    let funding = manager
+        .fund_hvm_registry_channel(wallet_id, &chain, now)
+        .await
+        .map_err(public_error)?;
+    Ok(json!({
+        "schema": "hpay-agent-registry-funding-result/1",
+        "transaction_hash": funding.transaction_hash(),
+        "contract_address": funding.contract_address(),
+        "deposit_zhu": funding.amount_zhu(),
+        "network_fee_zhu": funding.network_fee_zhu(),
+        "confirmed": funding.is_confirmed(),
+        "confirmed_block_height": funding.confirmed_block_height(),
+    }))
+}
+
+/// Adopt the funded channel, **without asking the provider anything**.
+///
+/// # Why this exists at all
+///
+/// A reviewer drove the trap: an honest countersignature, an honest deposit,
+/// and a provider that then vanished. The chain would have paid - the contract
+/// accepts the very bill the wallet already stores - but the only writer of the
+/// adopted binding needed the provider alive four times, and the exit refuses
+/// without that binding. The wallet held the way out and had no path to the
+/// chain with it.
+///
+/// Nothing here is weaker than the provider-assisted adoption: the bundle is
+/// the wallet's own, the deposit is one this wallet signed and has seen in a
+/// block, and the channel is held to `validate_open_binding`, which is stricter
+/// than the runtime check the provider-assisted path applies.
+#[tauri::command]
+pub async fn agent_wallet_adopt_hvm_registry_channel(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let manager = require_manager(&state)?;
+        let mut manager = manager.lock().await;
+        adopt_hvm_registry_channel(&mut manager, &wallet_id, unix_now()?).await
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent HVM registry Fast Pay is disabled in this build".to_owned())
+    }
+}
+
+/// Everything [`agent_wallet_adopt_hvm_registry_channel`] does once the shell
+/// is recognised.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub async fn adopt_hvm_registry_channel(
+    manager: &mut agent_wallet_core::AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    now: u64,
+) -> Result<Value, String> {
+    let chain = registry_open_chain(manager, wallet_id, now).await?;
+    let adopted = manager
+        .adopt_hvm_registry_channel_from_chain(wallet_id, &chain, now)
+        .await
+        .map_err(public_error)?;
+    Ok(json!({
+        "schema": "hpay-agent-registry-adoption-result/1",
+        "binding_commitment": adopted.binding_commitment(),
+        "hub_address": adopted.hub_address(),
+        "hub_url": adopted.hub_url(),
+        // True from this moment on: the exit head was seeded in the same
+        // journalled transition that wrote the binding.
+        "exit_available": true,
+    }))
+}
+
+/// What an owner is told when the channel they pasted cannot be read.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const OPEN_CHANNEL_UNREADABLE: &str = "The channel details from your provider could not be read, so nothing was asked of it and nothing was signed.";
+
+/// What an owner is told when the two statements of the deposit disagree.
+///
+/// It is refused rather than reconciled. One of the two numbers is the amount
+/// the owner decided to risk and the other is the amount that would actually be
+/// locked up, and there is no safe way to guess which one they meant.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const OPEN_CHANNEL_DEPOSIT_MISMATCH: &str = "The deposit you entered is not the deposit these channel details would lock up, so this wallet refused to open it. No channel was opened, nothing was sent to the network and no money has moved. Check the amount with your provider before trying again.";
+
+/// The open screen's facts, with every input already resolved.
+///
+/// Separated from the read so the rule that must never slip can be tested
+/// without a chain or a provider: `blocked_reason` is empty exactly when
+/// `open_ready` is true. A screen that withholds an irreversible control and
+/// gives no reason is the failure the whole panel exists to end.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+// Every argument is a distinct fact the screen renders, and bundling them
+// into a struct would only move the same list somewhere the caller fills in
+// by name instead of by position.
+#[allow(clippy::too_many_arguments)]
+fn open_status_json(
+    open_ready: bool,
+    blocked_reason: &str,
+    hub_url: &str,
+    hub: (bool, String, String),
+    fullnode_reachable: bool,
+    spendable_l1_zhu: u64,
+    deposit_zhu: u64,
+    challenge_blocks: u64,
+) -> Value {
+    let (hub_reachable, hub_address, hub_read_error) = hub;
+    json!({
+        "open_ready": open_ready,
+        "blocked_reason": if open_ready { "" } else { blocked_reason },
+        "hub_url": hub_url,
+        "hub_address": hub_address,
+        "hub_reachable": hub_reachable,
+        "hub_read_error": hub_read_error,
+        "fullnode_reachable": fullnode_reachable,
+        "spendable_l1_zhu": spendable_l1_zhu,
+        "deposit_zhu": deposit_zhu,
+        "required_l1_fee_zhu": OPEN_FEE_CEILING_ZHU,
+        "chain_transaction_count": OPEN_CHAIN_TRANSACTION_COUNT,
+        "challenge_blocks": challenge_blocks,
+    })
+}
+
+/// Read the open screen's facts: this wallet's balance, its fullnode, and the
+/// provider's own published identity.
+///
+/// The provider is asked one question and it is not a commitment: who are you,
+/// and do you run the reviewed profile. It cannot fund anything, cannot sign
+/// anything and cannot be charged for anything by being asked.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+async fn registry_open_status_value(overview: &Value, hub_url: &str, deposit_zhu: u64) -> Value {
+    let spendable_l1_zhu = overview
+        .get("available_units")
+        .and_then(Value::as_str)
+        .and_then(|units| units.parse::<u64>().ok())
+        .unwrap_or(0);
+    let already_bound = overview
+        .get("hvm_registry_binding")
+        .is_some_and(|value| !value.is_null());
+    let fullnode_reachable = match overview.get("node_url").and_then(Value::as_str) {
+        Some(node_url) => match l2_fast_pay_hub::node::NodeClient::new(node_url) {
+            Ok(client) => client.capabilities().await.is_ok(),
+            Err(_) => false,
+        },
+        None => false,
+    };
+    let hub = read_open_hub_identity(hub_url).await;
+    let (open_ready, blocked_reason) = if already_bound {
+        (false, OPEN_ALREADY_BOUND)
+    } else {
+        (true, "")
+    };
+    open_status_json(
+        open_ready,
+        blocked_reason,
+        hub_url,
+        hub,
+        fullnode_reachable,
+        spendable_l1_zhu,
+        deposit_zhu,
+        l2_fast_pay_hub::hvm_registry::HPAY_REGISTRY_MAX_CHALLENGE_BLOCKS,
+    )
+}
+
+/// What an owner is told when this wallet already holds a channel.
+///
+/// One shared registry channel per wallet. A second one opened while the first
+/// is live would put money behind a binding this wallet's exit record does not
+/// name, and the exit is the reason any of this is safe.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+const OPEN_ALREADY_BOUND: &str = "This Agent Wallet already has a provider channel. Close that one first: the section below takes your money out of it without needing the provider's permission.";
+
+/// The provider's own published identity, or the reason it could not be read.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+async fn read_open_hub_identity(hub_url: &str) -> (bool, String, String) {
+    let client = hacash_wallet_core::l2_hub::L2HubClient::new_for_wallet_policy(
+        hub_url.to_owned(),
+        "testnet",
+        false,
+    );
+    match client.health().await {
+        Ok(health) => {
+            let address = health.hub_address.clone().unwrap_or_default();
+            if !health.ok || health.version < 7 || address.is_empty() {
+                return (
+                    false,
+                    address,
+                    "This provider answered but does not run the reviewed provider profile."
+                        .to_owned(),
+                );
+            }
+            (true, address, String::new())
+        }
+        Err(error) => (false, String::new(), error.to_string()),
+    }
+}
+
 #[tauri::command]
 pub async fn agent_wallet_list_hvm_activity(
     wallet_id: String,

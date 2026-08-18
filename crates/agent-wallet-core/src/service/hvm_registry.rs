@@ -267,6 +267,73 @@ impl AgentHvmRegistryBinding {
         Ok(())
     }
 
+    /// Build the adopted binding from **the wallet's own evidence only**.
+    ///
+    /// The Hub path takes an `HvmRegistryChannelStatusV2` because the Hub is
+    /// where the channel is learned from. Here nothing is learned from
+    /// anybody: the bundle is the wallet's own, the snapshot is the wallet's
+    /// own node's, and the `activation_snapshot_commitment` is that snapshot's
+    /// own commitment rather than a number a provider reported.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    fn from_chain_evidence(
+        wallet_id: AgentWalletId,
+        address: &str,
+        network_mode: &str,
+        network_binding: L1ChannelNetworkBinding,
+        hub_url: String,
+        bundle: &HvmRegistryRecoveryBundleV2,
+        snapshot: &l2_fast_pay_hub::hvm_registry::HvmRegistryLiveSnapshotV2,
+        adopted_at: u64,
+    ) -> AgentWalletResult<Self> {
+        if snapshot.minimum_live_blocks == 0 {
+            return Err(AgentWalletError::NodeCapabilityMismatch);
+        }
+        let activation_snapshot_commitment = snapshot
+            .commitment()
+            .map_err(|_| AgentWalletError::NodeCapabilityMismatch)?;
+        if !is_lower_hash(&activation_snapshot_commitment) {
+            return Err(AgentWalletError::NodeCapabilityMismatch);
+        }
+        bundle
+            .initial_recovery_bill
+            .validate_fully_signed(&bundle.binding)
+            .map_err(|_| AgentWalletError::RecoveryRequired)?;
+        let binding = Self {
+            schema_version: AGENT_HVM_REGISTRY_BINDING_SCHEMA,
+            wallet_id: wallet_id.clone(),
+            network_mode: network_mode.to_owned(),
+            network_binding,
+            hub_url,
+            hub_address: bundle.binding.right_hub_address.clone(),
+            binding_commitment: bundle
+                .binding
+                .commitment()
+                .map_err(|_| AgentWalletError::RecoveryRequired)?,
+            recovery_bundle: bundle.clone(),
+            activation_snapshot_commitment,
+            minimum_required_live_blocks: snapshot.minimum_live_blocks,
+            minimum_required_recover_blocks: snapshot.minimum_recover_blocks,
+            adopted_at,
+        };
+        binding.validate(&wallet_id, address, network_mode)?;
+        Ok(binding)
+    }
+
+    /// Is this candidate still describing the chain a second read just
+    /// returned? The TOCTOU counterpart of [`Self::matches_status`].
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub(super) fn matches_chain_snapshot(
+        &self,
+        snapshot: &l2_fast_pay_hub::hvm_registry::HvmRegistryLiveSnapshotV2,
+    ) -> AgentWalletResult<bool> {
+        let commitment = snapshot
+            .commitment()
+            .map_err(|_| AgentWalletError::NodeCapabilityMismatch)?;
+        Ok(commitment == self.activation_snapshot_commitment
+            && snapshot.minimum_live_blocks == self.minimum_required_live_blocks
+            && snapshot.minimum_recover_blocks == self.minimum_required_recover_blocks)
+    }
     #[allow(clippy::too_many_arguments)]
     #[cfg(feature = "agent-wallet-testnet-pilot")]
     fn from_verified_status(
@@ -1184,6 +1251,28 @@ impl AgentWalletManager {
         {
             return Err(AgentWalletError::SigningBlocked);
         }
+        // Adoption is the moment a channel becomes this wallet's own, and the
+        // only evidence that makes it worth owning is a refund bill the wallet
+        // itself left-signed and the Hub countersigned. That bundle is built
+        // and validated at open (`super::hvm_registry_open`) and stored before
+        // any funding may be authorised, so requiring it here is not an extra
+        // hurdle: it is the same door, checked on the second side. Without it
+        // this method would adopt whatever a Hub served, and every check below
+        // would be verifying a stranger's arithmetic.
+        let countersigned = original
+            .hvm_registry_open
+            .as_ref()
+            .and_then(super::hvm_registry_open::AgentHvmRegistryChannelOpen::countersigned_bundle)
+            .cloned()
+            .ok_or(AgentWalletError::RegistryOpenRefundNotCountersigned)?;
+        if binding_commitment
+            != countersigned
+                .binding
+                .commitment()
+                .map_err(|_| AgentWalletError::RecoveryRequired)?
+        {
+            return Err(AgentWalletError::RegistryOpenRefundNotCountersigned);
+        }
         let hub_url = validate_service_url(hub_url, "Agent HVM registry hub")
             .map_err(|_| AgentWalletError::InvalidPaymentRequest)?;
         let hub = L2HubClient::new_for_wallet_policy(hub_url.clone(), "testnet", false);
@@ -1208,6 +1297,14 @@ impl AgentWalletManager {
             .hvm_registry_channel_status(binding_commitment)
             .await
             .map_err(|_| AgentWalletError::NodeRejected)?;
+        // Byte for byte, the bundle this wallet built and checked. A Hub that
+        // serves a different binding, a different refund bill or a different
+        // signature is not describing the channel this wallet holds a way out
+        // of, and adopting it would hand the owner an exit kit that verifies
+        // against nothing they can reach.
+        if status.recovery_bundle != countersigned {
+            return Err(AgentWalletError::RegistryOpenRefundNotCountersigned);
+        }
 
         let verified_node = crate::node_binding::verified_agent_node(
             &original.node_url,
@@ -1308,6 +1405,172 @@ impl AgentWalletManager {
         // exactly why everything the wallet will later need without the Hub
         // has to be copied into its own state right here. The binding already
         // was. The evidence built from it was not.
+        current.hvm_registry_exit_head = Some(AgentHvmRegistryExitHead::seed(&candidate, now));
+        current.updated_at = now;
+        self.persist_event(
+            &mut current,
+            &state_master,
+            &journal_key,
+            crate::journal::AgentJournalEventKind::HvmBindingVerified,
+            None,
+            None,
+            now,
+        )?;
+        Ok(candidate)
+    }
+
+    /// Adopt this wallet's own funded channel **without asking the provider
+    /// anything**.
+    ///
+    /// # The trap this closes
+    ///
+    /// A reviewer drove it end to end: the provider countersigns honestly, the
+    /// deposit is funded honestly, the provider then vanishes, and the owner
+    /// is stuck - not because the chain will not pay them, but because the
+    /// only writer of `hvm_registry_binding` needed the Hub alive four times
+    /// (health, channel status, a byte-identical served bundle, and a second
+    /// status for the TOCTOU re-check), and `advance_hvm_registry_exit`
+    /// refuses without that binding. The chain would have paid: the contract
+    /// accepts the very bill the wallet already stores. The wallet held the
+    /// way out and had no code path that reached the chain with it.
+    ///
+    /// # Why this is not a weaker second door
+    ///
+    /// Every fact adoption needs is already the wallet's own, and none of it
+    /// is the Hub's to state:
+    ///
+    /// * the recovery bundle is the one **this wallet** built, left-signed and
+    ///   validated at open, and is required to be present here exactly as the
+    ///   Hub path requires it;
+    /// * the deposit is required to be one **this wallet** signed, stored
+    ///   before broadcast, and has since seen in a block;
+    /// * the channel is read from **this wallet's own** pinned, block-1
+    ///   fingerprint-verified fullnode, and held to
+    ///   [`HvmRegistryLiveSnapshotV2::validate_open_binding`], which is
+    ///   stricter than the `validate_runtime_binding` the Hub path applies: it
+    ///   additionally demands status exactly OPEN, serial 0, the whole deposit
+    ///   still on the left line, no deadline and no prior claim.
+    ///
+    /// What is *not* available without the Hub is a later fully-signed bill,
+    /// and that is not a loss: no such bill can exist yet. Every bill of this
+    /// channel's life needs this wallet's own left signature, and at this
+    /// moment the only one it has ever made is the serial-1 full refund - which
+    /// is exactly what the exit head is seeded with, in the same journalled
+    /// transition, by the same `AgentHvmRegistryExitHead::seed` the Hub path
+    /// uses.
+    pub async fn adopt_hvm_registry_channel_from_chain<C>(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        chain: &C,
+        now: u64,
+    ) -> AgentWalletResult<AgentHvmRegistryBinding>
+    where
+        C: hacash_wallet_core::hvm_registry_open::HvmRegistryOpenChainV1,
+    {
+        self.ensure_session_active(wallet_id, now)?;
+        let (state_master, journal_key) = {
+            let session = self.session(wallet_id)?;
+            (
+                zeroize::Zeroizing::new(*session.state_master),
+                zeroize::Zeroizing::new(*session.journal_key),
+            )
+        };
+        let original = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        if original.network_mode != "testnet"
+            || !original.payments_suspended
+            || super::state::active_reservations(&original)? != crate::amount::HacUnits::ZERO
+            || !original.hvm_payment_operations.is_empty()
+            || original.hvm_channel_binding.is_some()
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        let open = original
+            .hvm_registry_open
+            .clone()
+            .ok_or(AgentWalletError::RegistryOpenRefundNotCountersigned)?;
+        let bundle = open
+            .countersigned_bundle()
+            .cloned()
+            .ok_or(AgentWalletError::RegistryOpenRefundNotCountersigned)?;
+        // A channel nobody has paid into is not a channel to walk out of, and
+        // seeding an exit head over one would send an owner's fee at an empty
+        // contract.
+        let funding = open
+            .funding()
+            .filter(|funding| funding.is_confirmed())
+            .ok_or(AgentWalletError::RegistryFundingNotConfirmed)?;
+        if funding.contract_address() != bundle.binding.contract_address
+            || funding.amount_zhu() != bundle.binding.left_deposit_zhu
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        let hub_url = validate_service_url(open.hub_url(), "Agent HVM registry hub")
+            .map_err(|_| AgentWalletError::InvalidPaymentRequest)?;
+
+        let reading = self
+            .registry_open_chain_evidence(&original, &bundle.binding, chain)
+            .await?;
+        // Same floor the pre-funding gate applies, for the same reason: the
+        // exit's own lease floor is enforced by the exit's own planner, which
+        // answers a shortfall by renewing. A stricter floor here would refuse
+        // to adopt exactly the channel whose lease the exit exists to renew.
+        reading
+            .snapshot
+            .validate_open_binding(&bundle.binding, 1, 0)
+            .map_err(|_| AgentWalletError::RegistryOpenChainMismatch)?;
+        let candidate = AgentHvmRegistryBinding::from_chain_evidence(
+            wallet_id.clone(),
+            &original.address,
+            &original.network_mode,
+            reading.network_binding.clone(),
+            hub_url,
+            &bundle,
+            &reading.snapshot,
+            now,
+        )?;
+
+        // Close the TOCTOU window before touching authenticated wallet state.
+        // No await is permitted after the final state reload.
+        let confirm = self
+            .registry_open_chain_evidence(&original, &bundle.binding, chain)
+            .await?;
+        confirm
+            .snapshot
+            .validate_open_binding(&bundle.binding, 1, 0)
+            .map_err(|_| AgentWalletError::RegistryOpenChainMismatch)?;
+        if !candidate.matches_chain_snapshot(&confirm.snapshot)? {
+            return Err(AgentWalletError::RegistryOpenChainMismatch);
+        }
+
+        let mut current = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        if current.address != original.address
+            || current.network_mode != original.network_mode
+            || current.node_url != original.node_url
+            || current.block_one_fingerprint != original.block_one_fingerprint
+            || current.policy_epoch != original.policy_epoch
+            || current.signer_epoch != original.signer_epoch
+            || current.emergency_epoch != original.emergency_epoch
+            || !current.payments_suspended
+            || super::state::active_reservations(&current)? != crate::amount::HacUnits::ZERO
+            || !current.hvm_payment_operations.is_empty()
+            || current.hvm_channel_binding.is_some()
+            || current.hvm_registry_open.as_ref().and_then(
+                super::hvm_registry_open::AgentHvmRegistryChannelOpen::countersigned_bundle,
+            ) != Some(&bundle)
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        if let Some(existing) = current.hvm_registry_binding.as_ref() {
+            return if existing == &candidate {
+                Ok(existing.clone())
+            } else {
+                Err(AgentWalletError::RecoveryRequired)
+            };
+        }
+        current.hvm_registry_binding = Some(candidate.clone());
+        // Same journalled transition, same seed, same reason as the Hub path:
+        // everything the wallet will later need without the provider has to be
+        // its own by the time this returns.
         current.hvm_registry_exit_head = Some(AgentHvmRegistryExitHead::seed(&candidate, now));
         current.updated_at = now;
         self.persist_event(

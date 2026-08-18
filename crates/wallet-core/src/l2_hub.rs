@@ -1104,6 +1104,45 @@ impl L2HubClient {
         Ok(status)
     }
 
+    /// Ask this Hub to countersign the serial-1 full refund for a channel this
+    /// wallet is about to fund, and hand back its raw answer.
+    ///
+    /// # What this deliberately does not do
+    ///
+    /// Decide anything. It puts the wallet's own ask on the wire, applies the
+    /// transport-level limits every other Hub call here applies, and returns
+    /// the envelope. The judgement - does this signature return this wallet's
+    /// whole deposit, on this exact channel, from the bound Hub key - belongs
+    /// to [`crate::hvm_registry_open::adopt_hub_countersignature`] and is made
+    /// against the binding the wallet derived, not against anything read here.
+    /// A Hub that refuses, times out or answers rubbish produces an error and
+    /// no channel opens; nothing has been funded at this point, so there is
+    /// nothing left half-done.
+    pub async fn countersign_hvm_registry_channel_open(
+        &self,
+        request: &l2_fast_pay_hub::hvm_registry::HvmRegistryRefundCountersignRequestV2,
+    ) -> WalletResult<l2_fast_pay_hub::hvm_registry_ledger::HvmRegistryRefundCountersignResponseV2>
+    {
+        if self.mainnet {
+            return Err(WalletError::L2(
+                "shared HVM registry channel open is not enabled for mainnet".into(),
+            ));
+        }
+        let url = format!("{}/v2/hvm-registry/channel/open-countersign", self.base_url);
+        let response = self
+            .http()?
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| {
+                WalletError::L2(format!(
+                    "the Hub could not be reached to countersign the refund, so no channel was opened: {error}"
+                ))
+            })?;
+        Self::read_hub_json(response, "Hub registry open countersign").await
+    }
+
     /// Fetch this Hub's continuity declaration for one channel and adjudicate
     /// it against this wallet's own anchor memory.
     ///

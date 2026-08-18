@@ -20,6 +20,7 @@ mod http_client;
 pub mod hvm_registry_exit;
 pub mod hvm_registry_exit_driver;
 pub mod hvm_registry_exit_record;
+pub mod hvm_registry_open;
 pub mod kdf;
 pub mod l1_channel_close_safety;
 pub mod l1_channel_flow;
@@ -59,7 +60,10 @@ pub mod webauthn;
 #[cfg(test)]
 mod test_support;
 
-pub use address::{AddressKind, ParsedAddress, parse_address, require_address_for_network};
+pub use address::{
+    AddressKind, ParsedAddress, parse_address, require_address_for_network,
+    require_agent_payment_recipient,
+};
 pub use airgap::{
     AirgapEnvelope, AirgapParseResult, AirgapPrepareResult, AirgapSignResult, AirgapSigned,
     AirgapUnsigned,

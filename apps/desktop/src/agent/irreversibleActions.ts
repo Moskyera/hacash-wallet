@@ -20,6 +20,7 @@ export type DesktopIrreversibleAction = {
     | "approve_exact_transaction"
     | "reject_payment"
     | "abandon_stranded_payment"
+    | "open_provider_channel"
     | "start_exit_without_provider";
   /** The control this warning belongs beside. */
   control: DesktopControlId;
@@ -93,6 +94,33 @@ export const ABANDON_STRANDED_PAYMENT_WARNING =
   "Giving up this payment is final. It cannot be resumed and the agent has to ask for it again. No money moves and nothing is taken back from the network, because this payment was signed but never sent: the reserved funds return to your spendable balance.";
 
 /**
+ * What committing to a provider channel costs, said before the first press.
+ *
+ * The press itself sends no money. What it does is permanent in a way an owner
+ * comparing providers would not guess: it signs this wallet's half of the
+ * receipt that returns the deposit, and once the provider's half is saved this
+ * wallet holds one channel and will not exchange it for another. A second ask
+ * for a different channel is refused by
+ * `AgentWalletManager::begin_hvm_registry_channel_open`
+ * (crates/agent-wallet-core/src/service/hvm_registry_open.rs), because
+ * replacing that record would throw away the only bill that gets the first
+ * channel's deposit back.
+ *
+ * So the warning states four things, in this order:
+ *  - what the press commits to, and that it moves no money;
+ *  - that the deposit which follows cannot be reversed by anyone;
+ *  - that the fee and reserved gas are on top of it and are spent either way;
+ *  - that a provider which refuses costs nothing at all, because the refusal
+ *    lands before any transaction is built.
+ *
+ * The exact amounts are named beside this by `lockUpLine` and `feeLine`
+ * (registryOpen.ts), which know the channel; this sentence does not repeat a
+ * number it cannot check.
+ */
+export const OPEN_PROVIDER_CHANNEL_WARNING =
+  "This commits this wallet to one provider channel and one deposit, permanently. The press itself moves no money and costs no fee: it signs your half of a receipt returning the whole deposit, asks your provider for its half and checks it here. Once that receipt is saved this wallet will not swap it for a different channel, because it is the only thing that gets this deposit back. The deposit that follows cannot be reversed by this app, by your provider or by anyone else, and the network fee and reserved gas are charged on top of it and are spent whatever happens next. If your provider will not sign the receipt then no channel opens, nothing is sent and nothing is charged.";
+
+/**
  * What starting a unilateral close actually costs, said before the first press.
  *
  * Four separate facts, and every one of them has to survive the press being
@@ -161,6 +189,17 @@ export const DESKTOP_IRREVERSIBLE_ACTIONS: readonly DesktopIrreversibleAction[] 
       // reached by accident, on a payment they were only waiting for, would
       // throw the payment away.
       confirmLabel: "Confirm give up",
+    },
+    {
+      id: "open_provider_channel",
+      control: "open_provider_channel",
+      warning: OPEN_PROVIDER_CHANNEL_WARNING,
+      renderedAs: "OPEN_PROVIDER_CHANNEL_WARNING",
+      // The exact deposit and the exact fee are on screen beside this, and the
+      // press still takes a second one. An owner reading the page and comparing
+      // providers must not be able to bind this wallet to one of them, for
+      // good, by mis-clicking once.
+      confirmLabel: "Confirm, open this channel",
     },
     {
       id: "start_exit_without_provider",

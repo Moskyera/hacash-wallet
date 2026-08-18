@@ -105,9 +105,76 @@ pub fn require_address_for_network(
     Ok(parsed)
 }
 
+/// A recipient an **agent** may be pointed at with the owner's money.
+///
+/// # The door this closed
+///
+/// A reviewer funded a real registry channel on chain with one ordinary
+/// Action 1 transfer and no countersignature in existence: the contract's
+/// `PayableHAC` accepts any correctly-sized HAC transfer from the left address
+/// while the channel is in FUNDING, and this product's ordinary agent payment
+/// path builds exactly those bytes for any recipient at all. The three
+/// registry-aware funding routes were each gated on the countersigned refund;
+/// the generic payment path was never counted, and it was the door that
+/// mattered most, because a wallet that cannot fund a channel itself is one
+/// whose channels all get funded by hand.
+///
+/// So an agent payment now has a *narrower* notion of recipient than the chain
+/// does: a person or a plain key, never a contract. A contract address is not
+/// a passive recipient - `parse_address` already says so, and sets
+/// `passive_receive = false` for exactly this reason - and there is no
+/// legitimate agent payment in this product whose destination executes code.
+/// Putting principal into a contract is its own act, with its own gate
+/// (`hacash_wallet_core::hvm_registry_open::authorize_registry_funding`), its
+/// own signing boundary and its own durable record.
+///
+/// The residual is stated rather than implied away: the chain cannot enforce
+/// this, and an owner holding their own key can always build such a transfer
+/// with some other tool. What is true is that no agent in this app will build
+/// it for them.
+pub fn require_agent_payment_recipient(
+    address: &str,
+    network_mode: &str,
+) -> WalletResult<ParsedAddress> {
+    let parsed = require_address_for_network(address, network_mode)?;
+    if parsed.kind == AddressKind::Contract || parsed.version == Address::CONTRACT {
+        return Err(WalletError::Policy(
+            "an agent payment cannot be sent to a contract address. Contract addresses execute \
+             code when they are paid, so this is not a payment to a person; putting money into a \
+             contract is a separate action with its own confirmation."
+                .into(),
+        ));
+    }
+    if !parsed.passive_receive {
+        return Err(WalletError::Policy(
+            "an agent payment can only be sent to an address that receives passively".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fourth funding route, and the reason it is now shut.
+    #[test]
+    fn an_agent_payment_can_never_be_addressed_to_a_contract() {
+        for network_mode in [TESTNET, MAINNET] {
+            let contract = readable(Address::CONTRACT);
+            assert!(
+                require_address_for_network(&contract, network_mode).is_ok(),
+                "the chain itself permits this, which is exactly why the wallet has to not"
+            );
+            assert!(
+                require_agent_payment_recipient(&contract, network_mode).is_err(),
+                "an agent must not be able to build a transfer into a contract"
+            );
+            let person = readable(Address::PRIVAKEY);
+            require_agent_payment_recipient(&person, network_mode)
+                .expect("paying a person is what this path is for");
+        }
+    }
 
     fn readable(version: u8) -> String {
         let hash = [version.wrapping_add(1); 20];

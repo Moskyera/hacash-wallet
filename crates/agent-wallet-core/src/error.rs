@@ -288,6 +288,41 @@ pub enum AgentWalletError {
         "This wallet's record of the rollback witnesses for this channel is missing or older than its own payment history, so it cannot check whether this Hub went backwards. Nothing was accepted. Restore this wallet's L2 store from the same backup as the rest of the wallet, or close this channel."
     )]
     AnchorMemoryBehindWallet,
+    // The provider would not, or could not, countersign the serial-1 refund
+    // that this wallet must hold before its money may enter a channel.
+    //
+    // Its own variant, and deliberately not `NodeRejected`. "node or network
+    // rejected the operation" reads as a transient network problem and invites
+    // a retry loop, when what actually happened is that a provider declined to
+    // guarantee the user a way out. The user's correct next move is to pick a
+    // different provider, and the only thing that must be unambiguous is that
+    // no money moved: this refusal happens strictly before any funding is
+    // built or broadcast, so there is no half-open channel to clean up.
+    #[error(
+        "This provider would not countersign the refund that lets you close this channel on your own, so no channel was opened. Nothing was funded and nothing was spent. You can try again, or use a different provider."
+    )]
+    RegistryOpenHubRefused,
+    // Funding was asked for on a channel this wallet does not hold a validated
+    // Hub-countersigned refund for. This is the gate, not a warning.
+    #[error(
+        "This wallet has no countersigned refund for this channel, so it will not put money into it. A channel is only funded after the provider has signed a bill that returns your whole deposit."
+    )]
+    RegistryOpenRefundNotCountersigned,
+    // The binding a caller asked to open, or to fund, does not match what this
+    // wallet's own pinned fullnode says is actually deployed and initialised.
+    // Every field of a binding is a claim; this is the refusal that arrives
+    // before the owner is told a provider has guaranteed anything.
+    #[error(
+        "The channel this provider described is not the one on the chain this wallet is connected to. This wallet checked the contract itself and it is not the reviewed channel registry, or not on this chain, or not carrying the exact channel that was described. Nothing was funded and nothing was spent."
+    )]
+    RegistryOpenChainMismatch,
+    // Funding bytes exist and durably so, and the node has not been seen
+    // holding them in a block yet. Nothing is lost; the answer is to press
+    // again, and the stored bytes are re-submitted rather than re-signed.
+    #[error(
+        "Your deposit transaction has been signed and sent, and this wallet has not yet seen it in a block. Nothing else will happen until it confirms. Check again in a moment."
+    )]
+    RegistryFundingNotConfirmed,
     #[error("Agent Wallet block 1 fingerprint is invalid")]
     InvalidNodeAnchor,
     #[error("secure vault operation failed")]

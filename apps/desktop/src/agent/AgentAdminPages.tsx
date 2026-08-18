@@ -29,6 +29,7 @@ import {
   APPROVE_TRANSACTION_WARNING,
   EMERGENCY_STOP_WARNING,
   EXIT_WITHOUT_PROVIDER_WARNING,
+  OPEN_PROVIDER_CHANNEL_WARNING,
   REJECT_PAYMENT_WARNING,
   REVOKE_AGENT_WARNING,
 } from "./irreversibleActions";
@@ -37,6 +38,11 @@ import {
   registryExitView,
   type AgentHvmRegistryExitStatus,
 } from "./registryExit";
+import {
+  openPressResultLine,
+  registryOpenView,
+  type AgentHvmRegistryOpenStatus,
+} from "./registryOpen";
 import { strandedWitnessView } from "./strandedWitness";
 
 export type AgentAdminPage = "agents" | "rules" | "activity" | "providers" | "security";
@@ -411,6 +417,24 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
   const [exitReadError, setExitReadError] = useState("");
   const [exitOperations, setExitOperations] = useState<AgentHvmPaymentOperation[]>([]);
   const [confirmExit, setConfirmExit] = useState(false);
+  // Opening a channel. The other end of the exit above, and the only screen in
+  // this app where money is deliberately made irreversible. Everything it shows
+  // is read before anything is asked of the provider, and the provider's
+  // countersigned full refund is validated in Rust before any funding is built,
+  // so nothing on this panel can talk an owner into an unbacked deposit.
+  const [openHubUrl, setOpenHubUrl] = useState("");
+  const [openDepositHac, setOpenDepositHac] = useState("");
+  const [openBindingText, setOpenBindingText] = useState("");
+  const [openStatus, setOpenStatus] = useState<AgentHvmRegistryOpenStatus | null>(null);
+  const [openReadError, setOpenReadError] = useState("");
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const openDepositZhu = depositHacToZhu(openDepositHac);
+  const openInputsReady =
+    !overview.hvm_registry_binding &&
+    /^https?:\/\/\S+$/.test(openHubUrl.trim()) &&
+    openDepositZhu !== null &&
+    openDepositZhu > 0 &&
+    isJsonObject(openBindingText);
   const load = useCallback(async () => {
     setError("");
     try { setPending(await agentWalletApi.listPendingApprovals(overview.wallet_id)); } catch (reason) { setPending(null); setError(readableError(reason)); }
@@ -430,6 +454,23 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
     try { setExitOperations(await agentWalletApi.listHvmActivity(overview.wallet_id)); } catch { setExitOperations([]); }
   }, [overview.wallet_id]);
   useEffect(() => { void load(); }, [load]);
+  // The open panel's own read. It is separate from `load` because it depends on
+  // two things the owner types, and because it is the only read on this page
+  // that contacts a provider at all: the exit section must stay readable when
+  // every provider in the world is unreachable.
+  useEffect(() => {
+    if (!openInputsReady || openDepositZhu === null) {
+      setOpenStatus(null);
+      setOpenReadError("");
+      return;
+    }
+    let live = true;
+    void agentWalletApi
+      .hvmRegistryOpenStatus(overview.wallet_id, openHubUrl.trim(), openDepositZhu)
+      .then((status) => { if (live) { setOpenStatus(status); setOpenReadError(""); } })
+      .catch((reason) => { if (live) { setOpenStatus(null); setOpenReadError(readableError(reason)); } });
+    return () => { live = false; };
+  }, [overview.wallet_id, openHubUrl, openDepositZhu, openInputsReady]);
   // Same predicate and same view helper as the Overview page. Before this,
   // Security could engage a stop and then showed no control that could clear
   // it, so the page that offers the emergency stop offered no way back.
@@ -453,6 +494,9 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
   const strandedView = strandedWitnessView(stranded, formatUnits);
   const exitView = exitStatus
     ? registryExitView(overview.hvm_registry_binding, exitStatus, exitOperations, formatZhu)
+    : null;
+  const openView = openStatus
+    ? registryOpenView(Boolean(overview.hvm_registry_binding), openStatus, formatZhu)
     : null;
   const rotationPhase = overview.witness_rotation_phase;
   const rotationNeedsAttention = Boolean(rotationPhase && rotationPhase !== "stable");
@@ -535,6 +579,130 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
             </>
           ) : (
             <p role="status">{strandedView.abandonWithheldReason}</p>
+          )}
+        </section>
+      )}
+      {/* Opening a channel, and locking money up to do it.
+
+          It sits directly above the exit section on purpose: these are the two
+          ends of the same decision, and an owner deciding whether to put money
+          in is entitled to read how it comes out on the same screen.
+
+          Nothing here is behind a <details>. The deposit, the fee and the
+          refund guarantee are the three facts that decide this, and a
+          disclosure an owner never opens is the same as not saying it. */}
+      {!overview.hvm_registry_binding && overview.pilot_enabled && (
+        <section className="agent-panel" aria-label="Opening a channel with a provider">
+          <span className="agent-eyebrow">Your money, before you commit it</span>
+          <h2>Opening a channel with a provider</h2>
+          <label className="agent-field">
+            <span>Provider URL</span>
+            <input
+              value={openHubUrl}
+              onChange={(event) => { setOpenHubUrl(event.target.value); setConfirmOpen(false); }}
+              placeholder="http://127.0.0.1:8790"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <label className="agent-field">
+            <span>Deposit to lock up, in HAC</span>
+            <input
+              value={openDepositHac}
+              onChange={(event) => { setOpenDepositHac(event.target.value); setConfirmOpen(false); }}
+              placeholder="5"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          {/* The channel itself, exactly as the provider published it. This
+              wallet re-states it as its own and the provider gets no field
+              through which to change it afterwards, so the one thing that can
+              be wrong here is the amount, and the deposit above is typed
+              separately for exactly that reason: the Rust command refuses
+              unless the two agree. */}
+          <label className="agent-field">
+            <span>Channel details from your provider</span>
+            <textarea
+              value={openBindingText}
+              onChange={(event) => { setOpenBindingText(event.target.value); setConfirmOpen(false); }}
+              placeholder='{"schema":"...","contract_address":"...","channel_id":"...","left_deposit_zhu":5000000}'
+              autoComplete="off"
+              spellCheck={false}
+              rows={4}
+            />
+          </label>
+          {openView ? (
+            <>
+              <p className="agent-exact-address">{openView.lockUpLine}</p>
+              {/* The fact that makes the deposit safe. Never collapsible and
+                  never softened into a statement about the provider being
+                  trustworthy: it is a signature this wallet checks itself, and
+                  funding is unbuildable without it. */}
+              <p className="agent-warning" role="status">{openView.refundLine}</p>
+              {/* What the press actually does, and what it does not. It moves
+                  no money and it binds this wallet to one channel for good, and
+                  an owner is owed both halves before the first press. */}
+              <p>{openView.commitmentLine}</p>
+              <p>{openView.refusalLine}</p>
+              <p>{openView.feeLine}</p>
+              <p>{openView.exitLine}</p>
+              {/* No build gives the phone a Hacash spending key, so this says
+                  "never" rather than "not yet". */}
+              <p>{openView.phoneLine}</p>
+              {/* Stated, never a silent gate. */}
+              <dl className="agent-detail-grid">
+                {openView.preconditions.map((entry) => (
+                  <Detail
+                    key={entry.label}
+                    label={`${entry.label}: ${entry.met ? "ready" : "not ready"}`}
+                    value={entry.detail}
+                    wide
+                  />
+                ))}
+              </dl>
+              <div className="agent-warning">{OPEN_PROVIDER_CHANNEL_WARNING}</div>
+              {openView.canOpen ? (
+                <div className="agent-confirm-row">
+                  {confirmOpen ? (
+                    <>
+                      <button type="button" disabled={busy} onClick={() => setConfirmOpen(false)}>Cancel</button>
+                      <button type="button" className="agent-danger" disabled={busy} onClick={() => void run(async () => {
+                        const result = await agentWalletApi.openHvmRegistryChannel(
+                          overview.wallet_id,
+                          openHubUrl.trim(),
+                          JSON.parse(openBindingText),
+                          openDepositZhu ?? 0,
+                        );
+                        setConfirmOpen(false);
+                        setOpenHubUrl("");
+                        setOpenDepositHac("");
+                        setOpenBindingText("");
+                        // The backend's own numbers, read from the countersigned
+                        // bill rather than from what this form was told earlier,
+                        // and honest about the deposit not having been sent.
+                        onInfo(openPressResultLine(result, formatZhu));
+                        await Promise.all([load(), onRefreshOverview()]);
+                      })}>Confirm, open this channel</button>
+                    </>
+                  ) : (
+                    <button type="button" className="agent-danger" disabled={busy} onClick={() => setConfirmOpen(true)}>
+                      {DESKTOP_CONTROLS.open_provider_channel}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="agent-warning" role="status">
+                  {DESKTOP_CONTROLS.open_provider_channel} is not available yet. {openView.openWithheldReason}
+                </p>
+              )}
+            </>
+          ) : (
+            <p role="status">
+              {openReadError
+                ? `This provider could not be checked just now. Nothing has been asked of it and no money has moved. ${openReadError}`
+                : "Enter a provider URL and the deposit you want to lock up. Nothing is asked of the provider and nothing is sent until you have read exactly what this costs."}
+            </p>
           )}
         </section>
       )}
@@ -895,6 +1063,41 @@ function formatZhu(raw: string): string {
     return fraction ? `${whole}.${fraction} HAC` : `${whole} HAC`;
   } catch {
     return "Invalid amount";
+  }
+}
+/**
+ * A typed HAC deposit as exact zhu, or null when it is not a deposit.
+ *
+ * The inverse of `formatZhu`, and deliberately strict rather than forgiving:
+ * this number decides how much of an owner's money stops being theirs to spend,
+ * so anything but a plain positive decimal with at most six places is refused
+ * outright instead of being rounded into something the screen never showed
+ * them. `Number.MAX_SAFE_INTEGER` bounds it because the value crosses the IPC
+ * boundary as a JSON number.
+ */
+export function depositHacToZhu(raw: string): number | null {
+  const text = raw.trim();
+  if (!/^\d+(?:\.\d{1,6})?$/.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  const zhu = BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0"));
+  if (zhu <= 0n || zhu > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(zhu);
+}
+/**
+ * Whether a pasted string is a JSON object at all.
+ *
+ * The only judgement made on this side. Everything about what the object means
+ * is decided in Rust, where the channel is validated against the reviewed
+ * profile and the deposit inside it is compared with the one the owner typed;
+ * this exists so the confirm press is not offered for text that cannot even be
+ * parsed, and it deliberately claims nothing more than that.
+ */
+export function isJsonObject(raw: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  } catch {
+    return false;
   }
 }
 function shortId(value: string): string { return value.length > 20 ? value.slice(0, 10) + "..." + value.slice(-6) : value; }

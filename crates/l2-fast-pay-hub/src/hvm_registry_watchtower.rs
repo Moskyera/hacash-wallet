@@ -5,7 +5,7 @@ use basis::interface::{Transaction, TransactionRead};
 use field::{
     AddrOrList, AddrOrPtr, Address, Amount, Field, Serialize as FieldSerialize, Uint1, Uint4,
 };
-use protocol::action::{ChainAllow, ChainIDList, HacFromToTrs};
+use protocol::action::{ChainAllow, ChainIDList, HacFromToTrs, HacToTrs};
 use protocol::transaction::TransactionType3;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1204,6 +1204,196 @@ fn canonical_commitment(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Exact, signed registry **funding** bytes, and the facts they commit to.
+///
+/// Separate from [`SignedHvmRegistryCallTransactionV2`] on purpose. That type
+/// carries a `call_source`, because every transaction it describes is an
+/// Action 44 contract call. Funding is not a call: it is a plain Action 1
+/// `HacToTrs` into the contract, and a type with a `call_source` field that is
+/// always empty would invite a reader to believe the contract was asked
+/// something. It was not. It was paid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedHvmRegistryFundingTransactionV2 {
+    pub transaction_hash: String,
+    pub signed_transaction_hex: String,
+    /// Where the deposit goes, taken from the bundle's binding.
+    pub contract_address: String,
+    /// Exactly `binding.left_deposit_zhu`, which is exactly what the
+    /// countersigned serial-1 bill returns.
+    pub amount_zhu: u64,
+}
+
+/// The **only** builder of registry funding bytes that a shipped wallet can
+/// reach, and the second door in this workspace onto the same gate.
+///
+/// The first statement of the body is `bundle.validate_crypto()`, exactly as
+/// in `crate::hvm_registry_pilot::build_hvm_registry_pilot_exact_funding`
+/// (the operator's door, behind `local-pilot-tools`). Like that one it takes
+/// the countersigned refund bundle rather than a contract address and an
+/// amount, and derives both from it, so there is no argument through which a
+/// caller can fund a channel it does not already hold a full refund for.
+///
+/// # What this deliberately does not check
+///
+/// The chain. This builder is byte-production and nothing else; whether the
+/// contract at `binding.contract_address` is really the reviewed registry,
+/// really on this wallet's chain, and really carrying the exact unfunded
+/// channel the binding names is a question only a fullnode can answer, and it
+/// is answered before a caller can obtain the permission that reaches here:
+/// see `hacash_wallet_core::hvm_registry_open::authorize_registry_funding`,
+/// whose own gate runs `HvmRegistryLiveSnapshotV2::validate_prefunding_binding`
+/// against the wallet's own pinned node.
+pub fn build_signed_hvm_registry_funding_transaction(
+    signer: &Account,
+    bundle: &crate::hvm_registry::HvmRegistryRecoveryBundleV2,
+    network_fee_zhu: u64,
+    timestamp: u64,
+    gas_max: u8,
+) -> HubResult<SignedHvmRegistryFundingTransactionV2> {
+    bundle.validate_crypto()?;
+    let binding = &bundle.binding;
+    if signer.readable() != binding.left_address {
+        return Err(HubError::State(
+            "registry funding signer is not the left party the refund bill pays".into(),
+        ));
+    }
+    if binding.left_address == binding.right_hub_address {
+        return Err(HubError::State(
+            "a registry channel cannot have one identity on both sides".into(),
+        ));
+    }
+    if binding.left_deposit_zhu == 0 || binding.right_hub_deposit_zhu != 0 {
+        return Err(HubError::State(
+            "the shared registry profile funds the left deposit only".into(),
+        ));
+    }
+    if !bundle
+        .initial_recovery_bill
+        .is_initial_recovery_bill(binding)
+    {
+        return Err(HubError::State(
+            "registry funding requires the exact serial-1 full-refund bill".into(),
+        ));
+    }
+    if network_fee_zhu == 0 || timestamp == 0 || gas_max == 0 {
+        return Err(HubError::State(
+            "registry funding fee, timestamp or gas limit is invalid".into(),
+        ));
+    }
+    let main = parse_address(&binding.left_address, "registry funding left party")?;
+    let contract = parse_address(&binding.contract_address, "registry contract")?;
+    let contract_address = ContractAddress::from_addr(contract)
+        .map_err(|_| HubError::State("registry target is not an HVM contract".into()))?;
+    let amount = Amount::zhu(binding.left_deposit_zhu);
+    if amount
+        .to_zhu_u64()
+        .map_err(|error| HubError::State(format!("registry deposit is not readable: {error}")))?
+        != binding.left_deposit_zhu
+    {
+        return Err(HubError::State(
+            "registry deposit is not exactly representable on the wire".into(),
+        ));
+    }
+    let mut action = HacToTrs::new();
+    action.to = AddrOrPtr::from_addr(contract_address.to_addr());
+    action.hacash = amount;
+    let mut transaction = TransactionType3::new_by(main, Amount::zhu(network_fee_zhu), timestamp);
+    transaction.addrlist = AddrOrList::from_list(vec![main, contract])
+        .map_err(|error| HubError::State(format!("HVM address list failed: {error}")))?;
+    transaction.gas_max = Uint1::from(gas_max);
+    let mut chain_allow = ChainAllow::new();
+    chain_allow.chains = ChainIDList::from_list(vec![Uint4::from(binding.chain_id)])
+        .map_err(|error| HubError::State(format!("HVM ChainAllow build failed: {error}")))?;
+    transaction
+        .push_action(Box::new(chain_allow))
+        .map_err(|error| HubError::State(format!("HVM chain guard append failed: {error}")))?;
+    transaction
+        .push_action(Box::new(action))
+        .map_err(|error| HubError::State(format!("HVM Action 1 append failed: {error}")))?;
+    transaction
+        .fill_sign(signer)
+        .map_err(|error| HubError::State(format!("registry funding signing failed: {error}")))?;
+    transaction
+        .verify_signature()
+        .map_err(|error| HubError::State(format!("HVM Type 3 signature failed: {error}")))?;
+    let signed_transaction_hex = hex::encode(transaction.serialize());
+    // Read the bytes back through an independent reader before handing them
+    // out. A builder that cannot be read exactly is not exact.
+    read_exact_registry_funding_transaction(&signed_transaction_hex, binding)?;
+    Ok(SignedHvmRegistryFundingTransactionV2 {
+        transaction_hash: hex::encode(transaction.hash()),
+        signed_transaction_hex,
+        contract_address: contract_address.to_readable(),
+        amount_zhu: binding.left_deposit_zhu,
+    })
+}
+
+/// Re-read signed funding bytes and refuse anything that is not the exact
+/// deposit this binding describes.
+///
+/// The value of this is that it does not share a line of code with the
+/// builder: it decodes the wire form and asks the transaction itself who is
+/// paying, who is being paid and how much.
+pub fn read_exact_registry_funding_transaction(
+    signed_transaction_hex: &str,
+    binding: &HvmRegistryBindingV2,
+) -> HubResult<()> {
+    binding.validate()?;
+    let raw = hex::decode(signed_transaction_hex)
+        .map_err(|_| HubError::State("registry funding bytes are not hex".into()))?;
+    let (transaction, consumed) = protocol::transaction::transaction_create(&raw)
+        .map_err(|error| HubError::State(format!("registry funding decode failed: {error}")))?;
+    if consumed != raw.len() {
+        return Err(HubError::State(
+            "registry funding bytes carry trailing data".into(),
+        ));
+    }
+    if transaction.gas_max_byte().is_none_or(|gas| gas == 0) {
+        return Err(HubError::State(
+            "registry funding must carry a non-zero gas limit".into(),
+        ));
+    }
+    if transaction.ty() != 3 {
+        return Err(HubError::State(
+            "registry funding must be a Type 3 transaction".into(),
+        ));
+    }
+    if transaction.main().to_readable() != binding.left_address {
+        return Err(HubError::State(
+            "registry funding is not paid by the left party of this channel".into(),
+        ));
+    }
+    let actions = transaction.actions();
+    if actions.len() != 2 || actions[0].kind() != 0x0411 || actions[1].kind() != 1 {
+        return Err(HubError::State(
+            "registry funding must be exactly [ChainAllow, HacToTrs]".into(),
+        ));
+    }
+    let expected_transfer = {
+        let contract = parse_address(&binding.contract_address, "registry contract")?;
+        let mut action = HacToTrs::new();
+        action.to = AddrOrPtr::from_addr(contract);
+        action.hacash = Amount::zhu(binding.left_deposit_zhu);
+        hex::encode(Sha256::digest(action.serialize()))
+    };
+    if hex::encode(Sha256::digest(actions[1].serialize())) != expected_transfer {
+        return Err(HubError::State(
+            "registry funding does not pay this channel's exact deposit into its contract".into(),
+        ));
+    }
+    let mut allowed = ChainAllow::new();
+    allowed.chains = ChainIDList::from_list(vec![Uint4::from(binding.chain_id)])
+        .map_err(|error| HubError::State(format!("HVM ChainAllow build failed: {error}")))?;
+    if hex::encode(Sha256::digest(actions[0].serialize()))
+        != hex::encode(Sha256::digest(allowed.serialize()))
+    {
+        return Err(HubError::State(
+            "registry funding is not bound to this channel's chain".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -125,6 +125,20 @@ pub(crate) enum AgentJournalEventKind {
     HvmCommitted,
     HvmRecoveryRequired,
     HvmExactRetryReady,
+    /// The wallet left-signed the serial-1 full-refund bill for a channel it
+    /// intends to open, and stored the ask. Nothing has been funded.
+    HvmRegistryChannelOpenRequested,
+    /// The Hub's countersignature was validated by this wallet against its own
+    /// binding and the whole refund bundle is now durable. This is the record
+    /// that must exist before any funding may be built.
+    HvmRegistryChannelOpenCountersigned,
+    /// The exact deposit transfer was signed and made durable **before** it was
+    /// handed to a node. A crash after this point leaves a wallet that knows
+    /// money may already be on its way into the contract, which is the whole
+    /// reason the record is written first.
+    HvmRegistryChannelFundingSigned,
+    /// The wallet saw its own funding transaction in a block.
+    HvmRegistryChannelFunded,
     PaymentRequested,
     FundsReserved,
     ApprovalRequested,
@@ -212,6 +226,10 @@ impl AgentJournalEventKind {
             Self::HvmCommitted => 93,
             Self::HvmRecoveryRequired => 94,
             Self::HvmExactRetryReady => 95,
+            Self::HvmRegistryChannelOpenRequested => 96,
+            Self::HvmRegistryChannelOpenCountersigned => 97,
+            Self::HvmRegistryChannelFundingSigned => 98,
+            Self::HvmRegistryChannelFunded => 99,
             Self::PaymentRequested => 30,
             Self::FundsReserved => 31,
             Self::ApprovalRequested => 32,

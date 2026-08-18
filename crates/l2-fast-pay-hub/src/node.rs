@@ -1327,6 +1327,35 @@ impl NodeClient {
             .map_err(|error| HubError::Node(format!("invalid HVM registry snapshot: {error}")))
     }
 
+    /// The registry's live storage, exactly as the node reports it, with no
+    /// validator applied.
+    ///
+    /// The wallet's pre-funding gate needs the raw reading because the
+    /// judgement about what it means belongs in one place -
+    /// `hacash_wallet_core::hvm_registry_open::authorize_registry_funding` -
+    /// and not split between whichever fetcher was reached and the gate. Every
+    /// other reader on this type keeps its validator.
+    pub async fn hvm_registry_raw_snapshot(
+        &self,
+        binding: &HvmRegistryBindingV2,
+    ) -> HubResult<HvmRegistryLiveSnapshotV2> {
+        self.hvm_registry_snapshot_unchecked(binding).await
+    }
+
+    /// A registry **funding** transfer, which is a Type 3 carrying an Action 1
+    /// and no contract call at all.
+    ///
+    /// Separate from [`Self::query_hvm_registry_call_transaction`] because
+    /// asking for the wrong proof is not a missing transaction, it is a node
+    /// answering a question nobody asked.
+    pub async fn query_hvm_registry_funding_transaction(
+        &self,
+        transaction_hash: &str,
+    ) -> HubResult<Option<TransactionObservation>> {
+        self.query_transaction_with_contract(transaction_hash, 3, None)
+            .await
+    }
+
     pub async fn hvm_registry_open_snapshot(
         &self,
         binding: &HvmRegistryBindingV2,

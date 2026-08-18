@@ -47,8 +47,15 @@ impl AgentWalletManager {
         let safety_permit = emergency.issue_safety_permit(state.payments_suspended)?;
 
         request.validate(now)?;
-        hacash_wallet_core::require_address_for_network(&request.recipient, &state.network_mode)
-            .map_err(|_| AgentWalletError::RecipientNotAllowed)?;
+        // Door one of two. An agent payment is a payment to a person, and
+        // a contract address is the fourth route into a registry channel that
+        // nobody had counted. See
+        // `hacash_wallet_core::require_agent_payment_recipient`.
+        hacash_wallet_core::require_agent_payment_recipient(
+            &request.recipient,
+            &state.network_mode,
+        )
+        .map_err(|_| AgentWalletError::RecipientNotAllowed)?;
         let network_fee = HacUnits::MIN_NETWORK_FEE;
         let total_debit = request.amount_units.checked_add(network_fee)?;
 

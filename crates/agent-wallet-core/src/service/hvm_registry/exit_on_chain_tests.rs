@@ -1014,3 +1014,443 @@ async fn the_managers_own_exit_drive_pays_the_owner_on_chain_with_the_hub_dead()
         "a second press on a finished exit put nothing further on the wire"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The chain, as OPENING and FUNDING a channel ask to see it.
+//
+// Same `MemChain`, same struct: the full circle needs one chain that the open,
+// the funding, the adoption and the exit all see, and two views of two chains
+// would prove nothing about the sequence.
+// ---------------------------------------------------------------------------
+
+impl hacash_wallet_core::hvm_registry_open::HvmRegistryOpenChainV1 for MemChainExitView {
+    async fn network_binding(
+        &self,
+    ) -> Result<L1ChannelNetworkBinding, hacash_wallet_core::WalletError> {
+        let network = HvmLocalPilotNetwork::canonical();
+        L1ChannelNetworkBinding::from_node_identity(
+            &network.network_kind,
+            false,
+            network.chain_id,
+            &network.block_1_hash,
+            &network.node_profile_id,
+            Some(&network.network_instance_id),
+            2,
+        )
+        .map_err(|error| hacash_wallet_core::WalletError::Node(error.to_string()))
+    }
+
+    async fn registry_snapshot(
+        &self,
+        binding: &HvmRegistryBindingV2,
+    ) -> Result<HvmRegistryLiveSnapshotV2, hacash_wallet_core::WalletError> {
+        let contract =
+            ContractAddress::from_addr(Address::from_readable(&binding.contract_address).map_err(
+                |_| hacash_wallet_core::WalletError::Node("contract address is unreadable".into()),
+            )?)
+            .map_err(|_| hacash_wallet_core::WalletError::Node("not a contract address".into()))?;
+        Ok(read_snapshot(&self.chain.borrow(), &contract, binding))
+    }
+
+    async fn submit_funding_transaction(
+        &self,
+        _binding: &HvmRegistryBindingV2,
+        signed_transaction_hex: &str,
+        transaction_hash: &str,
+    ) -> Result<(), hacash_wallet_core::WalletError> {
+        HvmRegistryExitChainV1::submit_exit_transaction(
+            self,
+            signed_transaction_hex,
+            transaction_hash,
+        )
+        .await
+    }
+
+    async fn funding_sighting(
+        &self,
+        transaction_hash: &str,
+    ) -> Result<HvmRegistryExitSightingV1, hacash_wallet_core::WalletError> {
+        HvmRegistryExitChainV1::transaction_sighting(self, transaction_hash).await
+    }
+}
+
+/// THE FULL CIRCLE, through the production path, with the provider killed.
+///
+/// A real Agent Wallet opens a provider channel, pays the deposit into a real
+/// deployed contract in real blocks, adopts the channel **without asking the
+/// provider anything**, and then - with the provider's process aborted and its
+/// socket asserted dead - drives its own unilateral exit until the contract
+/// holds nothing and the owner has been paid from their own key.
+///
+/// # What is production here, and what is setup
+///
+/// Setup is the *provider's* side and nothing else: the Hub deploys the
+/// registry and co-signs the channel `init`, because that is what a provider
+/// does and there is no wallet-side story in which the user does it. The
+/// wallet's key is never handled by this test at any point: it is created
+/// inside the vault by `create_wallet` and every signature below comes out of
+/// the manager's own signing boundaries.
+///
+/// The hop this test exists to prove did not exist when the exit proof beside
+/// it was written. That one had to read the wallet's secret out of its own
+/// vault to fund, and had to write the adopted binding directly into state,
+/// because nothing shipped could do either. Both of those are now method calls
+/// on `AgentWalletManager`:
+///
+/// * `open_hvm_registry_channel`
+/// * `fund_hvm_registry_channel`
+/// * `adopt_hvm_registry_channel_from_chain`
+/// * `advance_hvm_registry_exit`
+///
+/// Nothing is broadcast. `testkit::sim::memchain` is an in-process chain on
+/// chain id 7.
+#[tokio::test]
+async fn a_wallet_opens_pays_and_walks_out_with_the_provider_deleted() {
+    let network = HvmLocalPilotNetwork::canonical();
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+    let mut chain = MemChain::new();
+    testkit::sim::integration::enable_default_vm_setup();
+    chain.set_chain_id(network.chain_id);
+    chain.set_height(protocol::upgrade::ONLINE_OPEN_HEIGHT);
+
+    let hub = Account::create_by("full-circle-hub").unwrap();
+    let miner = addr(&Account::create_by("full-circle-miner").unwrap());
+
+    let root = tempfile::tempdir().unwrap();
+    let mut manager = AgentWalletManager::open(root.path()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let created = manager
+        .create_wallet(
+            CreateAgentWallet {
+                passphrase: PASSPHRASE.into(),
+                network_mode: "testnet".into(),
+                node_url: "http://127.0.0.1:18081".into(),
+                // The wallet is pinned to the chain this test actually runs,
+                // and the open path refuses a node whose block 1 is not this.
+                block_one_fingerprint: Some(network.block_1_hash.clone()),
+                mainnet_pilot_acknowledgement: None,
+            },
+            now,
+        )
+        .unwrap();
+    let wallet_id: AgentWalletId = created.wallet_id.clone();
+    manager.unlock(&wallet_id, PASSPHRASE, now).unwrap();
+
+    chain.mint_hac(&addr(&hub), 30_000_000_000_000);
+    chain.mint_hac(
+        &Address::from_readable(&created.address).unwrap(),
+        30_000_000_000_000,
+    );
+
+    // ---- the provider's side: a real deployment and a real channel init ----
+    let deployment =
+        build_hvm_registry_pilot_deployment(&hub, &network, SETUP_FEE_ZHU, 100, GAS_MAX).unwrap();
+    let contract =
+        ContractAddress::from_addr(Address::from_readable(&deployment.contract_address).unwrap())
+            .unwrap();
+    confirm_wallet_bytes(
+        &mut chain,
+        miner,
+        &deployment.transaction,
+        TxOutput::ContractAddress(contract.clone()),
+    );
+    let deployment_height = chain.height();
+
+    // `init` is co-signed, so the wallet's key is needed for it and only for
+    // it. This is the provider's half of the setup and is the one place the
+    // test opens the vault; nothing on the path being proven does.
+    let left = {
+        let paths = manager.storage.paths(&wallet_id).unwrap();
+        let vault = crate::vault::AgentEncryptedVault::load(&paths.vault_path()).unwrap();
+        let secrets = vault.unlock(PASSPHRASE).unwrap();
+        hacash_wallet_core::account::WalletAccount::from_secret_hex(secrets.blockchain_secret_hex())
+            .unwrap()
+            .inner()
+            .clone()
+    };
+    assert_eq!(left.readable(), created.address);
+    let init = build_hvm_registry_pilot_channel_init(
+        &left,
+        &hub,
+        &deployment.contract_address,
+        &network,
+        &parameters(),
+        SETUP_FEE_ZHU,
+        101,
+        GAS_MAX,
+    )
+    .unwrap();
+    confirm_wallet_bytes(&mut chain, miner, &init, TxOutput::None);
+
+    // The channel description the provider publishes and the owner hands in.
+    let binding = HvmRegistryBindingV2 {
+        schema: l2_fast_pay_hub::hvm_registry::HVM_REGISTRY_BINDING_SCHEMA.into(),
+        settlement_profile: HPAY_REGISTRY_SETTLEMENT_PROFILE.into(),
+        network_mode: "testnet".into(),
+        chain_id: network.chain_id,
+        network_instance_id: network.network_instance_id.clone(),
+        contract_address: deployment.contract_address.clone(),
+        deployment_tx_hash: deployment.transaction.transaction_hash.clone(),
+        deployment_height,
+        bytecode_sha3: deployment.bytecode_sha3.clone(),
+        channel_id: CHANNEL_ID.into(),
+        reuse_version: 0,
+        left_address: created.address.clone(),
+        right_hub_address: hub.readable().to_owned(),
+        left_deposit_zhu: DEPOSIT_ZHU,
+        right_hub_deposit_zhu: 0,
+        challenge_blocks: CHALLENGE_BLOCKS,
+    };
+    binding.validate().expect("a reviewed-profile channel");
+
+    let view = MemChainExitView {
+        chain: RefCell::new(chain),
+        contract: contract.clone(),
+        binding: binding.clone(),
+        miner,
+        block_hashes: RefCell::new(HashMap::new()),
+        mempool: RefCell::new(Vec::new()),
+        submissions: RefCell::new(Vec::new()),
+        encoded_sizes: RefCell::new(Vec::new()),
+        stalled_registry_lease: RefCell::new(None),
+    };
+
+    // ---- HOP 1: the owner presses "open a channel with this provider" ----
+    let hub_directory = tempfile::tempdir().unwrap();
+    let (hub_url, hub_state, hub_server) = spawn_hub(&hub, &hub_directory).await;
+
+    // Before the press: nothing may fund, and the reason is the refund, not
+    // the chain.
+    let refused = manager
+        .hvm_registry_funding_authorization(&wallet_id, &view, now)
+        .await
+        .expect_err("no refund, no funding");
+    assert!(
+        matches!(
+            refused,
+            crate::error::AgentWalletError::RegistryOpenRefundNotCountersigned
+        ),
+        "unexpected refusal before the open: {refused}"
+    );
+
+    let bundle = manager
+        .open_hvm_registry_channel(&wallet_id, &hub_url, binding.clone(), &view, now)
+        .await
+        .expect("the provider countersigns the serial-1 full refund");
+    assert_eq!(bundle.initial_recovery_bill.serial, 1);
+    assert_eq!(
+        bundle.initial_recovery_bill.left_balance_zhu, DEPOSIT_ZHU,
+        "the bill this wallet now holds returns the entire deposit"
+    );
+    assert_eq!(bundle.initial_recovery_bill.hub_balance_zhu, 0);
+
+    // ---- HOP 2: the deposit ----
+    let owner_before_funding = view.balance_zhu(&created.address);
+    let pending = manager
+        .fund_hvm_registry_channel(&wallet_id, &view, now)
+        .await
+        .expect_err("the bytes are on the wire and not yet in a block");
+    assert!(
+        matches!(
+            pending,
+            crate::error::AgentWalletError::RegistryFundingNotConfirmed
+        ),
+        "unexpected refusal while funding was pending: {pending}"
+    );
+    assert_eq!(
+        view.submissions.borrow().len(),
+        1,
+        "exactly one funding transaction was put on the wire"
+    );
+    // Durable before the wire: the record exists while the transaction is
+    // still only in a mempool.
+    let stored = manager
+        .hvm_registry_channel_open(&wallet_id, now)
+        .unwrap()
+        .expect("the open record");
+    let funding_hash = stored
+        .funding()
+        .expect("funding is durable")
+        .transaction_hash()
+        .to_owned();
+    assert!(!stored.funding().unwrap().is_confirmed());
+
+    view.mine();
+    let funded = manager
+        .fund_hvm_registry_channel(&wallet_id, &view, now)
+        .await
+        .expect("the deposit is in a block");
+    assert!(funded.is_confirmed());
+    assert_eq!(funded.transaction_hash(), funding_hash);
+    assert_eq!(funded.amount_zhu(), DEPOSIT_ZHU);
+    assert_eq!(
+        view.submissions.borrow().len(),
+        1,
+        "pressing again must never sign a second transfer into one channel"
+    );
+    assert_eq!(
+        view.chain
+            .borrow()
+            .balance(&contract.to_addr())
+            .to_zhu_u64(),
+        Ok(DEPOSIT_ZHU),
+        "the deposit is inside the contract"
+    );
+    println!(
+        "  FUNDED: owner {} -> {} zhu, contract holds {} zhu, tx {}",
+        owner_before_funding,
+        view.balance_zhu(&created.address),
+        DEPOSIT_ZHU,
+        funding_hash
+    );
+
+    // A channel that has taken coin cannot be funded a second time by any
+    // route: the gate itself refuses, because the chain no longer shows the
+    // exact unfunded channel the refund is signed over.
+    let second = manager
+        .hvm_registry_funding_authorization(&wallet_id, &view, now)
+        .await
+        .expect_err("a funded channel is not fundable again");
+    assert!(
+        matches!(
+            second,
+            crate::error::AgentWalletError::RegistryOpenChainMismatch
+        ),
+        "unexpected refusal on a funded channel: {second}"
+    );
+
+    // ---- HOP 3: adoption, with the provider ALREADY dead ----
+    //
+    // This is the trap a reviewer drove: an honest countersignature, an honest
+    // deposit, and then a provider that vanishes before the wallet ever adopts.
+    // The chain would pay; the wallet had no path to it.
+    hub_server.abort();
+    drop(hub_state);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let dead_ask = build_hvm_registry_pilot_refund_countersign_request(
+        &left,
+        hub.readable(),
+        &deployment,
+        deployment_height,
+        &parameters(),
+        now,
+        now + 300,
+    )
+    .unwrap();
+    assert!(
+        ask_hub(&hub_url, &dead_ask).await.is_err(),
+        "this proof is worthless unless the provider is actually dead"
+    );
+
+    // A wallet is created with agent payments suspended and adoption requires
+    // it, so nothing has to be done here; this asserts it rather than assuming.
+    {
+        let (state_master, journal_key) = {
+            let session = manager.session(&wallet_id).unwrap();
+            (
+                zeroize::Zeroizing::new(*session.state_master),
+                zeroize::Zeroizing::new(*session.journal_key),
+            )
+        };
+        let state = manager
+            .load_verified_state(&wallet_id, &state_master, &journal_key)
+            .unwrap();
+        assert!(
+            state.payments_suspended,
+            "adoption requires agent payments suspended"
+        );
+    }
+    let adopted = manager
+        .adopt_hvm_registry_channel_from_chain(&wallet_id, &view, now)
+        .await
+        .expect("the wallet adopts its own funded channel from the chain alone");
+    assert_eq!(adopted.hub_address(), hub.readable());
+    assert_eq!(
+        adopted.recovery_bundle(),
+        &bundle,
+        "the adopted evidence is the bundle this wallet built and validated itself"
+    );
+    let kit = manager
+        .hvm_registry_exit_kit(&wallet_id)
+        .expect("the exit head was seeded in the same transition");
+    assert_eq!(kit.latest_bill.serial, 1);
+
+    // ---- HOP 4: the exit, already proven, now reachable ----
+    let before = view.balance_zhu(&created.address);
+    let mut passes = 0;
+    let mut fees;
+    let claimed = loop {
+        passes += 1;
+        assert!(passes < 60, "the exit did not finish");
+        let progress = manager
+            .advance_hvm_registry_exit(&wallet_id, &view, now)
+            .await
+            .expect("a pass of the owner's own exit");
+        fees = progress.network_fees_confirmed_zhu;
+        match progress.outcome.as_str() {
+            "complete" => {
+                break progress
+                    .claimed_zhu
+                    .expect("a complete exit names its payout");
+            }
+            "stepped" => {
+                if !view.mempool.borrow().is_empty() {
+                    view.mine();
+                }
+            }
+            "waiting" => {
+                if !view.mempool.borrow().is_empty() {
+                    view.mine();
+                    continue;
+                }
+                if view.settled() {
+                    continue;
+                }
+                let status = progress.channel_status.expect("waiting names the status");
+                let deadline = progress
+                    .deadline_height
+                    .expect("waiting names the deadline");
+                let height = view.chain.borrow().height();
+                if status == 3 && deadline > height {
+                    view.mine_empty_to(deadline);
+                    continue;
+                }
+                panic!(
+                    "the exit stalled: {:?}",
+                    progress.waiting_reason.unwrap_or_default()
+                );
+            }
+            other => panic!("unknown outcome {other}"),
+        }
+    };
+    assert_eq!(
+        claimed, DEPOSIT_ZHU,
+        "the exit pays this wallet its whole settled balance"
+    );
+
+    let after = view.balance_zhu(&created.address);
+    assert_eq!(
+        view.chain
+            .borrow()
+            .balance(&contract.to_addr())
+            .to_zhu_u64(),
+        Ok(0),
+        "the contract must hold nothing when the owner has walked out"
+    );
+    assert!(
+        after > before,
+        "the owner was not paid: {before} -> {after} zhu"
+    );
+    println!(
+        "  EXITED with the provider deleted: owner {before} -> {after} zhu (+{}), contract 0 zhu, \
+         confirmed fees {fees} zhu, {passes} passes",
+        after - before
+    );
+    println!(
+        "  FULL CIRCLE: open -> fund -> adopt (no provider) -> exit -> paid, all through \
+         AgentWalletManager."
+    );
+}

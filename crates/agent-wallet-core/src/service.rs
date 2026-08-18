@@ -39,6 +39,7 @@ mod connector;
 mod diagnostics;
 mod hvm;
 mod hvm_registry;
+mod hvm_registry_open;
 mod l2;
 mod payment;
 mod state;
@@ -76,6 +77,7 @@ pub use hvm_registry::{
     agent_registry_exit_transaction_ceiling_zhu,
 };
 pub use hvm_registry::{AgentHvmRegistryBinding, AgentHvmRegistryExitHead};
+pub use hvm_registry_open::{AgentHvmRegistryChannelOpen, AgentHvmRegistryCountersignedRefund};
 use l2::{AgentChannelCloseOperation, AgentChannelSetupOperation};
 pub use l2::{
     AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
@@ -237,6 +239,12 @@ struct AgentWalletState {
     /// intact; see [`AgentHvmRegistryExitHead`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hvm_registry_exit_head: Option<AgentHvmRegistryExitHead>,
+    /// The wallet's own half of a registry channel open: the left-signed
+    /// serial-1 full refund, and the Hub countersignature once this wallet has
+    /// checked it. Written before any funding may be built, and the only thing
+    /// [`AgentWalletManager::hvm_registry_funding_authorization`] will accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_registry_open: Option<AgentHvmRegistryChannelOpen>,
     agents: BTreeMap<String, AgentRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pairing_completion_outbox: BTreeMap<String, PairingCompletionOutboxEntry>,
@@ -711,6 +719,7 @@ impl AgentWalletManager {
             hvm_channel_binding: None,
             hvm_registry_binding: None,
             hvm_registry_exit_head: None,
+            hvm_registry_open: None,
             agents: BTreeMap::new(),
             pairing_completion_outbox: BTreeMap::new(),
             companion_security: None,

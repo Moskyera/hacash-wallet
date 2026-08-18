@@ -61,7 +61,8 @@ pub use service::{
 pub use service::{
     AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
     AgentChannelSetupReview, AgentCompanionPairingAttempt, AgentCompletedCompanionPairing,
-    AgentDesktopSessionAttempt, AgentHvmChannelBinding, AgentHvmRegistryBinding, AgentL2Binding,
+    AgentDesktopSessionAttempt, AgentHvmChannelBinding, AgentHvmRegistryBinding,
+    AgentHvmRegistryChannelOpen, AgentHvmRegistryCountersignedRefund, AgentL2Binding,
     AgentPairingAttemptBudget, AgentWalletManager, AgentWalletOverview, CreateAgentWallet,
     MAX_PAIRING_REQUEST_ATTEMPTS, UnlockedAgentWalletStatus,
     WITNESS_PENDING_OPERATION_STATUS_NAMES,

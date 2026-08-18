@@ -652,8 +652,14 @@ impl AgentTransactionSigner {
         {
             return Err(AgentWalletError::ApprovalCommitmentMismatch);
         }
-        hacash_wallet_core::require_address_for_network(approved.recipient(), &self.network_mode)
-            .map_err(|_| AgentWalletError::RecipientNotAllowed)?;
+        // Door two of two, at the signing boundary itself, because a check
+        // placed only where an intent is created is a check an operation
+        // restored from a durable record walks straight past.
+        hacash_wallet_core::require_agent_payment_recipient(
+            approved.recipient(),
+            &self.network_mode,
+        )
+        .map_err(|_| AgentWalletError::RecipientNotAllowed)?;
 
         let amount = approved.amount_units().to_decimal();
         let network_fee = approved.network_fee_units().to_decimal();
@@ -1104,6 +1110,227 @@ impl AgentTransactionSigner {
         safety_permit.checkpoint(false)?;
         Ok(signed)
     }
+
+    /// Left-sign the serial-1 full-refund bill that has to exist before this
+    /// wallet's money may enter a registry channel, and refuse to sign
+    /// anything else at open.
+    ///
+    /// # Why this signature is the one that matters most
+    ///
+    /// Every other signature this boundary makes spends something. This one
+    /// creates the user's only unaided way back out. Until it exists, no Agent
+    /// Wallet in this app can hold a provider channel at all: adoption needs a
+    /// serial-1 refund carrying *this wallet's own* left signature, that
+    /// signature can only be made at open, and nothing in `agent-wallet-core`
+    /// made one. The exit driver, proven on a real chain, had nothing to act
+    /// on for anybody.
+    ///
+    /// # What the key may not be used for
+    ///
+    /// * Any binding whose `left_address` is not this wallet. A refund bill is
+    ///   a claim on a specific channel; signing one for a channel this wallet
+    ///   is not the left party of gives away a signature for nothing.
+    /// * A binding that puts this wallet on both sides, or that carries a
+    ///   right-hub deposit the shared V2 profile does not fund.
+    /// * A binding for another network than the one this signer is unlocked
+    ///   for, or under a stale scope, epoch or expired unlock.
+    /// * **Any bill that is not the whole refund.** Serial 1, the entire left
+    ///   deposit on the left line, zero on the Hub line. This is checked here
+    ///   on the object that comes back out of the builder, not only on the
+    ///   inputs that went in, so a builder that started returning a partial
+    ///   refund would be refused by the boundary rather than signed by it.
+    ///
+    /// The bytes themselves are produced by
+    /// [`hacash_wallet_core::hvm_registry_open::build_left_signed_refund_request`],
+    /// which signs `HvmRegistryBillV2::signing_hash` - the same encoder both
+    /// parties use for every bill of this channel's life. There is no second
+    /// encoder here.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub(crate) fn sign_exact_registry_channel_open(
+        &self,
+        request: AgentRegistryChannelOpenSigningRequest<'_>,
+        safety_permit: &AgentSafetyPermit,
+        now: u64,
+    ) -> AgentWalletResult<l2_fast_pay_hub::hvm_registry::HvmRegistryRefundCountersignRequestV2>
+    {
+        safety_permit.checkpoint(false)?;
+        if request.wallet_scope != &self.wallet_scope
+            || request.network_mode != self.network_mode
+            || request.signer_epoch != self.signer_epoch
+            || now >= self.unlock_expires_at
+            || now == 0
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+
+        let binding = request.binding;
+        if binding.network_mode != self.network_mode
+            || binding.left_address != self.address
+            || binding.right_hub_address == self.address
+            || binding.left_deposit_zhu == 0
+            || binding.right_hub_deposit_zhu != 0
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        binding
+            .validate()
+            .map_err(|_| AgentWalletError::SigningBlocked)?;
+
+        safety_permit.checkpoint(false)?;
+        let encoded = Zeroizing::new(hex::encode(self.secret_key.as_slice()));
+        let account = WalletAccount::from_secret_hex(&encoded)
+            .map_err(|_| AgentWalletError::SigningBlocked)?;
+        if account.address() != self.address {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        let ask = hacash_wallet_core::hvm_registry_open::build_left_signed_refund_request(
+            account.inner(),
+            binding.clone(),
+            now,
+        )
+        .map_err(|_| AgentWalletError::SigningBlocked)?;
+
+        // Read back what was actually signed. The builder already refuses
+        // anything but the full refund; this is the boundary refusing to
+        // delegate that question.
+        let bill = &ask.left_signed_refund_bill;
+        if ask.binding != *binding
+            || bill.serial != 1
+            || bill.left_balance_zhu != binding.left_deposit_zhu
+            || bill.hub_balance_zhu != 0
+            || !bill.hub_signature_hex.is_empty()
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        bill.validate_left_signed(binding)
+            .map_err(|_| AgentWalletError::SigningBlocked)?;
+        safety_permit.checkpoint(false)?;
+        Ok(ask)
+    }
+
+    /// Sign the exact deposit transfer that funds a registry channel.
+    ///
+    /// # Why this is a separate boundary rather than the ordinary send path
+    ///
+    /// Because it is the one transfer in this wallet whose *destination is a
+    /// contract*, and the ordinary agent payment path is now forbidden to
+    /// build one at all (see `super::service::payment`). Funding a channel is
+    /// not a payment to a person; it is the act of putting principal somewhere
+    /// only a countersigned refund can get it back out of, and the thing that
+    /// makes it safe is not the signature but what had to be true before this
+    /// function could be called.
+    ///
+    /// # What cannot be substituted here
+    ///
+    /// Not the destination, not the amount, not the chain. Every one of them
+    /// is read out of the countersigned bundle, and the permission the caller
+    /// must hand in - `HvmRegistryFundingAuthorizationV1` - has private
+    /// fields, no `Deserialize` and exactly one constructor, which refuses
+    /// unless the wallet's own pinned fullnode has just confirmed that the
+    /// contract at that address is the reviewed registry, on this wallet's own
+    /// chain, carrying the exact unfunded channel the refund is signed over.
+    /// A caller with a contract address and an amount cannot reach this.
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    pub(crate) fn sign_exact_registry_funding(
+        &self,
+        request: AgentRegistryFundingSigningRequest<'_>,
+        safety_permit: &AgentSafetyPermit,
+        now: u64,
+    ) -> AgentWalletResult<
+        l2_fast_pay_hub::hvm_registry_watchtower::SignedHvmRegistryFundingTransactionV2,
+    > {
+        safety_permit.checkpoint(false)?;
+        if request.wallet_scope != &self.wallet_scope
+            || request.network_mode != self.network_mode
+            || request.signer_epoch != self.signer_epoch
+            || now >= self.unlock_expires_at
+            || now == 0
+            || request.network_fee_zhu == 0
+            || request.gas_max == 0
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+
+        let binding = &request.bundle.binding;
+        if binding.network_mode != self.network_mode
+            || binding.left_address != self.address
+            || binding.right_hub_address == self.address
+            || binding.left_deposit_zhu == 0
+            || binding.right_hub_deposit_zhu != 0
+            || request.authorization.left_address() != self.address
+            || request.authorization.amount_zhu() != binding.left_deposit_zhu
+            || request.authorization.contract_address() != binding.contract_address
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        binding
+            .validate()
+            .map_err(|_| AgentWalletError::SigningBlocked)?;
+
+        safety_permit.checkpoint(false)?;
+        let encoded = Zeroizing::new(hex::encode(self.secret_key.as_slice()));
+        let account = WalletAccount::from_secret_hex(&encoded)
+            .map_err(|_| AgentWalletError::SigningBlocked)?;
+        if account.address() != self.address {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        let signed = hacash_wallet_core::hvm_registry_open::build_registry_funding_transaction(
+            account.inner(),
+            request.authorization,
+            request.bundle,
+            request.network_fee_zhu,
+            request.timestamp,
+            request.gas_max,
+        )
+        .map_err(|_| AgentWalletError::SigningBlocked)?;
+
+        // Read back what was actually signed, through a reader that shares no
+        // line of code with the builder.
+        if signed.contract_address != binding.contract_address
+            || signed.amount_zhu != binding.left_deposit_zhu
+        {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        l2_fast_pay_hub::hvm_registry_watchtower::read_exact_registry_funding_transaction(
+            &signed.signed_transaction_hex,
+            binding,
+        )
+        .map_err(|_| AgentWalletError::SigningBlocked)?;
+        safety_permit.checkpoint(false)?;
+        Ok(signed)
+    }
+}
+
+/// Everything the funding signer is allowed to be told.
+///
+/// The authorization is the load-bearing field, and it is borrowed rather than
+/// owned for the same reason the exit's kit is: a caller cannot construct one,
+/// so being able to name the type at this call site is itself the proof that
+/// the chain check ran.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub(crate) struct AgentRegistryFundingSigningRequest<'a> {
+    pub(crate) wallet_scope: &'a WalletScope,
+    pub(crate) network_mode: &'a str,
+    pub(crate) signer_epoch: u64,
+    pub(crate) authorization:
+        &'a hacash_wallet_core::hvm_registry_open::HvmRegistryFundingAuthorizationV1,
+    pub(crate) bundle: &'a l2_fast_pay_hub::hvm_registry::HvmRegistryRecoveryBundleV2,
+    pub(crate) network_fee_zhu: u64,
+    pub(crate) timestamp: u64,
+    pub(crate) gas_max: u8,
+}
+
+/// Everything the channel-open signer is allowed to be told.
+///
+/// The binding is borrowed and is the wallet's own derivation, not a Hub's
+/// proposal: the whole point of the open exchange is that the Hub sees the
+/// bill the wallet built and can only add 97 bytes to it.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub(crate) struct AgentRegistryChannelOpenSigningRequest<'a> {
+    pub(crate) wallet_scope: &'a WalletScope,
+    pub(crate) network_mode: &'a str,
+    pub(crate) signer_epoch: u64,
+    pub(crate) binding: &'a l2_fast_pay_hub::hvm_registry::HvmRegistryBindingV2,
 }
 
 /// Everything the exit signer is allowed to be told, and nothing it is allowed

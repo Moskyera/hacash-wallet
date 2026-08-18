@@ -892,6 +892,7 @@ fn daily_policy_counts_total_debit_of_pending_reservations() {
         hvm_channel_binding: None,
         hvm_registry_binding: None,
         hvm_registry_exit_head: None,
+        hvm_registry_open: None,
         agents: BTreeMap::new(),
         pairing_completion_outbox: BTreeMap::new(),
         companion_security: None,

@@ -76,6 +76,24 @@ export const DESKTOP_CONTROLS = {
    */
   replace_the_paired_phone: "Replace the paired phone",
   /**
+   * Opens an HVM registry channel with a provider, and funds it.
+   *
+   * The press signs this wallet's half of a receipt returning the whole
+   * deposit, asks the provider for its half, verifies what comes back against
+   * the wallet's own record of the channel, and saves it. It sends no money.
+   * What it does do is commit this wallet to this exact channel and this exact
+   * deposit for good, which is why it sits in `irreversibleActions.ts` beside
+   * the controls that spend money rather than beside the ones that can be
+   * pressed twice harmlessly.
+   *
+   * Funding follows that receipt and can never precede it: the only permission
+   * to fund in this tree is
+   * `AgentWalletManager::hvm_registry_funding_authorization`
+   * (crates/agent-wallet-core/src/service/hvm_registry_open.rs), whose sole
+   * constructor validates a countersigned refund.
+   */
+  open_provider_channel: "Open a channel with this provider",
+  /**
    * Starts a unilateral close of the HVM registry channel: challenge, then
    * finalize, then the Action 14 payout, all signed by the owner's own key and
    * sent through the owner's own fullnode. The provider is not asked and

@@ -4,6 +4,7 @@ import {
   type SealedAcknowledgement,
 } from "./backupWarning";
 import type { AgentHvmRegistryExitProgress, AgentHvmRegistryExitStatus } from "./registryExit";
+import type { AgentHvmRegistryOpenResult, AgentHvmRegistryOpenStatus } from "./registryOpen";
 
 export type AgentWalletRegistryEntry = {
   wallet_id: string;
@@ -1213,6 +1214,38 @@ export const agentWalletApi = {
       walletId,
       operationId,
       decision,
+    }),
+  /**
+   * What this wallet can see about opening a channel with one provider,
+   * before anything is asked of that provider and before anything is signed.
+   */
+  hvmRegistryOpenStatus: (walletId: string, hubUrl: string, depositZhu: number) =>
+    invoke<AgentHvmRegistryOpenStatus>("agent_wallet_hvm_registry_open_status", {
+      walletId,
+      hubUrl,
+      depositZhu,
+    }),
+  /**
+   * Opens and funds one provider channel.
+   *
+   * The order is the whole point and it is enforced in Rust, not here: the
+   * provider countersigns a receipt returning the entire deposit, this wallet
+   * validates that signature against its own binding, the countersigned bundle
+   * is stored durably, and only then is funding built at all. A provider that
+   * refuses leaves nothing behind, so a rejected promise from this call means
+   * no money moved.
+   */
+  openHvmRegistryChannel: (
+    walletId: string,
+    hubUrl: string,
+    binding: unknown,
+    depositZhu: number,
+  ) =>
+    invoke<AgentHvmRegistryOpenResult>("agent_wallet_open_hvm_registry_channel", {
+      walletId,
+      hubUrl,
+      binding,
+      depositZhu,
     }),
   /**
    * What the owner's own fullnode says about walking out of the registry
