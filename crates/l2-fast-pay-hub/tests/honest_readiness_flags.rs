@@ -525,7 +525,7 @@ async fn l1_dispute_path_flag_is_true_only_when_the_node_proves_a_verified_exit(
         readiness
             .blockers
             .iter()
-            .any(|blocker| blocker == "wallet_cannot_build_a_unilateral_exit_without_the_hub"),
+            .any(|blocker| blocker == "no_watcher_answers_for_an_offline_owner"),
         "and the document must say which half is missing, got {:?}",
         readiness.blockers
     );
@@ -903,15 +903,15 @@ mod anchor {
         // only way out of a channel runs through the Hub.
         assert!(
             !readiness.trustless_finality,
-            "a live anchor is one half; trustless finality also needs an exit \
-             the user can drive, got {:?}",
+            "a live anchor is one half; the exit the user drives ships now, and finality still needs \
+             somebody answering while they sleep, got {:?}",
             readiness.blockers
         );
         assert!(
             readiness
                 .blockers
                 .iter()
-                .any(|it| it == "wallet_cannot_build_a_unilateral_exit_without_the_hub"),
+                .any(|it| it == "no_watcher_answers_for_an_offline_owner"),
             "and the document must say so, got {:?}",
             readiness.blockers
         );
