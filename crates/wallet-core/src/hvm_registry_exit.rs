@@ -266,6 +266,22 @@ pub fn channel_lease_blocks(snapshot: &HvmRegistryLiveSnapshotV2) -> u64 {
 /// 3. the lease, because starting an exit that outlives its own storage keys
 ///    destroys the deposit;
 /// 4. only then, what the chain state actually calls for.
+/// # Precondition the signature cannot express
+///
+/// This takes no signer, so it cannot check that the caller holds
+/// `kit.binding.left_address`. That is deliberate rather than missing: it
+/// decides and builds nothing, and the left-party rule is enforced where a key
+/// is actually used, inside `build_signed_hvm_registry_call_transaction` under
+/// [`HvmRegistryCallerRole::ChannelLeft`].
+///
+/// It is safe today because the only production caller,
+/// `AgentWalletManager::advance_hvm_registry_exit`, takes its kit from
+/// `hvm_registry_exit_kit` - the verified binding and verified head bill out of
+/// the wallet's own encrypted state - so a kit for somebody else's channel
+/// cannot reach here. A caller that builds a kit from elsewhere would get a
+/// complete, actionable-looking plan and fail only at signing, which on the one
+/// screen a frightened person reads is worse than refusing up front. If a
+/// second caller ever appears, take the signer here.
 pub fn plan_user_exit_step(
     kit: &HvmRegistryExitKitV1,
     snapshot: &HvmRegistryLiveSnapshotV2,
