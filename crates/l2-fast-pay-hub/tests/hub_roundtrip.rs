@@ -297,14 +297,17 @@ async fn mainnet_pilot_blocks_new_money_without_external_anchor_but_keeps_close_
     );
     // Served over HTTP, so this is what a wallet actually reads. The generic
     // blocker above does not say whose side the gap is on; this one does, and
-    // it is the honest answer: the chain would permit the exit, and this
-    // software cannot put one in a user's hands.
+    // it is the honest answer. It used to be that this software could not put
+    // an exit in a user's hands. It can now - the driver ships and is proven
+    // on chain with the provider dead - so the named gap moved to the half
+    // that is still open: a provider can settle an old receipt while the owner
+    // is offline, and nothing answers the window for them.
     assert!(
         readiness["blockers"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|value| value == "wallet_cannot_build_a_unilateral_exit_without_the_hub"),
+            .any(|value| value == "no_watcher_answers_for_an_offline_owner"),
         "{readiness}"
     );
     assert_eq!(readiness["unilateral_l1_enforceable"], false, "{readiness}");
