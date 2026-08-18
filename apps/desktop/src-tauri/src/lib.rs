@@ -148,6 +148,7 @@ pub fn run() {
             wallet_tauri_common::agent_commands::agent_wallet_open_hvm_registry_channel,
             wallet_tauri_common::agent_commands::agent_wallet_fund_hvm_registry_channel,
             wallet_tauri_common::agent_commands::agent_wallet_adopt_hvm_registry_channel,
+            wallet_tauri_common::agent_commands::agent_wallet_establish_hvm_registry_channel,
             wallet_tauri_common::agent_commands::agent_wallet_hvm_registry_exit_status,
             wallet_tauri_common::agent_commands::agent_wallet_start_hvm_registry_exit,
             wallet_tauri_common::agent_commands::agent_wallet_list_pending_approvals,

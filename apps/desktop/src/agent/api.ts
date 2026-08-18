@@ -1252,6 +1252,34 @@ export const agentWalletApi = {
       depositZhu,
     }),
   /**
+   * Takes a channel from nothing to usable in one press, and continues from
+   * wherever it stopped if pressed again.
+   *
+   * The ordering is decided in Rust from this wallet's own durable record,
+   * not here and not from these arguments: ask the provider for a
+   * countersigned refund, sign the deposit once, wait for it to reach a
+   * block, then adopt from the chain alone. A resumed press never goes back
+   * to a provider that has already countersigned, which is the hop that
+   * matters, because on the day someone presses twice the provider is
+   * usually the thing that stopped answering.
+   *
+   * There is exactly one wait nothing can shorten: the deposit reaching a
+   * block. The result reports that as progress rather than as an error, so a
+   * screen can say what it is waiting for instead of looking broken.
+   */
+  establishHvmRegistryChannel: (
+    walletId: string,
+    hubUrl: string,
+    binding: unknown,
+    depositZhu: number,
+  ) =>
+    invoke<unknown>("agent_wallet_establish_hvm_registry_channel", {
+      walletId,
+      hubUrl,
+      binding,
+      depositZhu,
+    }),
+  /**
    * Puts the deposit into the channel the countersigned receipt already covers.
    *
    * The destination, the amount and the chain are re-derived in Rust from that
