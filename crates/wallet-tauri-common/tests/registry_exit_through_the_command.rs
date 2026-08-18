@@ -80,6 +80,10 @@ use testkit::sim::memchain::{MemChain, TxOutput};
 use tokio::sync::{mpsc, oneshot};
 use vm::ContractAddress;
 use vm::value::Value as VmValue;
+/// Far enough past the channel's opening that its storage lease no longer
+/// covers a whole exit, so the driver has to renew before it may start.
+const HVM_REGISTRY_EXIT_LEASE_DRAIN_BLOCKS: u64 = 9_980;
+
 use wallet_tauri_common::agent_commands::{
     drive_hvm_registry_exit, establish_hvm_registry_channel, start_hvm_registry_exit,
 };
@@ -1119,6 +1123,23 @@ async fn the_command_an_owner_presses_walks_them_out_with_the_provider_dead() {
             chain.failures().await.is_empty(),
             "nothing should have failed on chain before the exit is driven"
         );
+
+        // DRAIN THE LEASE FIRST, so the exit has to rescue it before it can
+        // start. This is the one path in the system that destroys a deposit
+        // outright: if the storage keys lapse entirely, the record describing
+        // the money is gone and nobody - not the owner, not the provider, not
+        // a stranger - can reach what the contract still holds.
+        //
+        // The driver is supposed to notice and renew the half that is short
+        // before it will begin, and the halves are separate calls: six shared
+        // globals and twelve channel keys. Renewing the wrong one is a fee
+        // spent to stand still. Nothing had ever driven that against a chain,
+        // so the lease is burned down here by mining rather than asserted
+        // about, and the exit below has to come back through it.
+        let drain_to = chain.height().await + HVM_REGISTRY_EXIT_LEASE_DRAIN_BLOCKS;
+        chain.mine_empty_to(drain_to).await;
+        println!("  LEASE DRAINED: chain at {}", chain.height().await);
+
         let progress = drive_hvm_registry_exit(&mut manager, &wallet_id, &overview, &binding, now)
             .await
             .expect("the half behind the gate drives with the provider dead");
@@ -1140,6 +1161,22 @@ async fn the_command_an_owner_presses_walks_them_out_with_the_provider_dead() {
             chain.settled().await,
             "driving past the gate must settle the channel, not report progress it did not make"
         );
+        // The lease rescue is the reason the drain above exists, so it is
+        // asserted rather than printed. Both halves, because they are separate
+        // calls against separate keys and renewing only one leaves the exit
+        // running out of record halfway - which is strictly worse than never
+        // starting, since the fees are spent and the deposit is gone for good.
+        let steps = progress["steps"]
+            .as_array()
+            .expect("the progress report lists the steps it took");
+        for required in ["renew_channel_lease", "renew_registry_lease"] {
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step["step"] == required && step["phase"] == "confirmed"),
+                "a short lease must be renewed and confirmed before the exit completes,                  and {required} is missing from {steps:?}"
+            );
+        }
         // Judged by the chain, not by the progress object: a report that says
         // it stepped is the thing under test, so it cannot also be the
         // evidence. `failures` is empty means every transaction this put on
