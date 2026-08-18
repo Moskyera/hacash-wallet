@@ -904,81 +904,6 @@ fn require_role_may_build_this_call(
     )))
 }
 
-#[cfg(test)]
-mod responder_scope_tests {
-    use super::*;
-
-    fn source(call: &str) -> String {
-        format!(
-            "lib Registry = 1: RANtcryCFFBJiiopsSTeJm
-var result = Registry.{call}
-assert result == 0
-end"
-        )
-    }
-
-    #[test]
-    fn a_responder_may_answer_and_settle_and_pay_rent() {
-        for call in [
-            "respond(1ABC, 2, 900000, 100000, aa, bb)",
-            "finalize(1ABC)",
-            "renew_channel(1ABC, 150)",
-            "renew_registry(150)",
-        ] {
-            require_role_may_build_this_call(
-                HvmRegistryCallerRole::ThirdPartyFeePayer,
-                &source(call),
-            )
-            .unwrap_or_else(|error| panic!("a responder must be able to build {call}: {error}"));
-        }
-    }
-
-    /// The refusal this scope exists for.
-    ///
-    /// `challenge` is the one call in the set that STARTS an arbitration
-    /// window rather than answering one, and nothing in the responder's
-    /// safety argument covers it. A stranger handed a stale but fully signed
-    /// bill could otherwise open a window against the channel's own party.
-    #[test]
-    fn a_responder_may_not_open_an_arbitration_window() {
-        let error = require_role_may_build_this_call(
-            HvmRegistryCallerRole::ThirdPartyFeePayer,
-            &source("challenge(1ABC, 2, 900000, 100000, aa, bb)"),
-        )
-        .expect_err("a responder must not be able to open a challenge");
-        assert!(
-            error.to_string().contains("fee-paying responder"),
-            "the refusal must name the role that is being refused: {error}"
-        );
-    }
-
-    /// The scope is the responder's alone. Widening it to the other two roles
-    /// would be a different change with a different argument, and this fails
-    /// if somebody makes it by accident.
-    #[test]
-    fn the_hub_and_the_channel_party_are_not_narrowed_by_this() {
-        for role in [
-            HvmRegistryCallerRole::Hub,
-            HvmRegistryCallerRole::ChannelLeft,
-        ] {
-            require_role_may_build_this_call(role, &source("challenge(1ABC, 2, 9, 1, aa, bb)"))
-                .expect("only the responder role is scoped here");
-        }
-    }
-
-    /// A source that carries no recognisable call line is refused rather than
-    /// waved through. `find_map` returning `None` must not read as permission.
-    #[test]
-    fn a_source_with_no_call_line_is_refused_not_ignored() {
-        require_role_may_build_this_call(
-            HvmRegistryCallerRole::ThirdPartyFeePayer,
-            "lib Registry = 1: RANtcryCFFBJiiopsSTeJm
-end",
-        )
-        .expect_err("absence of a call line is not permission");
-    }
-}
-
 pub fn build_signed_hvm_registry_call_transaction(
     signer: &Account,
     binding: &HvmRegistryBindingV2,
@@ -2493,5 +2418,80 @@ mod tests {
             user_key_can_build_registry_exit_transactions(),
             "the builders are role-aware, so the probe must report true"
         );
+    }
+}
+
+#[cfg(test)]
+mod responder_scope_tests {
+    use super::*;
+
+    fn source(call: &str) -> String {
+        format!(
+            "lib Registry = 1: RANtcryCFFBJiiopsSTeJm
+var result = Registry.{call}
+assert result == 0
+end"
+        )
+    }
+
+    #[test]
+    fn a_responder_may_answer_and_settle_and_pay_rent() {
+        for call in [
+            "respond(1ABC, 2, 900000, 100000, aa, bb)",
+            "finalize(1ABC)",
+            "renew_channel(1ABC, 150)",
+            "renew_registry(150)",
+        ] {
+            require_role_may_build_this_call(
+                HvmRegistryCallerRole::ThirdPartyFeePayer,
+                &source(call),
+            )
+            .unwrap_or_else(|error| panic!("a responder must be able to build {call}: {error}"));
+        }
+    }
+
+    /// The refusal this scope exists for.
+    ///
+    /// `challenge` is the one call in the set that STARTS an arbitration
+    /// window rather than answering one, and nothing in the responder's
+    /// safety argument covers it. A stranger handed a stale but fully signed
+    /// bill could otherwise open a window against the channel's own party.
+    #[test]
+    fn a_responder_may_not_open_an_arbitration_window() {
+        let error = require_role_may_build_this_call(
+            HvmRegistryCallerRole::ThirdPartyFeePayer,
+            &source("challenge(1ABC, 2, 900000, 100000, aa, bb)"),
+        )
+        .expect_err("a responder must not be able to open a challenge");
+        assert!(
+            error.to_string().contains("fee-paying responder"),
+            "the refusal must name the role that is being refused: {error}"
+        );
+    }
+
+    /// The scope is the responder's alone. Widening it to the other two roles
+    /// would be a different change with a different argument, and this fails
+    /// if somebody makes it by accident.
+    #[test]
+    fn the_hub_and_the_channel_party_are_not_narrowed_by_this() {
+        for role in [
+            HvmRegistryCallerRole::Hub,
+            HvmRegistryCallerRole::ChannelLeft,
+        ] {
+            require_role_may_build_this_call(role, &source("challenge(1ABC, 2, 9, 1, aa, bb)"))
+                .expect("only the responder role is scoped here");
+        }
+    }
+
+    /// A source that carries no recognisable call line is refused rather than
+    /// waved through. `find_map` returning `None` must not read as permission.
+    #[test]
+    fn a_source_with_no_call_line_is_refused_not_ignored() {
+        require_role_may_build_this_call(
+            HvmRegistryCallerRole::ThirdPartyFeePayer,
+            "lib Registry = 1: RANtcryCFFBJiiopsSTeJm
+end",
+        )
+        .expect_err("absence of a call line is not permission");
     }
 }
