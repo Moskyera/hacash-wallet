@@ -3661,11 +3661,19 @@ mod tests {
         let measured = l2_fast_pay_hub::readiness::measure_user_side_unilateral_exit_ready();
         let status = super::exit_status_json(measured, 0, (None, String::new()), Vec::new());
         assert_eq!(status["driver_ready"], serde_json::json!(measured));
-        // Today that measurement is false, because the only builders in this
-        // workspace refuse every signer that is not the Hub. If this assertion
-        // ever fails, the exit became buildable and this command's refusal is
-        // the thing that now needs replacing with a real driver.
-        assert!(!measured, "the user-side exit builders became available");
+        // This assertion used to read `!measured`, and its note said that if it
+        // ever failed, the exit had become buildable and the refusal was the
+        // thing needing replacement. That is exactly what happened: the
+        // builders are role aware, the driver ships, and the refusal is gone.
+        // So it now asserts the other direction. The property this test exists
+        // for is unchanged and is the line above and the lines below - the
+        // rendered gate is the measurement, never a literal - and pinning the
+        // measurement's value in both eras is what makes a silent flip back to
+        // a constant fail here rather than pass quietly.
+        assert!(
+            measured,
+            "the user-side exit builders are available and the driver ships"
+        );
         let source = include_str!("agent_commands.rs");
         assert!(
             source.contains(
