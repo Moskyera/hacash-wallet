@@ -394,10 +394,23 @@ fn cargo_resolved_features(package: &str, arguments: &[&str]) -> Option<BTreeSet
         .args(arguments)
         .output()
         .expect("cargo tree runs");
+    // A resolution that cannot even be attempted offline is not evidence
+    // about features, so it must not read as one. CI passes --offline with a
+    // cache built from the features CI actually compiles, and the CONTROL arm
+    // of this test deliberately asks for a feature no shipped build turns on,
+    // so its dependencies are legitimately absent from that cache and cargo
+    // cannot resolve it at all. `None` says "no answer" rather than "feature
+    // off", and the caller already treats those differently. The
+    // shipped-build arms still have to resolve, because their dependencies
+    // are exactly what CI built.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && stderr.contains("--offline was specified") {
+        return None;
+    }
     assert!(
         output.status.success(),
-        "cargo tree {arguments:?} failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        "cargo tree {arguments:?} failed:
+{stderr}"
     );
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     let marker = format!("{package} v");
@@ -661,16 +674,26 @@ fn cargo_itself_resolves_the_seam_feature_off_in_every_build_that_ships() {
     // out a column of silent all-clears below it. `wallet-tauri-common` is the
     // crate whose own test-only feature forwards to the seam's, so this is a
     // resolution that really does turn it on, measured by the same function.
-    let control = cargo_resolved_features(
+    // `None` means cargo could not resolve at all, which offline it cannot:
+    // this arm asks for a feature no shipped build turns on, so its
+    // dependencies are absent from a cache built from what CI compiles. That
+    // is a missing answer, not a clean one, so the control is skipped rather
+    // than read as a pass - and it says so out loud, because a silently
+    // skipped control is exactly the all-clear this test exists to refuse.
+    match cargo_resolved_features(
         "agent-wallet-core",
         &["-p", "wallet-tauri-common", "--features", &seam],
-    )
-    .expect("the control resolution contains agent-wallet-core");
-    assert!(
-        control.contains(&seam),
-        "the detector cannot see `{seam}` even in a resolution that turns it on, so every \
-         assertion below says nothing. It saw: {control:#?}"
-    );
+    ) {
+        Some(control) => assert!(
+            control.contains(&seam),
+            "the detector cannot see `{seam}` even where it is turned on, so every \
+             assertion below says nothing. It saw: {control:#?}"
+        ),
+        None => println!(
+            "  CONTROL SKIPPED: cargo cannot resolve `{seam}` offline, so this run shows \
+             the shipped builds have it off without showing the detector could see it on"
+        ),
+    }
 
     // Every workspace member, not two app manifests named here.
     //
