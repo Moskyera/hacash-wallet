@@ -668,9 +668,15 @@ mod tests {
             Box::new(|value| value.created_unix += 1),
             Box::new(|value| value.expires_unix += 1),
             Box::new(|value| {
+                // Flip the low bit rather than writing a fixed "00": a
+                // signature that already begins "00" would be left untouched,
+                // the mutation would be no mutation, and this row would assert
+                // nothing for one signature in 256.
+                let first = u8::from_str_radix(&value.payer_authorization_signature_hex[0..2], 16)
+                    .expect("a signature is hex");
                 value
                     .payer_authorization_signature_hex
-                    .replace_range(0..2, "00")
+                    .replace_range(0..2, &format!("{:02x}", first ^ 0x01));
             }),
         ];
         for mutate in mutations {

@@ -846,7 +846,17 @@ mod tests {
             Err(CompanionError::Expired)
         );
         let mut bad_signature = signed;
-        bad_signature.signature_hex.replace_range(0..2, "00");
+        // Corrupt the first byte to something it is not, rather than to a fixed
+        // value. Writing "00" over a signature that already begins "00" changes
+        // nothing, verify succeeds, and this assertion fails for one signature
+        // in 256 - which is what happened in CI rather than in anyone's local
+        // run. Flipping the low bit is guaranteed to differ from whatever is
+        // there.
+        let first =
+            u8::from_str_radix(&bad_signature.signature_hex[0..2], 16).expect("a signature is hex");
+        bad_signature
+            .signature_hex
+            .replace_range(0..2, &format!("{:02x}", first ^ 0x01));
         assert_eq!(
             bad_signature.verify(&commitment, &registry, &ReplayGuard::new(), 1_002),
             Err(CompanionError::InvalidSignature)
