@@ -799,11 +799,36 @@ async fn one_press_opens_funds_and_adopts_and_a_resumed_press_needs_no_provider(
     // flips this test states the new truth rather than having to be edited.
     let exit = start_hvm_registry_exit(&mut wallet.manager, &wallet.wallet_id, now).await;
     if l2_fast_pay_hub::readiness::measure_user_side_unilateral_exit_ready() {
-        let progress = exit.expect("a pass of the owner's own exit");
+        // The gate is open now, so the command no longer refuses: it builds the
+        // chain view and asks the planner, which is the hop that had never run.
+        // It gets as far as this fixture can carry it and stops on the
+        // fixture's own limit rather than on anything about the wallet.
+        //
+        // WHY THIS FIXTURE CANNOT FINISH AN EXIT, and it is worth writing down
+        // so nobody reads this as a product defect. The eighteen storage
+        // entries this fullnode serves are constants in `snapshot()`, so it can
+        // describe exactly one phase of a channel's life per run. The exit
+        // crosses two: adoption demands `minimum_recover_blocks == 0` on every
+        // key, and the exit planner demands at least one block of recovery
+        // credit on every key. No pair of literals satisfies both. Only rent
+        // accruing over real blocks does, which is a chain behaviour and not a
+        // number - so this needs a MemChain behind these routes, and seeding
+        // one needs a channel `init` co-signed by the wallet's own key.
+        //
+        // The exit itself is proven where a real chain exists:
+        // `a_wallet_opens_pays_and_walks_out_with_the_provider_deleted` in
+        // agent-wallet-core drives open, fund, adopt with the provider deleted,
+        // exit and payout on a MemChain.
+        let refusal = exit.expect_err("this fixture cannot carry an exit to completion");
         assert!(
-            progress.get("outcome").is_some(),
-            "a driven exit reports what it did"
+            refusal.contains("live HVM registry evidence does not match the approved binding"),
+            "the stop must be the fixture's constant storage entries, not the gate              or the wallet: {refusal}"
         );
+        assert!(
+            !refusal.contains("This wallet cannot yet send a channel exit for you"),
+            "the gate is open now and must not be what stops this: {refusal}"
+        );
+        println!("  EXIT ATTEMPTED, STOPPED BY THE FIXTURE: {refusal}");
     } else {
         let refusal = exit.expect_err("the exit gate is the project's own measurement");
         assert!(
