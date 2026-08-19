@@ -10,7 +10,7 @@ node. Where something is an inference it says so.
 
 `GET /v1/readiness/mainnet` on a running Hub is the machine-readable answer.
 It is evaluated by `MainnetReadinessV1::evaluate`
-(`crates/l2-fast-pay-hub/src/readiness.rs:213-400`). Ask it rather than trusting
+(`crates/l2-fast-pay-hub/src/readiness.rs:213-425`). Ask it rather than trusting
 a checklist.
 
 The measurement that matters is a mainnet-profile Hub pointed at the real
@@ -169,7 +169,7 @@ wallet gating on one could never be un-bricked by the guarantee arriving.
 gating on `HubHealth` for one is a compile error.
 
 `HubHardGuarantees::production_mainnet_ready` still exists as the Hub's internal
-aggregate measurement (`readiness.rs:1801-1807`); it is simply no longer exported
+aggregate measurement (`readiness.rs:1857-1863`); it is simply no longer exported
 on the liveness endpoint.
 
 ### 1. Unilateral L1 dispute path
