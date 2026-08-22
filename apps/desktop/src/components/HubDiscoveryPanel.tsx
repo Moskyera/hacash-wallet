@@ -70,7 +70,9 @@ export default function HubDiscoveryPanel({
         {scanning ? "Scanning…" : "Discover hubs"}
       </button>
       <p className="muted small" style={{ marginTop: "0.5rem" }}>
-        Scans known Fast Pay providers and your configured hub URL.
+        Checks the hub URL you entered above, plus a local development hub. There
+        is no public directory of providers yet, so paste the address your
+        provider gave you.
       </p>
       {report && (
         <div className="hub-discovery-list">
