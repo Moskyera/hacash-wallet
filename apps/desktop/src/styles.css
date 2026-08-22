@@ -1514,3 +1514,38 @@ button.irreversible-action:not(:disabled):hover {
     width: calc(100vw - 24px);
   }
 }
+
+/* Messages screen. */
+.messenger-threads { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.messenger-thread {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+}
+.messenger-thread .muted { font-size: 13px; }
+.messenger-back { margin-bottom: 8px; }
+.messenger-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.messenger-bubble {
+  max-width: 78%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.messenger-bubble p { margin: 0; word-break: break-word; }
+.messenger-bubble .muted { font-size: 11px; }
+.messenger-bubble.out { justify-self: end; background: var(--bg-card); }
+.messenger-bubble.in { justify-self: start; }
+.messenger-compose { display: flex; gap: 8px; }
+.messenger-compose input { flex: 1; }

@@ -13,6 +13,7 @@ import HacdScreen from "./HacdScreen";
 import HistoryScreen from "./HistoryScreen";
 import HomeScreen from "./HomeScreen";
 import DualWorkspaceScreen from "./DualWorkspaceScreen";
+import MessagesScreen from "./MessagesScreen";
 import PrivacyScreen from "./PrivacyScreen";
 import QuantumScreen from "./QuantumScreen";
 import ReceiveScreen from "./ReceiveScreen";
@@ -385,6 +386,16 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           busy={busy}
           onNotify={onNotify}
           onGoSend={() => setScreen("send")}
+        />
+      );
+    case "messages":
+      return (
+        <MessagesScreen
+          status={status}
+          dustWhisper={dustWhisper}
+          hideAddresses={hideAddresses}
+          onNavigate={setScreen}
+          onNotify={onNotify}
         />
       );
     case "history":

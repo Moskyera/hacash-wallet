@@ -1285,6 +1285,19 @@ button.btn-test {
   font-size: 0.72rem;
 }
 
+/* Transport state of one outgoing message. "Not sent" has to stay readable:
+   it is the only signal that the relay refused the message. */
+.messenger-status {
+  display: block;
+  margin: 2px 0 0;
+}
+
+/* Where one conversation actually stands on encryption. Sits above the
+   messages so it is read before anything is typed. */
+.messenger-sealed {
+  margin: 6px 0 4px;
+}
+
 .messenger-compose {
   display: flex;
   gap: 8px;

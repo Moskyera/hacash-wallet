@@ -67,6 +67,15 @@ pub struct MessengerEnvelope {
     pub from: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_pubkey: Option<String>,
+    /// Compact secp256k1 signature, hex, over `messenger_auth::envelope_auth_digest`.
+    ///
+    /// Without it `from` is a string anybody can write. A relay accepted such an
+    /// envelope, the receiving wallet filed it as an incoming message from that
+    /// address, and the screen showed it as a message from a trusted contact.
+    /// The relay refuses an envelope that does not carry a signature by the key
+    /// that `from` derives from, and the receiving wallet refuses it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_sig: Option<String>,
     pub nonce: String,
     pub ciphertext: String,
     pub sent_at: String,
@@ -90,6 +99,18 @@ pub struct MessengerSendResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessengerInboxResponse {
     pub messages: Vec<MessengerEnvelope>,
+    /// Whether the relay accepted the inbox claim.
+    ///
+    /// A refused claim used to answer with an empty message list, which is
+    /// byte-for-byte what an empty inbox looks like, so the wallet reported
+    /// "nothing new" to somebody who had in fact been locked out. This says
+    /// which of the two happened. It leaks nothing: a caller without the
+    /// address's key gets `false` whether or not that inbox exists.
+    ///
+    /// It defaults to `false` on a response that omits it, so an answer that
+    /// cannot vouch for itself is never read as a healthy empty inbox.
+    #[serde(default)]
+    pub auth_ok: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

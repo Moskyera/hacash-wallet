@@ -103,6 +103,7 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::whisper_commands::messenger_threads,
             wallet_tauri_common::whisper_commands::messenger_messages,
             wallet_tauri_common::whisper_commands::messenger_mark_read,
+            wallet_tauri_common::whisper_commands::messenger_peer_security,
             wallet_tauri_common::whisper_commands::messenger_send,
             wallet_tauri_common::whisper_commands::messenger_poll_inbox,
             wallet_tauri_common::dapp_commands::wallet_bump_activity,

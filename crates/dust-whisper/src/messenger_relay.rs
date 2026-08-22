@@ -19,8 +19,21 @@ use crate::protocol::{
 };
 
 const MAX_PER_RECIPIENT: usize = 200;
+/// How many undelivered envelopes one sender may hold in one recipient's inbox.
+///
+/// Eviction used to be "drop the oldest entry in the list", so a flood of junk
+/// deleted the genuine mail that had been waiting longest. Senders are
+/// authenticated now, so the inbox can charge each of them for its own share.
+const MAX_PER_SENDER: usize = 20;
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const CHALLENGE_TTL: Duration = Duration::from_secs(120);
+/// Ceiling on outstanding challenges across the whole relay.
+///
+/// Challenges are keyed by their own nonce rather than by address. Keyed by
+/// address there was exactly one slot per person and anybody could overwrite
+/// it, which silently locked the owner out of their own inbox for as long as
+/// the attacker kept asking. Keyed by nonce there is nothing to aim at.
+const MAX_PENDING_CHALLENGES: usize = 8192;
 
 #[derive(Clone)]
 struct Stored {
@@ -30,13 +43,14 @@ struct Stored {
 
 #[derive(Clone)]
 struct Challenge {
-    nonce: String,
+    to: String,
     expires: Instant,
 }
 
 #[derive(Clone, Default)]
 pub struct MessengerInbox {
     inner: Arc<Mutex<HashMap<String, Vec<Stored>>>>,
+    /// Nonce -> the address it was issued for. Never keyed by address.
     challenges: Arc<Mutex<HashMap<String, Challenge>>>,
 }
 
@@ -50,11 +64,35 @@ impl MessengerInbox {
         if to.is_empty() {
             return Err("missing recipient".into());
         }
+        let from = envelope.from.trim().to_string();
         let mut map = self.inner.lock().await;
         let list = map.entry(to).or_default();
         list.retain(|s| s.received.elapsed() < TTL);
-        if list.len() >= MAX_PER_RECIPIENT {
-            list.remove(0);
+        let from_this_sender = list
+            .iter()
+            .filter(|s| s.envelope.from.trim() == from)
+            .count();
+        if from_this_sender >= MAX_PER_SENDER {
+            // This sender is already using its whole share. Drop its own oldest
+            // entry rather than somebody else's.
+            if let Some(idx) = list.iter().position(|s| s.envelope.from.trim() == from) {
+                list.remove(idx);
+            }
+        } else if list.len() >= MAX_PER_RECIPIENT {
+            // The inbox is full of other people's mail. Evict from whichever
+            // sender is taking up the most room, oldest of theirs first, so a
+            // flood costs the flooder and not the person being written to.
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for s in list.iter() {
+                *counts.entry(s.envelope.from.trim()).or_default() += 1;
+            }
+            let Some((&worst, _)) = counts.iter().max_by_key(|&(_, &n)| n) else {
+                return Err("inbox full".into());
+            };
+            let worst = worst.to_string();
+            if let Some(idx) = list.iter().position(|s| s.envelope.from.trim() == worst) {
+                list.remove(idx);
+            }
         }
         list.push(Stored {
             envelope,
@@ -70,25 +108,39 @@ impl MessengerInbox {
         let expires_at =
             (Utc::now() + ChronoDuration::seconds(CHALLENGE_TTL.as_secs() as i64)).to_rfc3339();
         let mut map = self.challenges.lock().await;
+        let now = Instant::now();
+        map.retain(|_, ch| ch.expires > now);
+        if map.len() >= MAX_PENDING_CHALLENGES {
+            // Refuse to issue rather than evict somebody else's live challenge.
+            // An empty nonce never verifies, so the caller is told no by the
+            // same path a wrong nonce takes.
+            return MessengerChallengeResponse {
+                nonce: String::new(),
+                expires_at,
+            };
+        }
         map.insert(
-            to.to_string(),
+            nonce.clone(),
             Challenge {
-                nonce: nonce.clone(),
-                expires: Instant::now() + CHALLENGE_TTL,
+                to: to.to_string(),
+                expires: now + CHALLENGE_TTL,
             },
         );
         MessengerChallengeResponse { nonce, expires_at }
     }
 
     async fn consume_challenge(&self, to: &str, nonce: &str) -> bool {
-        let mut map = self.challenges.lock().await;
-        let Some(ch) = map.get(to) else {
-            return false;
-        };
-        if ch.expires < Instant::now() || ch.nonce != nonce {
+        if nonce.is_empty() {
             return false;
         }
-        map.remove(to);
+        let mut map = self.challenges.lock().await;
+        let Some(ch) = map.get(nonce) else {
+            return false;
+        };
+        if ch.expires < Instant::now() || ch.to != to {
+            return false;
+        }
+        map.remove(nonce);
         true
     }
 
@@ -144,6 +196,15 @@ async fn send_handler(
     State(state): State<RelayAppState>,
     Json(req): Json<MessengerSendRequest>,
 ) -> Json<MessengerSendResponse> {
+    // The door messages come IN through. Without this check `from` is a string
+    // anybody can write, and the recipient's wallet files the result as a
+    // message from whoever it names.
+    if !crate::messenger_auth::verify_envelope_sender(&req.envelope) {
+        return Json(MessengerSendResponse {
+            ok: false,
+            err: Some("envelope is not signed by the key its sender address derives from".into()),
+        });
+    }
     match state.inbox.push(req.envelope).await {
         Ok(()) => Json(MessengerSendResponse {
             ok: true,
@@ -175,28 +236,34 @@ async fn inbox_handler(
     Json(req): Json<MessengerInboxRequest>,
 ) -> Json<MessengerInboxResponse> {
     let to = req.to.trim();
+    let refused = || {
+        Json(MessengerInboxResponse {
+            messages: Vec::new(),
+            auth_ok: false,
+        })
+    };
     if to.is_empty() {
-        return Json(MessengerInboxResponse {
-            messages: Vec::new(),
-        });
+        return refused();
     }
-    if !state.inbox.consume_challenge(to, req.nonce.trim()).await {
-        return Json(MessengerInboxResponse {
-            messages: Vec::new(),
-        });
-    }
+    // Signature first, nonce second. Consuming the nonce before checking who
+    // sent it meant any caller could burn the challenge the owner was about to
+    // use, and the owner's own correctly signed fetch then came back empty.
     if !crate::messenger_auth::verify_inbox_auth(
         to,
         req.nonce.trim(),
         &req.claimant_pubkey,
         &req.signature,
     ) {
-        return Json(MessengerInboxResponse {
-            messages: Vec::new(),
-        });
+        return refused();
+    }
+    if !state.inbox.consume_challenge(to, req.nonce.trim()).await {
+        return refused();
     }
     let messages = state.inbox.peek(to).await;
-    Json(MessengerInboxResponse { messages })
+    Json(MessengerInboxResponse {
+        messages,
+        auth_ok: true,
+    })
 }
 
 async fn ack_handler(
@@ -211,13 +278,8 @@ async fn ack_handler(
             err: Some("missing recipient".into()),
         });
     }
-    if !state.inbox.consume_challenge(to, req.nonce.trim()).await {
-        return Json(MessengerAckResponse {
-            ok: false,
-            removed: 0,
-            err: Some("invalid or expired challenge".into()),
-        });
-    }
+    // Same order as the inbox handler, for the same reason: a caller who cannot
+    // sign for this address must not be able to spend its challenge.
     if !crate::messenger_auth::verify_inbox_auth(
         to,
         req.nonce.trim(),
@@ -228,6 +290,13 @@ async fn ack_handler(
             ok: false,
             removed: 0,
             err: Some("invalid inbox auth signature".into()),
+        });
+    }
+    if !state.inbox.consume_challenge(to, req.nonce.trim()).await {
+        return Json(MessengerAckResponse {
+            ok: false,
+            removed: 0,
+            err: Some("invalid or expired challenge".into()),
         });
     }
     let removed = state.inbox.ack(to, &req.ids).await;

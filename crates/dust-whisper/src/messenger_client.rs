@@ -58,11 +58,17 @@ pub async fn fetch_challenge(
         .map_err(|e| WhisperError::Relay(format!("messenger challenge json: {e}")))
 }
 
+/// Fetch an inbox and report the whole answer, not just its contents.
+///
+/// The caller needs `auth_ok` as much as it needs the messages: a refused claim
+/// and an empty inbox both come back with zero envelopes, and a screen that
+/// cannot tell them apart tells somebody who has been locked out that they have
+/// no mail.
 pub async fn fetch_inbox(
     http: &Client,
     relay_url: &str,
     request: &MessengerInboxRequest,
-) -> WhisperResult<Vec<MessengerEnvelope>> {
+) -> WhisperResult<MessengerInboxResponse> {
     let url = format!("{}{}", base_url(relay_url), MESSENGER_INBOX_PATH);
     let resp = http
         .post(url)
@@ -71,11 +77,9 @@ pub async fn fetch_inbox(
         .await
         .map_err(|e| WhisperError::Relay(format!("messenger inbox: {e}")))?;
     let resp = ensure_success(resp, "messenger inbox").await?;
-    let body: MessengerInboxResponse = resp
-        .json()
+    resp.json()
         .await
-        .map_err(|e| WhisperError::Relay(format!("messenger inbox json: {e}")))?;
-    Ok(body.messages)
+        .map_err(|e| WhisperError::Relay(format!("messenger inbox json: {e}")))
 }
 
 pub async fn ack_messages(

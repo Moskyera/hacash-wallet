@@ -301,6 +301,7 @@ export default function MoreRouter({ page, data, actions }: Props) {
           myAddress={statusAddress}
           hideAddresses={privacy.hide_addresses}
           whisperEnabled={dustWhisper?.enabled}
+          status={status}
           contacts={contacts}
           onToast={onToast}
           onGoPay={onGoPayPeer}

@@ -4,6 +4,7 @@ description = "Allows the trusted local wallet UI to use all registered wallet c
 commands.allow = [
   "messenger_mark_read",
   "messenger_messages",
+  "messenger_peer_security",
   "messenger_poll_inbox",
   "messenger_send",
   "messenger_threads",

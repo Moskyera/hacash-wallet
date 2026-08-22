@@ -26,8 +26,21 @@ import "./quantum.css";
  * the wording that changes what someone does, above all the two screens that
  * are not safe to treat like the rest of the wallet.
  */
+/**
+ * Screens labelled here instead of through the message catalogue, because they
+ * have no key in it. A key present in only some locale files renders as the raw
+ * key in the rest, so a screen without one is named here rather than half
+ * translated. `messages` is deliberately not in this map: `nav.messages` is
+ * already defined in all thirteen locale files, so hard-coding English here put
+ * one English word into an otherwise translated sidebar.
+ */
+const LOCAL_SCREEN_LABELS: Partial<Record<Screen, string>> = {
+  workspace: "Dual Workspace",
+};
+
 const SCREEN_SUBTITLES: Partial<Record<Screen, string>> = {
   fastpay: "Hacash L2 channel payments",
+  messages: "Needs a relay both wallets can reach",
   quantum: "Experimental lab, not for mainnet",
   airgap: "Offline transaction signing",
   advanced: "Node-gated protocol tools",
@@ -266,7 +279,7 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
 
   const isAuthScreen = screen === "welcome" || screen === "unlock";
   const screenTitle =
-    screen === "home" ? "My Wallet" : screen === "workspace" ? "Dual Workspace" : t(`nav.${screen}`);
+    screen === "home" ? "My Wallet" : (LOCAL_SCREEN_LABELS[screen] ?? t(`nav.${screen}`));
   const screenSubtitle = SCREEN_SUBTITLES[screen];
   const nodeReady = Boolean(wallet.status && !wallet.status.locked && wallet.assets);
   // "On" if any privacy control is doing something, so the chip never claims
@@ -336,13 +349,13 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
                   >
                     <span className="nav-item-mark" aria-hidden>{item.mark}</span>
                     {/*
-                      Dual Workspace is labelled here rather than through the
-                      message catalogue: adding a key means editing seven locale
-                      files in the shared package, and a key present in only one
-                      of them renders as the raw key in the other six.
+                      Dual Workspace and Messages are labelled here rather than
+                      through the message catalogue: adding a key means editing
+                      seven locale files in the shared package, and a key present
+                      in only one of them renders as the raw key in the other six.
                     */}
                     <span className="nav-item-label">
-                      {item.id === "workspace" ? "Dual Workspace" : t(`nav.${item.id}`)}
+                      {LOCAL_SCREEN_LABELS[item.id] ?? t(`nav.${item.id}`)}
                     </span>
                     {item.id === "fastpay" && (
                       <span className={`nav-fp-badge ${fastPayReady ? "nav-fp-on" : "nav-fp-off"}`}>

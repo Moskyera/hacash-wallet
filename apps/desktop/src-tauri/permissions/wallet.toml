@@ -173,6 +173,7 @@ commands.allow = [
   "messenger_threads",
   "messenger_messages",
   "messenger_mark_read",
+  "messenger_peer_security",
   "messenger_send",
   "messenger_poll_inbox",
   "wallet_bump_activity",

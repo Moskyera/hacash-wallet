@@ -2145,6 +2145,20 @@ impl WalletService {
         crate::messenger::messenger_mark_read(account, &my, peer)
     }
 
+    /// What is true about this conversation's privacy, for the screen to repeat.
+    ///
+    /// The messenger screen asks this before it tells the person anything about
+    /// privacy, so the sentence on screen matches both what the next send will
+    /// do and what the messages already on screen actually were.
+    pub fn messenger_peer_security(
+        &self,
+        peer: &str,
+    ) -> WalletResult<crate::messenger::MessengerPeerSecurity> {
+        let my = self.require_address()?;
+        let account = self.require_signing_account()?;
+        crate::messenger::messenger_peer_security(account, &my, peer)
+    }
+
     pub async fn messenger_send(
         &self,
         peer: &str,
@@ -2171,12 +2185,17 @@ impl WalletService {
         .await
     }
 
-    pub async fn messenger_poll_inbox(&self) -> WalletResult<u32> {
+    pub async fn messenger_poll_inbox(
+        &self,
+    ) -> WalletResult<crate::messenger::MessengerPollOutcome> {
         let my = self.require_address()?;
         let account = self.require_signing_account()?;
         let relays = self.settings.dust_whisper.trimmed_relay_urls();
         if relays.is_empty() {
-            return Ok(0);
+            // An all-zero outcome with nothing tried. The screen reads
+            // `relays_tried` and says no relay is configured, rather than
+            // reporting an empty inbox nobody looked in.
+            return Ok(crate::messenger::MessengerPollOutcome::default());
         }
         crate::messenger::messenger_poll_inbox(self.node.http(), account, &my, &relays).await
     }

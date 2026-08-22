@@ -84,7 +84,9 @@ pub use history::TxRecord;
 pub use l1_fee::L1FeeTierQuote;
 pub use l2_bill::{BillExportBundle, BillProveSummary, BillSignatureStatus, BillSummary};
 pub use l2_hub::HubHealth;
-pub use messenger::{ChatMessage, ChatThread, MessageDirection};
+pub use messenger::{
+    ChatMessage, ChatThread, MessageDirection, MessengerPeerSecurity, MessengerPollOutcome,
+};
 pub use native_asset_metadata::{NativeAssetMetadata, fetch_native_asset_metadata};
 pub use native_asset_send::NativeAssetSendPreview;
 pub use node::NativeAssetBalance;

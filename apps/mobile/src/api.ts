@@ -154,6 +154,36 @@ export type ChatMessage = {
   body: string;
   timestamp_utc: string;
   delivered: boolean;
+  /**
+   * Whether this one message travelled sealed to the peer's own key (v2).
+   * `false` is v1, whose key comes from the two addresses the relay holds in
+   * clear. `null` or absent is a record written before the wallet tracked it,
+   * about which nothing is known.
+   */
+  sealed?: boolean | null;
+};
+
+/** What the screen may say about one conversation's privacy. */
+export type MessengerPeerSecurity = {
+  /** The wallet holds a verified key for this peer, so the next send is sealed. */
+  sends_sealed: boolean;
+  /** Messages already in the thread that are not known to have been sealed. */
+  unsealed_messages: number;
+};
+
+/**
+ * What one pass over the configured relays actually managed to do.
+ *
+ * A bare count cannot separate an empty inbox from a relay that never answered
+ * or one that refused the claim, and the screen used to report all three as
+ * "nothing new".
+ */
+export type MessengerPollOutcome = {
+  added: number;
+  relays_tried: number;
+  relays_answered: number;
+  relays_refused: number;
+  rejected_envelopes: number;
 };
 
 export type ChatThread = {
@@ -713,7 +743,15 @@ export const messengerApi = {
   threads: () => invoke<ChatThread[]>("messenger_threads"),
   messages: (peer: string) => invoke<ChatMessage[]>("messenger_messages", { peer }),
   markRead: (peer: string) => invoke<void>("messenger_mark_read", { peer }),
+  /**
+   * Whether the next message to this peer is sealed to that peer's own key, and
+   * how many messages already in the thread are not known to have been. The
+   * screen says nothing about privacy that this answer does not support.
+   */
+  peerSecurity: (peer: string) =>
+    invoke<MessengerPeerSecurity>("messenger_peer_security", { peer }),
   send: (peer: string, body: string, peer_pubkey?: string) =>
     invoke<ChatMessage>("messenger_send", { peer, body, peer_pubkey }),
-  pollInbox: () => invoke<number>("messenger_poll_inbox"),
+  /** Reports what the poll reached, not only how many messages it took. */
+  pollInbox: () => invoke<MessengerPollOutcome>("messenger_poll_inbox"),
 };

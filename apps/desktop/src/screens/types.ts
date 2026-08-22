@@ -13,6 +13,7 @@ export type Screen =
   | "privacy"
   | "airgap"
   | "hacd"
+  | "messages"
   | "quantum";
 
 export type WelcomeTab = "create" | "import" | "backup" | "watch";
@@ -38,6 +39,7 @@ export const NAV_GROUPS: { id: "wallet" | "tools" | "control"; items: NavItem[] 
   {
     id: "tools",
     items: [
+      { id: "messages", mark: "✉" },
       { id: "quantum", mark: "◇" },
       { id: "airgap", mark: "▣" },
     ],
