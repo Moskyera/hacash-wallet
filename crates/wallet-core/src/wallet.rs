@@ -480,12 +480,40 @@ impl WalletService {
             return Ok(report);
         }
 
+        // Do not silently trade a signing-capable node for a read-only one.
+        //
+        // `candidate_urls` appends the plaintext official endpoint to every
+        // mainnet scan, and `auto_node_failover` defaults on. So a person who
+        // had correctly pointed the wallet at their own http://127.0.0.1:8080
+        // lost that setting to http://nodeapi.hacash.org the first time their
+        // local node was restarting - and their wallet silently became one
+        // that could not sign anything on mainnet, failing later with an
+        // unexplained security-policy refusal.
+        //
+        // This removes no check and lowers no bar. Every candidate is still
+        // probed and still listed; a person may still type any endpoint
+        // `validate_node_url` accepts. What narrows is only what an unattended
+        // switch is allowed to choose.
+        let signing_capable = |candidate: &crate::node_discovery::NodeCandidateStatus| {
+            crate::node_discovery::failover_may_adopt(&candidate.url, &snapshot.network_mode)
+        };
+        let working = |candidate: &&crate::node_discovery::NodeCandidateStatus| {
+            candidate.online && candidate.network_match
+        };
         let Some(next) = report
             .candidates
             .iter()
-            .find(|candidate| candidate.online && candidate.network_match)
+            .find(|candidate| working(candidate) && signing_capable(candidate))
             .map(|candidate| candidate.url.clone())
         else {
+            // Say so when a working node was found and refused, rather than
+            // reporting an indistinguishable "nothing to switch to".
+            if let Some(read_only) = report.candidates.iter().find(working) {
+                report.failover_declined = Some(format!(
+                    "{} is online, but this wallet cannot sign {} transactions against it, so it was not adopted automatically. On {}, signing needs HTTPS or a node on this same machine. Your node stays as it is: bring it back, or set the node by hand in Settings if you only need to read balances.",
+                    read_only.url, snapshot.network_mode, snapshot.network_mode
+                ));
+            }
             return Ok(report);
         };
         if next == snapshot.active_node {
@@ -2033,14 +2061,45 @@ impl WalletService {
         Ok(result)
     }
 
-    pub async fn discover_hubs(&self) -> WalletResult<HubDiscoveryReport> {
-        let extra = self
+    /// Probe the preset list, the saved hub URL, and any URL the caller typed.
+    ///
+    /// `typed_urls` exists because the panel's own copy told people to paste
+    /// the address their provider gave them, and discovery then probed
+    /// everything except that: it read `settings.l2_hub_url`, the *saved*
+    /// value, so a URL typed and not yet saved was silently dropped and the
+    /// scan reported "no online hubs found" for a hub that was answering.
+    ///
+    /// Reading the saved setting stays, so this only ever widens what is
+    /// probed. Nothing typed is persisted here; adopting a hub is still a
+    /// separate, explicit act.
+    pub async fn discover_hubs(&self, typed_urls: &[String]) -> WalletResult<HubDiscoveryReport> {
+        let mut extra = self
             .settings
             .l2_hub_url
             .clone()
             .into_iter()
             .collect::<Vec<_>>();
+        for url in typed_urls {
+            let url = url.trim();
+            if url.is_empty() {
+                continue;
+            }
+            // Same rule the saved field is held to: HTTPS, or HTTP on this
+            // machine. A typed URL that could never be saved should not be
+            // probed either, and an invalid one is dropped rather than
+            // reported as an offline hub.
+            if let Ok(valid) = crate::settings::validate_service_url(url, "Fast Pay hub") {
+                extra.push(valid);
+            }
+        }
         Ok(discover_all_hubs(&extra).await)
+    }
+
+    /// What one Hub says about itself, from a URL the caller typed.
+    ///
+    /// Read-only: saves nothing, adopts nothing, grants nothing.
+    pub async fn hub_declaration(&self, hub_url: &str) -> crate::fast_pay::HubDeclaration {
+        crate::fast_pay::hub_declaration(hub_url, &self.settings.network_mode).await
     }
 
     async fn maybe_discover_hub(&mut self) -> WalletResult<()> {
@@ -3996,6 +4055,88 @@ mod asset_facade_tests {
 }
 
 #[cfg(test)]
+mod hub_discovery_typed_url_tests {
+    use axum::{Json, Router, routing::get};
+
+    use super::*;
+    use crate::test_support::IsolatedWalletData;
+
+    async fn spawn_hub() -> String {
+        let app = Router::new().route(
+            "/v1/health",
+            get(|| async {
+                Json(serde_json::json!({
+                    "ok": true,
+                    "version": 7,
+                    "name": "Typed Hub",
+                    "hub_address": "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW",
+                    "hub_fee_mei": "0",
+                    "settlement_ready": true,
+                    "cross_channel_ready": true
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// The panel told people to paste the address their provider gave them,
+    /// and discovery then probed everything except that: it read the SAVED
+    /// `l2_hub_url`, so a URL typed and not yet saved was silently dropped and
+    /// the scan reported "no online hubs found" for a hub that was answering.
+    #[tokio::test]
+    async fn a_typed_hub_url_is_probed_without_being_saved_first() {
+        let _wallet_data = IsolatedWalletData::new();
+        let hub = spawn_hub().await;
+        let wallet = WalletService::new(Some("http://127.0.0.1:8080".into()), None).unwrap();
+        assert!(
+            wallet.settings.l2_hub_url.is_none(),
+            "nothing saved: this is the fresh-install case"
+        );
+
+        let report = wallet
+            .discover_hubs(std::slice::from_ref(&hub))
+            .await
+            .unwrap();
+
+        assert_eq!(report.online_count, 1, "{:?}", report.hubs);
+        let found = report.hubs.iter().find(|h| h.online).unwrap();
+        assert_eq!(found.hub_url, hub);
+        assert_eq!(
+            found.hub_address.as_deref(),
+            Some("1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW")
+        );
+        // Probing is not adopting. Nothing was persisted.
+        assert!(wallet.settings.l2_hub_url.is_none());
+        assert!(wallet.settings.hub_right_address.is_none());
+    }
+
+    /// A typed URL is held to the same rule the saved field is held to -
+    /// HTTPS, or HTTP on this same machine - so a URL that could never be
+    /// saved is never probed either.
+    #[tokio::test]
+    async fn a_typed_remote_plaintext_url_is_not_probed() {
+        let _wallet_data = IsolatedWalletData::new();
+        let wallet = WalletService::new(Some("http://127.0.0.1:8080".into()), None).unwrap();
+        let report = wallet
+            .discover_hubs(&["http://hub.example.com".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            !report
+                .hubs
+                .iter()
+                .any(|hub| hub.hub_url.contains("hub.example.com")),
+            "a URL the settings layer would refuse must not be probed"
+        );
+    }
+}
+
+#[cfg(test)]
 mod node_discovery_commit_tests {
     use super::*;
     use crate::node_discovery::{NodeCandidateStatus, NodeDiscoveryReport};
@@ -4026,6 +4167,7 @@ mod node_discovery_commit_tests {
             switched: false,
             network_mode: snapshot.network_mode.clone(),
             candidates: vec![candidate(active, false), candidate(old_fallback, true)],
+            failover_declined: None,
         };
 
         // Simulate a settings update racing with the in-flight network probes.
@@ -4038,6 +4180,72 @@ mod node_discovery_commit_tests {
         assert_eq!(committed.active_node, active);
         assert_eq!(wallet.node.base_url(), active);
         assert_eq!(wallet.settings.node_fallback_urls, vec![new_fallback]);
+    }
+
+    /// The dead end this opens: a person who had correctly pointed the wallet
+    /// at their own loopback node pressed "Find active node" while it was
+    /// restarting, and silently ended up on the plaintext official endpoint -
+    /// a wallet that can no longer sign anything on mainnet, failing later
+    /// with an unexplained security-policy refusal.
+    #[test]
+    fn mainnet_failover_never_silently_lands_on_a_node_it_cannot_sign_against() {
+        let _wallet_data = IsolatedWalletData::new();
+        let local = "http://127.0.0.1:8080";
+        let mut wallet = WalletService::new(Some(local.into()), None).unwrap();
+        assert_eq!(wallet.network_mode, "mainnet");
+        wallet.settings.node_fallback_urls = vec![crate::settings::DEFAULT_NODE_URL.into()];
+        let snapshot = wallet.node_discovery_snapshot();
+        assert!(snapshot.settings.auto_node_failover);
+
+        let report = NodeDiscoveryReport {
+            active_node: local.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![
+                candidate(local, false),
+                candidate(crate::settings::DEFAULT_NODE_URL, true),
+            ],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched, "must not adopt a read-only endpoint");
+        assert_eq!(wallet.node.base_url(), local);
+        assert_eq!(wallet.settings.node_url, local);
+        // Declining silently was half the defect. Say which node was found and
+        // why it was not taken.
+        let declined = committed.failover_declined.expect("a stated reason");
+        assert!(
+            declined.contains(crate::settings::DEFAULT_NODE_URL),
+            "{declined}"
+        );
+        assert!(declined.contains("cannot sign"), "{declined}");
+    }
+
+    /// Narrowing automatic failover must not disable it. A working candidate
+    /// this wallet CAN sign against is still adopted exactly as before.
+    #[test]
+    fn failover_still_switches_to_a_signing_capable_node() {
+        let _wallet_data = IsolatedWalletData::new();
+        let local = "http://127.0.0.1:8080";
+        let other_local = "http://127.0.0.1:8081";
+        let mut wallet = WalletService::new(Some(local.into()), None).unwrap();
+        wallet.settings.node_fallback_urls = vec![other_local.into()];
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: local.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(local, false), candidate(other_local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(committed.switched);
+        assert_eq!(committed.active_node, other_local);
+        assert_eq!(wallet.node.base_url(), other_local);
+        assert!(committed.failover_declined.is_none());
     }
 }
 

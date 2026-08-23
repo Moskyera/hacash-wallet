@@ -10,7 +10,7 @@ node. Where something is an inference it says so.
 
 `GET /v1/readiness/mainnet` on a running Hub is the machine-readable answer.
 It is evaluated by `MainnetReadinessV1::evaluate`
-(`crates/l2-fast-pay-hub/src/readiness.rs:259-511`). Ask it rather than trusting
+(`crates/l2-fast-pay-hub/src/readiness.rs:287-539`). Ask it rather than trusting
 a checklist.
 
 The measurement that matters is a mainnet-profile Hub pointed at the real
@@ -69,7 +69,7 @@ close_blockers  []
 ```
 
 `close_blockers` is empty on both, so cooperative close is available on both
-profiles even while the full profile refuses payments (`readiness.rs:399-430`
+profiles even while the full profile refuses payments (`readiness.rs:427-458`
 filters the waived and admission identifiers out of `blockers`).
 
 Two identifiers that look like blockers and are not. The control, the same two
@@ -85,14 +85,14 @@ mainnet-bounded-pilot  blockers  mainnet_pilot_requires_hacash_mainnet_fullnode
                                  fullnode_below_pinned_mainnet_checkpoint_765432
 ```
 
-`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:361-363`) and
-`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:364-369`) are
+`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:389-391`) and
+`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:392-397`) are
 artefacts of pointing a mainnet profile at the wrong chain. They vanish against
 the real mainnet node, as the two documents above show, and are not work.
 
 ## Two mainnet routes exist, and they are not the same thing
 
-`readiness.rs:300-336` branches on `is_bounded_pilot`:
+`readiness.rs:328-364` branches on `is_bounded_pilot`:
 
 ```rust
 let is_bounded_pilot = profile == MAINNET_BOUNDED_PILOT_PROFILE;
@@ -110,7 +110,7 @@ the invariant is in the type, not in a comment: `blockers` and
 to be outstanding. `payments_enabled` and `close_enabled` still read only the
 first two, so nothing the bounded pilot was allowed to do changed.
 
-The dispute-path branch is gated on the profile again at `readiness.rs:378-381`,
+The dispute-path branch is gated on the profile again at `readiness.rs:406-409`,
 which raises `fullnode_does_not_report_verified_registry_unilateral_exit` on
 `mainnet-pilot` only.
 
@@ -134,12 +134,12 @@ bounded profile identically:
 
 | demand | where |
 | --- | --- |
-| Hub signer plus authenticated durable storage | `readiness.rs:297-299` |
-| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:342-355`, `readiness.rs:805-820` |
-| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:361-369` |
-| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:370-377` |
-| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:719-745` |
-| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:754-790` |
+| Hub signer plus authenticated durable storage | `readiness.rs:325-327` |
+| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:370-383`, `readiness.rs:833-848` |
+| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:389-397` |
+| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:398-405` |
+| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:747-773` |
+| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:782-818` |
 
 **Full mainnet** does not waive them. It needs all three to be genuinely true.
 
@@ -156,7 +156,7 @@ rather than hiding it.
 
 ## Why full mainnet cannot be reached today
 
-`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:500-503`)
+`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:528-531`)
 publishes the measurement:
 
 ```rust
@@ -192,7 +192,7 @@ wallet gating on one could never be un-bricked by the guarantee arriving.
 gating on `HubHealth` for one is a compile error.
 
 `HubHardGuarantees::production_mainnet_ready` still exists as the Hub's internal
-aggregate measurement (`readiness.rs:1967-1973`); it is simply no longer exported
+aggregate measurement (`readiness.rs:1995-2001`); it is simply no longer exported
 on the liveness endpoint.
 
 ### 1. Unilateral L1 dispute path
@@ -459,48 +459,230 @@ No Action 14 transaction has ever been executed by the HVM. Every test drives a
 real `HubState` against an in-process mock. That these exact bytes satisfy
 `PermitHAC` is unproven until the Local Pilot lifecycle runs it.
 
-## Local Pilot lifecycle: exact resume point (2026-08-15)
+Still true on 2026-08-23, and now with a specific reason rather than a general
+one. There is a finalized channel on private chain 7 holding 99000000 Zhu for its
+left party with `left_claimed false`, and the V1 watchtower that owns that
+channel has no claim decision to make: `decide_watchtower_action` returns
+`NoAction` for chain status 4. The `ClaimLeftPayout` arm exists only on the
+registry V2 rail, and the registry V2 contract deployed on that chain is not the
+reviewed artifact any more. Both halves are written up under "Local Pilot
+lifecycle, re-read against the running node" below.
 
-Node, miner and Hub are running on private chain 7. Verified live:
-`chain id 7, mainnet false`, node height 2836, Hub `deployment_profile: local-pilot`.
+## Local Pilot lifecycle, re-read against the running node (2026-08-23)
 
-Journal state, read with `inspect`:
+The section that used to stand here said `Initialization Not prepared <-- resume
+here`. That is no longer where the work stops, and the sentence was misleading in
+both directions. What follows was read off a live node, not off the journal.
+
+### The node
+
+A fullnode was built from `hacash-fullnodedev` at `app/src/version.rs` 1.0.10 and
+started through `scripts/start-agent-local-pilot-node.ps1`. It is not mainnet and
+proves it from its own `/query/capabilities`:
 
 ```
-Hub prefunding  Confirmed      tx 592562024baabe9b7ea684d447a11786b71317befe613b8b918a75fcf603c3bb  height 2771
-Deployment      Confirmed      tx 62687a9db41de1b860566a1e5aba9899b0927fe769919f37921a8d79ea79b638  height 2789
-                contract       ajsciXwwYMAWiSewt41ijKaHfAHnnm1XP
-Initialization  Not prepared   <-- resume here
-Funding         Not prepared
+chain     id 7   mainnet false   height 3189 at start
+network   kind local_pilot_v1   node_profile_id hpay-local-pilot-chain-v1
+block 1   000087f67e55660eaefed72e0b9499147556a33a34f18fa48900f4a2fa30cd29
+instance  9ebd8657a72faed35ed4d6e309fab2ef259f054e4820684fab6c6b848e4438f3
 ```
 
-The 200 HAC prefund and the deploy are done and must not be repeated: the
-deployment protocol cost is exactly 20_000_000_000 Zhu = 200 HAC, and the Hub
-balance is now ~10.4 HAC, consistent with it having been spent.
+The block-1 hash and the instance id are byte-for-byte the ones pinned in
+`hvm_pilot.rs` as `HPAY_LOCAL_PILOT_BLOCK_ONE_HASH` and
+`HPAY_LOCAL_PILOT_NETWORK_INSTANCE_ID`, so this is the same private chain the
+earlier pilot ran on and not a fresh one.
+
+### The registry V2 lifecycle cannot be resumed, for three separate reasons
+
+1. **The sealed pilot state no longer authenticates.** `inspect` on both
+   `hvm/registry-v2-pilot-state.sealed.json` and
+   `hvm/registry-c3-pilot-state.sealed.json` returns
+   `State("registry pilot state authentication failed")`. The state tag is an
+   HMAC over `StateBody` in `hvm_registry_pilot_state.rs`, and commit `6cc0f53`
+   added two fields to that struct, `refund_countersign_request` and
+   `recovery_bundle_provenance`. Every state sealed before that commit therefore
+   fails at HEAD. The DPAPI identities are intact: `status` on the same files
+   decrypts and prints both addresses and both balances.
+
+2. **The contract that is deployed is not the reviewed one.** The node itself
+   refuses to answer for it:
+
+   ```
+   GET /query/hpay/channel-registry?contract=ajsciXwwYMAWiSewt41ijKaHfAHnnm1XP...
+   {"err":"HPAY HVM registry deployment does not contain the exact reviewed artifact","ret":1}
+   ```
+
+   Deployed on chain 7: `source_sha256 58ab4ba8...`, `bytecode_sha3 276d8c20...`.
+   Expected by both the node's own evidence document and
+   `HPAY_REGISTRY_SOURCE_SHA256` at HEAD: `37fabe6b...` and `2fa7429d...`. That
+   difference is the lease fix from `6cc0f53`, so the deployed build is the one
+   whose channel keys were created with a zero recovery credit.
+
+3. **Redeploying is a funding problem, and the number is exact.** The prefund
+   step refuses with its own arithmetic:
+
+   ```
+   Error: "pilot-left balance is insufficient: mine at least 200001000000 Local Pilot Zhu"
+   ```
+
+   `HVM_REGISTRY_DEPLOY_PROTOCOL_COST_ZHU` is 200_000_000_000 Zhu, which is
+   2000 HAC, not the 200 HAC this document used to claim. The three chain-7
+   identities under DPAPI held 468.95 HAC when this was written. The block
+   reward at these heights is 1 HAC (`mint/src/genesis/reward.rs`) and
+   `each_block_target_time` is 455 s, so the shortfall is a fixed number of
+   blocks of mining and nothing else. Mining is the only lever: difficulty is
+   recomputed at validation from the same config in
+   `mint/src/check/block_accept.rs`, so lowering the target time would make the
+   node reject its own stored history.
+
+Nothing here was worked around. No constant was lowered, no pin was moved and no
+state was re-sealed.
+
+### What is proven on the real node, and it is the V1 channel rail
+
+The other HVM contract on this chain is still the reviewed artifact.
+`hvm/pilot-state.sealed.json` authenticates at HEAD, and its deployment
+`source_sha256 c0a430eb...` is exactly `HPAY_CHANNEL_EXIT_SOURCE_SHA256`. Reading
+the blocks back gives the whole lifecycle, on the real node, with real heights:
+
+```
+2522  6a369078f214f7c6f270a732dcb5ba4c53034906d33865b4a50a83819c0714a2  deploy, contract ncJoygx8qBSHAw4sJbo5jTk1FJthJ1QLw
+2530  c3e6c1c3764678d21836abe166522c51a3e8d10ac5165fd08752eac0dcc4ed9c  initialize, channel 37c817400f54d3784474191c580bfc4b
+2538  6a21900f3716cd9da25fb0d6d841265c8c11900d0d6a043d69d2525be32310e2  fund, 100000000 Zhu
+2549  03fe4b718f470342e6ee59c41127377c8619adc8426b3c01e95b00a955834e26  renew all 18 storage keys
+2557  dbde9f0f1e02683d494819a2d553d3d55a605827f43bebe80df44d67ac564537  challenge
+2566  5d58bf8837d52f276c020fe50a90151b005fa9f646c6a7f91a24a823eba430ae  respond, serial 2
+2577  7a4a2fb95b0bb7e039746dec7d3bb6ba06c8d63106bc982bb499ce772837517f  finalize
+```
+
+The contract's own storage, read now through `/query/hpay/channel-exit`, agrees:
+`status 4`, `serial 2`, `left_balance 99000000`, `right_balance 1000000`,
+`left_claimed false`, `right_claimed false`, `all_keys_active true`.
+
+So challenge, respond and finalize are no longer simulator-only on this rail.
+The payout still is.
+
+### The Action 14 payout has no production caller on this rail
+
+`decide_watchtower_action` in `hvm_watchtower.rs` maps chain status 4 to
+`NoAction`. There is no `ClaimLeftPayout` arm in the V1 watchtower at all; that
+arm exists only in `hvm_registry_watchtower.rs`. Run against this exact channel,
+the production watchtower prints:
+
+```
+Stage: watchtower no_action
+Action: none
+```
+
+The V1 contract does have the payout: `PermitHAC` in
+`vm/contracts/hpay_channel_exit_v1.fitsh`, guarded by `left_claimed`. So 0.99 HAC
+sits settled inside a finalized channel on a real chain, while the code that
+would release it lives on the other rail. Building an Action 14 by hand to move
+it would be a harness, not evidence, and was not done.
+
+### The storage lease, driven against a real node with a real clock
+
+This was the part that had only ever been driven by mining empty MemChain
+blocks. It has now been driven three times by the shipped scheduler,
+`run_hvm_lease_scheduler`, against this node:
+
+```
+3314  b9dda80bc8a034ed3945302d37e76cead63267f256d4f49cd014b4cf6d3ecd7f
+3532  0c5870daa3aa09f7489cf4aa96e86d5139aa3cd0e0dd8a2e4cac7c61b22a73df
+3590  cf2dee77e440b1e5ac54c27898a348a18fc518b85aec8c49902a4413f9281eec
+```
+
+Each transaction carries a `Channel.renew` for all 18 key names, and the effect
+is visible in the node's own snapshot: `minimum_live_blocks` went 17117, 26945,
+36760, 46636, and `minimum_recover_blocks` 10000, 20000, 30000, 40000. The Hub
+balance went from 6.81 HAC to 3.37 HAC across the three, so one renew-all of 18
+keys for 100 periods costs about 1.15 HAC of rent on this chain, not the 0.01 HAC
+network fee.
+
+The second of the three was submitted with the miner stopped, so it sat
+unconfirmed for several minutes and confirmed when mining resumed. That is the
+"renewal that fails to confirm" case, and it exposed something worth writing
+down.
+
+### The scheduler renews once and then stands still until a person intervenes
+
+Every one of the three runs went the same way. Tick one submits. Tick two, sixty
+seconds later, fails closed:
+
+```
+INFO  HVM lease maintenance operation_id=hvm-lease-...-29791749 status=submitted
+ERROR HVM lease maintenance channel failed closed error=state: RecoveryRequired
+```
+
+After that error the scheduler logs nothing further and does not renew again,
+including in the run where the transaction had already confirmed one second after
+submission. The operation was resolved only by an operator running the shipped
+reconciliation command:
+
+```
+hpay-hvm-local-pilot reconcile --operation-id hvm-lease-...-29791749
+Stage: exact durable reconciliation confirmed
+Transaction: b9dda80bc8a034ed3945302d37e76cead63267f256d4f49cd014b4cf6d3ecd7f
+Confirmations: 182
+```
+
+That reconciliation was run with the Hub process stopped, which is the one thing
+here that was proven with the Hub down: the record is recoverable from the chain
+alone. It is not the owner walking out with their money, and it must not be read
+as that.
+
+An unattended Hub, on this evidence, renews once and then stands still, and the
+lease is the only path in this system that destroys a deposit outright. The
+default `--hvm-lease-threshold-blocks` is 10000 and the recovery buffer is
+months, so this is not urgent, but it is a real gap between what the scheduler is
+described as doing and what it does.
+
+### The one thing standing between here and a registry V2 lifecycle
+
+It is 666 blocks of mining, and nothing else. Everything else was checked
+against the running node rather than assumed, and every check passed:
+
+- The deployer address is derived from the deployer, not from the bytecode, so
+  redeploying from the existing Hub identity would land on the occupied
+  `ajsciXwwYMAWiSewt41ijKaHfAHnnm1XP`. `preview-deploy` from a second DPAPI
+  identity on this machine gives a free address,
+  `avXuuLphv6YqqWjx47nuBizit1fJbxzjH`, with the reviewed
+  `source_sha256 37fabe6b...` and `bytecode_sha3 2fa7429d...`.
+- `preview-initialize` and `preview-fund` against that address produce complete,
+  reproducible commitments offline, opening no node, identity or journal.
+- A Hub bound to that second identity starts and reports
+  `settlement_ready: true` on the `local-pilot` profile, so the countersignature
+  `initialize` needs is available.
+
+What is not available is the money. The prefund needs 200_001_000_000 Zhu at the
+left identity, which had 1354 HAC when this was written, and the block reward is
+1 HAC.
+
+Block rate is worth writing down because it is easy to misread. A node restarted
+after days of idleness mines far below the 455 s target while ASERT works off the
+timestamp deficit, and that phase is finite. Measured over this session, in
+order: 1.0, 2.5, 8.2 and 22.1 seconds per block, climbing toward the target as
+the deficit ran out. A rate sampled during the fast phase will suggest the deploy
+is twenty minutes away; it is not.
 
 Identities and state, all under `%LOCALAPPDATA%\hpay\agent-local-pilot-v1`:
 
 ```
---left-identity-dpapi-file  hvm/pilot-left.identity.dpapi
---hub-identity-dpapi-file   hub/hub.identity.dpapi
---state-file                hvm/registry-v2-pilot-state.sealed.json
+V1 channel rail, live and resumable today
+--left-identity-dpapi-file  hvm/pilot-left.identity.dpapi          1KCRLdAATCyeEPPtYn27RpJTdLV9Ueamk
+--hub-identity-dpapi-file   hub/hub.identity.dpapi                 12ZCnDaGiZW9cZhYombd4mhUNLYnXcBjq7
+--state-file                hvm/pilot-state.sealed.json
+--hub-state-file            hub/hub-state-hvm-pilot-3.sealed.json
+
+registry V2 rail, waiting only on the deploy cost
+--left-identity-dpapi-file  hvm/pilot-left.identity.dpapi          1KCRLdAATCyeEPPtYn27RpJTdLV9Ueamk
+--hub-identity-dpapi-file   hvm/pilot-left-c3.identity.dpapi       1NS4H9casx7xY1jwF5xoB8TmVyZNE5kM9t
+--state-file                hvm/registry-v4-pilot-state.sealed.json   (does not exist yet)
+--hub-state-file            hub/hub-state-registry-v4.sealed.json
+contract once deployed      avXuuLphv6YqqWjx47nuBizit1fJbxzjH
 ```
 
-Addresses: left `1KCRLdAATCyeEPPtYn27RpJTdLV9Ueamk`,
-hub `12ZCnDaGiZW9cZhYombd4mhUNLYnXcBjq7`.
-
-The next step is `initialize`. Its exact preview was reviewed and is reproducible
-(`preview-initialize` opens no node, no identity and no journal):
-
-```
-channel id           d47b203ff5dc783d1b421ba874756c6e
-left deposit         1000000000 Zhu      hub deposit 0
-challenge blocks     12                  reuse version 0
-action kinds         ChainAllow(1041), ContractMainCall(44), ReqSignList(1044)
-unsigned commitment  4808afbe1f2812612eb796c2ba50b4e702092f909f37dacb3d6e8b10cb0bbf0d
-```
-
-Remaining lifecycle after initialize: fund, activate, pay, then
-challenge/respond/finalize, then crash/recovery. The claim path built today has
-never been executed by the HVM; the finalize/claim leg is where that is first
-proven.
+The two sealed states from the abandoned runs,
+`hvm/registry-v2-pilot-state.sealed.json` and
+`hvm/registry-c3-pilot-state.sealed.json`, are evidence and not inputs. They
+cannot be opened at HEAD and were left exactly as found.

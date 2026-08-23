@@ -27,6 +27,8 @@ import {
 import {
   FAST_PAY_MAINNET_CEILINGS,
   FAST_PAY_MAINNET_CONSENT,
+  MAINNET_SIGNING_TRANSPORT_NOTICE,
+  mainnetSigningTransportIsEligible,
 } from "@hacash/wallet-ui";
 
 type Props = {
@@ -303,6 +305,13 @@ export default function FastPayChannelScreen({
       setBusy(false);
     }
   }
+  // Mirrors validate_signing_node_url. Only used to SAY the rule on screen
+  // before the ceremony; the core still enforces it at prepare and at signing.
+  const signingTransportEligible = mainnetSigningTransportIsEligible(
+    settings?.node_url,
+    settings?.network_mode,
+  );
+
   if (watchOnly) {
     return (
       <div className="card">
@@ -472,9 +481,38 @@ export default function FastPayChannelScreen({
         </div>
       )}
 
+      {/*
+        The transport rule, said as visible state rather than delivered as an
+        exception after the fingerprint prompt.
+
+        On a plain install this is mainnet plus the official plaintext node,
+        and the wallet cannot sign anything: not a send, not a channel open,
+        not a channel close. The rule is right and stays. What was wrong is
+        that no screen mentioned it, and the refusal arrived from inside
+        execution, after authorizePreparedOperation had already taken the
+        fingerprint or passphrase. Note that on a phone the loopback escape
+        hatch is not practical, so HTTPS is the door.
+      */}
+      {!signingTransportEligible ? (
+        <div className="card" role="note">
+          <h2>This node cannot sign on mainnet</h2>
+          <p className="muted small">{MAINNET_SIGNING_TRANSPORT_NOTICE}</p>
+          {/*
+            The shared sentence offers two doors, and only one of them opens
+            from a phone. Saying so here stops a person hunting for a way to
+            run a full node on their handset.
+          */}
+          <p className="muted small">
+            On a phone the second option is not realistic: a full node does not
+            run here. That leaves an HTTPS address for a node you or your
+            operator runs elsewhere.
+          </p>
+          <p className="muted small">Current node: {settings?.node_url}</p>
+        </div>
+      ) : null}
+
       <div className="card">
         <h2>Find a hub</h2>
-        <p className="muted small">Scan for online Fast Pay providers, then pick one to use.</p>
         <HubDiscoveryPanel
           settings={settings}
           activeHubUrl={hubUrl}

@@ -244,4 +244,64 @@ mod tests {
         wallet.network_mode = "testnet".into();
         wallet.require_online_signing_transport().unwrap();
     }
+
+    /// The refusal must arrive BEFORE the review screen and the fingerprint
+    /// prompt, not after.
+    ///
+    /// On a plain install - mainnet, `http://nodeapi.hacash.org` - the wallet
+    /// could not sign anything, and only said so from `execute_prepared_*`,
+    /// which runs after `authorizePreparedOperation` has already taken the
+    /// biometric or passphrase. A person authenticated a spend and was then
+    /// told the transport had never been eligible.
+    ///
+    /// The wallet here is LOCKED and has no address, so this also pins the
+    /// ordering: the transport refusal precedes even `require_address`, which
+    /// is the only way it can precede the ceremony.
+    #[tokio::test]
+    async fn prepare_refuses_an_ineligible_transport_before_any_ceremony() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet =
+            WalletService::new(Some(crate::settings::DEFAULT_NODE_URL.into()), None).unwrap();
+        wallet.network_mode = "mainnet".into();
+        assert!(wallet.unlocked.is_none(), "the wallet must still be locked");
+
+        let open = wallet
+            .prepare_channel_open("1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW", "7", "0")
+            .await
+            .unwrap_err();
+        assert!(
+            open.to_string().contains("mainnet signing requires HTTPS"),
+            "channel open must refuse at prepare, got: {open}"
+        );
+
+        let close = wallet.prepare_channel_close().await.unwrap_err();
+        assert!(
+            close.to_string().contains("mainnet signing requires HTTPS"),
+            "channel close must refuse at prepare, got: {close}"
+        );
+
+        let send = wallet
+            .prepare_send_hac(
+                "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW",
+                1.0,
+                crate::send_options::SendOptions::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            send.to_string().contains("mainnet signing requires HTTPS"),
+            "send must refuse at prepare, got: {send}"
+        );
+
+        // The same wallet on a node on this same machine is NOT refused by
+        // this check - it gets past it and fails later for want of a key. The
+        // safest configuration must not be the one turned away.
+        let mut local = WalletService::new(Some("http://127.0.0.1:8080".into()), None).unwrap();
+        local.network_mode = "mainnet".into();
+        let local_error = local.prepare_channel_close().await.unwrap_err().to_string();
+        assert!(
+            !local_error.contains("mainnet signing requires HTTPS"),
+            "a loopback node must pass the transport check, got: {local_error}"
+        );
+    }
 }

@@ -1,6 +1,19 @@
 import { useState } from "react";
-import { api, type HubDiscoveryEntry, type HubDiscoveryReport, type WalletSettings } from "../api";
+import {
+  api,
+  type HubDeclaration,
+  type HubDiscoveryEntry,
+  type HubDiscoveryReport,
+  type WalletSettings,
+} from "../api";
 import { formatInvokeError } from "../formatInvokeError";
+import {
+  FAST_PAY_NO_HUB_EXPLANATION,
+  FAST_PAY_PILOT_ALLOWLIST_NOTE,
+  FAST_PAY_SELF_HOSTED_HUB_NOTE,
+  HUB_OPERATOR_URL,
+  HubDeclarationCard,
+} from "@hacash/wallet-ui";
 
 type Props = {
   settings: WalletSettings | null;
@@ -9,8 +22,37 @@ type Props = {
   setBusy: (b: boolean) => void;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
   onToast: (msg: string, kind: "success" | "info" | "error") => void;
+  /** Keeps a host screen's own hub-URL draft in step with the one typed here. */
+  onHubUrlChange?: (url: string) => void;
+  /** Injected so this component gains no shell privileges of its own. */
+  openExternal?: (url: string) => void | Promise<unknown>;
 };
 
+/**
+ * Find, inspect and adopt a Fast Pay provider, all on one surface.
+ *
+ * Three things were wrong here and all three are fixed together, because they
+ * were one dead end wearing three hats.
+ *
+ * The panel's copy told people to paste the address their provider gave them
+ * into a field "above". On Settings that field was above; on the Fast Pay
+ * screen there was no such field anywhere, and on desktop it was below and
+ * collapsed inside "Technical settings (advanced)". So the panel now owns the
+ * field, and the sentence is true wherever the panel renders.
+ *
+ * Discovery then read the SAVED hub URL, so a URL typed and not yet saved was
+ * the one candidate the scan skipped. The typed value is now passed to the
+ * scan as an explicit argument.
+ *
+ * And a person who found a Hub was shown this build's compile-time ceilings
+ * rather than that Hub's declared caps. "Check this hub" reads the Hub's own
+ * /v1/health and /v1/readiness/mainnet and prints them verbatim, including its
+ * blockers, before any money is committed.
+ *
+ * No preset is invented. There is genuinely no public Hub, and a fabricated
+ * address would be worse than an empty list, so the empty state says the true
+ * thing instead.
+ */
 export default function HubDiscoveryPanel({
   settings,
   activeHubUrl,
@@ -18,9 +60,22 @@ export default function HubDiscoveryPanel({
   setBusy,
   onApplyHub,
   onToast,
+  onHubUrlChange,
+  openExternal,
 }: Props) {
   const [report, setReport] = useState<HubDiscoveryReport | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [draftUrl, setDraftUrl] = useState(activeHubUrl ?? "");
+  const [declaration, setDeclaration] = useState<HubDeclaration | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const isMainnet = settings?.network_mode === "mainnet";
+
+  function updateDraft(value: string) {
+    setDraftUrl(value);
+    setDeclaration(null);
+    onHubUrlChange?.(value);
+  }
 
   async function handleDiscover() {
     if (!settings) {
@@ -30,10 +85,12 @@ export default function HubDiscoveryPanel({
     setScanning(true);
     setReport(null);
     try {
-      const next = await api.discoverHubs();
+      // The typed value, not the saved one. Scanning everything except the
+      // field this panel tells people to fill in was the defect.
+      const next = await api.discoverHubs(draftUrl);
       setReport(next);
       if (next.online_count === 0) {
-        onToast("No online hubs found.", "info");
+        onToast("No online hubs answered.", "info");
       } else {
         onToast(`${next.online_count} online hub(s) found.`, "success");
       }
@@ -44,11 +101,30 @@ export default function HubDiscoveryPanel({
     }
   }
 
+  async function handleCheck() {
+    const url = draftUrl.trim();
+    if (!url) {
+      onToast("Enter the hub address your provider gave you.", "error");
+      return;
+    }
+    setChecking(true);
+    setDeclaration(null);
+    try {
+      setDeclaration(await api.hubDeclaration(url));
+    } catch (e) {
+      onToast(formatInvokeError(e), "error");
+    } finally {
+      setChecking(false);
+    }
+  }
+
   async function handleUse(entry: HubDiscoveryEntry) {
     if (!entry.online) return;
     setBusy(true);
     try {
       await onApplyHub(entry);
+      onHubUrlChange?.(entry.hub_url);
+      setDraftUrl(entry.hub_url);
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -56,25 +132,94 @@ export default function HubDiscoveryPanel({
     }
   }
 
+  /**
+   * Adopt the Hub whose declaration is on screen.
+   *
+   * Routed through the same `onApplyHub` a discovery result uses, so the Hub's
+   * published address is saved alongside its URL. Saving only a URL used to
+   * leave `hub_right_address` empty, and Enable then failed with "Choose an
+   * online Fast Pay provider first" for a provider the person had just chosen.
+   *
+   * Requires the Hub to have published an address: a channel binds to an exact
+   * counterparty and must never be guessed. The live Hub is checked against
+   * that address again at funding time by `require_channel_binding_ready`, so
+   * nothing here is taken on trust.
+   */
+  async function handleUseDeclared() {
+    if (!declaration || !declaration.reachable || !declaration.hub_address) return;
+    await handleUse({
+      id: "custom",
+      name: declaration.name ?? "Your provider",
+      hub_url: declaration.hub_url,
+      online: true,
+      hub_address: declaration.hub_address,
+      hub_fee_mei: declaration.hub_fee_mei,
+      error: null,
+    });
+  }
+
   const normalizedActive = activeHubUrl?.trim().replace(/\/$/, "") ?? "";
+  const declaredIsActive =
+    declaration !== null &&
+    normalizedActive !== "" &&
+    declaration.hub_url === normalizedActive;
 
   return (
     <div className="hub-discovery">
-      <button
-        type="button"
-        className="primary"
-        style={{ width: "100%" }}
-        disabled={busy || scanning || !settings}
-        onClick={() => void handleDiscover()}
-      >
-        {scanning ? "Scanning…" : "Discover hubs"}
-      </button>
-      <p className="muted small" style={{ marginTop: "0.5rem" }}>
-        Checks the hub URL you entered above, plus a local development hub. There
-        is no public directory of providers yet, so paste the address your
-        provider gave you. Somebody has to run a hub, and it can be you:{" "}
-        <code>docs/HUB-OPERATOR.md</code>.
+      <p className="muted small">{FAST_PAY_NO_HUB_EXPLANATION}</p>
+
+      <label htmlFor="hub-discovery-url">Hub address</label>
+      <input
+        id="hub-discovery-url"
+        value={draftUrl}
+        onChange={(e) => updateDraft(e.target.value)}
+        placeholder="https://hub.example.com"
+        inputMode="url"
+        autoComplete="off"
+        spellCheck={false}
+      />
+      <p className="muted small">
+        HTTPS, or http://127.0.0.1:PORT for a hub on this machine.
       </p>
+
+      <div className="actions-row">
+        <button
+          type="button"
+          className="primary"
+          disabled={busy || checking || !settings || !draftUrl.trim()}
+          onClick={() => void handleCheck()}
+        >
+          {checking ? "Checking…" : "Check this hub"}
+        </button>
+        <button
+          type="button"
+          disabled={busy || scanning || !settings}
+          onClick={() => void handleDiscover()}
+        >
+          {scanning ? "Scanning…" : "Scan for hubs"}
+        </button>
+      </div>
+
+      <HubDeclarationCard declaration={declaration} />
+
+      {declaration?.reachable && !declaration.hub_address && (
+        <p className="muted small">
+          This hub did not publish its on-chain address, so it cannot be used
+          yet. A channel binds to an exact counterparty and the wallet will not
+          guess one. Ask the operator to publish it on /v1/health.
+        </p>
+      )}
+      {declaration?.reachable && declaration.hub_address && (
+        <button
+          type="button"
+          className={declaredIsActive ? undefined : "primary"}
+          disabled={busy || declaredIsActive}
+          onClick={() => void handleUseDeclared()}
+        >
+          {declaredIsActive ? "In use" : "Use this hub"}
+        </button>
+      )}
+
       {report && (
         <div className="hub-discovery-list">
           {report.hubs.map((hub) => {
@@ -88,12 +233,8 @@ export default function HubDiscoveryPanel({
                   </span>
                 </div>
                 <p className="muted small hub-discovery-url">{hub.hub_url}</p>
-                {hub.online && (
-                  <p className="muted small">Fast Pay fee: 0 HAC</p>
-                )}
-                {!hub.online && hub.error && (
-                  <p className="muted small">{hub.error}</p>
-                )}
+                {hub.online && <p className="muted small">Fast Pay fee: 0 HAC</p>}
+                {!hub.online && hub.error && <p className="muted small">{hub.error}</p>}
                 {hub.online && (
                   <button
                     type="button"
@@ -109,6 +250,27 @@ export default function HubDiscoveryPanel({
           })}
         </div>
       )}
+
+      {isMainnet && (
+        <>
+          <p className="muted small">{FAST_PAY_PILOT_ALLOWLIST_NOTE}</p>
+          <p className="muted small">{FAST_PAY_SELF_HOSTED_HUB_NOTE}</p>
+        </>
+      )}
+      <p className="muted small">
+        Somebody has to run a hub, and it can be you.{" "}
+        {openExternal ? (
+          <button
+            type="button"
+            className="linkish"
+            onClick={() => void Promise.resolve(openExternal(HUB_OPERATOR_URL)).catch(() => undefined)}
+          >
+            Read the hub operator guide
+          </button>
+        ) : (
+          <span className="hub-discovery-url">{HUB_OPERATOR_URL}</span>
+        )}
+      </p>
     </div>
   );
 }

@@ -462,6 +462,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .into(),
                 );
             }
+            // Both caps are in hand here and nowhere else, and a Hub that
+            // publishes a channel cap larger than its aggregate cap advertises
+            // a channel it will always refuse at admission. Fail at startup,
+            // where the operator can fix it, rather than at a wallet's first
+            // funded channel open.
+            admission.require_can_fund_channel_cap(args.mainnet_max_channel_funding_hac_zhu)?;
             HubState::new_secure_with_mainnet_admission_signer(
                 args.name,
                 hub_address.clone(),

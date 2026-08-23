@@ -26,6 +26,7 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::commands::wallet_enable_fast_pay,
             wallet_tauri_common::commands::wallet_hub_health,
             wallet_tauri_common::commands::wallet_discover_hubs,
+            wallet_tauri_common::commands::wallet_hub_declaration,
             wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_ping_node_url,
             wallet_tauri_common::commands::wallet_fetch_asset_prices,

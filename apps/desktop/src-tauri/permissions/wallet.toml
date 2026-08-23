@@ -98,6 +98,7 @@ commands.allow = [
   "wallet_fast_pay_inbox",
   "wallet_accept_fast_pay",
   "wallet_enable_fast_pay",
+  "wallet_hub_declaration",
   "wallet_hub_health",
   "wallet_discover_hubs",
   "wallet_ping_node",

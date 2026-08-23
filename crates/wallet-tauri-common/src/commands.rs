@@ -472,10 +472,34 @@ pub async fn wallet_hub_health(state: State<'_, AppState>) -> Result<serde_json:
 }
 
 #[tauri::command]
-pub async fn wallet_discover_hubs(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn wallet_discover_hubs(
+    hub_url: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    // The URL the person has typed but not yet saved. Discovery used to read
+    // only the saved setting, so the field the panel told them to paste into
+    // was the one thing the scan skipped.
+    let typed: Vec<String> = hub_url.into_iter().collect();
     let svc = state.inner.lock().await;
-    let report = svc.discover_hubs().await.map_err(|e| e.to_string())?;
+    let report = svc.discover_hubs(&typed).await.map_err(|e| e.to_string())?;
     serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
+/// Read one Hub's own `/v1/health` and `/v1/readiness/mainnet` and return them
+/// verbatim, so a person choosing a Hub sees that Hub answering for itself
+/// rather than this build's compile-time ceilings.
+///
+/// Read-only. Saves nothing and authorizes nothing; the readiness document is
+/// re-fetched and re-gated at the signing boundary regardless of what this
+/// returned.
+#[tauri::command]
+pub async fn wallet_hub_declaration(
+    hub_url: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let declaration = svc.hub_declaration(&hub_url).await;
+    serde_json::to_value(declaration).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

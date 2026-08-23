@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { AGENT_WALLET_HOW_IT_WORKS_URL } from "@hacash/wallet-ui";
+import {
+  AGENT_WALLET_HOW_IT_WORKS_URL,
+  AGENT_WITNESS_PHONE_REQUIREMENT,
+  mainnetSigningTransportIsEligible,
+} from "@hacash/wallet-ui";
 import WalletLogo from "../components/WalletLogo";
 import MobileCompanionPanel, {
   EMPTY_COMPANION_SNAPSHOT,
@@ -671,10 +675,22 @@ function CreateAgentWallet({
         </label>
         {isMainnet ? (
           <label>
-            HPAY-compatible mainnet full node (HTTPS)
+            {/*
+              The label used to say HTTPS and the button used to enforce
+              `startsWith("https://")`, which refused http://127.0.0.1:8080 -
+              the exact configuration docs/HUB-OPERATOR.md prescribes and the
+              one the agent core treats as safest. There is no public HTTPS
+              Hacash node, so the only person who could create a bounded
+              mainnet Agent Wallet was one who did not exist, and the
+              self-hosted node owner, the safest case, was the one locked out.
+              The predicate below is now the core's own
+              (`validate_signing_node_url`), so this grants nothing
+              agent-wallet-core would not already have accepted.
+            */}
+            HPAY-compatible mainnet full node (HTTPS, or a node on this machine)
             <input
               value={mainnetNodeUrl}
-              placeholder="https://node.example"
+              placeholder="https://node.example or http://127.0.0.1:8080"
               inputMode="url"
               autoComplete="off"
               spellCheck={false}
@@ -720,6 +736,15 @@ function CreateAgentWallet({
           </label>
         </div>
       )}
+      {/*
+        Said here, at creation, rather than at the first approval.
+
+        The witness gate is compiled into shipped builds and applies on both
+        networks, so without a paired witness phone this wallet can hold funds
+        and approve nothing. A person used to discover that after they had
+        created and funded it.
+      */}
+      <p className="agent-note">{AGENT_WITNESS_PHONE_REQUIREMENT}</p>
       <button
         type="button"
         className="agent-primary"
@@ -727,7 +752,9 @@ function CreateAgentWallet({
           busy ||
           passphrase.length < 15 ||
           passphrase !== confirmation ||
-          (isMainnet && (!mainnetAcknowledged || !mainnetNodeUrl.startsWith("https://")))
+          (isMainnet &&
+            (!mainnetAcknowledged ||
+              !mainnetSigningTransportIsEligible(mainnetNodeUrl, "mainnet")))
         }
         onClick={() =>
           onCreate({

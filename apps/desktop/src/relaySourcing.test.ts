@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { HUB_OPERATOR_URL } from "@hacash/wallet-ui";
 import { pollReport } from "./messengerPoll";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -80,8 +81,16 @@ describe("the relay field says where a relay comes from", () => {
 describe("the hub field says where a hub comes from", () => {
   it("names the operator guide beside the discovery button", () => {
     const panel = source("components/HubDiscoveryPanel.tsx");
-    expect(panel).toMatch(HUB_GUIDE);
+    // The panel used to print the bare repo path as inline code, which is not
+    // a route to anything inside a desktop app. It now opens the guide, so
+    // the assertion follows the constant it opens rather than a literal, and
+    // the next assertion holds that constant to the same document.
+    expect(panel).toMatch(/HUB_OPERATOR_URL/);
     expect(panel).toMatch(RUN_ONE);
+  });
+
+  it("points that link at the operator guide and nowhere else", () => {
+    expect(HUB_OPERATOR_URL).toMatch(HUB_GUIDE);
   });
 
   it("names the operator guide beside the Hub API URL box", () => {

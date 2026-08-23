@@ -225,6 +225,7 @@ export default function SettingsScreen({
           busy={busy}
           setBusy={setBusy}
           onApplyHub={onApplyHub}
+          onHubUrlChange={setHubUrl}
           onToast={onToast}
         />
         <div className="row-btns">
@@ -260,12 +261,19 @@ export default function SettingsScreen({
                   setDiscovery(report);
                   setNodeUrl(report.active_node);
                   if (!isOfficialNodeUrl(report.active_node)) setShowCustomNode(true);
-                  onToast(
-                    report.switched
-                      ? t("settings.connectedTo", { node: report.active_node })
-                      : t("settings.activeHealthy"),
-                    "success",
-                  );
+                  // A working node was found and deliberately not adopted,
+                  // because adopting it would have left this wallet unable to
+                  // sign on mainnet. Declining silently was half the defect.
+                  if (report.failover_declined) {
+                    onToast(report.failover_declined, "error");
+                  } else {
+                    onToast(
+                      report.switched
+                        ? t("settings.connectedTo", { node: report.active_node })
+                        : t("settings.activeHealthy"),
+                      "success",
+                    );
+                  }
                 })
                 .catch((error) => onToast(formatInvokeError(error), "error"))
                 .finally(() => setBusy(false));

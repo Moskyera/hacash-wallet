@@ -111,6 +111,34 @@ impl MainnetPilotAdmissionPolicy {
     pub fn max_aggregate_tvl_hac_zhu(&self) -> u64 {
         self.max_aggregate_tvl_hac_zhu
     }
+
+    /// Refuse to run a Hub that cannot honour the channel cap it publishes.
+    ///
+    /// A Hub whose aggregate TVL cap is below its per-channel funding cap
+    /// advertises a channel size it will always refuse at admission: readiness
+    /// publishes `max_channel_funding_hac_zhu: 1000000000` next to
+    /// `max_aggregate_tvl_hac_zhu: 100000000`, a wallet reads the first, the
+    /// person funds against it, and `require_pilot_channel_admission` refuses.
+    /// The two numbers come from different flags and nothing compared them.
+    ///
+    /// This is a new refusal, not a relaxed one. It raises no cap: both remain
+    /// bounded by their compile-time hard maxima, and an operator who wants a
+    /// small aggregate gets it by lowering the channel cap to match, which is
+    /// the configuration they were describing anyway. `install.sh` has enforced
+    /// exactly this coherence rule since it was written; the binary did not.
+    pub fn require_can_fund_channel_cap(&self, max_channel_funding_hac_zhu: u64) -> HubResult<()> {
+        if max_channel_funding_hac_zhu > self.max_aggregate_tvl_hac_zhu {
+            return Err(HubError::State(format!(
+                "mainnet pilot aggregate TVL cap ({} zhu) is below the per-channel funding cap \
+                 ({max_channel_funding_hac_zhu} zhu). This Hub would publish a channel cap it \
+                 could never fund. Raise --mainnet-max-aggregate-tvl-hac-zhu to at least \
+                 {max_channel_funding_hac_zhu}, or lower --mainnet-max-channel-funding-hac-zhu \
+                 to at most {}.",
+                self.max_aggregate_tvl_hac_zhu, self.max_aggregate_tvl_hac_zhu
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl Default for MainnetPilotAdmissionPolicy {
@@ -2243,6 +2271,58 @@ mod tests {
             claimed_without_deployment.validate_candidate().is_err(),
             "an unverified candidate must not still be carrying deployment authority"
         );
+    }
+
+    /// A Hub must not start while advertising a channel it can never fund.
+    ///
+    /// This is the configuration the shipped binary default produces: the
+    /// aggregate flag defaults to 100_000_000 zhu (1 HAC, character-for-
+    /// character the per-PAYMENT hard maximum) while the operator doc has them
+    /// set the channel cap to 1_000_000_000 (10 HAC). Readiness then published
+    /// a 10 HAC channel cap next to a 1 HAC aggregate cap, and the first
+    /// channel over 1 HAC was refused at admission by a Hub whose own
+    /// published channel cap said it was fine.
+    ///
+    /// The fix is a refusal, not a raised cap: the aggregate default stays
+    /// exactly where it is, and an operator who wants a small aggregate gets
+    /// it by lowering the channel cap to match.
+    #[test]
+    fn a_hub_that_cannot_fund_its_published_channel_cap_refuses_to_start() {
+        let shipped_default_aggregate = 100_000_000;
+        let policy = MainnetPilotAdmissionPolicy::try_new(
+            ["1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW"],
+            shipped_default_aggregate,
+        )
+        .unwrap();
+
+        let error = policy
+            .require_can_fund_channel_cap(MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU)
+            .expect_err("an incoherent pair must refuse startup");
+        let text = error.to_string();
+        // Name both numbers and both remedies, so the operator can act.
+        assert!(text.contains("100000000"), "{text}");
+        assert!(text.contains("1000000000"), "{text}");
+        assert!(
+            text.contains("--mainnet-max-aggregate-tvl-hac-zhu"),
+            "{text}"
+        );
+        assert!(
+            text.contains("--mainnet-max-channel-funding-hac-zhu"),
+            "{text}"
+        );
+
+        // Coherent pairs still start, including equality and the configuration
+        // the operator doc and install.sh actually prescribe.
+        policy
+            .require_can_fund_channel_cap(shipped_default_aggregate)
+            .expect("aggregate equal to the channel cap is coherent");
+        MainnetPilotAdmissionPolicy::try_new(
+            ["1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW"],
+            MAINNET_PILOT_MAX_AGGREGATE_TVL_HAC_ZHU,
+        )
+        .unwrap()
+        .require_can_fund_channel_cap(MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU)
+        .expect("the documented pilot configuration must still start");
     }
 
     #[test]

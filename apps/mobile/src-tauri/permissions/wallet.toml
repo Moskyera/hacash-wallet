@@ -68,6 +68,7 @@ commands.allow = [
   "wallet_fast_pay_inbox",
   "wallet_get_bill_hex",
   "wallet_get_settings",
+  "wallet_hub_declaration",
   "wallet_hub_health",
   "wallet_import",
   "wallet_import_backup",

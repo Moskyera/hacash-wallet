@@ -31,6 +31,17 @@ pub struct NodeDiscoveryReport {
     pub switched: bool,
     pub network_mode: String,
     pub candidates: Vec<NodeCandidateStatus>,
+    /// Set when automatic failover found a working node and deliberately did
+    /// not move to it, because moving would have traded a node this wallet can
+    /// sign against for one it cannot.
+    ///
+    /// Carried so the surface can say so. Silence here was the whole defect:
+    /// a person pressed a button labelled "Find active node" while their own
+    /// loopback node was restarting, the wallet moved them to the plaintext
+    /// official endpoint, reported `switched: true`, and every later signing
+    /// attempt failed with an unexplained security-policy refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_declined: Option<String>,
 }
 
 /// Immutable node configuration captured while the wallet state lock is held.
@@ -111,7 +122,23 @@ pub async fn discover_node_candidates(settings: &WalletSettings) -> NodeDiscover
         switched: false,
         network_mode: settings.network_mode.clone(),
         candidates,
+        failover_declined: None,
     }
+}
+
+/// May automatic failover move this wallet onto `url` unattended?
+///
+/// Read-only endpoints stay listed and stay probed - that is what
+/// [`candidate_urls`] is for, and seeing that the official node is up is
+/// useful. This governs only the unattended *switch*.
+///
+/// The predicate is the settings layer's own, not a second opinion: a node
+/// this wallet could not sign against on this network is not a node automatic
+/// failover may silently adopt. Nothing here decides what a person may
+/// configure by hand; `validate_node_url` still governs that, and a person who
+/// deliberately types the official read-only endpoint still gets it.
+pub fn failover_may_adopt(url: &str, network_mode: &str) -> bool {
+    crate::settings::validate_signing_node_url(url, network_mode).is_ok()
 }
 
 pub async fn probe_node(url: &str, network_mode: &str) -> NodeCandidateStatus {

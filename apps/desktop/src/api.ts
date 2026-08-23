@@ -252,6 +252,12 @@ export type NodeDiscoveryReport = {
   switched: boolean;
   network_mode: "mainnet" | "testnet";
   candidates: NodeCandidateStatus[];
+  /**
+   * Set when automatic failover found a working node and deliberately did not
+   * move to it, because moving would have traded a node this wallet can sign
+   * against for one it cannot. Absent from older cores.
+   */
+  failover_declined?: string | null;
 };
 
 export type Hip23Check = {
@@ -418,6 +424,41 @@ export type HubDiscoveryEntry = {
 export type HubDiscoveryReport = {
   hubs: HubDiscoveryEntry[];
   online_count: number;
+};
+
+export type DeclaredHubCaps = {
+  max_payment_hac: string | null;
+  max_channel_funding_hac: string | null;
+  max_aggregate_tvl_hac: string | null;
+  aggregate_tvl_within_limit: boolean | null;
+};
+
+/**
+ * One Hub answering for itself. Every field is transcribed from that Hub's
+ * /v1/health and /v1/readiness/mainnet, so a person choosing a provider sees
+ * the Hub's declared caps and the Hub's own named blockers rather than this
+ * build's compile-time ceilings. Read-only: the readiness document is
+ * re-fetched and re-gated at the signing boundary regardless.
+ */
+export type HubDeclaration = {
+  hub_url: string;
+  reachable: boolean;
+  error: string | null;
+  name: string | null;
+  hub_address: string | null;
+  version: number | null;
+  settlement_ready: boolean;
+  cross_channel_ready: boolean;
+  hub_fee_mei: string | null;
+  deployment_profile: string | null;
+  mainnet_checked: boolean;
+  readiness_profile: string | null;
+  payments_enabled: boolean | null;
+  declared_caps: DeclaredHubCaps;
+  blockers: string[];
+  disclosed_blockers: string[];
+  limitations: string[];
+  readiness_error: string | null;
 };
 
 export type AirgapUnsigned = {
@@ -667,7 +708,13 @@ export const api = {
   webauthnAuthFinish: (operationId: string, assertionJson: string) =>
     invoke<void>("wallet_webauthn_auth_finish", { operationId, assertionJson }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
-  discoverHubs: () => invoke<HubDiscoveryReport>("wallet_discover_hubs"),
+  // hubUrl is what the person has typed but not yet saved. Discovery used to
+  // read only the saved setting, so the field the panel told them to paste
+  // into was the one thing the scan skipped.
+  discoverHubs: (hubUrl?: string) =>
+    invoke<HubDiscoveryReport>("wallet_discover_hubs", { hubUrl: hubUrl?.trim() || null }),
+  hubDeclaration: (hubUrl: string) =>
+    invoke<HubDeclaration>("wallet_hub_declaration", { hubUrl }),
   fastPayStatus: () => invoke<FastPayStatus>("wallet_fast_pay_status"),
   enableFastPay: (depositMei?: number) =>
     invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei: depositMei ?? null }),

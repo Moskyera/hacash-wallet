@@ -78,6 +78,33 @@ pub struct HubMainnetReadiness {
     pub fullnode_capabilities: Option<HubFullnodeCapabilities>,
     pub max_payment_hac_zhu: u64,
     pub max_channel_funding_hac_zhu: u64,
+    /// The third cap, carried across the last hop instead of dropped at it.
+    ///
+    /// The Hub publishes all three on every readiness document and the wallet
+    /// used to decode only two, so a person could read a 10 HAC channel cap off
+    /// a Hub whose aggregate cap was 1 HAC and whose very first channel open
+    /// would therefore be refused at admission. `securityPolicy.ts` promises
+    /// "what your Hub declares is what applies to you"; without this field the
+    /// wallet could not keep that promise, because it could not see the number.
+    ///
+    /// It produces **no client-side refusal**. The Hub is the authority and
+    /// re-checks aggregate TVL at admission against its live state, which the
+    /// wallet cannot know. This exists so a person can see, before they
+    /// authenticate, that the Hub they picked will take 1 HAC and not 7.
+    ///
+    /// `#[serde(default)]` because an older Hub does not send it, and zero is
+    /// then read as "not declared" rather than as a cap of zero.
+    #[serde(default)]
+    pub max_aggregate_tvl_hac_zhu: u64,
+    /// Whether the Hub's own live TVL is currently inside that cap.
+    ///
+    /// `#[serde(default)]` for older Hubs. Deliberately not a gate here: when
+    /// it is false the Hub already pushes
+    /// `mainnet_pilot_aggregate_tvl_limit_exceeded` into `blockers`, which the
+    /// existing gate reads. Adding a second, wallet-side refusal on a
+    /// defaulted field would refuse every older Hub for a field it never sent.
+    #[serde(default)]
+    pub aggregate_tvl_within_limit: bool,
     pub max_payment_satoshi: u64,
     pub wallet_fee_hac: String,
     pub trustless_finality: bool,
@@ -168,6 +195,58 @@ impl HubMainnetReadiness {
             .cloned()
             .collect()
     }
+
+    /// This Hub's three declared caps, in HAC, as the Hub declared them.
+    ///
+    /// `None` means the Hub did not send the field, and that can only happen
+    /// for the aggregate pair: `max_payment_hac_zhu` and
+    /// `max_channel_funding_hac_zhu` have no `serde(default)`, so a document
+    /// missing either one fails to decode at all and a zero there is a real
+    /// declaration of zero. Printing "not declared" for a Hub that declared a
+    /// cap of zero would hide the one number that refuses every payment, so
+    /// those two are always rendered.
+    ///
+    /// The caller renders these as the Hub's declaration, never as this build's
+    /// ceilings: the two are different numbers and conflating them is what let
+    /// a screen show 1/10/100 to a person whose Hub had declared far less.
+    pub fn declared_caps_hac(&self) -> DeclaredHubCaps {
+        DeclaredHubCaps {
+            max_payment_hac: Some(zhu_as_hac(self.max_payment_hac_zhu)),
+            max_channel_funding_hac: Some(zhu_as_hac(self.max_channel_funding_hac_zhu)),
+            // Zero here means absent, because the field is `serde(default)`.
+            max_aggregate_tvl_hac: (self.max_aggregate_tvl_hac_zhu > 0)
+                .then(|| zhu_as_hac(self.max_aggregate_tvl_hac_zhu)),
+            aggregate_tvl_within_limit: (self.max_aggregate_tvl_hac_zhu > 0)
+                .then_some(self.aggregate_tvl_within_limit),
+        }
+    }
+}
+
+/// The caps one Hub declares, in HAC, for display next to (never in place of)
+/// this build's compile-time ceilings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DeclaredHubCaps {
+    pub max_payment_hac: Option<String>,
+    pub max_channel_funding_hac: Option<String>,
+    pub max_aggregate_tvl_hac: Option<String>,
+    pub aggregate_tvl_within_limit: Option<bool>,
+}
+
+/// Zhu to a plain HAC string, trimmed. Zero prints as `0`, because a cap of
+/// zero is a declaration and not an absence; the caller decides which fields
+/// can be absent at all.
+///
+/// Integer arithmetic throughout: `1 HAC = 100_000_000 zhu` and a cap printed
+/// through an `f64` can round a refusal boundary the wrong way.
+fn zhu_as_hac(zhu: u64) -> String {
+    const ZHU_PER_HAC: u64 = 100_000_000;
+    let whole = zhu / ZHU_PER_HAC;
+    let fraction = zhu % ZHU_PER_HAC;
+    if fraction == 0 {
+        return whole.to_string();
+    }
+    let decimals = format!("{fraction:08}");
+    format!("{whole}.{}", decimals.trim_end_matches('0'))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

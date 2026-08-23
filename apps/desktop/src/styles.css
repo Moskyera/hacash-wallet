@@ -1549,3 +1549,10 @@ button.irreversible-action:not(:disabled):hover {
 .messenger-bubble.in { justify-self: start; }
 .messenger-compose { display: flex; gap: 8px; }
 .messenger-compose input { flex: 1; }
+
+/* The hub panel now prints what a Hub declares about itself, verbatim. */
+.hub-declaration h4 { margin: 0 0 6px; font-size: 0.95rem; }
+.hub-declaration ul { margin: 6px 0 0; padding-left: 18px; word-break: break-word; }
+.hub-declaration p { margin: 8px 0 0; }
+.hub-discovery > label { display: block; margin-top: 12px; }
+.hub-discovery > input { width: 100%; }

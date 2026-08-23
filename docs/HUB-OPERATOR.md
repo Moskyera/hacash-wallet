@@ -66,6 +66,10 @@ The installer verifies the local HPAY full node, creates independent journal and
 
 The bounded mainnet pilot caps each payment at 1 HAC (`100000000` Zhu), each newly funded channel at 10 HAC (`1000000000` Zhu), and aggregate active/reserved Hub TVL at 100 HAC (`10000000000` Zhu). Operators may configure lower values, never higher ones.
 
+Build first, with the `server` feature, as the Build section above shows. Without that feature the binary target does not exist and `cargo build -p l2-fast-pay-hub --bin fast-pay-hub` stops with "requires the features: `server`".
+
+Set the aggregate TVL cap deliberately. The binary's compiled-in default for `--mainnet-max-aggregate-tvl-hac-zhu` is `100000000` (1 HAC), which is lower than the 10 HAC channel cap prescribed below, and a Hub whose aggregate cap is under its per-channel cap would publish a channel size it can never fund. The Hub now refuses to start on that pair and names both numbers, so set the variable as shown or lower the channel cap to match.
+
 ```bash
 export HACASH_HUB_ADDRESS=1YourDedicatedHubAddress
 export HACASH_HUB_SECRET_HEX=your64characterhubprivatekey

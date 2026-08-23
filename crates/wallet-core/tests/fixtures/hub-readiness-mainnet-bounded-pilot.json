@@ -1,0 +1,40 @@
+{
+    "aggregate_tvl_within_limit": true,
+    "allowlist_configured": true,
+    "blockers": [
+        "fullnode_capability_probe_failed: node: error sending request for url (http://127.0.0.1:19999/query/capabilities)"
+    ],
+    "close_blockers": [
+        "fullnode_capability_probe_failed: node: error sending request for url (http://127.0.0.1:19999/query/capabilities)"
+    ],
+    "close_enabled": false,
+    "disclosed_blockers": [
+        "external_monotonic_rollback_anchor_is_not_ready",
+        "unilateral_l1_dispute_path_is_not_ready",
+        "no_watcher_answers_for_an_offline_owner"
+    ],
+    "evaluated_unix": 1800000000,
+    "fullnode_capabilities": null,
+    "limitations": [
+        "settled does not mean unilateral L1 finality",
+        "the active Hacash mainnet exposes cooperative original-funding close action 3",
+        "pilot exposure must remain inside the configured payment and channel caps",
+        "no_watcher_answers_for_an_offline_owner: nobody answers the objection window on an offline owner's behalf, and nothing finalizes or claims for them either. On the shipped one-directional rail this cannot cost them principal, because a stale split pays the left party MORE and the driver deliberately declines to answer it; that rests on two checks (a refused non-zero hub deposit and a ledger that only subtracts from the left balance) rather than on the protocol. It is disclosed and it does not block closing",
+        "new channels require an allowlisted user and aggregate Hub TVL at or below 10000000000 zhu"
+    ],
+    "mainnet_detected": null,
+    "max_aggregate_tvl_hac_zhu": 10000000000,
+    "max_channel_funding_hac_zhu": 1000000000,
+    "max_payment_hac_zhu": 100000000,
+    "max_payment_satoshi": 0,
+    "payments_enabled": false,
+    "profile": "mainnet-bounded-pilot",
+    "rollback_anchor": null,
+    "schema": "hpay-fast-pay-mainnet-readiness/1",
+    "settlement_model": "official Hacash ChannelPay bills with hub-coordinated bounded mainnet pilot",
+    "trusted_bounded_pilot": true,
+    "trustless_finality": false,
+    "unilateral_l1_enforceable": false,
+    "valid_until_unix": 1800000060,
+    "wallet_fee_hac": "0"
+}

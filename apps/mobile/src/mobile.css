@@ -1677,3 +1677,53 @@ button:disabled {
 .prepared-confirm-fields .mono {
   overflow-wrap: anywhere;
 }
+
+/* The hub panel now owns its URL field, its two actions and the card that
+   prints what a Hub declares about itself. These classes exist on desktop
+   already; the phone shell borrowed the markup and needed the rules. */
+.hub-discovery .actions-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 0.65rem;
+}
+
+.hub-discovery .actions-row > button {
+  flex: 1;
+}
+
+.hub-discovery .preview-card,
+.hub-discovery .alert {
+  margin-top: 0.75rem;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.hub-discovery .alert {
+  border-color: rgba(245, 166, 35, 0.35);
+}
+
+.hub-declaration h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.hub-declaration ul {
+  margin: 0.35rem 0 0;
+  padding-left: 18px;
+  word-break: break-word;
+}
+
+.hub-declaration p {
+  margin: 0.5rem 0 0;
+}
+
+.hub-discovery > label {
+  display: block;
+  margin-top: 0.75rem;
+}
+
+.hub-discovery > input {
+  width: 100%;
+}

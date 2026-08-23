@@ -50,7 +50,12 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
       setDiscovery(report);
       setNodeUrl(report.active_node);
       if (!isOfficialNodeUrl(report.active_node)) setShowCustomNode(true);
-      if (report.switched) {
+      // A working node was found and deliberately not adopted, because
+      // adopting it would have left this wallet unable to sign on mainnet.
+      // Declining silently was half the defect.
+      if (report.failover_declined) {
+        onError(report.failover_declined);
+      } else if (report.switched) {
         onInfo(t("settings.connectedTo", { node: report.active_node }));
       } else if (
         report.candidates.some(

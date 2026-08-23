@@ -17,10 +17,43 @@ import {
   type FastPayStatus,
 } from "../fastPayUi";
 import type { Screen } from "./types";
+import { open } from "@tauri-apps/plugin-shell";
 import {
   FAST_PAY_MAINNET_CEILINGS,
   FAST_PAY_MAINNET_CONSENT,
+  MAINNET_SIGNING_TRANSPORT_NOTICE,
+  mainnetSigningTransportIsEligible,
 } from "@hacash/wallet-ui";
+
+/**
+ * What the bounded pilot consent block's own submit control should do.
+ *
+ * Pulled out as a function so the rule can be tested without a DOM. The
+ * ceremony had no submit control at all: the consent text, the checkbox and
+ * the passphrase field rendered here while the only caller of
+ * onSaveL2Settings sat inside the collapsed "Technical settings (advanced)"
+ * section, which renders nothing until it is expanded.
+ *
+ * The asymmetry is deliberate and matches the core. GRANTING consent chooses
+ * the settlement model every later mainnet payment is judged under, so it
+ * needs the passphrase and goes through the authenticated consent command.
+ * WITHDRAWING is a tightening and needs nothing.
+ */
+export function consentSubmitState(
+  ticked: boolean,
+  saved: boolean,
+  passphrase: string,
+  busy: boolean,
+) {
+  const granting = ticked && !saved;
+  return {
+    // Nothing to submit while the tick already matches what is saved.
+    visible: ticked !== saved,
+    needsPassphrase: granting,
+    disabled: busy || (granting && passphrase.length === 0),
+    label: ticked ? "Confirm this choice" : "Withdraw consent",
+  };
+}
 
 type Props = {
   status: WalletStatus | null;
@@ -192,6 +225,20 @@ export default function FastPayScreen({
     settings,
   ]);
 
+  // Mirrors validate_signing_node_url. Used only to SAY the rule on screen
+  // before the ceremony; the core still enforces it at prepare and at signing.
+  const signingTransportEligible = mainnetSigningTransportIsEligible(
+    settings?.node_url,
+    settings?.network_mode,
+  );
+  const providerAddressChosen = Boolean(settings?.hub_right_address?.trim());
+  const consentSubmit = consentSubmitState(
+    trustedMainnetPilot,
+    settings?.trusted_mainnet_fast_pay_pilot ?? false,
+    mainnetPilotPassphrase,
+    busy,
+  );
+
   return (
     <section className="panel">
       <h2>Fast Pay</h2>
@@ -231,7 +278,7 @@ export default function FastPayScreen({
             />
             {FAST_PAY_MAINNET_CONSENT}
           </label>
-          {trustedMainnetPilot && !settings?.trusted_mainnet_fast_pay_pilot && (
+          {consentSubmit.needsPassphrase && (
             <>
               <label htmlFor="mainnet-pilot-passphrase">
                 Wallet passphrase, to confirm this choice
@@ -245,8 +292,74 @@ export default function FastPayScreen({
               />
             </>
           )}
+          {/*
+            The ceremony's own submit control.
+
+            The consent text, the checkbox and the passphrase field all render
+            here, and the only button that submitted them lived inside the
+            collapsed "Technical settings (advanced)" section further down. So
+            a person read the consent, ticked the box, typed their wallet
+            passphrase, and there was no control on screen that did anything
+            with it.
+
+            No gate moves. This calls the same onSaveL2Settings path the
+            advanced Save settings button calls, which still refuses to grant
+            consent without a passphrase and still routes granting through the
+            authenticated api.setMainnetFastPayConsent rather than
+            wallet_update_settings. The advanced button stays exactly as it is.
+          */}
+          {consentSubmit.visible && (
+            <button
+              type="button"
+              className="primary"
+              disabled={consentSubmit.disabled}
+              onClick={() =>
+                // Consent only. Every other argument is the value already
+                // saved, so this ceremony cannot carry a half-typed node or
+                // hub URL along with it and cannot fail for a reason that has
+                // nothing to do with consent. The advanced Save settings
+                // button remains the place that submits the form.
+                onSaveL2Settings(
+                  settings?.node_url ?? "",
+                  settings?.l2_hub_url ?? "",
+                  settings?.hub_right_address ?? "",
+                  trustedMainnetPilot,
+                  mainnetPilotPassphrase,
+                )
+              }
+            >
+              {consentSubmit.label}
+            </button>
+          )}
         </div>
       )}
+
+      {!signingTransportEligible && (
+        <div className="alert" role="note">
+          <strong>This node cannot sign on mainnet</strong>
+          <p>{MAINNET_SIGNING_TRANSPORT_NOTICE}</p>
+          <p className="small">
+            Current node: <code>{settings?.node_url}</code>
+          </p>
+        </div>
+      )}
+
+      <div className="fast-pay-card">
+        <h3>Find a hub</h3>
+        <HubDiscoveryPanel
+          settings={settings}
+          activeHubUrl={hubUrl}
+          busy={busy}
+          setBusy={setBusy}
+          onApplyHub={onApplyHub}
+          onHubUrlChange={setHubUrl}
+          openExternal={(url) => open(url)}
+          onToast={(msg, kind) => {
+            clearMessages();
+            onNotify(msg, kind);
+          }}
+        />
+      </div>
 
       {(fastPayNeedsSetup || fastPayDetail?.can_enable) && !status?.watch_only && (
         <div className="fast-pay-card">
@@ -260,9 +373,33 @@ export default function FastPayScreen({
             min="0.001"
             step="0.001"
           />
-          <button className="primary" disabled={busy} onClick={() => onEnableFastPay(userDeposit)}>
+          {/*
+            can_enable is set from the discovery branch of evaluate_fast_pay,
+            which has no hub address in hand, so the button could be offered
+            when handleEnableFastPay was guaranteed to throw "Choose an online
+            Fast Pay provider first." Say the missing step instead of throwing
+            it. This tightens what the button claims; it removes no check, and
+            hub_right_address is still required and still re-verified against
+            the live Hub at funding time.
+          */}
+          <button
+            className="primary"
+            disabled={busy || !providerAddressChosen || !signingTransportEligible}
+            onClick={() => onEnableFastPay(userDeposit)}
+          >
             Enable Fast Pay
           </button>
+          {!providerAddressChosen && (
+            <p className="muted small">
+              Pick a provider first. Use "Check this hub" or "Scan for hubs"
+              above, then "Use this hub" so the wallet has the provider's
+              on-chain address. A channel binds to an exact counterparty and
+              the wallet will not guess one.
+            </p>
+          )}
+          {providerAddressChosen && !signingTransportEligible && (
+            <p className="muted small">{MAINNET_SIGNING_TRANSPORT_NOTICE}</p>
+          )}
         </div>
       )}
 
@@ -294,24 +431,6 @@ export default function FastPayScreen({
           </li>
           <li>You always see which route is used before you confirm a payment.</li>
         </ul>
-      </div>
-
-      <div className="fast-pay-card">
-        <h3>Find a hub</h3>
-        <p className="muted small">
-          Scan for online Fast Pay providers, then pick one to use.
-        </p>
-        <HubDiscoveryPanel
-          settings={settings}
-          activeHubUrl={hubUrl}
-          busy={busy}
-          setBusy={setBusy}
-          onApplyHub={onApplyHub}
-          onToast={(msg, kind) => {
-            clearMessages();
-            onNotify(msg, kind);
-          }}
-        />
       </div>
 
       {fastPayReady && (

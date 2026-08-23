@@ -231,6 +231,19 @@ impl WalletService {
     ) -> WalletResult<PreparedOperationView> {
         self.touch_auto_lock();
         self.clear_prepared_operation();
+        // Refuse an ineligible signing transport HERE, not at execution.
+        //
+        // The rule is unchanged and is not relaxed by an inch: mainnet signing
+        // still requires HTTPS or a node on this same machine, still enforced
+        // at the signing boundary in `sign_submit_prepared` and in
+        // `execute_prepared_*`. What changed is only WHEN a person is told. The
+        // check used to run first inside execute, which is after the full
+        // review screen and after the fingerprint or passphrase prompt - so a
+        // person authenticated a spend and was then informed the transport had
+        // never been eligible. Checking at prepare is strictly more
+        // fail-closed: it refuses everything it refused before, earlier, and
+        // the execution-time check remains as the authority.
+        self.require_online_signing_transport()?;
         let from = self.require_address()?;
         let preview = self.preview_send(to, amount_mei, &options).await?;
         if preview.plan.rail != PaymentRail::L1OnChain {
@@ -335,6 +348,19 @@ impl WalletService {
     ) -> WalletResult<PreparedOperationView> {
         self.touch_auto_lock();
         self.clear_prepared_operation();
+        // Refuse an ineligible signing transport HERE, not at execution.
+        //
+        // The rule is unchanged and is not relaxed by an inch: mainnet signing
+        // still requires HTTPS or a node on this same machine, still enforced
+        // at the signing boundary in `sign_submit_prepared` and in
+        // `execute_prepared_*`. What changed is only WHEN a person is told. The
+        // check used to run first inside execute, which is after the full
+        // review screen and after the fingerprint or passphrase prompt - so a
+        // person authenticated a spend and was then informed the transport had
+        // never been eligible. Checking at prepare is strictly more
+        // fail-closed: it refuses everything it refused before, earlier, and
+        // the execution-time check remains as the authority.
+        self.require_online_signing_transport()?;
         let from = self.require_address()?;
         let preview = self.preview_send_hacd(to, diamond_names).await?;
         if !preview.hip23.ok {
@@ -439,6 +465,19 @@ impl WalletService {
     ) -> WalletResult<PreparedOperationView> {
         self.touch_auto_lock();
         self.clear_prepared_operation();
+        // Refuse an ineligible signing transport HERE, not at execution.
+        //
+        // The rule is unchanged and is not relaxed by an inch: mainnet signing
+        // still requires HTTPS or a node on this same machine, still enforced
+        // at the signing boundary in `sign_submit_prepared` and in
+        // `execute_prepared_*`. What changed is only WHEN a person is told. The
+        // check used to run first inside execute, which is after the full
+        // review screen and after the fingerprint or passphrase prompt - so a
+        // person authenticated a spend and was then informed the transport had
+        // never been eligible. Checking at prepare is strictly more
+        // fail-closed: it refuses everything it refused before, earlier, and
+        // the execution-time check remains as the authority.
+        self.require_online_signing_transport()?;
         let from = self.require_address()?;
         let preview = self
             .preview_send_native_asset(to, serial_raw, amount_raw)
@@ -547,6 +586,19 @@ impl WalletService {
     ) -> WalletResult<PreparedOperationView> {
         self.touch_auto_lock();
         self.clear_prepared_operation();
+        // Refuse an ineligible signing transport HERE, not at execution.
+        //
+        // The rule is unchanged and is not relaxed by an inch: mainnet signing
+        // still requires HTTPS or a node on this same machine, still enforced
+        // at the signing boundary in `sign_submit_prepared` and in
+        // `execute_prepared_*`. What changed is only WHEN a person is told. The
+        // check used to run first inside execute, which is after the full
+        // review screen and after the fingerprint or passphrase prompt - so a
+        // person authenticated a spend and was then informed the transport had
+        // never been eligible. Checking at prepare is strictly more
+        // fail-closed: it refuses everything it refused before, earlier, and
+        // the execution-time check remains as the authority.
+        self.require_online_signing_transport()?;
         let from = self.require_address()?;
         let preview = self.preview_send_btc(to, satoshi).await?;
         if !preview.hip23.ok {
@@ -687,6 +739,19 @@ impl WalletService {
     ) -> WalletResult<PreparedOperationView> {
         self.touch_auto_lock();
         self.clear_prepared_operation();
+        // Refuse an ineligible signing transport HERE, not at execution.
+        //
+        // The rule is unchanged and is not relaxed by an inch: mainnet signing
+        // still requires HTTPS or a node on this same machine, still enforced
+        // at the signing boundary in `sign_submit_prepared` and in
+        // `execute_prepared_*`. What changed is only WHEN a person is told. The
+        // check used to run first inside execute, which is after the full
+        // review screen and after the fingerprint or passphrase prompt - so a
+        // person authenticated a spend and was then informed the transport had
+        // never been eligible. Checking at prepare is strictly more
+        // fail-closed: it refuses everything it refused before, earlier, and
+        // the execution-time check remains as the authority.
+        self.require_online_signing_transport()?;
         let preview = self
             .preview_channel_open(hub_address, user_deposit_mei, hub_deposit_mei)
             .await?;
@@ -1264,6 +1329,19 @@ impl WalletService {
     pub async fn prepare_channel_close(&mut self) -> WalletResult<PreparedOperationView> {
         self.touch_auto_lock();
         self.clear_prepared_operation();
+        // Refuse an ineligible signing transport HERE, not at execution.
+        //
+        // The rule is unchanged and is not relaxed by an inch: mainnet signing
+        // still requires HTTPS or a node on this same machine, still enforced
+        // at the signing boundary in `sign_submit_prepared` and in
+        // `execute_prepared_*`. What changed is only WHEN a person is told. The
+        // check used to run first inside execute, which is after the full
+        // review screen and after the fingerprint or passphrase prompt - so a
+        // person authenticated a spend and was then informed the transport had
+        // never been eligible. Checking at prepare is strictly more
+        // fail-closed: it refuses everything it refused before, earlier, and
+        // the execution-time check remains as the authority.
+        self.require_online_signing_transport()?;
         let from = self.require_address()?;
         let channel_id = self
             .settings
