@@ -89,6 +89,7 @@ pub fn run() {
             wallet_tauri_common::security_commands::wallet_webauthn_replacement_begin,
             wallet_tauri_common::security_commands::wallet_webauthn_replacement_finish,
             wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
+            wallet_tauri_common::desktop_commands::wallet_relay_endpoint,
             wallet_list_bills,
             wallet_validate_hip23,
             wallet_platform_security_status,

@@ -73,11 +73,12 @@ pub fn recover_interrupted_restore() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn wallet_import_backup(
+pub async fn wallet_import_backup<R: tauri::Runtime>(
     json: String,
     passphrase: String,
     delete_source: Option<String>,
     allow_legacy: Option<bool>,
+    app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let json = Zeroizing::new(json);
@@ -95,5 +96,7 @@ pub async fn wallet_import_backup(
         )
         .map_err(|error| error.to_string())?
     };
+    // A restore replaces the address this machine's relay carries mail for.
+    crate::commands::sync_relay_after_wallet_identity_change(&app).await?;
     Ok(address)
 }

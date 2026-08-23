@@ -1,6 +1,6 @@
 //! In-memory messenger inbox on the DUST Whisper relay.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -133,6 +133,24 @@ const DIRECTORY_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
 /// the answer it gave before this table existed.
 const DIRECTORY_EVICT_BATCH: usize = MAX_DIRECTORY_ENTRIES / 16;
 
+/// How often a full store is allowed to walk every inbox looking for expired
+/// mail.
+///
+/// `prune` only ever ran on an inbox somebody touched, so envelopes in an inbox
+/// nobody polls stayed counted against `MAX_TOTAL_ENVELOPES` and
+/// `MAX_TOTAL_BYTES` for ever, not merely for `TTL`. A flood spread across
+/// inboxes the flooder never comes back to therefore held the whole store shut
+/// permanently, and the only way out was restarting the wallet, which drops
+/// every genuine undelivered message with it. Expiry now reaches those inboxes
+/// too: when the store is at a ceiling, and at most this often, it sweeps the
+/// whole map before it refuses anybody.
+///
+/// The interval is the point. A sweep is O(inboxes), so a sweep on every
+/// refused send would be a walk of the table for the price of one request,
+/// which is the lever the directory's read path is careful not to hand out
+/// either. Once a minute makes it free to the relay and useless to aim at.
+const FULL_STORE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
 #[derive(Clone)]
 struct Stored {
     envelope: MessengerEnvelope,
@@ -156,6 +174,9 @@ struct Inboxes {
     map: HashMap<String, Vec<Stored>>,
     envelopes: usize,
     bytes: usize,
+    /// When the whole map was last walked for expired mail. `None` until the
+    /// store first fills. See `FULL_STORE_SWEEP_INTERVAL`.
+    last_full_sweep: Option<Instant>,
 }
 
 fn stored_size(env: &MessengerEnvelope) -> usize {
@@ -192,6 +213,54 @@ impl Inboxes {
         }
     }
 
+    /// Drop expired entries from EVERY inbox, not only one somebody touched.
+    ///
+    /// Returns how many envelopes went. Rate limited by its only caller, which
+    /// is the moment the store would otherwise refuse a send: see
+    /// `FULL_STORE_SWEEP_INTERVAL` for why it is not run on every push.
+    fn sweep_expired(&mut self) -> usize {
+        self.sweep_expired_at(Instant::now())
+    }
+
+    /// The sweep against a clock the caller supplies.
+    ///
+    /// `TTL` is a week and a test process is not a week old, so a test cannot
+    /// push `received` into the past: the monotonic clock has no week of
+    /// history behind it to subtract from. It moves `now` forward instead,
+    /// which is the same comparison from the other side.
+    fn sweep_expired_at(&mut self, now: Instant) -> usize {
+        let mut dropped = 0usize;
+        let mut freed = 0usize;
+        self.map.retain(|_, list| {
+            list.retain(|s| {
+                let keep = now.saturating_duration_since(s.received) < TTL;
+                if !keep {
+                    dropped += 1;
+                    freed += stored_size(&s.envelope);
+                }
+                keep
+            });
+            !list.is_empty()
+        });
+        self.envelopes = self.envelopes.saturating_sub(dropped);
+        self.bytes = self.bytes.saturating_sub(freed);
+        self.last_full_sweep = Some(now);
+        dropped
+    }
+
+    /// True when a full sweep is due. A store that is not full never sweeps,
+    /// and a store that is full sweeps at most once per interval.
+    fn may_sweep(&self) -> bool {
+        self.may_sweep_at(Instant::now())
+    }
+
+    fn may_sweep_at(&self, now: Instant) -> bool {
+        match self.last_full_sweep {
+            None => true,
+            Some(at) => now.saturating_duration_since(at) >= FULL_STORE_SWEEP_INTERVAL,
+        }
+    }
+
     fn remove_at(&mut self, to: &str, idx: usize) {
         if let Some(list) = self.map.get_mut(to)
             && idx < list.len()
@@ -223,6 +292,177 @@ struct DirectoryEntry {
     seen: Instant,
 }
 
+/// The addresses this relay carries mail for. Nobody else, ever.
+///
+/// # Why this exists, and why it denies by default
+///
+/// The wallet offers to bind its relay to every interface so that one friend
+/// can host for another. Reaching a friend means binding somewhere reachable,
+/// and a socket a friend can reach is a socket every other machine on that
+/// network can reach too. So the question this type answers is not "how much
+/// may a stranger do" but "may a stranger be here at all", and the answer is
+/// no unless the host said otherwise about that exact address.
+///
+/// Nothing else works. Every other bound in this relay is a bound on volume -
+/// how many envelopes one inbox holds, how many bytes one sender may park -
+/// and every one of them is walked around by making more keys, because keys
+/// are free and mailbox addresses are free. A stranger who can reach the port
+/// can post properly signed mail to inboxes of their own until
+/// `MAX_TOTAL_ENVELOPES` is reached, after which the relay refuses every send
+/// including the friend's, and nothing is deleted to make room. A list of
+/// addresses is the one rule a free keypair cannot buy its way past.
+///
+/// # What an empty list means
+///
+/// Nobody. Not "open", not "the LAN", not "whoever asks": an empty list is a
+/// relay that carries no mail for any address at all, and a host who has not
+/// named anybody is hosting for nobody. That is the default because it is the
+/// only default that cannot expose somebody who never made a choice.
+///
+/// The wallet composes the list its own relay serves in
+/// `crates/wallet-tauri-common/src/desktop_relay.rs`: the host's own address,
+/// plus the addresses they typed. So an untouched wallet serves exactly one
+/// person, the one sitting at it.
+///
+/// # The one way to serve everybody
+///
+/// `serving_everybody`, which nothing in the wallet calls and nothing reaches
+/// by default. It exists for the operator of a deliberately public relay, who
+/// asks for it by name on the command line of `dust-whisper-relay`. There is
+/// no code path from "I want to message my friend" to that constructor.
+///
+/// # What is compared
+///
+/// The exact trimmed address text, against `to` and against `from`. Entries
+/// are not validated: an address that is not claimable simply never matches,
+/// so a typo costs the person who made it their own mail and can never widen
+/// the relay. That is the direction a mistake has to fail in.
+#[derive(Clone)]
+pub struct InboxAllowlist(Rule);
+
+#[derive(Clone)]
+enum Rule {
+    /// These addresses and no others. An empty set is nobody.
+    ///
+    /// Kept twice: a set to answer `allows` in one lookup, and the order the
+    /// caller gave them in, because the screen quotes this list back to the
+    /// person who typed it and the owner's own address is first in it.
+    Only(Arc<Listed>),
+    /// Everybody who can reach the socket. Only ever built by name.
+    Everybody,
+}
+
+struct Listed {
+    set: HashSet<String>,
+    order: Vec<String>,
+}
+
+impl Default for InboxAllowlist {
+    /// Nobody. See the type documentation for why this is the default.
+    fn default() -> Self {
+        Self(Rule::Only(Arc::new(Listed {
+            set: HashSet::new(),
+            order: Vec::new(),
+        })))
+    }
+}
+
+impl InboxAllowlist {
+    /// A relay that carries mail for nobody at all.
+    pub fn closed() -> Self {
+        Self::default()
+    }
+
+    /// Only these addresses. Empty, or whitespace only, is `closed`.
+    pub fn from_addresses<I, S>(addresses: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut order: Vec<String> = Vec::new();
+        for address in addresses {
+            let trimmed = address.as_ref().trim().to_string();
+            if !trimmed.is_empty() && !order.contains(&trimmed) {
+                order.push(trimmed);
+            }
+        }
+        let set = order.iter().cloned().collect();
+        Self(Rule::Only(Arc::new(Listed { set, order })))
+    }
+
+    /// A relay for whoever can reach it, asked for by name.
+    ///
+    /// The wallet never calls this. It is how the operator of a public relay
+    /// says out loud that a public relay is what they are running, and the
+    /// only caller is the `--serve-everybody` flag on `dust-whisper-relay`.
+    pub fn serving_everybody() -> Self {
+        Self(Rule::Everybody)
+    }
+
+    /// True when this relay was deliberately opened to everybody.
+    pub fn serves_everybody(&self) -> bool {
+        matches!(self.0, Rule::Everybody)
+    }
+
+    /// True when this relay carries mail for nobody at all, which is what an
+    /// untouched list means.
+    pub fn serves_nobody(&self) -> bool {
+        match &self.0 {
+            Rule::Only(listed) => listed.set.is_empty(),
+            Rule::Everybody => false,
+        }
+    }
+
+    /// True when this address may use this relay at all.
+    pub fn allows(&self, address: &str) -> bool {
+        match &self.0 {
+            Rule::Only(listed) => listed.set.contains(address.trim()),
+            Rule::Everybody => true,
+        }
+    }
+
+    /// How many addresses were named. Zero is nobody, unless
+    /// `serves_everybody`.
+    pub fn len(&self) -> usize {
+        match &self.0 {
+            Rule::Only(listed) => listed.set.len(),
+            Rule::Everybody => 0,
+        }
+    }
+
+    /// True when no address was named.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The addresses this relay is enforcing, in the order they were given.
+    ///
+    /// Read by the wallet's own screen through `RelayEndpointReport`, so that
+    /// what a person is shown is read back off the running relay rather than
+    /// recomputed beside it from settings that may have moved on. The order is
+    /// preserved because the screen quotes it back in the shape it was typed,
+    /// with the owner's own address first. A relay opened to everybody names
+    /// nobody, because there is nobody to name.
+    pub fn addresses(&self) -> Vec<String> {
+        match &self.0 {
+            Rule::Only(listed) => listed.order.clone(),
+            Rule::Everybody => Vec::new(),
+        }
+    }
+}
+
+/// What a caller is told when the operator did not name them.
+///
+/// One sentence, and the same sentence for every refused address on every
+/// path, so that a person who cannot use somebody's relay learns why from the
+/// relay rather than from silence - and so that the refusal itself carries no
+/// information. It does not say which end of the envelope was refused, it does
+/// not say how many addresses are listed, and it is byte-identical whether the
+/// address is one the operator considered and left off or one this relay has
+/// never seen. The only fact it hands back is the one the caller already had:
+/// they are not on it.
+const NOT_ON_THE_LIST: &str = "this relay carries mail only for the addresses its operator listed, and this envelope names an address that is not one of them";
+
 #[derive(Clone, Default)]
 pub struct MessengerInbox {
     inner: Arc<Mutex<Inboxes>>,
@@ -239,6 +479,18 @@ pub struct MessengerInbox {
     /// conversation under a key this operator can derive from the two addresses
     /// on the envelope.
     directory: Arc<Mutex<HashMap<String, DirectoryEntry>>>,
+    /// Who this relay is for. Empty is nobody. See `InboxAllowlist`.
+    ///
+    /// Held behind a lock so the list can be changed on a running relay
+    /// instead of by rebuilding one. The wallet used to rebuild: every save on
+    /// the Privacy screen, and every automatic node failover, dropped the
+    /// socket and built a fresh store, which silently threw away every
+    /// undelivered envelope on it - including for correspondents whose
+    /// listing had not changed, and including on a save that changed nothing.
+    /// It also meant the list a person was shown was recomputed from settings
+    /// beside the relay rather than read off it, so the two could disagree.
+    /// One live list, swapped in place, removes both. See `set_allowlist`.
+    allowlist: Arc<std::sync::RwLock<InboxAllowlist>>,
 }
 
 /// True when this string is an address a key could ever sign for.
@@ -281,6 +533,53 @@ impl MessengerInbox {
         Self::default()
     }
 
+    /// An inbox that carries mail only for the addresses named.
+    ///
+    /// An empty list is `new()`, and `new()` is an inbox that carries mail for
+    /// nobody.
+    pub fn with_allowlist(allowlist: InboxAllowlist) -> Self {
+        Self {
+            allowlist: Arc::new(std::sync::RwLock::new(allowlist)),
+            ..Self::default()
+        }
+    }
+
+    /// Change who this relay is for, without dropping anybody's mail.
+    ///
+    /// The narrowing takes effect on the very next request: a caller removed
+    /// from the list is refused from here on, on every route, and one added is
+    /// served from here on. Undelivered envelopes already in the store are not
+    /// touched, because they were accepted under a rule that was true when
+    /// they arrived; the person they are addressed to still has to prove the
+    /// address to collect them, and if they have just been removed from the
+    /// list they no longer can - the mail simply expires where it lies.
+    pub fn set_allowlist(&self, allowlist: InboxAllowlist) {
+        match self.allowlist.write() {
+            Ok(mut held) => *held = allowlist,
+            // A poisoned lock means a handler panicked while reading the list.
+            // The safe recovery is the closed list, never the requested one.
+            Err(poisoned) => *poisoned.into_inner() = InboxAllowlist::closed(),
+        }
+    }
+
+    /// Who this relay is for, right now, read off the running relay.
+    pub fn allowlist(&self) -> InboxAllowlist {
+        match self.allowlist.read() {
+            Ok(held) => held.clone(),
+            // Fail closed. A panic somewhere else must never be the thing that
+            // opens this relay.
+            Err(_) => InboxAllowlist::closed(),
+        }
+    }
+
+    /// The one question every route asks, so there is one place it is answered.
+    fn allows(&self, address: &str) -> bool {
+        match self.allowlist.read() {
+            Ok(held) => held.allows(address),
+            Err(_) => false,
+        }
+    }
+
     async fn push(&self, envelope: MessengerEnvelope) -> Result<(), String> {
         let to = envelope.to.trim().to_string();
         if to.is_empty() {
@@ -290,6 +589,13 @@ impl MessengerInbox {
             return Err(
                 "recipient is not a Hacash account address, so no key could ever collect it".into(),
             );
+        }
+        // Both ends, before anything is stored or counted. Checked here rather
+        // than in the handler so no future caller can reach the store around
+        // it. Both, and not only the sender: a relay named for two friends must
+        // not become a drop box addressed to a stranger either.
+        if !self.allows(&to) || !self.allows(envelope.from.trim()) {
+            return Err(NOT_ON_THE_LIST.into());
         }
         if envelope.ciphertext.len() > MAX_CIPHERTEXT_HEX {
             return Err("envelope body is larger than this relay accepts".into());
@@ -379,6 +685,23 @@ impl MessengerInbox {
         if new_inbox && inboxes.map.len() >= MAX_INBOXES {
             return Err("this relay is holding all the mailboxes it will hold".into());
         }
+        if (inboxes.envelopes >= MAX_TOTAL_ENVELOPES || inboxes.bytes + size > MAX_TOTAL_BYTES)
+            && inboxes.may_sweep()
+        {
+            // Expired mail in inboxes nobody ever touches used to hold its
+            // slots for ever rather than for `TTL`, because `prune` only ran on
+            // an inbox somebody polled. That turned a flood into a permanent
+            // refusal whose only cure was a restart, and a restart drops the
+            // genuine undelivered mail with it. Reach those inboxes before
+            // refusing anybody. Rate limited: see FULL_STORE_SWEEP_INTERVAL.
+            let dropped = inboxes.sweep_expired();
+            if dropped > 0 {
+                tracing::info!(
+                    dropped,
+                    "swept expired messenger mail from a full relay store"
+                );
+            }
+        }
         if inboxes.envelopes >= MAX_TOTAL_ENVELOPES || inboxes.bytes + size > MAX_TOTAL_BYTES {
             return Err("this relay is full".into());
         }
@@ -452,6 +775,17 @@ impl MessengerInbox {
     /// the storage it occupies is reclaimed on the write path, which costs the
     /// caller a signed envelope. See `remember_sender_key`.
     async fn sender_key(&self, address: &str) -> Option<String> {
+        // The relay answers this question only about the people it is for.
+        // Unlisted, the answer is `None`, which is byte-identical to the answer
+        // for an address this relay has genuinely never seen and to the answer
+        // for one whose entry has expired: the directory cannot be used to ask
+        // who is on somebody's list. Opened deliberately to everybody, it
+        // answers about anybody, which is the correspondent-confirmation oracle
+        // section 6.2 describes and is now something an operator has to ask for
+        // by name.
+        if !self.allows(address) {
+            return None;
+        }
         let now = Instant::now();
         let dir = self.directory.lock().await;
         let entry = dir.get(address)?;
@@ -547,6 +881,10 @@ impl MessengerInbox {
 pub struct RelayAppState {
     pub relay: Arc<crate::relay::RelayState>,
     pub inbox: Arc<MessengerInbox>,
+    /// Who may push a transaction through this relay to the operator's node.
+    /// A separate decision from the mail allowlist, and separately denied by
+    /// default. See `crate::relay::SubmitAccess`.
+    pub submit: crate::relay::SubmitAccess,
 }
 
 #[derive(Deserialize)]
@@ -596,17 +934,33 @@ async fn send_handler(
 
 /// The last public key this relay saw the named address send with.
 ///
-/// # What this answers, and what it gives away
+/// # Why the ASKER has to prove who they are
 ///
-/// It is unauthenticated, because the wallet that needs it is by definition a
-/// stranger to the address it is asking about: that is the whole case this
-/// endpoint exists for. So anybody can ask about anybody, and a `pubkey` in the
-/// answer tells the asker that this address has sent through this relay inside
-/// `DIRECTORY_TTL`. The key itself is not a secret - it is on the chain the
-/// moment that account signs anything, and it rides in clear on every envelope
-/// this relay already forwards. The new fact is the association between an
-/// address and this relay, and it is a fact the operator already holds in full.
-/// Section 6.2 of docs/RUNNING-A-RELAY.md states it for the operator to weigh.
+/// This route used to be unauthenticated, on the reasoning that the wallet
+/// which needs it is by definition a stranger to the address it is asking
+/// about. That reasoning was wrong in the one way that matters. The answer
+/// differed by whether the address was on the operator's list: a listed
+/// address that had sent recently came back with a key, and everything else
+/// came back with `None`. So anybody who could open the socket could put
+/// candidate addresses to it and read the host's list back out - the single
+/// fact the whole design says only the host holds, which is that these two
+/// people talk to each other, handed to a passer-by.
+///
+/// A refusal cannot be made symmetric here by inventing an answer, because a
+/// Hacash address IS the hash of its own public key: a decoy key does not
+/// derive to the address asked about, so the asker can tell a decoy from a
+/// real answer with a hash. The only way to close it is to stop answering
+/// strangers, so the asker now presents the same credential the inbox route
+/// wants - their own address, a nonce this relay issued for it, and a
+/// signature - and the relay answers only somebody it already carries mail
+/// for. An unauthenticated caller gets `None` for every address in the world,
+/// which is one answer and therefore no oracle.
+///
+/// The key itself was never the secret: it is on the chain the moment that
+/// account signs anything, and it rides in clear on every envelope this relay
+/// forwards. What is now protected is the association between an address and
+/// this relay. Section 6.2 of docs/RUNNING-A-RELAY.md states what is left for
+/// the operator to weigh.
 ///
 /// It is deliberately not made cheaper to abuse than it has to be: an address
 /// no key could ever sign for is refused without touching the table, the answer
@@ -621,29 +975,79 @@ async fn pubkey_handler(
     State(state): State<RelayAppState>,
     Json(req): Json<MessengerPubkeyRequest>,
 ) -> Json<MessengerPubkeyResponse> {
+    let nothing = || Json(MessengerPubkeyResponse { pubkey: None });
     let address = req.address.trim();
     if address.is_empty() || !is_claimable_address(address) {
-        return Json(MessengerPubkeyResponse { pubkey: None });
+        return nothing();
+    }
+    // Who is asking, checked before anything about the address asked about is
+    // looked at, and answered with the identical `None` on every failure.
+    let asker = req.asker.trim();
+    if asker.is_empty()
+        || !crate::messenger_auth::verify_inbox_auth(
+            asker,
+            req.nonce.trim(),
+            &req.asker_pubkey,
+            &req.signature,
+        )
+    {
+        return nothing();
+    }
+    // Short-circuits before the challenge table is touched, so an unlisted
+    // asker cannot spend a nonce and cannot make the relay do work either.
+    if !state.inbox.allows(asker) || !state.inbox.consume_challenge(asker, req.nonce.trim()).await {
+        return nothing();
     }
     Json(MessengerPubkeyResponse {
         pubkey: state.inbox.sender_key(address).await,
     })
 }
 
+/// A nonce, and the same shape of nonce for everybody.
+///
+/// # Why a refused caller is handed one too
+///
+/// This used to answer an unlisted address with an EMPTY nonce and a listed one
+/// with sixteen bytes of hex. That is a membership test anybody who can open
+/// the socket may run, once per candidate address, with no key and no
+/// relationship with the host: listed answers long, unlisted answers short. A
+/// neighbour on the same network could reconstruct a host's whole correspondent
+/// list from a handful of guesses. The refusal was symmetric - an address the
+/// operator left off looked exactly like one the relay had never heard of - but
+/// the ACCEPTANCE was not, and it is the acceptance that carries the fact.
+///
+/// So every caller gets a well formed nonce now, and only a caller this relay
+/// carries mail for gets one that is written down. A decoy is sixteen fresh
+/// random bytes that no table has ever seen, so `consume_challenge` refuses it
+/// exactly as it refuses an expired one, and `inbox_handler` and `ack_handler`
+/// refuse the address before the nonce is even reached. Nothing is stored for a
+/// decoy, so this cannot be used to fill the challenge table either - which is
+/// also why an address no key could ever sign for is handed a decoy rather than
+/// a real challenge.
+///
+/// What a caller can still learn from this route: nothing. Listed, unlisted,
+/// unclaimable and never-heard-of all receive one 32 character hex nonce and an
+/// expiry `CHALLENGE_TTL` from now.
 async fn challenge_handler(
     State(state): State<RelayAppState>,
     Query(q): Query<ChallengeQuery>,
 ) -> Json<MessengerChallengeResponse> {
     let to = q.to.trim();
-    // An address no key can sign for never gets a challenge, so the table
-    // cannot be filled with invented names.
-    if to.is_empty() || !is_claimable_address(to) {
-        return Json(MessengerChallengeResponse {
-            nonce: String::new(),
-            expires_at: Utc::now().to_rfc3339(),
-        });
+    if to.is_empty() || !is_claimable_address(to) || !state.inbox.allows(to) {
+        return Json(decoy_challenge());
     }
     Json(state.inbox.issue_challenge(to).await)
+}
+
+/// A nonce that is never written down, indistinguishable from one that is.
+fn decoy_challenge() -> MessengerChallengeResponse {
+    let mut nonce_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    MessengerChallengeResponse {
+        nonce: hex::encode(nonce_bytes),
+        expires_at: (Utc::now() + ChronoDuration::seconds(CHALLENGE_TTL.as_secs() as i64))
+            .to_rfc3339(),
+    }
 }
 
 async fn inbox_handler(
@@ -660,9 +1064,19 @@ async fn inbox_handler(
     if to.is_empty() {
         return refused();
     }
-    // Signature first, nonce second. Consuming the nonce before checking who
-    // sent it meant any caller could burn the challenge the owner was about to
-    // use, and the owner's own correctly signed fetch then came back empty.
+    // Signature first, then the list, then the nonce. Every failure answers
+    // with the identical `refused()` - no messages and `auth_ok: false` - so
+    // this route has never been able to say whether an address is on somebody's
+    // list. The ORDER is what changed: the list used to be checked first, which
+    // made an unlisted address answer without a signature verification while a
+    // listed one paid for one, and identical bytes that arrive at measurably
+    // different times are still an answer. Doing the same work for both leaves
+    // nothing to compare.
+    //
+    // Checking the signature before spending the nonce is the older reason for
+    // this order and still holds: consuming it first meant any caller could
+    // burn the challenge the owner was about to use, and the owner's own
+    // correctly signed fetch then came back empty.
     if !crate::messenger_auth::verify_inbox_auth(
         to,
         req.nonce.trim(),
@@ -671,7 +1085,11 @@ async fn inbox_handler(
     ) {
         return refused();
     }
-    if !state.inbox.consume_challenge(to, req.nonce.trim()).await {
+    // Default deny, short-circuiting before the challenge table is touched. An
+    // unlisted address is also unreachable here in practice, because
+    // `challenge_handler` only ever hands it a decoy - which is exactly why it
+    // is checked here too. A door that is only shut upstream is a door.
+    if !state.inbox.allows(to) || !state.inbox.consume_challenge(to, req.nonce.trim()).await {
         return refused();
     }
     let messages = state.inbox.peek(to).await;
@@ -693,8 +1111,22 @@ async fn ack_handler(
             err: Some("missing recipient".into()),
         });
     }
-    // Same order as the inbox handler, for the same reason: a caller who cannot
-    // sign for this address must not be able to spend its challenge.
+    // SIGNATURE FIRST, AND THE LIST FOLDED INTO THE CHALLENGE CHECK.
+    //
+    // The list used to be checked first and answered "invalid or expired
+    // challenge" while a listed caller with a bad signature was answered
+    // "invalid inbox auth signature". Two different sentences, chosen by list
+    // membership, from identical garbage credentials: that is the same
+    // membership oracle the challenge route carried, in words. Checking the
+    // signature first makes the two answers depend on what the caller sent and
+    // not on who the operator listed - an unlisted address that signs properly
+    // gets "invalid or expired challenge", which is what a listed address with
+    // a stale nonce gets, and any address that signs badly gets the signature
+    // sentence.
+    //
+    // It also keeps the property the order was originally for: a caller who
+    // cannot sign for this address never reaches `consume_challenge`, so it
+    // cannot burn the challenge the owner was about to spend.
     if !crate::messenger_auth::verify_inbox_auth(
         to,
         req.nonce.trim(),
@@ -707,7 +1139,12 @@ async fn ack_handler(
             err: Some("invalid inbox auth signature".into()),
         });
     }
-    if !state.inbox.consume_challenge(to, req.nonce.trim()).await {
+    // Default deny, short-circuiting before the challenge table is touched. An
+    // unlisted caller can hold no challenge for this address anyway, because
+    // `challenge_handler` only ever hands them a decoy, so this sentence is the
+    // literal truth as well as being the one a listed caller with a spent nonce
+    // receives.
+    if !state.inbox.allows(to) || !state.inbox.consume_challenge(to, req.nonce.trim()).await {
         return Json(MessengerAckResponse {
             ok: false,
             removed: 0,
@@ -720,4 +1157,145 @@ async fn ack_handler(
         removed,
         err: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(to: &str, id: &str) -> MessengerEnvelope {
+        MessengerEnvelope {
+            v: 1,
+            id: id.to_string(),
+            to: to.to_string(),
+            from: "1SomeSender".to_string(),
+            from_pubkey: None,
+            from_sig: None,
+            nonce: "00".to_string(),
+            ciphertext: "deadbeef".to_string(),
+            sent_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// THE BUG THIS SWEEP EXISTS FOR.
+    ///
+    /// `prune` only ever ran on an inbox somebody touched, and a flood is
+    /// posted to inboxes its author never comes back to. So expired envelopes
+    /// in those inboxes kept counting against the whole store's ceilings for
+    /// ever rather than for `TTL`: the relay stayed full permanently, and the
+    /// only cure was restarting the wallet, which throws away every genuine
+    /// undelivered message with it.
+    #[test]
+    fn expiry_reaches_an_inbox_nobody_ever_comes_back_to() {
+        let mut inboxes = Inboxes::default();
+        inboxes.insert("1Untouched".into(), envelope("1Untouched", "flood-1"));
+        inboxes.insert("1Untouched".into(), envelope("1Untouched", "flood-2"));
+        inboxes.insert("1Friend".into(), envelope("1Friend", "genuine-1"));
+        assert_eq!(inboxes.envelopes, 3);
+        let bytes_before = inboxes.bytes;
+        assert!(bytes_before > 0);
+
+        // A week goes by for the flood, and one more envelope arrives for the
+        // friend on the far side of it. Nobody polls the flooded mailboxes, so
+        // nothing has ever called `prune` on them.
+        let a_week_later = Instant::now() + TTL + Duration::from_secs(60);
+        inboxes.map.get_mut("1Friend").expect("inbox")[0].received = a_week_later;
+
+        inboxes.prune("1Friend");
+        assert_eq!(
+            inboxes.envelopes, 3,
+            "pruning the inbox somebody DID touch is what used to be the whole of expiry"
+        );
+
+        assert_eq!(inboxes.sweep_expired_at(a_week_later), 2);
+        assert_eq!(inboxes.envelopes, 1, "the slots were never given back");
+        assert!(inboxes.bytes < bytes_before);
+        assert!(!inboxes.map.contains_key("1Untouched"));
+        assert_eq!(
+            inboxes.list("1Friend").len(),
+            1,
+            "the sweep took mail that had not expired"
+        );
+    }
+
+    /// A sweep is O(inboxes) and the caller is a refused send, so it must not
+    /// be something an outsider can make the relay do once per request.
+    #[test]
+    fn a_full_store_does_not_walk_itself_once_per_refused_send() {
+        let mut inboxes = Inboxes::default();
+        assert!(
+            inboxes.may_sweep(),
+            "a store that has never swept has to be allowed to"
+        );
+        let now = Instant::now();
+        inboxes.sweep_expired_at(now);
+        assert!(
+            !inboxes.may_sweep_at(now),
+            "the second refusal in the same instant swept again"
+        );
+        assert!(
+            !inboxes.may_sweep_at(now + FULL_STORE_SWEEP_INTERVAL - Duration::from_secs(1)),
+            "the interval is not being waited out"
+        );
+        assert!(
+            inboxes.may_sweep_at(now + FULL_STORE_SWEEP_INTERVAL),
+            "the interval never elapses"
+        );
+    }
+
+    /// An empty list is nobody, and every way of arriving at one is nobody.
+    ///
+    /// This is the default, and it is the state an upgraded settings file is in
+    /// (`#[serde(default)]` on `relay_allowlist`), so it is the state a person
+    /// who never made a choice is in. It has to be the state that exposes them
+    /// to nothing.
+    #[test]
+    fn an_unnamed_relay_carries_mail_for_nobody() {
+        for list in [
+            InboxAllowlist::closed(),
+            InboxAllowlist::default(),
+            InboxAllowlist::from_addresses(Vec::<String>::new()),
+            // Whitespace is not a name.
+            InboxAllowlist::from_addresses(["", "  ", "	"]),
+        ] {
+            assert!(list.serves_nobody());
+            assert!(!list.serves_everybody());
+            assert!(list.is_empty());
+            assert_eq!(list.len(), 0);
+            assert!(!list.allows("1Anybody"));
+            assert!(!list.allows(""));
+        }
+    }
+
+    /// The one open relay, and the only way to get one.
+    #[test]
+    fn serving_everybody_is_reachable_only_by_asking_for_it_by_name() {
+        let list = InboxAllowlist::serving_everybody();
+        assert!(list.serves_everybody());
+        assert!(!list.serves_nobody());
+        assert!(list.allows("1Anybody"));
+        // And it is not what any default gives you.
+        assert!(!InboxAllowlist::default().serves_everybody());
+        assert!(!MessengerInbox::new().allowlist().serves_everybody());
+        assert!(MessengerInbox::new().allowlist().serves_nobody());
+    }
+
+    /// Named, it is exact. A typo is an address that never matches, which costs
+    /// the person who made it their own mail and can never open the relay to
+    /// everybody.
+    #[test]
+    fn a_named_relay_matches_the_address_and_nothing_near_it() {
+        let list = InboxAllowlist::from_addresses(["  1Alice ", "1Bob"]);
+        assert!(!list.serves_nobody());
+        assert!(!list.serves_everybody());
+        assert_eq!(list.len(), 2);
+        assert!(list.allows("1Alice"));
+        assert!(list.allows(" 1Alice"));
+        assert!(list.allows("1Bob"));
+        assert!(!list.allows("1Alic"));
+        assert!(!list.allows("1AliceX"));
+        assert!(!list.allows("1alice"));
+        assert!(!list.allows("1Mallory"));
+        assert!(!list.allows(""));
+    }
 }

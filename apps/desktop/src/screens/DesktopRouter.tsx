@@ -3,7 +3,7 @@ import AirgapScreen from "../AirgapScreen";
 import { AssetSummary, HubDiscoveryEntry, TxRecord, WalletSettings, WalletStatus } from "../api";
 import type { AssetTrendHistory } from "../assetTrends";
 import { HubFeePayer, L1FeeSpeed, SendPreview } from "../api";
-import { DustWhisperSettings, PrivacySettings, RelayHealthStatus } from "../api";
+import { DustWhisperSettings, PrivacySettings, RelayEndpoint, RelayHealthStatus } from "../api";
 import { ChannelInfo, HubHealth } from "../api";
 import type { FastPayStatus } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
@@ -39,6 +39,8 @@ export type DesktopData = {
   webauthnReady: boolean;
   nativeBioAvailable: boolean;
   relayHealth: RelayHealthStatus[];
+  /** What this wallet is serving, from `wallet_relay_endpoint`. */
+  relayEndpoint: RelayEndpoint | null;
   privacy: PrivacySettings;
   dustWhisper: DustWhisperSettings;
   busy: boolean;
@@ -160,6 +162,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     webauthnReady,
     nativeBioAvailable,
     relayHealth,
+    relayEndpoint,
     privacy,
     dustWhisper,
     busy,
@@ -393,6 +396,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
         <MessagesScreen
           status={status}
           dustWhisper={dustWhisper}
+          relayEndpoint={relayEndpoint}
           hideAddresses={hideAddresses}
           onNavigate={setScreen}
           onNotify={onNotify}
@@ -464,6 +468,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           status={status}
           dustWhisper={dustWhisper}
           relayHealth={relayHealth}
+          relayEndpoint={relayEndpoint}
           busy={busy}
           onSavePrivacy={onSavePrivacy}
           onSaveWhisper={onSaveWhisper}

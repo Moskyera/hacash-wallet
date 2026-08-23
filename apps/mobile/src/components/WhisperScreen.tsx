@@ -2,7 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type DustWhisperSettings, type RelayHealthStatus } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 
-const RELAY_PLACEHOLDER = "https://relay.example";
+/**
+ * What a relay URL looks like, in the two shapes a person is actually handed.
+ *
+ * It used to name an https host only, while the paragraph beside it tells the
+ * reader to paste the plain http LAN address a friend's desktop wallet prints.
+ * The example the field itself offers made the right answer look wrong.
+ */
+const RELAY_PLACEHOLDER = "http://192.168.1.24:8787";
 
 type Props = {
   initial?: DustWhisperSettings;
@@ -103,6 +110,21 @@ export default function WhisperScreen({ initial, onToast }: Props) {
           This box is empty on a new wallet because there is no public relay to fill it with.
           Somebody has to run one, and it can be you, on a computer rather than on this phone:
           only the desktop wallet can host a relay. See <code>docs/RUNNING-A-RELAY.md</code>.
+        </p>
+        <p className="muted small">
+          If the person you want to message is hosting on their computer, the address they give
+          you is what goes in this box. It usually looks like{" "}
+          <code>http://192.168.1.24:8787</code> rather than like a web address. You both have to
+          be using the same relay: an envelope posted to one is only ever collected from that one.
+          Whether their address reaches this phone at all depends on their network and not on this
+          setting, which is section 0 of that guide.
+        </p>
+        <p className="muted small">
+          If you put more than one address here, order matters and only in one direction. A
+          message you send stops at the first relay in this list that accepts it, while checking
+          for new mail tries all of them. So a relay that is not the one your correspondent uses,
+          sitting above the one they do use, quietly swallows everything you send while their
+          replies keep arriving.
         </p>
         <textarea
           value={relayText}

@@ -31,6 +31,7 @@ import {
   type ChatThread,
   type DustWhisperSettings,
   type MessengerPeerSecurity,
+  type RelayEndpoint,
   type WalletStatus,
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
@@ -39,6 +40,13 @@ import { pollReport } from "../messengerPoll";
 import { privacyNotice, sealedLabel } from "../messengerPrivacy";
 import { arrivalNote } from "../messengerTiming";
 import { maskAddress } from "../privacy";
+import {
+  PLAIN_HTTP_LIMIT,
+  SHARE_INSTRUCTION,
+  acceptedByNote,
+  firstAcceptWarning,
+  relayReach,
+} from "../relayReach";
 import type { Screen } from "./types";
 
 export type SendOutcome = { text: string; kind: "success" | "error" };
@@ -51,8 +59,22 @@ export type SendOutcome = { text: string; kind: "success" | "error" };
  * message with `delivered: false` is a message that is sitting on this computer
  * and nowhere else.
  */
-export function sendOutcome(msg: ChatMessage): SendOutcome {
-  if (msg.delivered) return { text: "A relay accepted the message.", kind: "success" };
+export function sendOutcome(
+  msg: ChatMessage,
+  relayEndpoint: RelayEndpoint | null = null,
+): SendOutcome {
+  if (msg.delivered) {
+    // WHICH relay, not merely that one accepted. A wallet hosting its own
+    // relay always has one that accepts, on this machine, and a send stops at
+    // the first that does, so "a relay accepted it" was also what a person was
+    // told about a message that never left their own computer. See
+    // `acceptedByNote` and `ChatMessage::delivered_via`.
+    const via = acceptedByNote(msg.delivered_via, relayEndpoint);
+    return {
+      text: via ? `A relay accepted the message. ${via}` : "A relay accepted the message.",
+      kind: "success",
+    };
+  }
   // The relay's own reason, when it gave one. Without it "the relay is down"
   // and "that person's mailbox is full" were the same sentence, and only one of
   // those is worth waiting out.
@@ -81,6 +103,12 @@ export function messengerBlockedReason(status: WalletStatus | null): string | nu
 type Props = {
   status: WalletStatus | null;
   dustWhisper: DustWhisperSettings;
+  /**
+   * What this wallet is serving, from `wallet_relay_endpoint`. The relay a
+   * person needs may be the one their own wallet is already running, and this
+   * screen is where they would go looking for something to give a friend.
+   */
+  relayEndpoint: RelayEndpoint | null;
   hideAddresses: boolean;
   onNavigate: (screen: Screen) => void;
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
@@ -89,6 +117,7 @@ type Props = {
 export default function MessagesScreen({
   status,
   dustWhisper,
+  relayEndpoint,
   hideAddresses,
   onNavigate,
   onNotify,
@@ -195,7 +224,7 @@ export default function MessagesScreen({
       if (activePeerRef.current === peer && sent?.delivered === true) setDraft("");
       await loadMessages(peer);
       await refreshPeerSecurity(peer);
-      const outcome = sendOutcome(sent);
+      const outcome = sendOutcome(sent, relayEndpoint);
       onNotify(outcome.text, outcome.kind);
     } catch (error) {
       onNotify(formatInvokeError(error), "error");
@@ -279,10 +308,12 @@ export default function MessagesScreen({
         <code>docs/RUNNING-A-RELAY.md</code>.
       </p>
       <p>
-        This computer can run one itself. The Privacy screen offers{" "}
+        This computer can run one itself, and that is the whole arrangement for two people:
+        one of you hosts and the other points at them. The Privacy screen offers{" "}
         <code>http://127.0.0.1:8787</code>, and the wallet runs that relay while DUST Whisper
-        and its auto-start option are both on. A relay on this computer is reachable only by
-        wallets that can reach this computer.
+        and its auto-start option are both on. It listens on this computer only until you say
+        otherwise, so on those settings it is reachable by nobody else, including the person
+        you want to message. The Privacy screen says what has to be true to change that.
       </p>
       <button type="button" className="primary" onClick={() => onNavigate("privacy")}>
         Open Privacy to set the relay
@@ -300,6 +331,61 @@ export default function MessagesScreen({
     </div>
   ) : null;
 
+  /**
+   * The relay this wallet is itself serving, if any.
+   *
+   * A person looking for a relay to give somebody has one running on this
+   * computer already. What they never had is any way to learn its address, or
+   * to be told that on the default bind it is an address nobody else can
+   * reach. `relayReach` is where both of those sentences are written and
+   * tested; this screen only renders them.
+   */
+  const ownRelay = relayReach(relayEndpoint);
+  const ownRelayNotice = ownRelay ? (
+    <div className="info-box">
+      <strong>The relay this wallet is running</strong>
+      <p>{ownRelay.headline}</p>
+      <p className={ownRelay.tone === "warn" ? "warn-text" : undefined}>{ownRelay.reach}</p>
+      {ownRelay.share ? (
+        <>
+          <p>
+            Give the other person: <code>{ownRelay.share}</code>
+          </p>
+          <p className="muted small">{SHARE_INSTRUCTION}</p>
+          <p className="muted small">{PLAIN_HTTP_LIMIT}</p>
+          <ul>
+            {ownRelay.conditions.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      <button type="button" onClick={() => onNavigate("privacy")}>
+        Open Privacy to change who can reach it
+      </button>
+    </div>
+  ) : null;
+
+  /**
+   * The relay list is walked in order on the way out and in full on the way
+   * back, and only one of those two facts is visible from here.
+   *
+   * This is the screen where somebody is actually trying to reach a person, so
+   * it is the screen that has to say when nothing they send is leaving this
+   * machine. `firstAcceptWarning` is the sentence and the condition.
+   */
+  const orderingNotice = firstAcceptWarning(relayEndpoint) ? (
+    <div className="warn-box">
+      <p>
+        <strong>Nothing you send is reaching the other relay in your list.</strong>
+      </p>
+      <p>{firstAcceptWarning(relayEndpoint)}</p>
+      <button type="button" onClick={() => onNavigate("privacy")}>
+        Open Privacy to reorder the relay list
+      </button>
+    </div>
+  ) : null;
+
   if (!activePeer) {
     return (
       <section className="panel">
@@ -310,6 +396,8 @@ export default function MessagesScreen({
             ? `Relay: ${relays.join(", ")}`
             : "Relay: none configured."}
         </p>
+        {orderingNotice}
+        {ownRelayNotice}
         <label htmlFor="messenger-new-peer">New conversation. Hacash address</label>
         <div className="actions-row">
           <input
@@ -358,6 +446,7 @@ export default function MessagesScreen({
       </button>
       <h2>{maskAddress(activePeer, hideAddresses)}</h2>
       {relayNotice}
+      {orderingNotice}
       {(() => {
         const notice = privacyNotice(peerSecurity);
         if (!notice) return null;
@@ -384,6 +473,11 @@ export default function MessagesScreen({
               </span>
               {arrivalNote(m) ? (
                 <span className="warn-text messenger-status">{arrivalNote(m)}</span>
+              ) : null}
+              {m.direction === "out" && acceptedByNote(m.delivered_via, relayEndpoint) ? (
+                <span className="muted messenger-status">
+                  {acceptedByNote(m.delivered_via, relayEndpoint)}
+                </span>
               ) : null}
             </div>
           ))

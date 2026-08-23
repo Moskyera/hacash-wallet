@@ -9,6 +9,7 @@ import {
   HubDiscoveryEntry,
   HubHealth,
   PrivacySettings,
+  RelayEndpoint,
   RelayHealthStatus,
   TxRecord,
   WalletSettings,
@@ -54,6 +55,10 @@ export function useDesktopWallet(
   const [webauthnReady, setWebauthnReady] = useState(false);
   const [nativeBioAvailable, setNativeBioAvailable] = useState(false);
   const [relayHealth, setRelayHealth] = useState<RelayHealthStatus[]>([]);
+  // What this wallet is serving, and whether anybody else could reach it.
+  // `null` until the wallet answers, and back to `null` if it stops answering,
+  // so the screens say nothing rather than quoting a stale address.
+  const [relayEndpoint, setRelayEndpoint] = useState<RelayEndpoint | null>(null);
   const statusRequestRef = useRef<Promise<WalletStatus> | null>(null);
   const assetTrendWalletRef = useRef<string | null>(null);
 
@@ -199,6 +204,15 @@ export function useDesktopWallet(
     }
   }, [dustWhisper.enabled, dustWhisper.relay_urls.join("|")]);
 
+  /** Read-only. Starts no relay and moves no socket. */
+  const refreshRelayEndpoint = useCallback(async () => {
+    try {
+      setRelayEndpoint(await api.relayEndpoint());
+    } catch {
+      setRelayEndpoint(null);
+    }
+  }, []);
+
   useEffect(() => {
     setWebauthnReady(webAuthnAvailable());
     api.platformSecurityStatus()
@@ -220,6 +234,19 @@ export function useDesktopWallet(
     }, 5000);
     return () => window.clearInterval(id);
   }, [dustWhisper.enabled, relayUrlsKey, refreshRelayHealth]);
+
+  // Every setting that decides whether a relay is hosted here, and where it
+  // listens. The socket only moves on a save, so this follows the settings
+  // rather than polling on a timer.
+  useEffect(() => {
+    refreshRelayEndpoint().catch(() => undefined);
+  }, [
+    dustWhisper.enabled,
+    dustWhisper.auto_start_relay,
+    dustWhisper.relay_bind,
+    relayUrlsKey,
+    refreshRelayEndpoint,
+  ]);
 
   // Load wallet data when unlocking or switching wallets. NOT on every tab click.
   useEffect(() => {
@@ -839,18 +866,36 @@ export function useDesktopWallet(
           return null;
         }
         await api.updateDustWhisperSettings(next);
-        await refreshStatus();
-        await refreshRelayHealth();
         onInfo("DUST Whisper settings saved.");
         return next;
       } catch (e) {
         onError(String(e));
         return null;
       } finally {
+        // RE-READ WHETHER THE SAVE THREW OR NOT.
+        //
+        // `wallet_update_dust_whisper_settings_desktop` persists the settings
+        // and THEN binds the socket, so a save that fails on a port already in
+        // use has already changed what is stored. These three refreshes used to
+        // sit on the success path only, so on that failure the "Your own relay"
+        // box kept showing the state from before the save while the stored
+        // settings had moved: the screen was wrong precisely when the person
+        // needed it to be right. `relayReach` already has the sentence for a
+        // wallet that is set to host and is not listening; it was never fetched.
+        await refreshStatus().catch(() => undefined);
+        await refreshRelayHealth().catch(() => undefined);
+        await refreshRelayEndpoint().catch(() => undefined);
         setBusy(false);
       }
     },
-    [clearMessages, refreshStatus, refreshRelayHealth, onInfo, onError],
+    [
+      clearMessages,
+      refreshStatus,
+      refreshRelayHealth,
+      refreshRelayEndpoint,
+      onInfo,
+      onError,
+    ],
   );
 
   const handleClearHistory = useCallback(async () => {
@@ -947,6 +992,7 @@ export function useDesktopWallet(
     webauthnReady,
     nativeBioAvailable,
     relayHealth,
+    relayEndpoint,
     privacy,
     dustWhisper,
     clearMessages,
@@ -961,6 +1007,7 @@ export function useDesktopWallet(
     refreshFastPay,
     refreshUnlockedData,
     refreshRelayHealth,
+    refreshRelayEndpoint,
     handleCreate,
     handleImport,
     handleImportBackup,

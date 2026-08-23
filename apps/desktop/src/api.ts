@@ -19,11 +19,79 @@ export type PrivacySettings = {
   pause_auto_lock_dapp: boolean;
 };
 
+/**
+ * Where the relay this wallet hosts accepts connections.
+ *
+ * `loopback` is 127.0.0.1: this machine and nothing else, which is why a
+ * wallet hosting a relay has never been reachable by the person it wants to
+ * message. `all_interfaces` is 0.0.0.0, which is what makes hosting for
+ * somebody else possible and is never chosen for anybody.
+ * `crates/wallet-core/src/dust_whisper.rs` holds the setting.
+ */
+export type RelayBind = "loopback" | "all_interfaces";
+
 export type DustWhisperSettings = {
   enabled: boolean;
   relay_urls: string[];
   fallback_direct: boolean;
   auto_start_relay: boolean;
+  relay_bind: RelayBind;
+  /**
+   * The addresses this wallet's own relay carries mail for.
+   *
+   * Empty is open to whoever can reach the socket, which is what every relay
+   * this wallet has run has been. It is the one defence against a stranger on
+   * the same network filling the relay that a free keypair does not walk
+   * around. See `InboxAllowlist`, crates/dust-whisper/src/messenger_relay.rs.
+   */
+  relay_allowlist: string[];
+};
+
+/**
+ * What this wallet is serving, from `wallet_relay_endpoint`.
+ *
+ * `listen_addr` is read back from the socket by
+ * `crates/wallet-tauri-common/src/desktop_relay.rs`, so it is the address the
+ * relay is on rather than the address that was asked for. `lan_url` is offered
+ * only when the bind is wide enough for it to mean anything, and it is a
+ * candidate address, not a promise that anybody can reach it.
+ */
+export type RelayEndpoint = {
+  hosting: boolean;
+  serving: boolean;
+  listen_addr: string | null;
+  bind: RelayBind;
+  loopback_only: boolean;
+  port: number | null;
+  own_url: string | null;
+  lan_addr: string | null;
+  lan_url: string | null;
+  idle_reason: string | null;
+  /**
+   * The addresses the person added, exactly as stored. This is NOT the whole
+   * of who the relay serves: the wallet's own address is added to the list the
+   * relay enforces and is never stored here. Read `served_addresses` when the
+   * question is who can use this relay.
+   */
+  allowlist: string[];
+  /** This wallet's own address, which its own relay always carries mail for. */
+  own_address: string | null;
+  /**
+   * Every address this relay will answer for: the owner, plus the additions.
+   * Anybody not on it gets nothing on every route - no send, no mailbox, no
+   * challenge, no acknowledgement, no directory answer. This is the list the
+   * relay enforces, so it is the list a screen must quote.
+   */
+  served_addresses: string[];
+  /** True when this relay would carry mail for no address at all. */
+  serves_nobody: boolean;
+  /** Who may push a transaction through this relay. Always this machine. */
+  transaction_reach: string;
+  /**
+   * Every relay URL this wallet is configured with, in the order a send walks
+   * them. The order is the point: see `firstAcceptWarning` in relayReach.ts.
+   */
+  relay_urls: string[];
 };
 
 export type RelayHealthStatus = {
@@ -676,6 +744,8 @@ export const api = {
     invoke<void>("wallet_update_dust_whisper_settings_desktop", { dustWhisper }),
   whisperRelayHealth: () =>
     invoke<RelayHealthStatus[]>("wallet_whisper_relay_health"),
+  /** Read-only. Starts nothing and moves no socket. */
+  relayEndpoint: () => invoke<RelayEndpoint>("wallet_relay_endpoint"),
   clearTxHistory: () => invoke<void>("wallet_clear_tx_history"),
   airgapPrepareSend: (to: string, amountMei: number) =>
     invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),
@@ -803,6 +873,17 @@ export type ChatMessage = {
    * and a recipient whose mailbox was full read identically.
    */
   delivery_error?: string | null;
+  /**
+   * WHICH relay accepted an outgoing message, when one did.
+   *
+   * A send stops at the first relay in the list that accepts, and a wallet
+   * hosting its own relay always has one that accepts: its own, on this
+   * machine. So `delivered: true` was also the answer for a message that never
+   * left the computer it was typed on, while the friend's replies kept
+   * arriving because collecting mail tries every relay. Absent on incoming
+   * messages, on undelivered ones, and on records written before this existed.
+   */
+  delivered_via?: string | null;
 };
 
 /** What the screen may say about one conversation's privacy. */

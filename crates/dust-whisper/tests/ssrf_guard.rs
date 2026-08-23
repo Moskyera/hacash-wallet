@@ -8,7 +8,10 @@ use axum::routing::post;
 use axum::{Json, Router};
 use dust_whisper::crypto::{decrypt_payload, encrypt_payload, generate_relay_keypair};
 use dust_whisper::protocol::WhisperInnerPayload;
-use dust_whisper::relay::{build_router, relay_state_from_secret};
+use dust_whisper::relay::{
+    SUBMIT_TOKEN_HEADER, build_router, relay_state_from_secret, serve_router,
+    submit_token_from_secret,
+};
 use reqwest::Client;
 use serde_json::json;
 use tokio::task::JoinHandle;
@@ -45,7 +48,9 @@ async fn relay_only_hits_configured_node_not_attacker_host() {
     let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_addr = relay_listener.local_addr().unwrap();
     let relay_handle = tokio::spawn(async move {
-        axum::serve(relay_listener, relay_app).await.unwrap();
+        // With connection info, the way the wallet serves it: the transaction
+        // route forwards only for this machine (`SubmitAccess`).
+        serve_router(relay_listener, relay_app).await.unwrap();
     });
 
     // Craft a legacy-style inner JSON that tries to point at evil_node.
@@ -59,6 +64,11 @@ async fn relay_only_hits_configured_node_not_attacker_host() {
     let client = Client::new();
     let resp = client
         .post(format!("http://{relay_addr}/whisper/v1/submit"))
+        // The transaction door wants the relay's own submit token as well as a
+        // local connection, because a reverse proxy makes every caller local.
+        // Deriving it from the secret is what a process that can read the key
+        // file does (`dust_whisper::relay::local_submit_token`).
+        .header(SUBMIT_TOKEN_HEADER, submit_token_from_secret(&sk))
         .json(&envelope)
         .send()
         .await

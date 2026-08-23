@@ -29,3 +29,17 @@ pub async fn wallet_update_dust_whisper_settings_desktop<R: Runtime>(
     crate::desktop_relay::sync_managed_relay(&app).await?;
     Ok(())
 }
+
+/// The address this wallet's own relay is serving on, and whether anybody else
+/// can reach it.
+///
+/// Read-only. It starts nothing, stops nothing and changes no setting: the
+/// bind is only ever moved by a saved settings change, which is
+/// `wallet_update_dust_whisper_settings_desktop` above.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn wallet_relay_endpoint<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<crate::desktop_relay::RelayEndpointReport, String> {
+    crate::desktop_relay::relay_endpoint(&app).await
+}

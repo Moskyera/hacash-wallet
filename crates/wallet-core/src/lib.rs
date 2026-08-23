@@ -72,7 +72,7 @@ pub use airgap::{
 pub use assets::{AssetSummary, DiamondMetadataReader};
 pub use bills::BillEntry;
 pub use btc_send::{BtcSendPreview, btc_to_satoshi, satoshi_to_btc};
-pub use dust_whisper::{DustWhisperSettings, RelayHealthStatus};
+pub use dust_whisper::{DustWhisperSettings, RelayBind, RelayHealthStatus};
 pub use error::{WalletError, WalletResult};
 pub use fast_pay::{
     DEFAULT_CHANNEL_DEPOSIT_MEI, FastPayState, FastPayStatus, HubDiscoveryEntry, HubDiscoveryReport,

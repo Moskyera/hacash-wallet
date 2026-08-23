@@ -133,6 +133,28 @@ fn set_relay(shell: &Shell, relay_url: &str, auto_start: bool) {
     );
 }
 
+/// The relay operator naming who their relay carries mail for.
+///
+/// The relay denies by default: an address the operator did not name gets
+/// nothing on any route (`InboxAllowlist`,
+/// crates/dust-whisper/src/messenger_relay.rs). That is what turned the flood
+/// below from something any passer-by could do into something only a listed
+/// address can do, and it is why this fixture now has to list the flooders on
+/// purpose. See the comment at the flood itself.
+fn set_relay_for(shell: &Shell, relay_url: &str, serving: &[String]) {
+    invoke(
+        shell,
+        "wallet_update_dust_whisper_settings_desktop",
+        json!({ "dustWhisper": {
+            "enabled": true,
+            "relay_urls": [relay_url],
+            "fallback_direct": false,
+            "auto_start_relay": true,
+            "relay_allowlist": serving,
+        }}),
+    );
+}
+
 /// Junk that every check the relay makes will pass: a real key, a real
 /// signature over the real envelope, a fresh timestamp, and a body that is
 /// simply not a message to anybody.
@@ -223,6 +245,20 @@ fn a_flood_of_unreadable_mail_does_not_shut_an_inbox_and_the_owner_is_told() {
     println!("Alice {alice_address}");
     println!("Bob   {bob_address}");
 
+    // The relay denies by default, so the operator has to say who it is for.
+    // The flooders are named here, on purpose, and section 3 says why: an
+    // address nobody named cannot post at all any more, so the only flood left
+    // to measure is one from an address that WAS named. The keys are made now
+    // rather than at the flood because naming somebody restarts the relay, and
+    // a restart half way through would throw away the mail this run is about.
+    let flooders: Vec<Account> = (0..(MAX_PER_RECIPIENT / MAX_PER_SENDER))
+        .map(|i| Account::create_by(&format!("wedge-flooder-{i}")).expect("key"))
+        .collect();
+    let mut serving = vec![alice_address.clone(), bob_address.clone()];
+    serving.extend(flooders.iter().map(|f| f.readable().to_string()));
+    set_relay_for(&operator, &relay_url, &serving);
+    println!("the operator lists {} addresses", serving.len());
+
     let sent = invoke(
         &alice,
         "messenger_send",
@@ -238,10 +274,37 @@ fn a_flood_of_unreadable_mail_does_not_shut_an_inbox_and_the_owner_is_told() {
     println!("Alice writes, Bob collects: {collected}");
     println!("Bob has now released Alice's slot, which is what the attack needs.");
 
-    // -- 3. The flood. Ten free keypairs, an HTTP client, nothing else. -----
-    let flooders: Vec<Account> = (0..(MAX_PER_RECIPIENT / MAX_PER_SENDER))
-        .map(|i| Account::create_by(&format!("wedge-flooder-{i}")).expect("key"))
-        .collect();
+    // -- 3. The flood, and who is left able to do it. -----------------------
+    //
+    // This used to be ten free keypairs and an HTTP client, from anybody who
+    // could reach the port. It is not any more: the relay denies by default,
+    // so an address its operator never named is refused before any ceiling is
+    // consulted, and free keys buy nothing because the rule they have to beat
+    // is not about volume. What is left is this, and it is why the test is
+    // still here: somebody the operator DID name can still fill a mailbox.
+    // That is a correspondent behaving badly, or one whose key was taken, and
+    // no allowlist addresses it. So the operator lists the flooders, on
+    // purpose, and the run below is the residual case rather than the open one.
+    // First, the thing that is now impossible: one more key, not on that list,
+    // posting the same properly signed envelope. Nothing about it is different
+    // except that nobody named it.
+    let unlisted = Account::create_by("wedge-unlisted").expect("key");
+    let refused = post_envelope(&relay_url, &signed_junk(&unlisted, &bob_address, 9_000));
+    println!("\n== 3a. AN ADDRESS NOBODY NAMED, WITH A PERFECT ENVELOPE ==");
+    println!("relay answered {refused}");
+    assert_eq!(
+        refused["ok"],
+        json!(false),
+        "an address the operator never named was allowed to post: {refused}"
+    );
+    assert!(
+        refused["err"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only for the addresses its operator listed"),
+        "refused for the wrong reason: {refused}"
+    );
+
     let mut accepted = 0usize;
     let mut seed = 0u32;
     for flooder in &flooders {
@@ -253,7 +316,7 @@ fn a_flood_of_unreadable_mail_does_not_shut_an_inbox_and_the_owner_is_told() {
             seed += 1;
         }
     }
-    println!("\n== 3. THE FLOOD ==");
+    println!("\n== 3b. THE FLOOD, FROM ADDRESSES THE OPERATOR LISTED ==");
     println!(
         "{} keypairs x {MAX_PER_SENDER} correctly signed envelopes of noise, {accepted} accepted",
         flooders.len()

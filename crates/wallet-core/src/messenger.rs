@@ -100,6 +100,21 @@ pub struct ChatMessage {
     /// person's mailbox is full" arrived at the screen as the same sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_error: Option<String>,
+    /// WHICH relay took it. `None` when none did, and on records written
+    /// before this field existed.
+    ///
+    /// A send stops at the first relay in the list that accepts, and a wallet
+    /// hosting its own relay always has one that accepts: its own, on this
+    /// machine. So a person whose list reads `[my own relay, my friend's]`
+    /// delivered every message into their own mailbox, where the friend cannot
+    /// collect it, and `delivered: true` with no error was the whole of what
+    /// the screen was given. Polling tries EVERY relay, so the friend's replies
+    /// still arrived and the thread looked like a conversation.
+    ///
+    /// Naming the relay is what makes that visible. The screen prints it, and
+    /// compares it against the relay this wallet is itself hosting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_via: Option<String>,
 }
 
 impl ChatMessage {
@@ -437,7 +452,7 @@ fn encrypt_for_send(
 ///
 /// # What it costs, in time
 ///
-/// One unauthenticated request per configured relay, and only on a send to a
+/// Two requests per configured relay, and only on a send to a
 /// peer this wallet holds no key for. A relay that is down, slow or hostile
 /// costs a failed request and nothing else: every arm here falls through to the
 /// next relay and then to `None`.
@@ -467,12 +482,26 @@ fn encrypt_for_send(
 /// It is kept as small as it can be. The question is a POST, so the address
 /// does not land in an access log, and the loop stops at the first relay whose
 /// answer survives checking rather than polling them all.
+///
+/// # Why it now says who is asking
+///
+/// The relay's key directory used to answer anybody, and its answer differed by
+/// whether the address asked about was on that relay's list. That made it a
+/// membership test a passer-by could run. It answers a listed caller only now,
+/// so this fetches a challenge for THIS wallet's own address first and signs
+/// it - the same credential the inbox poll already presents, to the same relay.
+/// A relay this wallet is not listed on hands back a decoy nonce, the signed
+/// request is refused, and the answer is `None`: the same outcome as a relay
+/// that never had a key, and the same honest v1 fallback.
 async fn lookup_peer_key(
     http: &reqwest::Client,
+    account: &Account,
+    my_address: &str,
     relay_urls: &[String],
     peer: &str,
 ) -> Option<[u8; 33]> {
     let deadline = Instant::now() + PEER_KEY_LOOKUP_BUDGET;
+    let asker_pubkey = pubkey_hex(account);
     for url in relay_urls {
         let u = url.trim();
         if u.is_empty() {
@@ -485,8 +514,34 @@ async fn lookup_peer_key(
             break;
         }
         let budget = left.min(PEER_KEY_RELAY_TIMEOUT);
+        // The credential this relay wants, obtained from this relay. A relay
+        // that will not issue this wallet a real nonce is a relay that will not
+        // answer the question either, and both end at `continue`.
+        let challenge = match tokio::time::timeout(
+            budget,
+            dust_whisper::messenger_client::fetch_challenge(http, u, my_address),
+        )
+        .await
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(_)) | Err(_) => continue,
+        };
+        let signature = sign_inbox_auth(account, my_address, &challenge.nonce);
+        let asker = dust_whisper::messenger_client::PubkeyAsker {
+            address: my_address,
+            pubkey_hex: &asker_pubkey,
+            nonce: &challenge.nonce,
+            signature: &signature,
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let budget = left.min(PEER_KEY_RELAY_TIMEOUT);
         let claimed =
-            match dust_whisper::messenger_client::fetch_peer_pubkey(http, u, peer, budget).await {
+            match dust_whisper::messenger_client::fetch_peer_pubkey(http, u, peer, &asker, budget)
+                .await
+            {
                 Ok(Some(claimed)) => claimed,
                 // No key, no answer at all, or no answer in time. All are "ask
                 // the next one", and if there is no next one, all are the
@@ -597,7 +652,7 @@ pub async fn messenger_send(
     // for the key they have already seen this address send with, and use it
     // only if it derives back to this address. See `lookup_peer_key`.
     if peer_pk.is_none()
-        && let Some(found) = lookup_peer_key(http, relay_urls, peer).await
+        && let Some(found) = lookup_peer_key(http, ctx.account, my_address, relay_urls, peer).await
     {
         // Kept, so the screen's banner catches up with what the send actually
         // did and the next message does not ask again. `learn_peer_key`
@@ -624,7 +679,11 @@ pub async fn messenger_send(
     let digest = dust_whisper::messenger_auth::envelope_auth_digest(&envelope);
     envelope.from_sig = Some(hex::encode(ctx.account.do_sign(&digest)));
 
-    let mut relay_ok = false;
+    // WHICH relay took it, not merely whether one did. The loop below stops at
+    // the first relay that accepts, and a wallet hosting its own relay has one
+    // that always accepts, so "a relay accepted it" was true of a message that
+    // had gone no further than this machine. See `ChatMessage::delivered_via`.
+    let mut accepted_by: Option<String> = None;
     // Kept, because "no relay accepted this" and "that person's mailbox is
     // full" are different facts and used to reach the screen as one sentence.
     let mut refusal: Option<String> = None;
@@ -635,7 +694,7 @@ pub async fn messenger_send(
         }
         match dust_whisper::messenger_client::send_envelope(http, u, envelope.clone()).await {
             Ok(()) => {
-                relay_ok = true;
+                accepted_by = Some(u.to_string());
                 break;
             }
             // A relay that answered and said no gives its own sentence, which
@@ -652,10 +711,11 @@ pub async fn messenger_send(
         direction: MessageDirection::Out,
         body: trimmed.to_string(),
         timestamp_utc: sent_at,
-        delivered: relay_ok,
+        delivered: accepted_by.is_some(),
         sealed: Some(crypto_v == MESSENGER_CRYPTO_V2),
         received_utc: None,
-        delivery_error: if relay_ok { None } else { refusal },
+        delivery_error: if accepted_by.is_some() { None } else { refusal },
+        delivered_via: accepted_by,
     };
 
     // The room was checked before anything left the machine, so this cannot
@@ -848,6 +908,9 @@ pub async fn messenger_poll_inbox(
                 // and is not what the conversation is ordered on.
                 received_utc: Some(Utc::now().to_rfc3339()),
                 delivery_error: None,
+                // Inbound. The relay it came from is not a fact about a message
+                // this wallet sent, and nothing on screen claims it is.
+                delivered_via: None,
             });
             if !taken {
                 // Left on the relay rather than dropped: the store is full, and
@@ -939,6 +1002,7 @@ mod tests {
             sealed: Some(true),
             received_utc: None,
             delivery_error: None,
+            delivered_via: None,
         }));
         store.save(&ctx).unwrap();
         let loaded = MessengerStore::load(&ctx).unwrap();
@@ -2019,9 +2083,18 @@ mod tests {
         let relays = vec![url.clone(), url.clone(), url.clone()];
 
         let bob = keyed_account("b0");
+        let alice = keyed_account("a0");
+        let alice_address = alice.address();
         let http = reqwest::Client::new();
         let started = Instant::now();
-        let found = lookup_peer_key(&http, &relays, &bob.address()).await;
+        let found = lookup_peer_key(
+            &http,
+            alice.inner(),
+            &alice_address,
+            &relays,
+            &bob.address(),
+        )
+        .await;
         let took = started.elapsed();
         relay.abort();
 

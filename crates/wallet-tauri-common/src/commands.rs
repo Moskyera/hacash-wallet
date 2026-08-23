@@ -12,6 +12,26 @@ use zeroize::Zeroizing;
 
 use crate::state::{AppState, WALLET_BUSY_RETRY};
 
+/// Put the embedded relay back in step with the wallet it belongs to.
+///
+/// Called after anything that moves one of the two things the relay is built
+/// from: the node it forwards to, and the address it carries mail for. The
+/// second was not called at all, and that was a real divergence rather than a
+/// tidiness point - `wallet_create` and `wallet_reset` change the owner
+/// address, the Privacy screen recomputed the served list from that address the
+/// instant it moved, and the socket went on enforcing the list it was started
+/// with. After a reset the screen therefore said "this relay will carry mail
+/// for nobody" while the relay was still carrying mail for the deleted
+/// wallet's address. `relay_endpoint` now reads the enforced list off the
+/// running relay so it can no longer print a list nothing is enforcing, and
+/// this makes the relay follow the wallet so the two do not need to disagree in
+/// the first place.
+pub(crate) async fn sync_relay_after_wallet_identity_change<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    sync_relay_after_node_change(app).await
+}
+
 async fn sync_relay_after_node_change<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     #[cfg(feature = "desktop")]
     {
@@ -125,24 +145,39 @@ pub fn wallet_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 }
 
 #[tauri::command]
-pub fn wallet_create(passphrase: String, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn wallet_create<R: tauri::Runtime>(
+    passphrase: String,
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let passphrase = Zeroizing::new(passphrase);
-    let mut svc = state.inner.blocking_lock();
-    svc.create_wallet(&passphrase).map_err(|e| e.to_string())
+    let address = {
+        let mut svc = state.inner.lock().await;
+        svc.create_wallet(&passphrase).map_err(|e| e.to_string())?
+    };
+    // The new owner is now one of the addresses this machine's relay is for,
+    // and the relay has to be told before anything quotes the list back.
+    sync_relay_after_node_change(&app).await?;
+    Ok(address)
 }
 
 #[tauri::command]
-pub fn wallet_import(
+pub async fn wallet_import<R: tauri::Runtime>(
     seed: String,
     passphrase: String,
     expected_address: String,
+    app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let seed = Zeroizing::new(seed);
     let passphrase = Zeroizing::new(passphrase);
-    let mut svc = state.inner.blocking_lock();
-    svc.import_wallet(&seed, &passphrase, &expected_address)
-        .map_err(|e| e.to_string())
+    let address = {
+        let mut svc = state.inner.lock().await;
+        svc.import_wallet(&seed, &passphrase, &expected_address)
+            .map_err(|e| e.to_string())?
+    };
+    sync_relay_after_node_change(&app).await?;
+    Ok(address)
 }
 
 #[tauri::command]
@@ -315,7 +350,12 @@ pub async fn wallet_reset(
     if final_kind != initial_kind {
         return Err("wallet changed while reset authorization was in progress".into());
     }
-    svc.reset_wallet().map_err(|e| e.to_string())
+    svc.reset_wallet().map_err(|e| e.to_string())?;
+    drop(svc);
+    // The address this relay was carrying mail for has just been deleted. Stop
+    // carrying it: without this the socket went on serving the deleted wallet
+    // while the screen said it served nobody.
+    sync_relay_after_node_change(&app).await
 }
 
 #[tauri::command]

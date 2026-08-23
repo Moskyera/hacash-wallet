@@ -9,8 +9,9 @@ use std::net::SocketAddr;
 use dust_whisper::crypto::generate_relay_keypair;
 use dust_whisper::messenger_auth::{envelope_auth_digest, inbox_auth_digest};
 use dust_whisper::messenger_client::{ack_messages, fetch_challenge, fetch_inbox, send_envelope};
+use dust_whisper::messenger_relay::InboxAllowlist;
 use dust_whisper::protocol::{MessengerAckRequest, MessengerEnvelope, MessengerInboxRequest};
-use dust_whisper::relay::{build_router, relay_state_from_secret};
+use dust_whisper::relay::{build_router_for, relay_state_from_secret, serve_router};
 use reqwest::Client;
 use sys::Account;
 use tokio::task::JoinHandle;
@@ -18,11 +19,19 @@ use tokio::task::JoinHandle;
 async fn spawn_relay() -> (String, JoinHandle<()>) {
     let (sk, _pk) = generate_relay_keypair();
     let state = relay_state_from_secret(sk, "http://127.0.0.1:1".to_string());
-    let app = build_router(state);
+    // A DELIBERATELY PUBLIC RELAY, because that is what this file is about.
+    //
+    // The relay denies by default now: an address its operator did not name gets
+    // nothing on any route, which is `messenger_relay_allowlist.rs`. The rules
+    // exercised below are the ones that apply ON TOP of that, to callers the relay
+    // has already agreed to serve, and they are the rules a public relay operator
+    // is left holding. So this harness asks for the open relay by name, which is
+    // the only way to get one.
+    let app = build_router_for(state, InboxAllowlist::serving_everybody());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        serve_router(listener, app).await.unwrap();
     });
     (format!("http://{addr}"), handle)
 }

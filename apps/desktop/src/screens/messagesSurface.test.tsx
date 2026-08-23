@@ -15,6 +15,7 @@
 /// prove it claims neither encryption it has not verified nor delivery the core
 /// did not report.
 
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
@@ -154,5 +155,63 @@ describe("the desktop messenger surface", () => {
     ).toMatch(/Cold Vault/);
     expect(messengerBlockedReason({ ...UNLOCKED, locked: true } as never)).toMatch(/Unlock/);
     expect(messengerBlockedReason(UNLOCKED as never)).toBeNull();
+  });
+});
+
+/**
+ * WHICH RELAY TOOK IT, NOT ONLY THAT ONE DID.
+ *
+ * `messenger_send` stops at the first relay in the list that accepts, and a
+ * wallet hosting its own relay always has one that accepts, on this machine.
+ * So "A relay accepted the message." was also what a person was told about a
+ * message that never left the computer they typed it on, while their friend's
+ * replies kept arriving through a second relay and the thread looked like a
+ * conversation. The core records the URL now; this is the screen saying it.
+ */
+describe("what the screen says about where a message went", () => {
+  const OWN: Parameters<typeof sendOutcome>[1] = {
+    hosting: true,
+    serving: true,
+    listen_addr: "127.0.0.1:8787",
+    bind: "loopback",
+    loopback_only: true,
+    port: 8787,
+    own_url: "http://127.0.0.1:8787",
+    lan_addr: null,
+    lan_url: null,
+    idle_reason: null,
+    allowlist: [],
+  own_address: "1Owner",
+  served_addresses: ["1Owner"],
+  serves_nobody: false,
+  transaction_reach:
+    "Transactions are not relayed for anybody else. This relay forwards a transaction to your fullnode only when it was submitted from this computer.",
+    relay_urls: ["http://127.0.0.1:8787", "http://192.168.1.24:8787"],
+  } as never;
+
+  it("says a message accepted by this machine's own relay went no further", () => {
+    const msg = { ...outgoing(true), delivered_via: "http://127.0.0.1:8787" } as never;
+    const outcome = sendOutcome(msg, OWN);
+    expect(outcome.kind).toBe("success");
+    expect(outcome.text).toMatch(/relay accepted/i);
+    expect(outcome.text).toContain("http://127.0.0.1:8787");
+    expect(outcome.text).toMatch(/gone no further than this machine/i);
+  });
+
+  it("names the relay plainly when it is the one the other person uses", () => {
+    const msg = { ...outgoing(true), delivered_via: "http://192.168.1.24:8787" } as never;
+    expect(sendOutcome(msg, OWN).text).toContain("Accepted by http://192.168.1.24:8787.");
+  });
+
+  it("still says only what it knows about a record with no relay named", () => {
+    // Records written before the wallet kept this field, and every undelivered
+    // message. Nothing is invented for either.
+    expect(sendOutcome(outgoing(true), OWN).text).toBe("A relay accepted the message.");
+    expect(sendOutcome(outgoing(false), OWN).text).toMatch(/not been delivered/i);
+  });
+
+  it("puts the same note beside the message itself, not only in the toast", () => {
+    const source = readFileSync(new URL("./MessagesScreen.tsx", import.meta.url), "utf8");
+    expect(source).toMatch(/acceptedByNote\(m\.delivered_via, relayEndpoint\)/);
   });
 });

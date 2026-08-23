@@ -64,10 +64,41 @@ const RESPONSES: Record<string, unknown> = {
       relay_urls: [],
       fallback_direct: true,
       auto_start_relay: false,
+      relay_bind: "loopback",
+      relay_allowlist: [],
     },
     fast_pay_state: "ready",
     fast_pay_message: "Fast Pay channel open and ready to send.",
     legacy_key_derivation: null,
+  },
+
+  // The messenger reads these three before it renders anything, and without
+  // fixtures the preview answered undefined and the Chat screen threw on
+  // `threads.length`. A fixture wallet has no correspondents, so: none.
+  messenger_threads: [],
+  messenger_messages: [],
+  messenger_mark_read: null,
+
+  // Nothing is hosted in a browser tab, and the screen must say so rather than
+  // showing an address that would then be handed to somebody.
+  wallet_relay_endpoint: {
+    hosting: false,
+    serving: false,
+    listen_addr: null,
+    bind: "loopback",
+    loopback_only: true,
+    port: null,
+    own_url: null,
+    lan_addr: null,
+    lan_url: null,
+    idle_reason: "DUST Whisper is off, so this wallet is not hosting a relay.",
+    allowlist: [],
+    own_address: null,
+    served_addresses: [],
+    serves_nobody: true,
+    transaction_reach:
+      "Transactions are not relayed for anybody else. This relay forwards a transaction to your fullnode only when it was submitted from this computer by something that can read this relay's own key file, whatever the bind is set to and whoever is on the address list. Another machine that tries is refused before its payload is even read, and that stays true behind a reverse proxy, where every caller in the world would otherwise look like this computer.",
+    relay_urls: [],
   },
 
   wallet_asset_summary: {

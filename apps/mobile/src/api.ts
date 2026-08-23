@@ -177,6 +177,17 @@ export type ChatMessage = {
    * and a recipient whose mailbox was full read identically.
    */
   delivery_error?: string | null;
+  /**
+   * WHICH relay accepted an outgoing message, when one did.
+   *
+   * A send stops at the first relay in the list that accepts, and a wallet
+   * hosting its own relay always has one that accepts: its own, on this
+   * machine. So `delivered: true` was also the answer for a message that never
+   * left the computer it was typed on, while the friend's replies kept
+   * arriving because collecting mail tries every relay. Absent on incoming
+   * messages, on undelivered ones, and on records written before this existed.
+   */
+  delivered_via?: string | null;
 };
 
 /** What the screen may say about one conversation's privacy. */

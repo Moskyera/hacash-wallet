@@ -145,9 +145,35 @@ pub struct MessengerChallengeResponse {
 /// somewhere else without thinking about it. The send path already posts the
 /// same address in a JSON body. This one does too, so the two are consistent and
 /// neither is logged by default.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # Why the asker names and signs for themselves
+///
+/// The answer used to depend on whether `address` was on the relay's list, and
+/// nothing was asked of the caller, so the route was a membership test anybody
+/// could run against any address. A decoy answer cannot fix that, because an
+/// address is the hash of its own key and a decoy fails that check. So the
+/// asker presents the credential the inbox route already asks for - their own
+/// address, a nonce this relay issued for it, and a signature over both - and a
+/// relay answers only somebody it already carries mail for. Everybody else is
+/// told `None` about every address, which is one answer for the whole world.
+///
+/// The three credential fields default to empty, so an older wallet's request
+/// still parses. It is simply never answered.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessengerPubkeyRequest {
     pub address: String,
+    /// The asker's own Hacash address.
+    #[serde(default)]
+    pub asker: String,
+    /// The asker's compressed secp256k1 public key, hex.
+    #[serde(default)]
+    pub asker_pubkey: String,
+    /// A nonce this relay issued for `asker`, spent by this request.
+    #[serde(default)]
+    pub nonce: String,
+    /// `inbox_auth_digest(asker, nonce)` signed by the asker's key, hex.
+    #[serde(default)]
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

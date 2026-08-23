@@ -23,9 +23,12 @@ use axum::Router;
 use axum::routing::any;
 use dust_whisper::error::WhisperError;
 use dust_whisper::messenger_auth::envelope_auth_digest;
-use dust_whisper::messenger_client::{fetch_peer_pubkey, send_envelope};
+use dust_whisper::messenger_client::{
+    PubkeyAsker, fetch_challenge, fetch_peer_pubkey, send_envelope,
+};
+use dust_whisper::messenger_relay::InboxAllowlist;
 use dust_whisper::protocol::{MESSENGER_PUBKEY_PATH, MessengerEnvelope};
-use dust_whisper::relay::{build_router, relay_state_from_secret};
+use dust_whisper::relay::{build_router_for, relay_state_from_secret, serve_router};
 use reqwest::Client;
 use sys::Account;
 use tokio::task::JoinHandle;
@@ -35,22 +38,83 @@ use tokio::task::JoinHandle;
 /// longer for an answer than a person pressing Send does.
 const ASK: Duration = Duration::from_secs(3);
 
+/// WHO IS ASKING, WHICH THE DIRECTORY NOW REQUIRES.
+///
+/// The route used to answer anybody about anybody, and its answer depended on
+/// whether the address asked about was on the relay's list, which made it a
+/// membership test a passer-by could run against any address. It answers only
+/// a caller the relay already carries mail for now, so every lookup in this
+/// file carries the same credential a mailbox fetch does: the asker's own
+/// address, a nonce this relay issued for it, and a signature over both.
+struct Asker {
+    address: String,
+    pubkey: String,
+    nonce: String,
+    signature: String,
+}
+
+impl Asker {
+    fn borrow(&self) -> PubkeyAsker<'_> {
+        PubkeyAsker {
+            address: &self.address,
+            pubkey_hex: &self.pubkey,
+            nonce: &self.nonce,
+            signature: &self.signature,
+        }
+    }
+}
+
+/// A real credential, obtained from the relay that is about to be asked.
+async fn credential(http: &Client, url: &str, who: &Account) -> Asker {
+    let address = who.readable().to_string();
+    let challenge = fetch_challenge(http, url, &address)
+        .await
+        .expect("the relay issued a challenge");
+    let digest = dust_whisper::messenger_auth::inbox_auth_digest(&address, &challenge.nonce);
+    Asker {
+        signature: hex::encode(who.do_sign(&digest)),
+        pubkey: hex::encode(who.public_key().serialize_compressed()),
+        nonce: challenge.nonce,
+        address,
+    }
+}
+
+/// Credentials for the mock relays further down, which check nothing and are
+/// there to observe the request the wallet makes rather than to answer it.
+fn unchecked_credential() -> Asker {
+    Asker {
+        address: String::new(),
+        pubkey: String::new(),
+        nonce: String::new(),
+        signature: String::new(),
+    }
+}
+
 async fn ask(
     http: &Client,
     url: &str,
     address: &str,
+    asker: &Asker,
 ) -> dust_whisper::error::WhisperResult<Option<String>> {
-    fetch_peer_pubkey(http, url, address, ASK).await
+    fetch_peer_pubkey(http, url, address, &asker.borrow(), ASK).await
 }
 
 async fn spawn_relay() -> (String, JoinHandle<()>) {
     let (sk, _pk) = dust_whisper::crypto::generate_relay_keypair();
     let state = relay_state_from_secret(sk, "http://127.0.0.1:1".to_string());
-    let app = build_router(state);
+    // A DELIBERATELY PUBLIC RELAY, because that is what this file is about.
+    //
+    // The relay denies by default now: an address its operator did not name gets
+    // nothing on any route, which is `messenger_relay_allowlist.rs`. The rules
+    // exercised below are the ones that apply ON TOP of that, to callers the relay
+    // has already agreed to serve, and they are the rules a public relay operator
+    // is left holding. So this harness asks for the open relay by name, which is
+    // the only way to get one.
+    let app = build_router_for(state, InboxAllowlist::serving_everybody());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        serve_router(listener, app).await.unwrap();
     });
     (format!("http://{addr}"), handle)
 }
@@ -91,10 +155,16 @@ async fn the_relay_serves_the_key_it_saw_and_nothing_for_an_address_it_has_not()
     let bob_addr = bob.readable().to_string();
     let carol_addr = carol.readable().to_string();
 
+    // The relay serves everybody in this file, so Bob's own credential is
+    // accepted; what is being tested is what it then says about an address.
+    let asking = credential(&http, &url, &bob).await;
+
     // Nobody has sent anything yet, so there is nothing to serve about either.
     for who in [&bob_addr, &carol_addr] {
         assert_eq!(
-            ask(&http, &url, who).await.unwrap(),
+            ask(&http, &url, who, &credential(&http, &url, &bob).await)
+                .await
+                .unwrap(),
             None,
             "the relay answered with a key for an address it has never seen send"
         );
@@ -106,7 +176,7 @@ async fn the_relay_serves_the_key_it_saw_and_nothing_for_an_address_it_has_not()
         .await
         .expect("the relay accepts a well-formed envelope");
 
-    let served = ask(&http, &url, &bob_addr)
+    let served = ask(&http, &url, &bob_addr, &credential(&http, &url, &bob).await)
         .await
         .unwrap()
         .expect("the relay saw Bob send, so it has a key for him");
@@ -123,7 +193,7 @@ async fn the_relay_serves_the_key_it_saw_and_nothing_for_an_address_it_has_not()
     // Carol has still only RECEIVED. Receiving teaches the relay nothing about
     // her key, and the directory must not invent one.
     assert_eq!(
-        ask(&http, &url, &carol_addr).await.unwrap(),
+        ask(&http, &url, &carol_addr, &asking).await.unwrap(),
         None,
         "the relay answered with a key for somebody who has only ever received"
     );
@@ -152,7 +222,14 @@ async fn a_refused_envelope_and_an_unclaimable_address_leave_the_directory_empty
         "the relay accepted an envelope that was not signed by the key its sender derives from"
     );
     assert_eq!(
-        ask(&http, &url, &mallory_addr).await.unwrap(),
+        ask(
+            &http,
+            &url,
+            &mallory_addr,
+            &credential(&http, &url, &mallory).await
+        )
+        .await
+        .unwrap(),
         None,
         "a refused envelope taught the directory a key anyway"
     );
@@ -162,7 +239,9 @@ async fn a_refused_envelope_and_an_unclaimable_address_leave_the_directory_empty
     let contract = field::Address::create_contract([9u8; 20]).to_readable();
     for junk in [contract.as_str(), "not-an-address", "   "] {
         assert_eq!(
-            ask(&http, &url, junk).await.unwrap(),
+            ask(&http, &url, junk, &credential(&http, &url, &mallory).await)
+                .await
+                .unwrap(),
             None,
             "the relay answered a directory lookup for {junk:?}"
         );
@@ -194,7 +273,7 @@ async fn a_second_send_from_the_same_address_replaces_rather_than_adds() {
             .await
             .expect("accepted");
     }
-    let served = ask(&http, &url, &bob_addr)
+    let served = ask(&http, &url, &bob_addr, &credential(&http, &url, &bob).await)
         .await
         .unwrap()
         .expect("a key for Bob");
@@ -248,7 +327,7 @@ async fn spawn_probe(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        serve_router(listener, app).await.unwrap();
     });
     (format!("http://{addr}"), Probe { seen }, handle)
 }
@@ -267,7 +346,12 @@ async fn the_address_asked_about_is_never_put_in_the_url() {
 
     let bob = Account::create_by("directory-url-bob").unwrap();
     let bob_addr = bob.readable().to_string();
-    assert_eq!(ask(&http, &url, &bob_addr).await.unwrap(), None);
+    assert_eq!(
+        ask(&http, &url, &bob_addr, &unchecked_credential())
+            .await
+            .unwrap(),
+        None
+    );
 
     let seen = probe.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1, "the lookup made more than one request");
@@ -303,7 +387,7 @@ async fn an_answer_larger_than_the_cap_is_refused_rather_than_read() {
     let http = Client::new();
 
     let bob = Account::create_by("directory-huge-bob").unwrap();
-    let err = ask(&http, &url, bob.readable())
+    let err = ask(&http, &url, bob.readable(), &unchecked_credential())
         .await
         .expect_err("a 128 KiB answer was read instead of refused");
     match err {
@@ -333,7 +417,7 @@ async fn a_relay_that_never_answers_costs_only_the_lookups_own_budget() {
 
     let bob = Account::create_by("directory-stall-bob").unwrap();
     let started = Instant::now();
-    let outcome = ask(&http, &url, bob.readable()).await;
+    let outcome = ask(&http, &url, bob.readable(), &unchecked_credential()).await;
     let took = started.elapsed();
 
     assert!(

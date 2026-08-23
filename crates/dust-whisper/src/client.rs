@@ -69,11 +69,24 @@ pub async fn check_relays_health(http: &Client, relay_urls: &[String]) -> Vec<Re
     out
 }
 
+/// Submit a transaction through the configured relays, first one that takes it.
+///
+/// # `local_submit_token`
+///
+/// The credential a relay on THIS machine asks for at its transaction door
+/// (`relay::SubmitAccess::ThisMachineOnly`). It is derived from that relay's own
+/// key file, so only something that can read the file has it, and it is sent
+/// only to a relay URL whose host is a loopback address - a token handed to a
+/// remote relay would be handing away the one thing that opens this machine's
+/// own door. `None` is a wallet with no relay of its own, which is every phone
+/// and any desktop that has not started one; such a wallet cannot submit
+/// through a local relay and never could.
 pub async fn submit_tx(
     http: &Client,
     settings: &WhisperSettings,
     default_node_url: &str,
     tx_hex: &str,
+    local_submit_token: Option<&str>,
 ) -> WhisperResult<SubmitTxResult> {
     if !settings.enabled {
         return Err(WhisperError::Protocol("whisper disabled".into()));
@@ -90,7 +103,12 @@ pub async fn submit_tx(
 
     let mut last_err = WhisperError::NoRelay;
     for relay_url in relays {
-        match submit_to_relay(http, &relay_url, default_node_url, tx_hex).await {
+        let token = if is_loopback_relay_url(&relay_url) {
+            local_submit_token
+        } else {
+            None
+        };
+        match submit_to_relay(http, &relay_url, default_node_url, tx_hex, token).await {
             Ok(result) => return Ok(result),
             Err(e) => {
                 tracing::warn!(relay = %relay_url, error = %e, "DUST Whisper relay failed");
@@ -101,11 +119,66 @@ pub async fn submit_tx(
     Err(last_err)
 }
 
+/// True when this relay URL names this machine.
+///
+/// Only these are shown the submit token, and the list is deliberately short:
+/// the two loopback literals and the name `localhost`, matching exactly what
+/// `is_local_relay_url` in `wallet-core/src/dust_whisper.rs` treats as this
+/// wallet's own relay. Anything else, including a hostname that happens to
+/// resolve to a loopback address, is somebody else's relay as far as this is
+/// concerned and is never handed the token - a secret sent to a remote relay is
+/// a secret given away, and the only relay that has any use for it is the one
+/// whose key file produced it.
+fn is_loopback_relay_url(relay_url: &str) -> bool {
+    let Ok(url) = Url::parse(relay_url.trim()) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod loopback_url_tests {
+    use super::is_loopback_relay_url;
+
+    /// The token opens this machine's own transaction door, so where it may be
+    /// sent is its own decision and not the same one as "is this URL usable".
+    #[test]
+    fn only_this_machine_is_ever_shown_the_submit_token() {
+        for mine in [
+            "http://127.0.0.1:8787",
+            "http://127.0.0.1:8787/",
+            "http://localhost:8787",
+            "http://LOCALHOST:8787",
+            "http://[::1]:8787",
+        ] {
+            assert!(is_loopback_relay_url(mine), "{mine} is this machine");
+        }
+        for theirs in [
+            "https://relay.example.org",
+            "http://192.168.1.24:8787",
+            "http://localhost.evil.example",
+            "not a url",
+            "",
+        ] {
+            assert!(
+                !is_loopback_relay_url(theirs),
+                "{theirs} was handed this machine's submit token"
+            );
+        }
+    }
+}
+
 async fn submit_to_relay(
     http: &Client,
     relay_url: &str,
     wallet_node_url: &str,
     tx_hex: &str,
+    submit_token: Option<&str>,
 ) -> WhisperResult<SubmitTxResult> {
     validate_relay_url(relay_url)?;
 
@@ -134,9 +207,11 @@ async fn submit_to_relay(
     let envelope = encrypt_payload(&pubkey, &inner)?;
 
     let url = format!("{relay_url}{SUBMIT_PATH}");
-    let resp = http
-        .post(url)
-        .json(&envelope)
+    let mut request = http.post(url).json(&envelope);
+    if let Some(token) = submit_token {
+        request = request.header(crate::relay::SUBMIT_TOKEN_HEADER, token);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| WhisperError::Relay(format!("submit request: {e}")))?;
@@ -250,6 +325,7 @@ mod tests {
                 &settings,
                 "https://node.example.com",
                 "aa",
+                None,
             ))
             .unwrap_err();
         assert!(matches!(err, WhisperError::NoRelay));

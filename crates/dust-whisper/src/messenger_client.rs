@@ -68,6 +68,22 @@ pub async fn fetch_challenge(
 /// wallet's memory on a peer's say-so.
 pub const MAX_PUBKEY_RESPONSE_BYTES: usize = 1024;
 
+/// Who is asking the key directory, and their proof of it.
+///
+/// One nonce per relay, because a nonce is issued by one relay and spent at
+/// that same relay. The caller obtains it from `fetch_challenge` against the
+/// relay it is about to ask.
+pub struct PubkeyAsker<'a> {
+    /// The asking wallet's own Hacash address.
+    pub address: &'a str,
+    /// Its compressed secp256k1 public key, hex.
+    pub pubkey_hex: &'a str,
+    /// A nonce this relay issued for `address`.
+    pub nonce: &'a str,
+    /// `inbox_auth_digest(address, nonce)` signed by that key, hex.
+    pub signature: &'a str,
+}
+
 /// Ask a relay for the last public key it saw an address send with.
 ///
 /// The answer is a claim by the relay and this function does nothing to check
@@ -89,10 +105,22 @@ pub const MAX_PUBKEY_RESPONSE_BYTES: usize = 1024;
 /// The address is posted in a body rather than hung off a query string, so it
 /// does not land in the access log of every relay asked. See
 /// `MessengerPubkeyRequest`.
+///
+/// # Why this now carries a credential
+///
+/// The relay answers this only for somebody it already carries mail for, so the
+/// caller has to say who it is and prove it. `asker` is this wallet's own
+/// address, `nonce` is one the same relay issued for that address, and
+/// `signature` is `inbox_auth_digest(asker, nonce)` signed by its key - the
+/// identical credential the inbox route wants, because it is the identical
+/// question: is this caller one of the people this relay is for. A relay this
+/// wallet is not listed on answers `None`, which is what it answered before and
+/// lands on the same honest v1 fallback.
 pub async fn fetch_peer_pubkey(
     http: &Client,
     relay_url: &str,
     address: &str,
+    asker: &PubkeyAsker<'_>,
     timeout: Duration,
 ) -> WhisperResult<Option<String>> {
     let url = format!("{}{MESSENGER_PUBKEY_PATH}", base_url(relay_url));
@@ -101,6 +129,10 @@ pub async fn fetch_peer_pubkey(
         .timeout(timeout)
         .json(&MessengerPubkeyRequest {
             address: address.to_string(),
+            asker: asker.address.to_string(),
+            asker_pubkey: asker.pubkey_hex.to_string(),
+            nonce: asker.nonce.to_string(),
+            signature: asker.signature.to_string(),
         })
         .send()
         .await

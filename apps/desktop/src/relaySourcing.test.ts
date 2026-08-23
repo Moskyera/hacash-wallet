@@ -119,3 +119,110 @@ describe("the relay operator sees the whole transaction, and the wallet says so"
     expect(privacy).toMatch(/sees the whole transaction/i);
   });
 });
+
+/**
+ * SECTION 0 IS A WALKTHROUGH, SO ITS GAPS ARE WHERE A PERSON STOPS.
+ *
+ * Three of them were real, and each one stopped somebody at the exact step it
+ * was missing from:
+ *
+ *  - step 1's very first save fails outright if something already holds 8787,
+ *    and section 0 never said so or pointed at section 4, which has a whole
+ *    subsection for it;
+ *  - step 4 told the second person to "put the address in their relay URL box"
+ *    without saying to remove the loopback line the box came with, having just
+ *    trained the reader in step 1 to leave exactly that line alone;
+ *  - step 2 listed what widening costs without listing the one that stops the
+ *    thing working.
+ */
+describe("the walkthrough for two people with nothing else deployed", () => {
+  const guide = readFileSync(join(REPO, "docs/RUNNING-A-RELAY.md"), "utf8");
+  const sectionZero = guide.slice(
+    guide.indexOf("## 0. Two people"),
+    guide.indexOf("## 1. What you are running"),
+  );
+
+  it("is a real section, read from the file rather than assumed", () => {
+    expect(sectionZero.length).toBeGreaterThan(2000);
+  });
+
+  it("says the first save can fail on a port, in the step where it can", () => {
+    expect(sectionZero).toMatch(/port is already in use/i);
+    expect(sectionZero).toMatch(/before-anything-the-port-the-wallet-may-already-be-using/);
+    // And the subsection it points at is really there to be pointed at.
+    expect(guide).toMatch(/### Before anything: the port the wallet may already be using/);
+  });
+
+  it("tells the second person to move or remove the line already in the box", () => {
+    expect(sectionZero).toMatch(/has to go \*\*above\s+it, or replace it\*\*/i);
+    expect(sectionZero).toMatch(/delete the loopback line/i);
+  });
+
+  it("states the sending asymmetry the way it actually fails", () => {
+    // Sending stops at the first relay that accepts; polling tries all of them.
+    // Describing it as "the order of both lists" is not the same hazard and is
+    // not what costs somebody an afternoon.
+    expect(sectionZero).toMatch(/stops at the first relay in the\s+list that\s+accepts/i);
+    expect(sectionZero).toMatch(/tries every relay in\s+the\s+list/i);
+    expect(sectionZero).toMatch(/never written to you|no reason to suspect|live two way thread/i);
+  });
+
+  it("says the socket opening is not the relay opening, and what a stranger gets", () => {
+    expect(sectionZero).toMatch(/The socket stops being yours alone. The relay does\s+not/i);
+    expect(sectionZero).toMatch(/denies by\s+default/i);
+    expect(sectionZero).toMatch(/cannot post a\s+message/i);
+    expect(sectionZero).toMatch(/is not in the key\s+directory/i);
+    // And that neither the refusal nor the acceptance is an answer. The
+    // refusal was symmetric all along; the acceptance was not, which is how a
+    // passer-by used to read the host list out of the challenge route.
+    expect(sectionZero).toMatch(/never heard of/i);
+    expect(sectionZero).toMatch(/or one that is on your\s+list/i);
+    expect(sectionZero).toMatch(/cannot work out who you\s+are relaying for/i);
+    expect(sectionZero).toMatch(/acceptances are the same shape as the\s+refusals/i);
+  });
+
+  it("names the limit it does not close: the people on the list", () => {
+    expect(sectionZero).toMatch(/The people on the list are a different\s+matter/i);
+    expect(sectionZero).toMatch(/not a secret from the people on\s+it/i);
+  });
+
+  it("says an empty list is nobody, which is the state an upgrade lands in", () => {
+    expect(sectionZero).toMatch(/An empty list is nobody, not\s+everybody/i);
+    expect(sectionZero).toMatch(/a safe relay and not yet a useful\s+one/i);
+    // The upgrade direction is stated rather than left to be discovered.
+    expect(sectionZero).toMatch(/narrows a\s+relay rather than widening one/i);
+  });
+
+  it("says the flood is closed because a stranger cannot post at all", () => {
+    expect(sectionZero).toMatch(/a stranger cannot\s+fill it/i);
+    expect(sectionZero).toMatch(/keys cost nothing/i);
+    expect(sectionZero).toMatch(/seven days/i);
+  });
+
+  it("says the transaction door is separate and stays shut", () => {
+    expect(sectionZero).toMatch(/Transactions are a different\s+door/i);
+    expect(sectionZero).toMatch(/only when it was submitted from\s+this computer/i);
+    expect(sectionZero).toMatch(/SubmitAccess::ThisMachineOnly/);
+    // The credential, and why it is a secret rather than an IP address: the
+    // very next section tells the operator to install a reverse proxy, behind
+    // which every caller in the world arrives as 127.0.0.1.
+    expect(sectionZero).toMatch(/READ THIS RELAY.S OWN KEY\s+FILE/i);
+    expect(sectionZero).toMatch(/reverse proxy/i);
+  });
+
+  it("states the metadata a host does hold, without softening it or overclaiming", () => {
+    expect(sectionZero).toMatch(/metadata of the people you\s+listed/i);
+    expect(sectionZero).toMatch(/both addresses, when, and how\s+big/i);
+    expect(sectionZero).toMatch(/no list removes it/i);
+    expect(sectionZero).toMatch(/which both of them already know/i);
+  });
+
+  it("has the step that closes it, and names the setting behind it", () => {
+    expect(sectionZero).toMatch(/### Step 2b: say who this relay is for/);
+    expect(sectionZero).toMatch(/relay_allowlist/);
+    expect(sectionZero).toMatch(/Your own address is already on\s+it/i);
+    expect(sectionZero).toMatch(/Removing somebody takes effect at\s+once/i);
+    // And it does not oversell it.
+    expect(sectionZero).toMatch(/changes nothing on the loopback\s+bind/i);
+  });
+});

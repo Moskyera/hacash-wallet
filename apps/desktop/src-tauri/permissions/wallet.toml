@@ -201,6 +201,7 @@ commands.allow = [
   "wallet_webauthn_replacement_begin",
   "wallet_webauthn_replacement_finish",
   "wallet_update_dust_whisper_settings_desktop",
+  "wallet_relay_endpoint",
   "wallet_list_bills",
   "wallet_validate_hip23",
   "wallet_platform_security_status",

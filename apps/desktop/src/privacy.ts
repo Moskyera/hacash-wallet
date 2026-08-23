@@ -76,4 +76,11 @@ export const DEFAULT_DUST_WHISPER: DustWhisperSettings = {
   relay_urls: ["http://127.0.0.1:8787"],
   fallback_direct: true,
   auto_start_relay: true,
+  // This computer only. A relay that accepts other machines is a decision
+  // with consequences, so it is never where anybody starts.
+  relay_bind: "loopback",
+  // Open, which is what the relay has always been and is harmless while the
+  // bind is loopback. Narrowing it is the person's own decision, made on the
+  // screen beside the bind.
+  relay_allowlist: [],
 };

@@ -15,6 +15,374 @@ tells people to set one. This is where they, or you, learn to run one.
 be able to see about other people's conversations. It matters more than the rest
 of this document.
 
+**If there are two of you, read section 0 first.** You may not need this
+document at all. The wallet can be the relay, and the smallest arrangement that
+works is one of the two of you hosting for the other, with nothing deployed
+anywhere.
+
+---
+
+## 0. Two people, one relay, nothing else deployed
+
+This is the smallest useful configuration and it is what most people who arrive
+here actually want: two people who have installed this wallet and would like to
+message each other. You do not need a server, a domain, a certificate or this
+document's section 4. One of you hosts and the other points at them. Everything
+in this section is a setting on a screen, not a command.
+
+### Your wallet is already running one
+
+The desktop wallet has hosted a relay since it shipped. `auto_start_relay`
+defaults to on (`crates/wallet-core/src/dust_whisper.rs`), and when DUST Whisper
+is enabled with a loopback relay URL in the list, the wallet binds that port
+itself and serves the same relay this document is about
+(`sync_managed_relay`, `crates/wallet-tauri-common/src/desktop_relay.rs`). It
+uses one key of its own in your wallet data directory, `relay.key`, which is the
+same key section 3 describes. It forwards transactions to whatever node the
+wallet is pointed at, and it follows that node when you change it.
+
+What was missing was never the relay. It was that no screen told you the address
+it was serving on, and that the socket went to loopback with no way to move it.
+Both of those are on the Privacy screen now.
+
+### Step 1: one of you hosts
+
+On the machine that will host, open Privacy:
+
+1. Turn on **Enable DUST Whisper for tx broadcast**.
+2. Leave **Auto-start the relay this wallet hosts** on.
+3. Leave `http://127.0.0.1:8787` in the relay URL box. That is the address this
+   wallet uses to reach its own relay, and it is what makes the wallet host one
+   at all.
+4. Press **Save DUST Whisper**.
+
+**If that save fails, read the message before anything else.** The one failure
+you are most likely to meet on the first press is the port:
+
+```
+Cannot start the local DUST relay at 127.0.0.1:8787. The port is already in use: (os error 10048)
+```
+
+That is not this wallet refusing. Something on this machine is already holding
+`8787`, and the usual something is a `dust-whisper-relay` binary you started
+earlier, or a second copy of the wallet. Either stop it, or give the wallet a
+different port by putting `http://127.0.0.1:8788` in the relay URL box instead
+and saving again; the port in that box is the port the wallet binds. The full
+version of this collision, including how to run this wallet and the standalone
+binary side by side, is [section 4, "Before anything: the port the wallet may
+already be using"](#before-anything-the-port-the-wallet-may-already-be-using).
+
+Note what the wallet does on that failure and what it does not: the settings you
+typed are saved before the socket is attempted, so the relay URL box keeps what
+you entered, and the **Your own relay** box re-reads itself and says "This wallet
+is set to host a relay, but nothing is listening." Nothing is silently half
+applied, but nothing is listening either, and the box says so rather than showing
+you the address it had before you pressed Save.
+
+Under **Your own relay** a successful save now says what it is serving and who
+can reach it:
+
+> Your wallet is serving a relay on 127.0.0.1:8787.
+>
+> That address is this computer and nothing else. No other machine can reach it,
+> including the machine of the person you are trying to message. There is no
+> address to share while it is bound here.
+
+That is the honest state of a default install. The relay is running, it is
+working, and it is of no use to anybody but you. Nothing is wrong; there is one
+more decision to make.
+
+### Step 2: decide, knowingly, to accept other machines
+
+**Who this relay accepts connections from** has two settings, and they are the
+only two a socket honestly offers:
+
+| | |
+|---|---|
+| This computer only (`127.0.0.1`) | The default. Reachable by nobody else. |
+| Any machine that can reach this computer (`0.0.0.0`) | Every network this computer is on. |
+
+Choosing the second and saving is what makes hosting for somebody else possible,
+and it is a decision whose consequences are yours from that moment on. The
+wallet lists them beside the control, and they are these:
+
+- **The socket stops being yours alone. The relay does not.** Anyone who can
+  reach this computer on that port can open a connection. What they can then do
+  is nothing, unless you named their address in step 2b. The relay denies by
+  default: an address that is not on its list cannot post a message, cannot have
+  one posted to it, cannot obtain a mailbox challenge, cannot collect, cannot
+  acknowledge, and is not in the key directory. It gets one refusal sentence,
+  and it is the same sentence whether the address it named is one you left off,
+  one this relay has never heard of, or one that is on your list, so a passer-by
+  cannot work out who you are relaying for. That is `InboxAllowlist` in
+  `crates/dust-whisper/src/messenger_relay.rs`, and
+  `crates/dust-whisper/tests/messenger_relay_allowlist.rs` drives every one of
+  those routes over a real socket.
+- **The acceptances are the same shape as the refusals, and that took fixing.**
+  The mailbox challenge route used to answer a listed address with a real nonce
+  and an unlisted one with an empty string, to anybody, with no credential. That
+  is a membership test a neighbour can run once per candidate address, and it
+  handed over the single fact this whole arrangement says only you hold: that
+  those two people talk to each other. It hands every caller a nonce of the same
+  shape now, and writes down only the ones it means; a decoy cannot be spent, so
+  nothing else changed. `crates/dust-whisper/tests/messenger_relay_stranger_probe.rs`
+  is the probe that found it, kept with its assertions flipped.
+- **An empty list is nobody, not everybody.** This is the state a settings file
+  written before the list existed loads in, and the state of a wallet whose owner
+  has typed nothing. It means the relay carries mail for the address of the
+  wallet running it and no other, which is a safe relay and not yet a useful one.
+  Filling in step 2b is what makes it useful. Nothing anywhere turns an empty
+  list into an open one.
+- **Because a stranger cannot post, a stranger cannot fill it.** The store has
+  ceilings, and reaching one makes the relay refuse everybody until mail expires
+  - up to seven days, because nothing is deleted to make room. Keys cost nothing,
+  so on an open relay anyone who can reach the port can walk the store to that
+  ceiling in under a minute and stop the mail of the person you widened the bind
+  for. On a listed relay there is nobody to do it but the people you named.
+  Section 8 has the measurement and says what a genuinely public relay is left
+  holding.
+- **The key directory answers only the people you listed.** It used to answer
+  anybody, on the reasoning that a wallet seeking a correspondent's key is by
+  definition a stranger. That was a second way to read your list out: a key came
+  back for a listed address that had sent recently and nothing came back for
+  everybody else, and a decoy answer cannot paper over it, because a Hacash
+  address is the hash of its own public key and a made-up key fails that check
+  in one line of arithmetic. So the route stopped answering strangers. A caller
+  presents its own address, a nonce this relay issued for it, and a signature
+  over both - the same credential a mailbox fetch wants - and a relay answers
+  only somebody it already carries mail for. Everybody else is told nothing
+  about every address in the world. Section 6.2 is what the answer is worth to
+  whoever gets one.
+- **You will be holding the metadata of the people you listed.** For each message
+  that passes through: both addresses, when, and how big. Not the contents, which
+  are sealed to the recipient's key and which your relay cannot open. This is
+  inherent to relaying for somebody and no list removes it. It is also close to
+  nothing, because the fact it reveals is that those two people talk to each
+  other, which both of them already know. **Section 6 is the section to read
+  before you do this**, not after.
+- **Transactions are a different door, and widening this does not open it.** The
+  relay forwards a transaction to your fullnode only when it was submitted from
+  this computer BY SOMETHING THAT CAN READ THIS RELAY'S OWN KEY FILE. A machine
+  on your network that tries is refused before its payload is read, whatever the
+  bind is set to and whoever is on the address list
+  (`SubmitAccess::ThisMachineOnly`, `crates/dust-whisper/src/relay.rs`). Wanting
+  to carry a friend's mail is not a request to become a transaction submitter for
+  your network, and it is not treated as one.
+
+  The credential is a secret rather than an IP address, and that is not a detail.
+  The check used to be "did this connection come from 127.0.0.1", and section 4
+  of this document tells you to put a reverse proxy in front of the relay, behind
+  which **every submitter on earth arrives as 127.0.0.1**. In the deployment this
+  guide prescribes, the sentence above was false and the door was open to the
+  internet. The token is derived from the relay's key file, which only a process
+  on your machine with your rights can read, and a proxy cannot launder it.
+  `a_reverse_proxy_does_not_make_a_stranger_local` in
+  `crates/dust-whisper/tests/messenger_relay_allowlist.rs` runs a forwarder in
+  front of the shipped router and holds it.
+- **It speaks plain HTTP.** Until you put HTTPS in front of it, everything
+  section 6 describes is also readable by every network between the other person
+  and this computer. On a home network you both sit on, that is your own
+  network. Over the internet it is everybody in between, and section 4 is where
+  you fix that.
+- **It runs while the wallet is open.** Close the wallet and the relay stops.
+  Mail nobody has collected yet lives in memory and is gone with it. Saving this
+  screen does not lose it: changing the address list changes the rule on the
+  running relay rather than rebuilding it, so what is waiting stays where it is.
+
+The wallet never makes this choice for anybody. A settings file written before
+this option existed loads as loopback, and a save that does not mention the bind
+is a save that leaves it where it is. The run that holds it there is
+`crates/wallet-tauri-common/tests/relay_bind_is_the_persons_choice.rs`: act 1 is
+a save in the old shape, act 5 is a public relay URL sitting in the list, and
+neither moves the socket.
+
+### Step 2b: say who this relay is for
+
+Under the relay URL box there is a second box, **Addresses this relay carries
+mail for**. Put both of your Hacash addresses in it, one per line, and save.
+
+Empty, it carries mail for one address: the one belonging to the wallet running
+it, which the wallet adds for you so that a host is never locked out of their
+own relay. Nobody else at all. Filled in, an address that is not on the list
+cannot post through this relay, cannot be posted to through it, cannot claim a
+mailbox on it, cannot collect or acknowledge, and is not in its key directory.
+There is no partial state and no rate limit involved: the relay either carries
+mail for an address or it does not.
+
+Refusing gives nothing away either, and neither does accepting. Every route
+answers a passer-by the same way for an address you left off, for an address
+this relay has never heard of, and for an address that is on your list, so
+nobody outside the list can use your relay to find out who you are relaying for.
+
+**The people on the list are a different matter, and this is the limit.** A
+message to a listed address is accepted and a message to any other address is
+refused, so somebody you named can put a third address in front of the send
+route and learn whether you named them too. There is no way to close that
+without accepting a message and quietly throwing it away so the two answers
+match, which is a worse thing for a relay to do than to be honest about this.
+Your list is not a secret from the people on it.
+
+That is worth doing even on a home network you trust, because it is the one
+defence that a free keypair does not walk around. Every other limit in this
+relay is a ceiling on how much somebody can send, and somebody who can make new
+identities for nothing can always spread a flood under any such ceiling. A list
+of addresses is not a limit on volume, so there is nothing to spread it across.
+
+Three things to be honest about:
+
+- **Your own address is already on it.** The wallet composes the list the relay
+  enforces as your address plus whatever you typed
+  (`desktop_relay::served_addresses`), so you cannot lock yourself out by
+  forgetting yourself. The screen shows the composed list back to you before you
+  save, and once the relay is running the list you are shown is READ OFF IT
+  rather than recomputed beside it. That distinction was a real divergence:
+  creating or resetting a wallet changes your own address, nothing resynced the
+  relay, and after a reset the screen said "this relay carries mail for nobody"
+  while the socket was still carrying mail for the deleted wallet's address.
+  Creating, importing, restoring and resetting all resync the relay now.
+- **Nothing checks the list.** There is nothing to check it against; an address
+  is not registered anywhere until it has been used on the chain. A typo is
+  simply an address that never matches, and the person it belongs to is refused
+  with a sentence saying they are not on the list. Paste, do not type.
+- **Removing somebody takes effect at once.** Saving swaps the list on the
+  running relay, so the next request from a removed address is refused - and
+  that includes a request on a connection they already had open. There is no
+  window in which a removed address is still carried, and nothing waiting on the
+  relay for anybody else is lost in the process. `crates/wallet-tauri-common/
+  tests/relay_list_the_screen_shows_vs_enforced.rs` holds both halves.
+- **It changes nothing on the loopback bind**, where nothing else can open a
+  connection in the first place. It is the companion of step 2, and on loopback
+  it has nothing to do.
+
+The list is stored as `relay_allowlist` in the wallet's DUST Whisper settings and
+holds only the addresses you added; your own is never written into it. It is
+absent from every settings file written before it existed, and an absent list
+means the relay serves its owner and nobody else. An upgrade therefore narrows a
+relay rather than widening one, which is the direction this has to fail in: the
+alternative is a person who never made a choice discovering they had been running
+an open relay for their network. If you were relying on the old behaviour, the
+addresses you were carrying have to be named here, and naming them is the point.
+
+### Step 3: what has to be true for the address to reach anybody
+
+Binding wider is not the same as being reachable, and this is the part a guide
+usually skips. After you save, the wallet shows the address this computer holds
+on its network and says what still has to be true. There are three cases and you
+are in exactly one of them.
+
+**Same network.** You are both on the same home or office network. The address
+looks like `http://192.168.1.24:8787` and it works, once this computer's
+firewall lets that port in. Windows asks the first time something listens on a
+network interface; if that prompt was dismissed, the rule is in Windows Defender
+Firewall and you will have to add it yourself. This case needs nothing else, and
+if it is your case, stop here and go to step 4.
+
+**Different networks.** The address the wallet showed you is private and means
+nothing outside your own network. Reaching this computer from elsewhere needs
+all of:
+
+- a port forwarded on your router to this computer's address on the LAN,
+- a firewall rule on this computer to match,
+- and a public address that stays put, or a dynamic DNS name that follows it
+  when your provider changes it.
+
+That is real work, and it is worth knowing before you start, because of the
+third case.
+
+**Behind carrier grade NAT, where it cannot be done at all.** Most mobile
+broadband and a good deal of home fibre puts your router behind the provider's
+own NAT. There is no port on your router to forward, because the address on your
+router's internet side is not yours. The sign is that address being private:
+`100.64.0.0/10` is the giveaway, and so is an RFC 1918 address there. Compare
+what your router reports on its WAN side against what a "what is my IP" page
+says; if they differ, you are behind it. No setting in this wallet and no
+setting on that router changes it. In that case the two of you either sit on the
+same network, or one of you rents a machine with a public address and runs the
+relay binary from section 4 on it, or you both use a relay somebody else runs.
+
+### Step 4: the other person points at you
+
+They open their own Privacy screen and put the address in **their** relay URL
+box. On mobile the same box is under More, then DUST Whisper. They do not turn
+on auto-start for it: it is not their relay, and a phone cannot host one at all,
+so if one of you is on a phone then the desktop is the host.
+
+**On a desktop, that box is not empty, and what they do with the line already in
+it decides whether any of this works.** A desktop wallet's relay box starts with
+`http://127.0.0.1:8787`, which is that wallet's own relay on their own computer,
+and step 1 told you to leave exactly that line alone because it is what makes a
+wallet host. For the second person it is the trap. Their line has to go **above
+it, or replace it**:
+
+```
+http://192.168.1.24:8787      <- yours, the one they were given
+http://127.0.0.1:8787         <- theirs, if they want to keep hosting at all
+```
+
+Not the other way round, and here is why, because the failure is silent and
+looks like success. **Sending stops at the first relay in the list that
+accepts** (`messenger_send`, `crates/wallet-core/src/messenger.rs`, which breaks
+out of the loop on the first success). **Collecting mail tries every relay in
+the list** (`messenger_poll_inbox`, no break). Their own relay always accepts,
+because it is running on their own machine. So with the loopback line first:
+
+- every message they send lands in the mailbox on their own computer, which you
+  cannot collect from;
+- their wallet says a relay accepted it, because one did, and shows no error;
+- your replies still arrive, because their polling tries your relay too.
+
+They see a live two way thread. You see somebody who has never written to you.
+The wallet now names the relay that accepted each outgoing message next to that
+message, and both screens raise a warning when the list is in this order, but
+the fastest fix is not to be in it: delete the loopback line, or put yours above
+it. Section 7 states the same asymmetry for relay operators.
+
+Then they save. Both of you have to be using the **same** relay. There is no
+federation: an envelope posted to one relay is only ever collected from that
+relay, and two people each running their own are two people who cannot talk.
+
+If you did step 2b, your relay carries mail only for the addresses you listed,
+so **you need their address and they need yours** before any of this works. That
+is not an extra step in practice: you cannot message somebody whose address you
+do not have.
+
+One thing they should hear from you rather than discover: **a plain `http://`
+address carries their messages and will not carry their transactions.**
+`validate_relay_url` refuses a relay URL that is neither loopback nor HTTPS
+(`crates/dust-whisper/src/client.rs`), and that check is on the transaction path
+only. The messenger path has no scheme check at all, which is why the messaging
+half of this section works. So with DUST Whisper on and a plain http relay, the
+other person's transactions go straight to their node instead, with the wallet
+saying so, if they have the direct fallback on, and fail if they do not. If they
+want their broadcasts going through your relay too, it needs HTTPS, and that is
+section 4 step 2.
+
+### Step 5: check it from the other machine
+
+Not from the host's own. A relay answering on its own loopback proves nothing
+about the firewall, the router, or the bind.
+
+```console
+$ curl -sS http://192.168.1.24:8787/whisper/v1/info
+{"v":1,"pubkey":"...","node_url":"http://nodeapi.example.org"}
+```
+
+If that returns JSON, the address is one the other person can use. If it hangs,
+it is a firewall. If it is refused, nothing is listening on that address, which
+usually means the bind is still on loopback or the wallet is closed.
+
+### What this arrangement does not give you
+
+- **No anonymity for the host.** Your own relay forwards your transactions from
+  your own machine, so the node sees your address. Hiding your address from the
+  node is what a relay somebody else runs is for, and hosting your own is not
+  it.
+- **No delivery while the host's wallet is shut.** The relay is a process inside
+  the wallet. Messages posted while it is closed are not queued anywhere, and
+  the sender's wallet says no relay accepted them.
+- **No encryption on the wire unless you add it.** Section 4, step 2.
+- **No protection for the host from what the host can see.** Section 6.
+
 ---
 
 ## 1. What you are running, in one paragraph
@@ -200,11 +568,13 @@ under systemd.
 
 ### Before anything: the port the wallet may already be using
 
-The desktop wallet runs its own relay on loopback, and **`auto_start_relay`
-defaults to on** (`crates/wallet-core/src/dust_whisper.rs:29-37`). If DUST
-Whisper is enabled and any configured relay URL is a loopback one, the wallet
-binds that URL's port itself
-(`should_manage_relay`, `crates/wallet-tauri-common/src/desktop_relay.rs:99-105`).
+The desktop wallet runs its own relay, and **`auto_start_relay` defaults to on**
+(`crates/wallet-core/src/dust_whisper.rs`). If DUST Whisper is enabled and any
+configured relay URL is a loopback one, the wallet binds that URL's port itself
+(`should_manage_relay`, `crates/wallet-tauri-common/src/desktop_relay.rs`), on
+loopback or on every interface according to its own bind setting. Section 0 is
+that relay used deliberately, and it is the shorter road for two people. This
+subsection is about it getting in this binary's way.
 The default in every example below is `127.0.0.1:8787`, and so is the desktop
 relay field's own placeholder
 (`apps/desktop/src/screens/PrivacyScreen.tsx`), so the two collide by default
@@ -222,8 +592,10 @@ own version of the same collision reads "Cannot start the local DUST relay at
 
 Pick one before you go further:
 
-- **Serving other people from this machine:** turn off "Auto-start local relay"
-  on the wallet's Privacy screen, and let this relay own the port.
+- **Serving other people from this machine with this binary:** turn off
+  "Auto-start the relay this wallet hosts" on the wallet's Privacy screen, and
+  let this relay own the port. If the wallet's own relay would have done, you
+  are in section 0 and do not need this binary at all.
 - **Both at once:** give this relay a different port with
   `DUST_WHISPER_LISTEN=127.0.0.1:8788` and leave the wallet's alone. They share
   nothing, including mail, which is rule 6 in section 9.
@@ -280,7 +652,9 @@ on two machines cannot test the messenger against it.** This is the section that
 changes that.
 
 **1. Decide where it listens.** Keep it on loopback and let a reverse proxy be
-the only thing exposed. That is how the Hub and the witness are deployed, and it
+the only thing exposed. Read the note under step 2 before you do: a proxy makes
+every caller on earth arrive at the relay as 127.0.0.1, and the transaction door
+is built for that rather than fooled by it. That is how the Hub and the witness are deployed, and it
 is what the rest of this section assumes. If you have a reason to bind the
 interface directly instead, the variable is `DUST_WHISPER_LISTEN`:
 
@@ -342,6 +716,19 @@ server {
 Neither config is exercised by this repository's tests, and no proxy is shipped
 with the relay. What is exercised is the relay behind them, and step 4 is the
 check that tells you the pair works.
+
+**A proxy makes every caller look local, and one door used to believe it.** Both
+configurations above have the relay seeing 127.0.0.1 as the peer for every
+request in the world. The transaction door was gated on exactly that, so
+following this section turned a relay that refused other machines into an open
+transaction submitter against the operator's fullnode, with no screen anywhere
+saying so. It is gated on a secret derived from the relay's key file now, which a
+proxy cannot forward on somebody else's behalf, so this section is safe to follow
+as written. The messenger routes were never affected: they key on the address on
+the envelope, not on the connection. Both halves are held by
+`crates/dust-whisper/tests/messenger_relay_allowlist.rs`
+(`a_reverse_proxy_does_not_make_a_stranger_local`) and by
+`crates/dust-whisper/tests/messenger_relay_stranger_probe.rs`.
 
 This is also the only place you can put a rate limit, because the relay has
 none. Section 8 says what that costs you if you skip it. The Hub's guide asks
@@ -594,10 +981,22 @@ decide how you feel about the endpoint it added.
 
 **Your relay now serves the last public key it saw for an address**
 (`MESSENGER_PUBKEY_PATH`, `pubkey_handler`,
-`crates/dust-whisper/src/messenger_relay.rs`). It is a POST carrying the address
-in a JSON body, deliberately not a GET carrying it in a query string, so that
-asking does not write the address into your access log or into the log of any
-proxy you put in front of this. It is not being given anything new to hold:
+`crates/dust-whisper/src/messenger_relay.rs`), **to the people it carries mail
+for and to nobody else**. It is a POST carrying the address in a JSON body,
+deliberately not a GET carrying it in a query string, so that asking does not
+write the address into your access log or into the log of any proxy you put in
+front of this.
+
+The credential is not decoration. This route answered anybody for one revision,
+and its answer differed by whether the address asked about was on your list, so
+a passer-by could put candidate addresses to it and read your correspondent list
+back out. A decoy answer cannot fix that: an address is the hash of its own
+public key, so a made-up key fails the asker's own derivation check in one step
+and the two answers stay distinguishable. Refusing strangers is the only thing
+that closes it. The asker presents its own address, a nonce your relay issued
+for that address, and a signature over both - the identical credential a mailbox
+fetch presents, because it is the identical question. Everybody else is told
+nothing about every address in the world. It is not being given anything new to hold:
 `from_pubkey` rides in clear on every envelope you have ever accepted and you
 already check it against `from` before storing the envelope. The directory is
 your relay writing that down for up to thirty days instead of discarding it when
@@ -646,11 +1045,35 @@ still costs your users a wait; it can no longer cost them a minute of one.
 **What this costs you to serve, and it is not nothing.** Answering "do you have a
 key for this address" tells the asker that the address has sent through your
 relay inside the retention window. You already knew that; the asker did not. The
-lookup is unauthenticated, because a wallet opening a first conversation is by
-definition a stranger to the address it is asking about, so anyone can probe any
-address one at a time and learn whether it is one of your users. The key itself
-is not the secret being given away: it is on the chain the moment that account
-signs anything. The association between an address and your machine is.
+key itself is not the secret being given away: it is on the chain the moment that
+account signs anything. The association between an address and your machine is.
+
+**Who may ask.** The lookup was unauthenticated for one revision, on the
+reasoning that a wallet opening a first conversation is by definition a stranger
+to the address it is asking about. That was wrong in the way that mattered: the
+answer differed by whether the address asked about was on your list, so anybody
+who could open the socket could probe candidate addresses one at a time and read
+your correspondent list back out. There is no symmetric answer to give instead,
+because a Hacash address is the hash of its own public key and a decoy key fails
+the asker's own derivation check. So the route asks for a credential now: the
+asker's own address, a nonce your relay issued for it, and a signature over both
+(`pubkey_handler`, `crates/dust-whisper/src/messenger_relay.rs`). Your relay
+answers the people it carries mail for and tells everybody else nothing about
+every address in the world.
+
+That costs something, and it is the thing the old reasoning was protecting: your
+relay now sees WHO asked as well as what they asked about. It is not new
+knowledge - they are one of your listed correspondents and you already hold every
+envelope they send - but it is one more line for your logging policy to cover
+(section 6.4). Keys being free was the argument against authentication, and it
+does not survive default deny: a free keypair is not on your list, so it cannot
+ask.
+
+Two further bounds. On the loopback bind nobody off your machine can ask, which
+is the default and where most wallet hosted relays sit. On a public relay
+(`--serve-everybody`) everybody is a listed correspondent by construction, so a
+throwaway key can authenticate and the probe is back; that is one more thing a
+public relay is left holding.
 
 **And what it tells you, which is the other half and belongs to somebody else.**
 Being asked is itself a fact: it tells you that whoever asked is about to write
@@ -664,10 +1087,9 @@ who is not your user pays for.
 Weigh it against what it replaces, which is the honest comparison: without it,
 the opening message of every conversation on your relay arrives in a form you can
 read in full, and you learn the same address anyway from the envelope that
-follows a second later. Requiring the asker to authenticate would not fix the
-probing, because keys are free, and it would hand you a record of who asked about
-whom. If you would rather not run the directory at all, an operator who does not
-serve that endpoint costs their users exactly the old behaviour and nothing more.
+follows a second later. If you would rather not run the directory at all, an
+operator who does not serve that endpoint costs their users exactly the old
+behaviour and nothing more.
 
 **The end of the unsealed stretch is still partly in your hands.** A wallet that
 holds no key and gets no usable answer from any relay keeps sending v1, and both
@@ -773,18 +1195,51 @@ forwards to the node URL you configured and never to a target named by the
 client (`:103`), so nobody can use your relay as an outbound proxy to somewhere
 else.
 
+**And who may hand you one to decrypt.** By default only a submitter on the
+relay's own machine that can also present the relay's submit token, which is a
+one-way hash of the secret key in your key file (`SubmitAccess::ThisMachineOnly`
+and `submit_token_from_secret`, `crates/dust-whisper/src/relay.rs`; the
+standalone binary prints the token at startup). The check used to be "did this
+connection come from a loopback address" and nothing else, and that was not a
+check at all in the deployment section 4 tells you to build: behind a reverse
+proxy every submitter in the world arrives at the relay as 127.0.0.1, so any
+machine that could reach your proxy was pushing transactions through your node
+from your address while every screen said the door was shut. A secret in the key
+file is a fact about who is running on your machine, and no number of hops can
+launder it. `a_reverse_proxy_does_not_make_a_stranger_local` in
+`crates/dust-whisper/tests/messenger_relay_allowlist.rs` puts a forwarder in
+front of the shipped router and checks it.
+
+A deliberately public relay - one people other than you submit transactions
+through, which is the whole point of DUST Whisper for its users - is
+`--submit-from-anywhere` on `dust-whisper-relay`, and it is a flag whose name is
+the warning. Nothing in the wallet builds it and there is no toggle for it,
+because a checkbox that turns somebody's wallet into a transaction submitter for
+their network is the thing this door exists to prevent.
+
 ### 6.6 In one sentence
 
-**Running a relay means holding other people's metadata, answering whether a
-given address is one of your users, being told who somebody is about to write
-to even when you will not carry it, and reading in plaintext every message
-written before either party could get a key for the other.** That last group is
-smaller than it was, because your relay can now hand a sender the key it already
-saw and the sender checks it against the address rather than trusting you (6.2).
-It is not empty, and the metadata is not affected at all. If that is not a thing
-you want to hold, run a relay for yourself and people you already know, or do
-not run one. Both are respectable. Publishing a relay to strangers while telling
-them it is private is not.
+**Running a relay means holding other people's metadata, being told who somebody
+is about to write to even when you will not carry it, and reading in plaintext
+every message written before either party could get a key for the other.** That
+last group is smaller than it was, because your relay can now hand a sender the
+key it already saw and the sender checks it against the address rather than
+trusting you (6.2). It is not empty, and the metadata is not affected at all.
+
+What is no longer on that list is **answering a stranger whether a given address
+is one of your users**. It was on it, on three routes, and all three are closed:
+the mailbox challenge hands every caller a nonce of the same shape, the key
+directory answers only somebody you carry mail for, and the acknowledgement
+route decides its refusal by what the caller sent rather than by who you listed.
+What remains is that the people you DO carry mail for can work out who else you
+carry mail for, because a message to a listed address is accepted and one to any
+other address is not; closing that would mean taking somebody's message and
+silently discarding it so the two answers matched, and that is not a thing a
+relay should do.
+
+If that is not a thing you want to hold, run a relay for yourself and people you
+already know, or do not run one. Both are respectable. Publishing a relay to
+strangers while telling them it is private is not.
 
 ---
 
@@ -886,6 +1341,51 @@ be wrong:
   somebody writing to a person who is not reading. Deleting the mail of the
   person they do read was not a delay.
 
+**The one an open relay cannot win, and the one thing that does win it.** The
+paragraph above is about one inbox. The whole store has ceilings too: 20,000
+undelivered envelopes and 48 MB across every mailbox on the relay (`MAX_TOTAL_
+ENVELOPES` and `MAX_TOTAL_BYTES`, `messenger_relay.rs`). They exist so that a
+relay cannot be made to hold unbounded memory, and reaching them makes the relay
+answer `{"ok":false,"err":"this relay is full"}` to everybody, because nothing is
+deleted to make room. Keys are free and mailbox addresses are free, so anybody
+who can reach the port can walk the store to that ceiling with properly signed
+mail addressed to inboxes of their own, in well under a minute on a LAN, and
+from then on nobody else's message is accepted.
+
+Be exact about what that does and does not break. Mail already stored is
+untouched and is still collectable, so nothing anybody has sent is lost, and
+authentication is not involved anywhere in this: reading somebody else's inbox is
+still refused, and a forged sender is still refused. What stops is new delivery,
+for everyone, and the recipient sees no error at all because it is the sender's
+wallet that is told.
+
+Two things changed in response, and only one of them is a defence:
+
+- **Expiry now reaches inboxes nobody touches.** Expired mail used to be dropped
+  only from an inbox somebody polled, so envelopes sitting in mailboxes their
+  owner never comes back to kept their slots for ever rather than for the 7 day
+  TTL. A full store therefore stayed full permanently, and the only cure was
+  restarting the wallet, which throws away every genuine undelivered message with
+  it. A store that is at a ceiling now sweeps every inbox for expired mail before
+  it refuses anybody, at most once a minute so that the sweep is not itself
+  something to aim at (`FULL_STORE_SWEEP_INTERVAL`). That turns a permanent
+  outage into one that ends by itself. It does not shorten the 7 days.
+- **An allowlist is the actual answer, and it is now the default.** No ceiling
+  can help here. Every one of them bounds how much an identity may hold, and an
+  attacker who can mint identities for nothing spreads the load under any such
+  bound; that is not a bug in the numbers, it is what free identities mean. The
+  only rule a free keypair does not walk around is one that is not about volume:
+  a list of the addresses this relay is for. On a listed relay a stranger cannot
+  post at all, so there is nothing to fill. Every relay the wallet starts is a
+  listed relay, and section 0 step 2b is where you say who is on it.
+
+A public relay, by definition, cannot use that list, and so a public relay can be
+filled by anybody who wants to. It is no longer something anybody arrives at by
+accident: the standalone `dust-whisper-relay` binary serves the addresses given
+with `--allow`, and serving everybody takes `--serve-everybody`, a flag whose
+name is the warning. Rate limiting in the reverse proxy (section 4) raises the
+cost and does not remove it. Say so when you publish the URL.
+
 **Three things that used to be free, and are not any more.** Each of these was
 done against a running relay with an HTTP client and nothing else, and each is
 now refused. They are listed so that an operator on an older build knows what
@@ -907,6 +1407,22 @@ they are carrying:
   nonce to everybody. A full table now evicts its own oldest entry instead
   (`a_challenge_flood_cannot_lock_an_owner_out_of_their_own_inbox`).
 - **Inventing recipients parked unbounded memory on your machine.** Section 2.
+- **Reading your address list out of the challenge route.** One GET per candidate
+  address, no key, no envelope, no relationship with you: a listed address came
+  back with a 32 character nonce and everybody else came back with an empty
+  string. A neighbour on the same network could reconstruct your correspondent
+  list from a handful of guesses, which is the one fact this whole arrangement
+  says only you hold. Every caller now gets a nonce of the same shape and only
+  the ones you carry mail for get one that was written down
+  (`a_stranger_cannot_test_any_address_against_the_hosts_list` and
+  `the_oracle_no_longer_enumerates_a_hosts_correspondents`,
+  `crates/dust-whisper/tests/messenger_relay_stranger_probe.rs`).
+- **Confirming it a second way through the key directory, and a third through
+  the wording of an acknowledgement refusal.** Both closed, and both in the same
+  file. See section 6.2 and section 6.6.
+- **Submitting transactions through your node from anywhere, once you followed
+  section 4.** The transaction door was gated on the peer's IP address, and a
+  reverse proxy makes every caller in the world 127.0.0.1. Section 6.5.
 
 **The key directory, which is new and which you should size up yourself.** It
 adds one table and one unauthenticated endpoint, and both are levers:
@@ -918,25 +1434,41 @@ adds one table and one unauthenticated endpoint, and both are levers:
   wallet sends v1 and says on its own screen that the message is not sealed.
   Nothing is deleted that anyone was promised, and nothing false is ever
   produced. Compare that to the mail caps, where eviction was the bug.
-- **Probing it.** The lookup needs no key and no signature, so anyone who can
-  reach the port can ask about any address as fast as your network allows and
-  learn which addresses use your relay. Answering costs one hash lookup and no
-  walk of the table on purpose (`sender_key`), and expiry and eviction are both
-  done on the write path, which costs a signed envelope. So the cheap question
-  stays cheap for you as well as for them. What it gives away is section 6.2.
+- **Probing it.** It used to need no key and no signature, so anyone who could
+  reach the port could ask about any address as fast as your network allowed and
+  learn which addresses use your relay. It now answers only a caller you carry
+  mail for, presenting the same credential a mailbox fetch presents, so the
+  probe is available to the people on your list and to nobody else. Answering
+  still costs one hash lookup and no walk of the table on purpose (`sender_key`),
+  and expiry and eviction are both done on the write path, which costs a signed
+  envelope. What an answer gives away is section 6.2.
 - **What neither of them can do.** Nothing an asker sends changes what you hold,
   and nothing you answer changes what a wallet seals to, because the wallet
   re-derives the address from your answer before it uses it (section 6.2).
 
-**What is still not there.** Nothing rate limits by IP, and nothing
-authenticates who is allowed to use your relay. If you want either, it belongs in
-the reverse proxy in front of it. It does not exist in the relay, and no cap the
-relay has is a substitute for it. The caps above bound what one machine can be
-made to hold; they do not stop the requests arriving.
+**What is still not there.** Nothing rate limits by IP. Who is allowed to use
+your relay IS authenticated - that is the address list, and every messenger route
+enforces it - but the requests still arrive and are still refused one at a time,
+so a rate limit belongs in the reverse proxy in front of it. It does not exist in
+the relay, and no cap the relay has is a substitute for it. The caps above bound
+what one machine can be made to hold; they do not stop the requests arriving.
+
+**And one thing that is deliberately still open.** The people you carry mail for
+can work out who else you carry mail for: a message to a listed address is
+accepted and one to any other address is refused, so a listed correspondent can
+test a third address. Closing it would mean accepting somebody's message and
+silently discarding it so the two answers matched. A relay that quietly drops
+mail to make a probe symmetrical is a worse relay, so this one does not, and this
+sentence is here instead of a fix. A stranger cannot run the same probe, because
+a send from an unlisted sender is refused identically whatever it names.
 
 **No money.** Your relay holds no funds and cannot move anyone's. The worst case
 for the relay key is that transactions submitted through you can be read, which
-is already true of you (section 6.5).
+is already true of you (section 6.5). The key file is also what the transaction
+door's credential is derived from, so anything that can read it can submit
+through your node as you; on a wallet-hosted relay that file sits in the wallet
+data directory with the same protection as the rest of it, and on a standalone
+relay it is `--key-file` and yours to keep at mode 600.
 
 **A service for other people.** You are running a message service that strangers
 may come to depend on. What that means where you live is yours to work out

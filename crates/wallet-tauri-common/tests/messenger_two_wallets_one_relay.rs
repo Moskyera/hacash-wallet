@@ -140,6 +140,22 @@ struct Shell {
 /// the reason this file switches the root before each shell acts instead of
 /// simply holding two services. Only one shell acts at a time, and every
 /// entrance goes through `invoke`, which sets the root first.
+/// One run at a time in this process.
+///
+/// `enter` moves a process-wide environment variable, so two runs that each
+/// open wallets would take each other's data root out from under them. There
+/// is more than one run in this file now, and `cargo test` runs them on
+/// separate threads by default. A person runs one wallet per machine; this is
+/// the test harness paying for putting several in one process.
+static ONE_RUN_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold the lock for a whole run, whatever happened on the run before.
+fn one_run_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    ONE_RUN_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn enter(root: &Path) {
     // SAFETY: single-threaded test flow. Only one shell acts at a time, and
     // the relay and the recorder never read the wallet data root.
@@ -180,6 +196,7 @@ fn open_shell(who: &'static str, root: &Path, node_url: &str) -> Shell {
             wallet_tauri_common::whisper_commands::messenger_send,
             wallet_tauri_common::whisper_commands::messenger_poll_inbox,
             wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
+            wallet_tauri_common::desktop_commands::wallet_relay_endpoint,
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .expect("build the wallet application");
@@ -239,6 +256,80 @@ fn set_relay(shell: &Shell, relay_url: &str, auto_start: bool) {
             "auto_start_relay": auto_start,
         }}),
     );
+}
+
+/// The same press with the whole payload spelled out, for the acts that move
+/// the bind, name the addresses the relay is for, or put two relays in the list
+/// in a particular order.
+fn set_whisper(shell: &Shell, dust_whisper: Value) {
+    invoke(
+        shell,
+        "wallet_update_dust_whisper_settings_desktop",
+        json!({ "dustWhisper": dust_whisper }),
+    );
+}
+
+/// The relay operator naming who their relay is for.
+///
+/// The relay denies by default: an address the operator has not named gets
+/// nothing on any route. So a third party who is running a relay for other
+/// people has to say who those people are, and this is that press - the same
+/// command the Privacy screen invokes, with `relay_allowlist` filled in.
+///
+/// This did not exist while an empty list meant "open", and the run below
+/// worked without it because the operator's relay carried mail for whoever
+/// asked. That is the exposure this change is about: the operator was also
+/// relaying for every other machine that could reach the socket, and had
+/// pressed nothing that said so.
+fn set_relay_for(shell: &Shell, relay_url: &str, serving: &[&str]) {
+    invoke(
+        shell,
+        "wallet_update_dust_whisper_settings_desktop",
+        json!({ "dustWhisper": {
+            "enabled": true,
+            "relay_urls": [relay_url],
+            "fallback_direct": false,
+            "auto_start_relay": true,
+            "relay_allowlist": serving,
+        }}),
+    );
+}
+
+/// What this wallet reports it is serving, read through the same read-only
+/// command the Privacy and Chat screens invoke.
+fn relay_endpoint(shell: &Shell) -> Value {
+    invoke(shell, "wallet_relay_endpoint", json!({}))
+}
+
+/// One HTTP request over a bare TCP socket, and the body that came back.
+///
+/// Deliberately not a client this workspace ships: the point of the acts that
+/// use it is that a machine which is not either wallet can open a connection to
+/// the address the wallet printed, so it must not borrow anything from either
+/// wallet to do it. `None` when the connection could not be made at all, which
+/// is what a relay bound to loopback gives a caller on the network address.
+fn http_request(addr: &str, request: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &addr.parse().ok()?,
+        std::time::Duration::from_secs(3),
+    )
+    .ok()?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .ok()?;
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).to_string())
+}
+
+/// `host:port` out of a relay URL, for the raw socket above.
+fn host_port(url: &str) -> String {
+    url.trim()
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +519,7 @@ fn body_of(messages: &Value, index: usize) -> String {
 
 #[test]
 fn two_wallets_exchange_a_message_through_one_relay_and_still_have_it_after_a_cold_start() {
+    let _one_at_a_time = one_run_at_a_time();
     // A port with nothing on it. Every shell is configured with this as its
     // node, so an accidental chain call fails loudly rather than reaching a
     // real node. No chain is contacted by anything in this file.
@@ -488,6 +580,46 @@ fn two_wallets_exchange_a_message_through_one_relay_and_still_have_it_after_a_co
     assert_ne!(alice_root, bob_root, "two wallets, two data roots");
     set_relay(&alice, &tap_url, false);
     set_relay(&bob, &tap_url, false);
+
+    // Carol and Dave, the two strangers section 8 needs, opened here rather
+    // than there for one reason: the operator has to name everybody this relay
+    // will carry mail for, and naming somebody is a settings press. A press
+    // used to rebuild the relay, which erased the directory of "which key did I
+    // last see this address send with" and with it every undelivered envelope -
+    // exactly what section 8 is about. A press swaps the list on the running
+    // relay now and leaves both alone, so the ordering here is no longer
+    // load-bearing; it is kept because one press before any mail moves is still
+    // the clearest way to read the run.
+    let carol = open_shell("Carol", &carol_root, &node_url);
+    let dave = open_shell("Dave", &dave_root, &node_url);
+    let carol_address = invoke(
+        &carol,
+        "wallet_create",
+        json!({ "passphrase": PASSPHRASE_C }),
+    )
+    .as_str()
+    .expect("carol address")
+    .to_string();
+    let dave_address = invoke(
+        &dave,
+        "wallet_create",
+        json!({ "passphrase": PASSPHRASE_D }),
+    )
+    .as_str()
+    .expect("dave address")
+    .to_string();
+    set_relay(&carol, &tap_url, false);
+    set_relay(&dave, &tap_url, false);
+
+    // The operator says who this relay is for. Without this press the relay
+    // carries mail for nobody but the operator, which is what a relay whose
+    // owner has named nobody should do, and every send below is refused. There
+    // is no press anywhere that says "and whoever else turns up".
+    set_relay_for(
+        &operator,
+        &relay_url,
+        &[&alice_address, &bob_address, &carol_address, &dave_address],
+    );
 
     println!("\n== 2. TWO WALLETS ==");
     println!("Alice {alice_address}");
@@ -680,27 +812,6 @@ fn two_wallets_exchange_a_message_through_one_relay_and_still_have_it_after_a_co
     // by the key `from` derives from. Carol has never heard from Bob and holds
     // nothing of his. She asks, checks the answer against Bob's address
     // herself, and seals to it. The recorder below is the proof.
-    let carol = open_shell("Carol", &carol_root, &node_url);
-    let dave = open_shell("Dave", &dave_root, &node_url);
-    let carol_address = invoke(
-        &carol,
-        "wallet_create",
-        json!({ "passphrase": PASSPHRASE_C }),
-    )
-    .as_str()
-    .expect("carol address")
-    .to_string();
-    let dave_address = invoke(
-        &dave,
-        "wallet_create",
-        json!({ "passphrase": PASSPHRASE_D }),
-    )
-    .as_str()
-    .expect("dave address")
-    .to_string();
-    set_relay(&carol, &tap_url, false);
-    set_relay(&dave, &tap_url, false);
-
     println!("\n== 8. A FIRST MESSAGE THAT IS SEALED ==");
     println!("Carol {carol_address}");
     println!("Dave  {dave_address}  (has never sent through this relay)");
@@ -944,6 +1055,10 @@ fn the_commands_this_test_drives_are_the_ones_the_shipped_screens_invoke() {
         r#"invoke<ChatMessage>("messenger_send", { peer, body })"#,
         r#"invoke<MessengerPollOutcome>("messenger_poll_inbox")"#,
         r#"invoke<void>("wallet_update_dust_whisper_settings_desktop", { dustWhisper })"#,
+        // The read-only command the second run reads the shareable address out
+        // of. Without it the guest in that run is handed an address this file
+        // made up rather than one a person would be shown.
+        r#"invoke<RelayEndpoint>("wallet_relay_endpoint")"#,
     ] {
         assert!(
             desktop_api.contains(call),
@@ -982,4 +1097,516 @@ fn the_commands_this_test_drives_are_the_ones_the_shipped_screens_invoke() {
         desktop_entry.contains("wallet_tauri_common::desktop_relay::sync_managed_relay"),
         "the desktop shell no longer starts the managed relay at launch"
     );
+    assert!(
+        desktop_entry.contains("wallet_tauri_common::desktop_commands::wallet_relay_endpoint"),
+        "the desktop shell no longer registers the command the screens read the relay address          from, so the second run in this file drives something no screen can reach"
+    );
+
+    // The order of the relay list is what the second run's trap turns on, and
+    // the screens can only warn about it if they are given the list in order.
+    let relay_reach = read("apps/desktop/src/relayReach.ts");
+    assert!(
+        relay_reach.contains("export function firstAcceptWarning"),
+        "the sentence for a wallet whose own relay sits above somebody else's is gone"
+    );
+    assert!(
+        relay_reach.contains("export function acceptedByNote"),
+        "the sentence naming which relay took a message is gone, and `delivered` alone is what          the second run in this file proves is not enough"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Two people. One of them hosting. Nothing else deployed.
+// ---------------------------------------------------------------------------
+
+const HOST_FIRST: &str = "Host to guest: first contact, over a relay I am running myself.";
+const GUEST_REPLY: &str = "Guest to host: got it, and this reply is sealed to your key.";
+const HOST_SEALED: &str = "Host to guest: now I hold your key, so this one is sealed too.";
+const TRAPPED: &str = "Guest to host: this one is the trap, and it never left my computer.";
+
+/// THE WHOLE POINT, WITH NOBODY ELSE INVOLVED.
+///
+/// The run above has a third shell playing a relay operator, because that is
+/// what publishing a relay looks like. This one has nobody but the two people
+/// messaging: one wallet hosts on its own machine, the other points at the
+/// address that wallet printed, and a sealed message goes each way. No third
+/// party, no server, no domain, no certificate.
+///
+/// # What each act is really doing
+///
+/// 1. The host's Privacy screen press: DUST Whisper on, auto-start on, its own
+///    loopback URL in the box, the bind moved to every interface, and both
+///    addresses named as the people this relay is for. One
+///    `wallet_update_dust_whisper_settings_desktop`, the payload `api.ts` sends.
+/// 2. The address the guest is given comes from `wallet_relay_endpoint`, the
+///    read-only command the screens invoke. This file does not construct it.
+/// 3. A bare TCP socket, borrowing nothing from either wallet, fetches
+///    `/whisper/v1/info` from that address. That is the check section 0 step 5
+///    tells a person to run from the other machine.
+/// 4. A stranger with a real keypair, posting a properly signed envelope over
+///    that same bare socket, is refused, because the host named who this relay
+///    is for. That is the defence a free keypair does not walk around.
+/// 5. Three messages, and both directions end up sealed.
+/// 6. The trap: the guest turns on their own relay and leaves it ABOVE the
+///    host's in the list. The send is accepted, by the guest's own machine, and
+///    the host never sees it. `delivered_via` is what makes that visible, and
+///    the endpoint report carries the list in order so the screens can warn.
+///
+/// # What it does not claim
+///
+/// It does not claim the two machines are on different networks: they are the
+/// same machine, and the socket is what differs. It does not claim TLS. It
+/// contacts no node and broadcasts nothing: every shell's node URL points at a
+/// port nothing listens on.
+#[test]
+fn two_people_one_of_them_hosting_and_no_third_party_at_all() {
+    let _one_at_a_time = one_run_at_a_time();
+    let node_url = format!("http://127.0.0.1:{}", free_port());
+
+    let host_dir = tempfile::tempdir().expect("host dir");
+    let guest_dir = tempfile::tempdir().expect("guest dir");
+    let host_root = host_dir.path().join("wallet-data");
+    let guest_root = guest_dir.path().join("wallet-data");
+    for root in [&host_root, &guest_root] {
+        std::fs::create_dir_all(root).expect("wallet root");
+    }
+
+    let host = open_shell("the host", &host_root, &node_url);
+    let guest = open_shell("the guest", &guest_root, &node_url);
+    let host_address = invoke(
+        &host,
+        "wallet_create",
+        json!({ "passphrase": PASSPHRASE_A }),
+    )
+    .as_str()
+    .expect("host address")
+    .to_string();
+    let guest_address = invoke(
+        &guest,
+        "wallet_create",
+        json!({ "passphrase": PASSPHRASE_B }),
+    )
+    .as_str()
+    .expect("guest address")
+    .to_string();
+    assert_ne!(host_address, guest_address);
+    assert_ne!(
+        host_root, guest_root,
+        "two people, two machines' worth of data"
+    );
+
+    println!("\n== TWO PEOPLE, NOBODY ELSE ==");
+    println!("host  {host_address}");
+    println!("guest {guest_address}");
+    println!("nothing else is deployed: no operator shell, no server, no domain");
+
+    // -- 1. The host presses Save on their own Privacy screen. --------------
+    let port = free_port();
+    let own_url = format!("http://127.0.0.1:{port}");
+    set_whisper(
+        &host,
+        json!({
+            "enabled": true,
+            "relay_urls": [own_url],
+            "fallback_direct": false,
+            "auto_start_relay": true,
+            // The bind is a stored choice and never inferred. This is the
+            // person choosing it, knowingly, on the screen that lists what it
+            // costs.
+            "relay_bind": "all_interfaces",
+            // And naming who the relay is for, which is what stops a passer-by
+            // on the same network filling it and stopping the guest's mail.
+            "relay_allowlist": [host_address, guest_address],
+        }),
+    );
+
+    let report = relay_endpoint(&host);
+    println!("\n== 1. THE HOST'S OWN WALLET IS THE RELAY ==");
+    println!("hosting        {}", report["hosting"]);
+    println!("serving        {}", report["serving"]);
+    println!("listen_addr    {}", report["listen_addr"]);
+    println!("bind           {}", report["bind"]);
+    println!("loopback_only  {}", report["loopback_only"]);
+    println!("allowlist      {}", report["allowlist"]);
+    println!("lan_url        {}", report["lan_url"]);
+    assert_eq!(report["hosting"], json!(true));
+    assert_eq!(report["serving"], json!(true));
+    assert_eq!(report["bind"], json!("all_interfaces"));
+    assert_eq!(report["loopback_only"], json!(false));
+    assert_eq!(
+        report["listen_addr"],
+        json!(format!("0.0.0.0:{port}")),
+        "the socket is not where the person asked for it: {report}"
+    );
+    assert_eq!(
+        report["allowlist"],
+        json!([host_address, guest_address]),
+        "the relay does not report who its operator said it is for: {report}"
+    );
+
+    // -- 2. The address the guest is given, from the wallet and not from us. -
+    // On a machine with no route off itself the wallet offers no address, and
+    // says so rather than inventing one. The round trip below is the same
+    // either way; only the reachability act depends on there being one.
+    let shared_url = match report["lan_url"].as_str() {
+        Some(url) => url.to_string(),
+        None => {
+            println!(
+                "this machine offered no network address of its own, so the guest is pointed at\n\
+                 the same socket over loopback. The relay is still the host's wallet and still\n\
+                 nobody else's."
+            );
+            own_url.clone()
+        }
+    };
+    println!("\n== 2. THE ADDRESS THE HOST HANDS OVER ==");
+    println!("from wallet_relay_endpoint   {shared_url}");
+
+    // -- 3. Somebody who is not either wallet opens a connection to it. -----
+    let target = host_port(&shared_url);
+    let info = http_request(
+        &target,
+        &format!("GET /whisper/v1/info HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n"),
+    );
+    println!("\n== 3. A BARE SOCKET, BORROWING NOTHING FROM EITHER WALLET ==");
+    match &info {
+        Some(body) => println!(
+            "GET /whisper/v1/info      {}",
+            body.lines().next().unwrap_or("")
+        ),
+        None => println!("GET /whisper/v1/info      no connection"),
+    }
+    let info = info.expect("the address the wallet printed refused a connection");
+    assert!(
+        info.contains("\"v\":") && info.contains("pubkey"),
+        "the address the wallet printed is not answering as a relay: {info}"
+    );
+
+    // -- 4. A stranger who can reach the port, and holds a real key. --------
+    let stranger =
+        WalletAccount::create("a stranger on the same network 5521").expect("stranger account");
+    let stranger_address = stranger.address();
+    let mut envelope = MessengerEnvelope {
+        v: MESSENGER_CRYPTO_V1,
+        id: "stranger-flood-1".to_string(),
+        to: stranger_address.clone(),
+        from: stranger_address.clone(),
+        from_pubkey: Some(pubkey_hex(stranger.inner())),
+        from_sig: None,
+        nonce: "00112233445566778899aabb".to_string(),
+        ciphertext: "deadbeef".to_string(),
+        sent_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let digest = dust_whisper::messenger_auth::envelope_auth_digest(&envelope);
+    envelope.from_sig = Some(hex::encode(stranger.inner().do_sign(&digest)));
+    let body = serde_json::to_string(&MessengerSendRequest {
+        envelope: envelope.clone(),
+    })
+    .expect("send request json");
+    let refusal = http_request(
+        &target,
+        &format!(
+            "POST {MESSENGER_SEND_PATH} HTTP/1.1\r\nHost: {target}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .expect("the relay answered the stranger");
+    println!("\n== 4. A STRANGER ON THAT NETWORK, WITH A REAL KEY ==");
+    println!("stranger address          {stranger_address}");
+    println!(
+        "posts a signed envelope   {}",
+        refusal.lines().last().unwrap_or("")
+    );
+    assert!(
+        refusal.contains("\"ok\":false"),
+        "a relay named for two people accepted a stranger's envelope: {refusal}"
+    );
+    assert!(
+        refusal.contains("only for the addresses its operator listed"),
+        "the relay refused the stranger for the wrong reason: {refusal}"
+    );
+
+    // -- 5. The guest points at the host, and messages go both ways. --------
+    set_relay(&guest, &shared_url, false);
+    let guest_report = relay_endpoint(&guest);
+    println!("\n== 5. THE GUEST POINTS AT THE HOST ==");
+    println!("guest relay_urls   {}", guest_report["relay_urls"]);
+    println!("guest hosting      {}", guest_report["hosting"]);
+    assert_eq!(
+        guest_report["hosting"],
+        json!(false),
+        "the guest must not be hosting anything: {guest_report}"
+    );
+    let health = invoke(&guest, "wallet_whisper_relay_health", json!({}));
+    assert_eq!(
+        health[0]["online"],
+        json!(true),
+        "the guest cannot see the host's relay: {health}"
+    );
+
+    // Opening message. Nothing anywhere holds a key for the guest yet, and this
+    // relay has never seen the guest send, so it is v1 and says so.
+    let opening = invoke(
+        &host,
+        "messenger_send",
+        json!({ "peer": guest_address, "body": HOST_FIRST }),
+    );
+    assert_eq!(opening["delivered"], json!(true), "{opening}");
+    assert_eq!(
+        opening["delivered_via"],
+        json!(own_url),
+        "the host's own send went somewhere other than the host's own relay: {opening}"
+    );
+    assert_eq!(opening["sealed"], json!(false), "{opening}");
+
+    let guest_poll = invoke(&guest, "messenger_poll_inbox", json!({}));
+    assert_eq!(guest_poll["added"], json!(1), "{guest_poll}");
+    let guest_sees = invoke(
+        &guest,
+        "messenger_messages",
+        json!({ "peer": host_address }),
+    );
+    assert_eq!(body_of(&guest_sees, 0), HOST_FIRST);
+
+    // The reply. The guest's wallet learned the host's key off that envelope,
+    // so this one is sealed with ECDH to a key only the host's secret opens.
+    let reply = invoke(
+        &guest,
+        "messenger_send",
+        json!({ "peer": host_address, "body": GUEST_REPLY }),
+    );
+    assert_eq!(reply["delivered"], json!(true), "{reply}");
+    assert_eq!(
+        reply["sealed"],
+        json!(true),
+        "the reply is not sealed: {reply}"
+    );
+    assert_eq!(
+        reply["delivered_via"],
+        json!(shared_url),
+        "the guest's message did not go to the host's relay: {reply}"
+    );
+
+    let host_poll = invoke(&host, "messenger_poll_inbox", json!({}));
+    assert_eq!(host_poll["added"], json!(1), "{host_poll}");
+    let host_sees = invoke(
+        &host,
+        "messenger_messages",
+        json!({ "peer": guest_address }),
+    );
+    assert_eq!(body_of(&host_sees, 1), GUEST_REPLY);
+
+    // And back the other way, sealed now that the host holds the guest's key.
+    let sealed_back = invoke(
+        &host,
+        "messenger_send",
+        json!({ "peer": guest_address, "body": HOST_SEALED }),
+    );
+    assert_eq!(sealed_back["delivered"], json!(true), "{sealed_back}");
+    assert_eq!(
+        sealed_back["sealed"],
+        json!(true),
+        "the host's second message is not sealed: {sealed_back}"
+    );
+    let guest_poll2 = invoke(&guest, "messenger_poll_inbox", json!({}));
+    assert_eq!(guest_poll2["added"], json!(1), "{guest_poll2}");
+    let guest_sees2 = invoke(
+        &guest,
+        "messenger_messages",
+        json!({ "peer": host_address }),
+    );
+    assert_eq!(body_of(&guest_sees2, 2), HOST_SEALED);
+
+    println!("\n== 6. A SEALED MESSAGE EACH WAY, THROUGH A RELAY NEITHER RENTED ==");
+    println!(
+        "host  -> guest  {}  sealed {}",
+        HOST_FIRST, opening["sealed"]
+    );
+    println!(
+        "guest -> host   {}  sealed {}",
+        GUEST_REPLY, reply["sealed"]
+    );
+    println!(
+        "host  -> guest  {}  sealed {}",
+        HOST_SEALED, sealed_back["sealed"]
+    );
+    println!("accepted by     host: {}", opening["delivered_via"]);
+    println!("accepted by     guest: {}", reply["delivered_via"]);
+
+    // -- 7. The trap, what closed most of it, and what is left. -------------
+    // The guest turns on their own relay and leaves it above the host's, which
+    // is exactly what happens to somebody who adds a friend's address underneath
+    // the line their Privacy screen came with. A send stops at the first relay
+    // that accepts, and the relay on your own machine always used to accept.
+    //
+    // It does not any more, and that is worth stating precisely rather than
+    // celebrating. The guest's own relay now carries mail only for the
+    // addresses the guest named, and the guest named nobody, so it serves the
+    // guest's own address and nothing else. A message ADDRESSED TO THE HOST is
+    // refused by it and the send falls through to the host's relay, which is
+    // where it was supposed to go. Default deny closed the common shape of this
+    // trap as a side effect of being default deny.
+    let guest_port = free_port();
+    let guest_own = format!("http://127.0.0.1:{guest_port}");
+    set_whisper(
+        &guest,
+        json!({
+            "enabled": true,
+            "relay_urls": [guest_own, shared_url],
+            "fallback_direct": false,
+            "auto_start_relay": true,
+            "relay_bind": "loopback",
+        }),
+    );
+    let fell_through = invoke(
+        &guest,
+        "messenger_send",
+        json!({ "peer": host_address, "body": TRAPPED }),
+    );
+    let host_poll2 = invoke(&host, "messenger_poll_inbox", json!({}));
+    let trap_report = relay_endpoint(&guest);
+
+    println!("\n== 7a. THE OWN RELAY ON TOP, AND IT NO LONGER SWALLOWS ==");
+    println!("guest relay list   {}", trap_report["relay_urls"]);
+    println!("guest own_url      {}", trap_report["own_url"]);
+    println!("guest serves       {}", trap_report["served_addresses"]);
+    println!("delivered          {}", fell_through["delivered"]);
+    println!("delivered_via      {}", fell_through["delivered_via"]);
+    println!("host poll after it {host_poll2}");
+
+    assert_eq!(
+        trap_report["served_addresses"],
+        json!([guest_address]),
+        "the guest's own relay carries mail for somebody the guest never named: {trap_report}"
+    );
+    assert_eq!(fell_through["delivered"], json!(true));
+    assert_eq!(
+        fell_through["delivered_via"],
+        json!(shared_url),
+        "the guest's own relay accepted mail for an address it does not carry: {fell_through}"
+    );
+    assert_eq!(
+        host_poll2["added"],
+        json!(1),
+        "the message did not reach the host after falling through: {host_poll2}"
+    );
+
+    // What is LEFT of the trap, and it is why `firstAcceptWarning` stays.
+    // Default deny closed the trap for a peer your own relay does not carry.
+    // Two friends who host for each other both name each other, and then each
+    // one's own relay DOES accept mail for the other - so the order of the list
+    // is load bearing again, and the message stops on the sender's own machine
+    // where the recipient cannot collect it.
+    set_whisper(
+        &guest,
+        json!({
+            "enabled": true,
+            "relay_urls": [guest_own, shared_url],
+            "fallback_direct": false,
+            "auto_start_relay": true,
+            "relay_bind": "loopback",
+            "relay_allowlist": [host_address.clone()],
+        }),
+    );
+    let trapped = invoke(
+        &guest,
+        "messenger_send",
+        json!({ "peer": host_address, "body": TRAPPED }),
+    );
+    let host_poll3 = invoke(&host, "messenger_poll_inbox", json!({}));
+    let trap_report = relay_endpoint(&guest);
+
+    println!("\n== 7b. THE TRAP THAT IS LEFT: BOTH OF THEM NAMED EACH OTHER ==");
+    println!("guest serves       {}", trap_report["served_addresses"]);
+    println!("delivered          {}", trapped["delivered"]);
+    println!("delivery_error     {}", trapped["delivery_error"]);
+    println!("delivered_via      {}", trapped["delivered_via"]);
+    println!("host poll after it {host_poll3}");
+
+    assert_eq!(
+        trap_report["served_addresses"],
+        json!([guest_address, host_address]),
+        "the report does not show who the guest's own relay is now for: {trap_report}"
+    );
+    assert_eq!(
+        trapped["delivered"],
+        json!(true),
+        "the relay on the guest's own machine did accept it, which is the trap"
+    );
+    assert_eq!(
+        trapped["delivered_via"],
+        json!(guest_own),
+        "the field that makes the trap visible is wrong: {trapped}"
+    );
+    assert_eq!(
+        host_poll3["added"],
+        json!(0),
+        "the host received a message that stopped at the guest's own relay: {host_poll3}"
+    );
+    // The report the screens read carries the list IN ORDER and the wallet's own
+    // relay URL, which is everything `firstAcceptWarning` in
+    // apps/desktop/src/relayReach.ts needs to raise the warning.
+    assert_eq!(
+        trap_report["relay_urls"],
+        json!([guest_own, shared_url]),
+        "the endpoint report lost the order of the relay list: {trap_report}"
+    );
+    assert_eq!(trap_report["own_url"], json!(guest_own), "{trap_report}");
+    assert_eq!(trap_report["serving"], json!(true), "{trap_report}");
+
+    // Put it back the way section 0 step 4 says, and the same message goes.
+    set_whisper(
+        &guest,
+        json!({
+            "enabled": true,
+            "relay_urls": [shared_url, guest_own],
+            "fallback_direct": false,
+            "auto_start_relay": true,
+            "relay_bind": "loopback",
+            // Still naming the host, so this is the order changing and nothing
+            // else: the same wallet that swallowed the last message.
+            "relay_allowlist": [host_address.clone()],
+        }),
+    );
+    let untrapped = invoke(
+        &guest,
+        "messenger_send",
+        json!({ "peer": host_address, "body": TRAPPED }),
+    );
+    let host_poll3 = invoke(&host, "messenger_poll_inbox", json!({}));
+    println!("\n== 8. THE SAME TWO URLS, THE OTHER WAY ROUND ==");
+    println!("guest relay list   {}", json!([shared_url, guest_own]));
+    println!("delivered_via      {}", untrapped["delivered_via"]);
+    println!("host poll          {host_poll3}");
+    assert_eq!(untrapped["delivered_via"], json!(shared_url), "{untrapped}");
+    assert_eq!(
+        host_poll3["added"],
+        json!(1),
+        "order was the whole difference and the message still did not arrive: {host_poll3}"
+    );
+    assert!(
+        first_accept_warning_is_reachable(),
+        "the screens' warning for this configuration is gone from the shipped source"
+    );
+}
+
+/// The sentence the screens raise for the configuration act 7 produces.
+///
+/// This run stops at Tauri IPC and cannot execute the TypeScript above it, so
+/// the report it just asserted on is only useful if a screen still reads it.
+/// `apps/desktop/src/relayReach.test.ts` holds what the sentence says; this
+/// holds that it exists and that both screens render it.
+fn first_accept_warning_is_reachable() -> bool {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repo root")
+        .to_path_buf();
+    let read = |relative: &str| {
+        std::fs::read_to_string(repo.join(relative))
+            .unwrap_or_else(|error| panic!("{relative}: {error}"))
+    };
+    read("apps/desktop/src/relayReach.ts").contains("export function firstAcceptWarning")
+        && read("apps/desktop/src/screens/PrivacyScreen.tsx").contains("firstAcceptWarning")
+        && read("apps/desktop/src/screens/MessagesScreen.tsx").contains("firstAcceptWarning")
 }
