@@ -39,11 +39,17 @@ export const NOT_SENT_TEXT =
  * answer in the other direction is a message the person believes they sent.
  */
 export function sendReceipt(
-  msg: Pick<ChatMessage, "delivered"> | null | undefined,
+  msg: Pick<ChatMessage, "delivered" | "delivery_error"> | null | undefined,
 ): SendReceipt {
-  return msg?.delivered === true
-    ? { text: SENT_TEXT, kind: "success" }
-    : { text: NOT_SENT_TEXT, kind: "error" };
+  if (msg?.delivered === true) return { text: SENT_TEXT, kind: "success" };
+  // The relay's own reason when it gave one. `messenger_send` used to throw it
+  // away, so a relay that was down and a recipient whose mailbox was being
+  // flooded produced the same line, and only one of those is worth waiting out.
+  const reason = msg?.delivery_error?.trim();
+  return {
+    text: reason ? `${NOT_SENT_TEXT} The relay said: ${reason}` : NOT_SENT_TEXT,
+    kind: "error",
+  };
 }
 
 export type DeliveryLabel = {

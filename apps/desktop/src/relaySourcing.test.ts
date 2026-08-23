@@ -65,6 +65,8 @@ describe("the relay field says where a relay comes from", () => {
       relays_answered: 0,
       relays_refused: 0,
       rejected_envelopes: 0,
+      undecryptable: 0,
+      store_full: false,
     });
     expect(report.kind).toBe("error");
     expect(report.text).toMatch(RELAY_GUIDE);

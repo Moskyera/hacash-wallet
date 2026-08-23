@@ -57,6 +57,23 @@ describe("what the messenger may claim after send", () => {
   });
 });
 
+describe("what a refusal is allowed to say", () => {
+  it("passes on the relay's own reason for refusing, when it gave one", () => {
+    // "inbox full" and "no relay is reachable" are different problems, and only
+    // one of them is worth waiting out. `messenger_send` used to throw the
+    // relay's answer away, so both arrived here as the same line.
+    const receipt = sendReceipt({ delivered: false, delivery_error: "inbox full" });
+    expect(receipt.kind).toBe("error");
+    expect(receipt.text).toMatch(/inbox full/i);
+    expect(receipt.text).toContain(NOT_SENT_TEXT);
+  });
+
+  it("says nothing extra when the relay gave no reason", () => {
+    expect(sendReceipt({ delivered: false, delivery_error: null }).text).toBe(NOT_SENT_TEXT);
+    expect(sendReceipt(null).text).toBe(NOT_SENT_TEXT);
+  });
+});
+
 describe("the screen reports what the command actually returned", () => {
   it("does not toast success for any call that merely did not throw", () => {
     // messenger_send returns Ok when the message was only written to local

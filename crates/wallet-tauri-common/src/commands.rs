@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use crate::state::{AppState, WALLET_BUSY_RETRY};
 
-async fn sync_relay_after_node_change(app: &AppHandle) -> Result<(), String> {
+async fn sync_relay_after_node_change<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     #[cfg(feature = "desktop")]
     {
         return crate::desktop_relay::sync_managed_relay(app).await;

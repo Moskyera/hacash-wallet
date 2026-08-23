@@ -15,6 +15,7 @@ import { deliveryLabel, sendReceipt } from "../messengerDelivery";
 import { messengerBlockedReason } from "../messengerAccess";
 import { pollReport } from "../messengerPoll";
 import { privacyNotice, sealedLabel } from "../messengerPrivacy";
+import { arrivalNote } from "../messengerTiming";
 import {
   failedProbe,
   isCurrentKeyedRequest,
@@ -462,6 +463,7 @@ export default function MessengerScreen({
           messages.map((m) => {
             const delivery = deliveryLabel(m);
             const seal = sealedLabel(m.sealed);
+            const held = arrivalNote(m);
             return (
               <div
                 key={m.id}
@@ -469,6 +471,7 @@ export default function MessengerScreen({
               >
                 <p>{m.body}</p>
                 <span className="muted">{m.timestamp_utc.slice(11, 19)}</span>
+                {held ? <span className="warn-text messenger-status">{held}</span> : null}
                 {delivery ? (
                   <span
                     className={

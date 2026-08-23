@@ -64,7 +64,7 @@ function renderMessages(relayUrls: string[], enabled = true, autoStart = true): 
   return renderToStaticMarkup(<DesktopRouter {...props} />);
 }
 
-function outgoing(delivered: boolean): ChatMessage {
+function outgoing(delivered: boolean, delivery_error?: string): ChatMessage {
   return {
     id: "m1",
     peer: "1AVRUVLKKCrzMBtwvbcUgsQBd9JJmvNRT8",
@@ -72,6 +72,7 @@ function outgoing(delivered: boolean): ChatMessage {
     body: "meet me at 9",
     timestamp_utc: "2026-08-22T09:00:00+00:00",
     delivered,
+    delivery_error,
   };
 }
 
@@ -131,6 +132,16 @@ describe("the desktop messenger surface", () => {
     const accepted = sendOutcome(outgoing(true));
     expect(accepted.kind).toBe("success");
     expect(accepted.text).toMatch(/relay accepted/i);
+  });
+
+  it("passes on the relay's own reason for refusing, when it gave one", () => {
+    // "inbox full" and "the relay is down" are different problems and only one
+    // of them is worth waiting out. `messenger_send` used to discard the
+    // relay's answer, so both reached this screen as the same sentence.
+    const refused = sendOutcome(outgoing(false, "inbox full"));
+    expect(refused.kind).toBe("error");
+    expect(refused.text).toMatch(/inbox full/i);
+    expect(refused.text).toMatch(/not been delivered/i);
   });
 
   it("explains the two wallet states the core refuses the messenger for", () => {

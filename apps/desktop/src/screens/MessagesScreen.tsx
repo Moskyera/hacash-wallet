@@ -37,6 +37,7 @@ import { formatInvokeError } from "../formatInvokeError";
 import { peerRefusal } from "../messengerPeer";
 import { pollReport } from "../messengerPoll";
 import { privacyNotice, sealedLabel } from "../messengerPrivacy";
+import { arrivalNote } from "../messengerTiming";
 import { maskAddress } from "../privacy";
 import type { Screen } from "./types";
 
@@ -51,13 +52,18 @@ export type SendOutcome = { text: string; kind: "success" | "error" };
  * and nowhere else.
  */
 export function sendOutcome(msg: ChatMessage): SendOutcome {
-  return msg.delivered
-    ? { text: "A relay accepted the message.", kind: "success" }
-    : {
-        text:
-          "No relay accepted the message. It is saved on this computer only and has not been delivered.",
-        kind: "error",
-      };
+  if (msg.delivered) return { text: "A relay accepted the message.", kind: "success" };
+  // The relay's own reason, when it gave one. Without it "the relay is down"
+  // and "that person's mailbox is full" were the same sentence, and only one of
+  // those is worth waiting out.
+  const reason = msg.delivery_error?.trim();
+  const why = reason ? ` The relay said: ${reason}` : "";
+  return {
+    text:
+      "No relay accepted the message. It is saved on this computer only and has not been delivered." +
+      why,
+    kind: "error",
+  };
 }
 
 /** Why the messenger is unavailable, or null when it is usable. */
@@ -376,6 +382,9 @@ export default function MessagesScreen({
                 {m.direction === "out" && !m.delivered ? " · not delivered" : ""}
                 {sealedLabel(m.sealed) ? ` · ${sealedLabel(m.sealed)}` : ""}
               </span>
+              {arrivalNote(m) ? (
+                <span className="warn-text messenger-status">{arrivalNote(m)}</span>
+              ) : null}
             </div>
           ))
         )}

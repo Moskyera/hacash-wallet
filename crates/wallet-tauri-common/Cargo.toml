@@ -42,6 +42,20 @@ hpay-companion-lan-runtime = { path = "../companion-lan-runtime", optional = tru
 tempfile = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# The mock runtime, so a test can build a real Tauri application with a real
+# managed `AppState` and enter a command through IPC, exactly where a press
+# enters it. Without it there is no way to obtain a `tauri::State` at all, and
+# the only entrance left is the crate helper underneath the command, which is
+# not the thing a person runs.
+tauri = { version = "2", features = ["unstable", "test"] }
+# The relay's own wire types, so the recorder in
+# `messenger_two_wallets_one_relay.rs` reads the envelope a relay operator
+# would hold rather than a re-encoding of it.
+dust-whisper = { path = "../dust-whisper" }
+# So an attack fixture can stamp an envelope with the time it is really posting
+# it. The relay refuses one whose signed timestamp is outside its freshness
+# window, which is what bounds how long copied bytes stay replayable.
+chrono = { workspace = true }
 # The fullnode's own in-memory chain and the contract types that read it. Same
 # dependency, and for the same reason, as `wallet-core`'s on-chain exit proofs:
 # it is how the bytes this crate's own command produces get executed by the

@@ -787,6 +787,22 @@ export type ChatMessage = {
    * about which nothing is known.
    */
   sealed?: boolean | null;
+  /**
+   * When this wallet took delivery of an incoming message, by its own clock.
+   *
+   * `timestamp_utc` is the sender's own signed claim, and a relay that holds a
+   * message back for a week hands that claim over untouched. The conversation
+   * is ordered on this instead. Absent on outgoing messages and on records
+   * written before the wallet kept it.
+   */
+  received_utc?: string | null;
+  /**
+   * Why no relay took an outgoing message, in the relay's own words.
+   *
+   * "No relay accepted it" used to be the whole story, so a relay that was down
+   * and a recipient whose mailbox was full read identically.
+   */
+  delivery_error?: string | null;
 };
 
 /** What the screen may say about one conversation's privacy. */
@@ -810,12 +826,25 @@ export type MessengerPollOutcome = {
   relays_answered: number;
   relays_refused: number;
   rejected_envelopes: number;
+  /**
+   * Correctly signed envelopes whose body this wallet could not open, cleared
+   * from the relay rather than left there. Left there, they held the inbox at
+   * the relay's cap and every correspondent was refused with "inbox full"
+   * while the owner was told there was nothing new.
+   */
+  undecryptable: number;
+  /** The local store is at its ceiling, so messages were left on the relay. */
+  store_full: boolean;
 };
 
 export type ChatThread = {
   peer: string;
+  /** The newest message in the thread, cut short for the list row. */
   last_message: string;
+  /** The sender's own claim about when the newest message was written. */
   last_timestamp_utc: string;
+  /** When this wallet last saw activity here. The list is ordered on this. */
+  last_activity_utc: string;
   unread: number;
 };
 

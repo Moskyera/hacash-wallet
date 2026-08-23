@@ -12,11 +12,33 @@ use zeroize::Zeroizing;
 use crate::account::WalletAccount;
 use crate::error::{WalletError, WalletResult};
 use crate::messenger_crypto::{
-    MESSENGER_CRYPTO_V1, MESSENGER_CRYPTO_V2, decrypt_body, decrypt_store, encrypt_body_v1,
-    encrypt_body_v2, encrypt_store, parse_pubkey_hex, pubkey_hex, sign_inbox_auth,
+    EnvelopeBinding, MESSENGER_CRYPTO_V1, MESSENGER_CRYPTO_V2, decrypt_body, decrypt_store,
+    encrypt_body_v1, encrypt_body_v2, encrypt_store, parse_pubkey_hex, pubkey_hex, sign_inbox_auth,
     storage_key_from_secret, verify_pubkey_address,
 };
 use crate::paths::{messenger_path, secure_write};
+
+/// The longest message body this wallet will send, or accept off a relay.
+///
+/// There was no bound at all in either direction. A 1 MiB body was accepted by
+/// `messenger_send` and stored; inbound, one keypair could add 8.8 MiB to the
+/// local store per poll cycle, forever, and both shells rendered the newest body
+/// raw into the conversation list. A chat message is not a file transfer.
+pub const MAX_MESSAGE_BODY_BYTES: usize = 4096;
+/// How many messages the encrypted local store will hold.
+///
+/// The store is one file, decrypted and rewritten in full on every poll, and it
+/// had no ceiling. This one is deliberately a refusal rather than an eviction:
+/// dropping the oldest to make room would let anybody who can post to an inbox
+/// delete a conversation by filling it, which is the same mistake the relay's
+/// inbox cap already had to be talked out of. Messages the store has no room for
+/// are left on the relay, and the poll says so.
+const MAX_STORED_MESSAGES: usize = 10_000;
+/// How much of a message the conversation list is given for its preview line.
+///
+/// Both shells render `last_message` straight into the thread row, so without
+/// this a single very long body is a very long row.
+const THREAD_PREVIEW_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -42,6 +64,33 @@ pub struct ChatMessage {
     /// "not known to be sealed", which is the only claim the data supports.
     #[serde(default)]
     pub sealed: Option<bool>,
+    /// When this wallet actually took delivery of an inbound message.
+    ///
+    /// `timestamp_utc` is the sender's own signed claim, and a relay that holds
+    /// a message back for a week still delivers that claim untouched. The
+    /// conversation used to be ordered on it alone, so a held message landed in
+    /// the middle of the history, did not move the thread to the top of the
+    /// list, and rendered as a clock time with no date. This is the wallet's own
+    /// clock, and it is what the conversation is ordered on. `None` on outgoing
+    /// messages, and on records written before the wallet kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_utc: Option<String>,
+    /// Why no relay took an outgoing message, in the relay's own words.
+    ///
+    /// `delivered: false` was the whole story, so "the relay is down" and "that
+    /// person's mailbox is full" arrived at the screen as the same sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_error: Option<String>,
+}
+
+impl ChatMessage {
+    /// The wallet's own clock where it has one, the sender's claim otherwise.
+    ///
+    /// Ordering on this rather than on `timestamp_utc` is what stops a relay
+    /// choosing where in a conversation a message it held appears.
+    pub fn ordering_key(&self) -> &str {
+        self.received_utc.as_deref().unwrap_or(&self.timestamp_utc)
+    }
 }
 
 /// What the screen is allowed to say about one conversation's privacy.
@@ -69,15 +118,38 @@ pub struct MessengerPollOutcome {
     pub relays_answered: u32,
     /// Relays that answered but refused the inbox claim.
     pub relays_refused: u32,
-    /// Envelopes dropped because their sender could not be verified.
+    /// Envelopes the wallet refused to believe: no verifiable sender, or
+    /// addressed to somebody else entirely and handed over anyway.
     pub rejected_envelopes: u32,
+    /// Envelopes correctly signed by a real key whose body this wallet could
+    /// not open, discarded from the relay rather than left there.
+    ///
+    /// Leaving them was a way to shut an inbox permanently: 200 signed
+    /// envelopes of noise, and the poll skipped each one without acking it, so
+    /// they were never removed, the inbox stayed at the relay's per-recipient
+    /// cap, every established correspondent was refused with "inbox full", and
+    /// the owner's own polls reported a clean empty mailbox.
+    pub undecryptable: u32,
+    /// The local store was already at its ceiling, so messages were left on the
+    /// relay rather than taken. Not an empty inbox, and not a failure to reach
+    /// one either.
+    pub store_full: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatThread {
     pub peer: String,
+    /// The newest message in the thread, cut to `THREAD_PREVIEW_CHARS`.
     pub last_message: String,
+    /// The sender's own claim about when the newest message was written.
     pub last_timestamp_utc: String,
+    /// When this wallet last saw activity in the thread, by its own clock.
+    ///
+    /// The list is ordered on this. Ordered on the sender's claim, a relay
+    /// holding a message back kept the thread out of sight at the bottom of the
+    /// list when it finally released it.
+    #[serde(default)]
+    pub last_activity_utc: String,
     pub unread: u32,
 }
 
@@ -90,6 +162,16 @@ struct MessengerStore {
     /// whose key is the two public addresses and therefore no secret at all.
     #[serde(default)]
     peer_keys: std::collections::BTreeMap<String, String>,
+}
+
+/// The conversation-list preview of one body: whole if short, cut if not.
+fn preview(body: &str) -> String {
+    if body.chars().count() <= THREAD_PREVIEW_CHARS {
+        return body.to_string();
+    }
+    let mut out: String = body.chars().take(THREAD_PREVIEW_CHARS).collect();
+    out.push_str("...");
+    out
 }
 
 struct MessengerCtx<'a> {
@@ -150,18 +232,20 @@ impl MessengerStore {
                 peer: m.peer.clone(),
                 last_message: String::new(),
                 last_timestamp_utc: String::new(),
+                last_activity_utc: String::new(),
                 unread: 0,
             });
-            if m.timestamp_utc >= entry.last_timestamp_utc {
-                entry.last_message = m.body.clone();
+            if m.ordering_key() >= entry.last_activity_utc.as_str() {
+                entry.last_message = preview(&m.body);
                 entry.last_timestamp_utc = m.timestamp_utc.clone();
+                entry.last_activity_utc = m.ordering_key().to_string();
             }
             if m.direction == MessageDirection::In && !m.delivered {
                 entry.unread += 1;
             }
         }
         let mut out: Vec<_> = map.into_values().collect();
-        out.sort_by(|a, b| b.last_timestamp_utc.cmp(&a.last_timestamp_utc));
+        out.sort_by(|a, b| b.last_activity_utc.cmp(&a.last_activity_utc));
         out
     }
 
@@ -172,12 +256,26 @@ impl MessengerStore {
             .filter(|m| m.peer == peer)
             .cloned()
             .collect();
-        out.sort_by(|a, b| a.timestamp_utc.cmp(&b.timestamp_utc));
+        // The wallet's own clock, not the sender's claim. See
+        // `ChatMessage::ordering_key`.
+        out.sort_by(|a, b| a.ordering_key().cmp(b.ordering_key()));
         out
     }
 
-    fn push(&mut self, msg: ChatMessage) {
+    /// Take a message into the store, or refuse because it is full.
+    ///
+    /// Refusing rather than evicting is deliberate: see `MAX_STORED_MESSAGES`.
+    fn is_full(&self) -> bool {
+        self.messages.len() >= MAX_STORED_MESSAGES
+    }
+
+    #[must_use]
+    fn push(&mut self, msg: ChatMessage) -> bool {
+        if self.is_full() {
+            return false;
+        }
         self.messages.push(msg);
+        true
     }
 
     fn mark_read(&mut self, peer: &str) {
@@ -233,11 +331,27 @@ fn encrypt_for_send(
     peer: &str,
     body: &str,
     sent_at: &str,
+    id: &str,
     peer_pubkey: Option<&[u8; 33]>,
 ) -> WalletResult<(u8, String, String, Option<String>)> {
+    // The body is sealed against the envelope it will travel in, so the same
+    // bytes cannot be lifted into any other envelope. See `EnvelopeBinding`.
     if let Some(peer_pk) = peer_pubkey {
-        let (nonce, ciphertext) =
-            encrypt_body_v2(ctx.account, ctx.my_address, peer, peer_pk, body, sent_at)?;
+        let binding = EnvelopeBinding {
+            id,
+            from: ctx.my_address,
+            to: peer,
+            v: MESSENGER_CRYPTO_V2,
+        };
+        let (nonce, ciphertext) = encrypt_body_v2(
+            ctx.account,
+            ctx.my_address,
+            peer,
+            peer_pk,
+            body,
+            sent_at,
+            &binding,
+        )?;
         Ok((
             MESSENGER_CRYPTO_V2,
             nonce,
@@ -245,7 +359,13 @@ fn encrypt_for_send(
             Some(pubkey_hex(ctx.account)),
         ))
     } else {
-        let (nonce, ciphertext) = encrypt_body_v1(ctx.my_address, peer, body, sent_at);
+        let binding = EnvelopeBinding {
+            id,
+            from: ctx.my_address,
+            to: peer,
+            v: MESSENGER_CRYPTO_V1,
+        };
+        let (nonce, ciphertext) = encrypt_body_v1(ctx.my_address, peer, body, sent_at, &binding);
         Ok((
             MESSENGER_CRYPTO_V1,
             nonce,
@@ -307,6 +427,12 @@ pub async fn messenger_send(
     if trimmed.is_empty() {
         return Err(WalletError::Other("empty message".into()));
     }
+    if trimmed.len() > MAX_MESSAGE_BODY_BYTES {
+        return Err(WalletError::Other(format!(
+            "a message can be at most {MAX_MESSAGE_BODY_BYTES} bytes. This one is {}",
+            trimmed.len()
+        )));
+    }
     let ctx = messenger_ctx(account, my_address);
     let sent_at = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
@@ -315,12 +441,20 @@ pub async fn messenger_send(
     // is the difference between ECDH (v2) and a "key" the relay already has
     // both halves of (v1).
     let mut store = MessengerStore::load(&ctx)?;
+    // Checked before the envelope is built, so nothing is sent that this wallet
+    // has no room to remember sending.
+    if store.is_full() {
+        return Err(WalletError::Other(format!(
+            "this wallet's message store is full ({MAX_STORED_MESSAGES} messages), so nothing \
+             was sent. Nothing here deletes messages for you"
+        )));
+    }
     let peer_pk = match peer_pubkey_hex {
         Some(hex_str) => Some(parse_pubkey_hex(hex_str)?),
         None => store.peer_key(peer),
     };
     let (crypto_v, nonce, ciphertext, from_pubkey) =
-        encrypt_for_send(&ctx, peer, trimmed, &sent_at, peer_pk.as_ref())?;
+        encrypt_for_send(&ctx, peer, trimmed, &sent_at, &id, peer_pk.as_ref())?;
 
     let mut envelope = MessengerEnvelope {
         v: crypto_v,
@@ -339,17 +473,24 @@ pub async fn messenger_send(
     envelope.from_sig = Some(hex::encode(ctx.account.do_sign(&digest)));
 
     let mut relay_ok = false;
+    // Kept, because "no relay accepted this" and "that person's mailbox is
+    // full" are different facts and used to reach the screen as one sentence.
+    let mut refusal: Option<String> = None;
     for url in relay_urls {
         let u = url.trim();
         if u.is_empty() {
             continue;
         }
-        if dust_whisper::messenger_client::send_envelope(http, u, envelope.clone())
-            .await
-            .is_ok()
-        {
-            relay_ok = true;
-            break;
+        match dust_whisper::messenger_client::send_envelope(http, u, envelope.clone()).await {
+            Ok(()) => {
+                relay_ok = true;
+                break;
+            }
+            // A relay that answered and said no gives its own sentence, which
+            // is the useful one; anything else is a transport failure and says
+            // so in its own words.
+            Err(dust_whisper::error::WhisperError::Relay(reason)) => refusal = Some(reason),
+            Err(e) => refusal = Some(e.to_string()),
         }
     }
 
@@ -361,9 +502,14 @@ pub async fn messenger_send(
         timestamp_utc: sent_at,
         delivered: relay_ok,
         sealed: Some(crypto_v == MESSENGER_CRYPTO_V2),
+        received_utc: None,
+        delivery_error: if relay_ok { None } else { refusal },
     };
 
-    store.push(msg.clone());
+    // The room was checked before anything left the machine, so this cannot
+    // refuse a message that has already been handed to a relay.
+    debug_assert!(!store.is_full());
+    let _ = store.push(msg.clone());
     store.save(&ctx)?;
     Ok(msg)
 }
@@ -459,6 +605,18 @@ pub async fn messenger_poll_inbox(
                 ack_ids.push(env.id);
                 continue;
             }
+            // Addressed to this wallet, checked rather than assumed.
+            //
+            // `to` was never compared with anything. A relay could serve
+            // somebody else's envelope out of this inbox and the wallet would
+            // learn a public key from it and report the thread with a stranger
+            // as sealed, about a person who had never written. The crypto
+            // covered for the body; nothing covered for that.
+            if env.to.trim() != my_address {
+                outcome.rejected_envelopes += 1;
+                ack_ids.push(env.id);
+                continue;
+            }
             // The sender pubkey is verified, so keeping it is safe, and it is
             // what lets the reply be sealed with ECDH instead of falling back
             // to a key the relay can derive from the addresses it holds. Done
@@ -482,19 +640,51 @@ pub async fn messenger_poll_inbox(
                     continue;
                 }
             };
+            let binding = EnvelopeBinding {
+                id: &env.id,
+                from: &env.from,
+                to: my_address,
+                v: env.v,
+            };
             let plain = match decrypt_body(
                 ctx.account,
                 my_address,
                 &env.from,
                 peer_pk.as_ref(),
-                env.v,
                 &env.nonce,
                 &env.ciphertext,
+                &binding,
             ) {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(_) => {
+                    // This was the wedge, and it was one missing line. Every
+                    // other skip in this loop acks; this one did not, so a
+                    // correctly signed envelope of noise sat in the inbox for
+                    // the relay's full seven-day TTL, was re-downloaded on
+                    // every poll, was not counted anywhere, and held a slot
+                    // against the relay's per-recipient cap. Two hundred of
+                    // them, which is ten free keypairs, made an address deaf to
+                    // everybody it already talked to while its owner was told
+                    // "nothing new".
+                    //
+                    // What is given up by acking: an envelope in a crypto
+                    // version this build does not understand is thrown away
+                    // rather than waiting for a build that would. There is no
+                    // such version, and a mailbox that cannot be emptied is a
+                    // worse thing to ship than that risk.
+                    outcome.undecryptable += 1;
+                    ack_ids.push(env.id);
+                    continue;
+                }
             };
-            store.push(ChatMessage {
+            if plain.body.len() > MAX_MESSAGE_BODY_BYTES {
+                // Nothing this wallet sends can be this long, so nothing that
+                // is came from a wallet playing by the rules.
+                outcome.rejected_envelopes += 1;
+                ack_ids.push(env.id);
+                continue;
+            }
+            let taken = store.push(ChatMessage {
                 id: env.id.clone(),
                 peer: env.from,
                 direction: MessageDirection::In,
@@ -502,7 +692,18 @@ pub async fn messenger_poll_inbox(
                 timestamp_utc: plain.sent_at,
                 delivered: false,
                 sealed: Some(env.v == MESSENGER_CRYPTO_V2),
+                // This wallet's own clock. The sender's claim is kept beside it
+                // and is not what the conversation is ordered on.
+                received_utc: Some(Utc::now().to_rfc3339()),
+                delivery_error: None,
             });
+            if !taken {
+                // Left on the relay rather than dropped: the store is full, and
+                // this is a real message somebody sent. Not acked, so it is
+                // still there when there is room for it.
+                outcome.store_full = true;
+                continue;
+            }
             ack_ids.push(env.id);
             outcome.added += 1;
         }
@@ -576,7 +777,7 @@ mod tests {
         let addr = acc.address();
         let ctx = messenger_ctx(&acc, &addr);
         let mut store = MessengerStore::default();
-        store.push(ChatMessage {
+        assert!(store.push(ChatMessage {
             id: "1".into(),
             peer: "peer".into(),
             direction: MessageDirection::Out,
@@ -584,7 +785,9 @@ mod tests {
             timestamp_utc: "t".into(),
             delivered: true,
             sealed: Some(true),
-        });
+            received_utc: None,
+            delivery_error: None,
+        }));
         store.save(&ctx).unwrap();
         let loaded = MessengerStore::load(&ctx).unwrap();
         assert_eq!(loaded.messages.len(), 1);
@@ -703,8 +906,18 @@ mod tests {
 
         // Alice opens the conversation the way a first contact has to: no key of
         // Bob's to seal against, and her own pubkey riding along in the envelope.
-        let (nonce, ciphertext) =
-            encrypt_body_v1(&alice_addr, &bob_addr, "you there?", "2026-08-22T09:00:00Z");
+        let (nonce, ciphertext) = encrypt_body_v1(
+            &alice_addr,
+            &bob_addr,
+            "you there?",
+            "2026-08-22T09:00:00Z",
+            &EnvelopeBinding {
+                id: "alice-opening",
+                from: &alice_addr,
+                to: &bob_addr,
+                v: MESSENGER_CRYPTO_V1,
+            },
+        );
         let opening = signed_envelope(
             MessengerEnvelope {
                 v: MESSENGER_CRYPTO_V1,
@@ -838,9 +1051,14 @@ mod tests {
             &sealed.to,
             &sealed.from,
             None,
-            MESSENGER_CRYPTO_V1,
             &sealed.nonce,
             &sealed.ciphertext,
+            &EnvelopeBinding {
+                id: &sealed.id,
+                from: &sealed.from,
+                to: &sealed.to,
+                v: MESSENGER_CRYPTO_V1,
+            },
         );
         assert!(
             leaked.is_err(),
@@ -865,9 +1083,14 @@ mod tests {
             &alice_addr,
             &bob_addr,
             Some(&bob_pk),
-            sealed.v,
             &sealed.nonce,
             &sealed.ciphertext,
+            &EnvelopeBinding {
+                id: &sealed.id,
+                from: &sealed.from,
+                to: &sealed.to,
+                v: sealed.v,
+            },
         )
         .expect("Alice decrypts the reply");
         assert_eq!(plain.body, "meet me at 9");
@@ -968,6 +1191,466 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    /// A relay that hands over a fixed inbox and writes down every id the
+    /// wallet acks, which is the only way to see whether junk is being cleared
+    /// or left behind.
+    async fn spawn_acking_relay(
+        messages: Vec<MessengerEnvelope>,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use axum::extract::{Query, State};
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use dust_whisper::protocol::{
+            MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH,
+            MessengerAckRequest, MessengerAckResponse, MessengerChallengeResponse,
+            MessengerInboxResponse,
+        };
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Recorder {
+            inbox: Arc<Mutex<Vec<MessengerEnvelope>>>,
+            acked: Arc<Mutex<Vec<String>>>,
+        }
+
+        let acked = Arc::new(Mutex::new(Vec::new()));
+        let state = Recorder {
+            inbox: Arc::new(Mutex::new(messages)),
+            acked: acked.clone(),
+        };
+        let app = Router::new()
+            .route(
+                MESSENGER_CHALLENGE_PATH,
+                get(|Query(_q): Query<HashMap<String, String>>| async {
+                    Json(MessengerChallengeResponse {
+                        nonce: "recording-relay-nonce".into(),
+                        expires_at: "2099-01-01T00:00:00Z".into(),
+                    })
+                }),
+            )
+            .route(
+                MESSENGER_INBOX_PATH,
+                post(
+                    |State(r): State<Recorder>, Json(_): Json<serde_json::Value>| async move {
+                        let messages = r.inbox.lock().unwrap().clone();
+                        Json(MessengerInboxResponse {
+                            messages,
+                            auth_ok: true,
+                        })
+                    },
+                ),
+            )
+            .route(
+                MESSENGER_ACK_PATH,
+                post(
+                    |State(r): State<Recorder>, Json(req): Json<MessengerAckRequest>| async move {
+                        let mut inbox = r.inbox.lock().unwrap();
+                        let before = inbox.len();
+                        inbox.retain(|e| !req.ids.contains(&e.id));
+                        r.acked.lock().unwrap().extend(req.ids.iter().cloned());
+                        Json(MessengerAckResponse {
+                            ok: true,
+                            removed: (before - inbox.len()) as u32,
+                            err: None,
+                        })
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind recording relay");
+        let addr = listener.local_addr().expect("recording relay address");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), handle, acked)
+    }
+
+    /// The mailbox that could not be emptied.
+    ///
+    /// Two hundred correctly signed envelopes of noise, which is ten free
+    /// keypairs at the relay's per-sender share, and the poll's decrypt failure
+    /// arm skipped each one with a bare `continue`: not acked, so never removed,
+    /// re-downloaded on every poll for the relay's whole seven-day TTL, and
+    /// holding the inbox at the per-recipient cap so every correspondent whose
+    /// mail had already been read was refused with "inbox full". The owner's own
+    /// polls reported a clean, empty mailbox, and no shipped command could
+    /// clear it.
+    #[tokio::test]
+    async fn signed_junk_is_cleared_from_the_relay_instead_of_wedging_the_inbox() {
+        let _iso = IsolatedWalletData::new();
+        let bob = keyed_account("b0");
+        let alice = keyed_account("a1");
+        let bob_addr = bob.address();
+        let alice_addr = alice.address();
+
+        // Junk from throwaway keys: every signature real, every body noise.
+        let mut inbox = Vec::new();
+        for i in 0..40u32 {
+            let junker =
+                WalletAccount::from_secret_hex(&format!("{:0>64}", format!("{:x}", i + 3)))
+                    .expect("throwaway key");
+            let junker_addr = junker.address();
+            inbox.push(signed_envelope(
+                MessengerEnvelope {
+                    v: MESSENGER_CRYPTO_V1,
+                    id: format!("junk-{i}"),
+                    to: bob_addr.clone(),
+                    from: junker_addr,
+                    from_pubkey: Some(pubkey_hex(junker.inner())),
+                    from_sig: None,
+                    nonce: "000102030405060708090a0b".into(),
+                    ciphertext: "0123456789abcdef0123456789abcdef".into(),
+                    sent_at: "2026-08-22T09:00:00Z".into(),
+                },
+                &junker,
+            ));
+        }
+        // And one real message behind it, from somebody Bob talks to.
+        let (nonce, ciphertext) = encrypt_body_v1(
+            &alice_addr,
+            &bob_addr,
+            "still here",
+            "2026-08-22T10:00:00Z",
+            &EnvelopeBinding {
+                id: "alice-real",
+                from: &alice_addr,
+                to: &bob_addr,
+                v: MESSENGER_CRYPTO_V1,
+            },
+        );
+        inbox.push(signed_envelope(
+            MessengerEnvelope {
+                v: MESSENGER_CRYPTO_V1,
+                id: "alice-real".into(),
+                to: bob_addr.clone(),
+                from: alice_addr.clone(),
+                from_pubkey: Some(pubkey_hex(alice.inner())),
+                from_sig: None,
+                nonce,
+                ciphertext,
+                sent_at: "2026-08-22T10:00:00Z".into(),
+            },
+            &alice,
+        ));
+
+        let (url, relay, acked) = spawn_acking_relay(inbox).await;
+        let http = reqwest::Client::new();
+        let outcome = messenger_poll_inbox(&http, &bob, &bob_addr, std::slice::from_ref(&url))
+            .await
+            .expect("the poll completes");
+
+        assert_eq!(outcome.added, 1, "the real message behind the junk arrived");
+        assert_eq!(
+            outcome.undecryptable, 40,
+            "the junk has to be counted, or the screen says 'nothing new' about a wedged inbox"
+        );
+        let acked_ids = acked.lock().unwrap().clone();
+        for i in 0..40u32 {
+            assert!(
+                acked_ids.contains(&format!("junk-{i}")),
+                "junk-{i} was left on the relay, which is what holds the inbox shut"
+            );
+        }
+
+        // The second poll is the proof: nothing is still sitting there.
+        let again = messenger_poll_inbox(&http, &bob, &bob_addr, std::slice::from_ref(&url))
+            .await
+            .expect("the second poll completes");
+        relay.abort();
+        assert_eq!(
+            (again.added, again.undecryptable, again.rejected_envelopes),
+            (0, 0, 0),
+            "the inbox was not actually emptied: {again:?}"
+        );
+    }
+
+    /// Somebody else's mail, handed over as if it were yours.
+    ///
+    /// `env.to` was never compared with anything. A relay could serve an
+    /// envelope addressed to a third party out of this inbox, and the wallet
+    /// learned a public key from it before it ever tried to read it. The screen
+    /// then told the owner their conversation with that third party was sealed,
+    /// about somebody who had never written to them.
+    #[tokio::test]
+    async fn an_envelope_addressed_to_somebody_else_teaches_this_wallet_nothing() {
+        let _iso = IsolatedWalletData::new();
+        let bob = keyed_account("b0");
+        let carol = keyed_account("c3");
+        let dave = keyed_account("d4");
+        let bob_addr = bob.address();
+        let carol_addr = carol.address();
+        let dave_addr = dave.address();
+
+        let (nonce, ciphertext) = encrypt_body_v1(
+            &carol_addr,
+            &dave_addr,
+            "addressed to Dave, not to Bob",
+            "2026-08-22T09:00:00Z",
+            &EnvelopeBinding {
+                id: "misaddressed-1",
+                from: &carol_addr,
+                to: &dave_addr,
+                v: MESSENGER_CRYPTO_V1,
+            },
+        );
+        let not_for_bob = signed_envelope(
+            MessengerEnvelope {
+                v: MESSENGER_CRYPTO_V1,
+                id: "misaddressed-1".into(),
+                to: dave_addr.clone(),
+                from: carol_addr.clone(),
+                from_pubkey: Some(pubkey_hex(carol.inner())),
+                from_sig: None,
+                nonce,
+                ciphertext,
+                sent_at: "2026-08-22T09:00:00Z".into(),
+            },
+            &carol,
+        );
+
+        let (url, relay, acked) = spawn_acking_relay(vec![not_for_bob]).await;
+        let http = reqwest::Client::new();
+        let outcome = messenger_poll_inbox(&http, &bob, &bob_addr, std::slice::from_ref(&url))
+            .await
+            .expect("the poll completes");
+        relay.abort();
+
+        assert_eq!(outcome.added, 0);
+        assert_eq!(
+            outcome.rejected_envelopes, 1,
+            "an envelope addressed to a third party must be refused, not filed"
+        );
+        assert!(
+            !messenger_peer_security(&bob, &bob_addr, &carol_addr)
+                .unwrap()
+                .sends_sealed,
+            "Bob's wallet learned Carol's key from an envelope Carol never sent him"
+        );
+        assert!(
+            messenger_threads(&bob, &bob_addr).unwrap().is_empty(),
+            "somebody else's envelope left a conversation behind"
+        );
+        assert!(
+            acked
+                .lock()
+                .unwrap()
+                .contains(&"misaddressed-1".to_string()),
+            "it has to be cleared too, or it comes back on every poll forever"
+        );
+    }
+
+    /// A message a relay sat on for a week, filed where it belongs.
+    ///
+    /// `timestamp_utc` is the sender's own signed claim and a relay that holds
+    /// an envelope back delivers that claim untouched. The conversation was
+    /// ordered on it alone, so a held message landed in the middle of the
+    /// history rather than at the end, the thread did not move to the top of the
+    /// list, and the bubble rendered a clock time with no date. Only the unread
+    /// count moved.
+    #[tokio::test]
+    async fn a_message_the_relay_held_back_is_filed_by_when_it_arrived() {
+        let _iso = IsolatedWalletData::new();
+        let alice = keyed_account("a1");
+        let bob = keyed_account("b0");
+        let alice_addr = alice.address();
+        let bob_addr = bob.address();
+        let http = reqwest::Client::new();
+
+        let envelope_at = |id: &str, body: &str, sent_at: &str| {
+            let (nonce, ciphertext) = encrypt_body_v1(
+                &alice_addr,
+                &bob_addr,
+                body,
+                sent_at,
+                &EnvelopeBinding {
+                    id,
+                    from: &alice_addr,
+                    to: &bob_addr,
+                    v: MESSENGER_CRYPTO_V1,
+                },
+            );
+            signed_envelope(
+                MessengerEnvelope {
+                    v: MESSENGER_CRYPTO_V1,
+                    id: id.into(),
+                    to: bob_addr.clone(),
+                    from: alice_addr.clone(),
+                    from_pubkey: Some(pubkey_hex(alice.inner())),
+                    from_sig: None,
+                    nonce,
+                    ciphertext,
+                    sent_at: sent_at.into(),
+                },
+                &alice,
+            )
+        };
+
+        // Delivered on time.
+        let (url, relay, _) = spawn_acking_relay(vec![envelope_at(
+            "number-two",
+            "NUMBER TWO",
+            "2026-08-20T12:00:00Z",
+        )])
+        .await;
+        messenger_poll_inbox(&http, &bob, &bob_addr, std::slice::from_ref(&url))
+            .await
+            .unwrap();
+        relay.abort();
+
+        // NUMBER ONE was written first and released afterwards, which is the
+        // operator's whole move.
+        let (url, relay, _) = spawn_acking_relay(vec![envelope_at(
+            "number-one",
+            "NUMBER ONE",
+            "2026-08-20T09:00:00Z",
+        )])
+        .await;
+        messenger_poll_inbox(&http, &bob, &bob_addr, std::slice::from_ref(&url))
+            .await
+            .unwrap();
+        relay.abort();
+
+        let messages = messenger_messages(&bob, &bob_addr, &alice_addr).unwrap();
+        let bodies: Vec<&str> = messages.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            vec!["NUMBER TWO", "NUMBER ONE"],
+            "a held message was filed above one that had already arrived, so nothing on \
+             screen shows that it is late"
+        );
+        let late = messages
+            .iter()
+            .find(|m| m.body == "NUMBER ONE")
+            .expect("the held message");
+        let arrived = late
+            .received_utc
+            .as_deref()
+            .expect("the wallet has to keep its own arrival time");
+        assert!(
+            arrived > late.timestamp_utc.as_str(),
+            "arrival {arrived} is not after the sender's claim {}",
+            late.timestamp_utc
+        );
+
+        // And the thread moves to the top of the list on arrival, which is what
+        // ordering the list on the sender's claim used to prevent.
+        let threads = messenger_threads(&bob, &bob_addr).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(
+            threads[0].last_message, "NUMBER ONE",
+            "the conversation list still shows the older message as the newest thing in it"
+        );
+    }
+
+    /// Why a message did not go, in the relay's own words.
+    ///
+    /// `messenger_send` discarded the relay's refusal, so "my relay is down"
+    /// and "that person's mailbox is being flooded" arrived at the screen as
+    /// one sentence with no way to tell them apart.
+    #[tokio::test]
+    async fn a_relays_reason_for_refusing_a_message_reaches_the_person() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use dust_whisper::protocol::{MESSENGER_SEND_PATH, MessengerSendResponse};
+
+        let _iso = IsolatedWalletData::new();
+        let me = keyed_account("a1");
+        let peer = keyed_account("b0").address();
+        let my_address = me.address();
+
+        let app = Router::new().route(
+            MESSENGER_SEND_PATH,
+            post(|| async {
+                Json(MessengerSendResponse {
+                    ok: false,
+                    err: Some("inbox full".into()),
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let relay = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let http = reqwest::Client::new();
+        let sent = messenger_send(
+            &http,
+            &me,
+            &my_address,
+            &peer,
+            "are you there",
+            std::slice::from_ref(&url),
+            None,
+        )
+        .await
+        .expect("the message is stored locally either way");
+        relay.abort();
+
+        assert!(!sent.delivered);
+        let reason = sent
+            .delivery_error
+            .as_deref()
+            .expect("the relay said why and the wallet has to keep it");
+        assert!(
+            reason.contains("inbox full"),
+            "the relay's own words were thrown away: {reason}"
+        );
+    }
+
+    /// A chat message is not a file transfer.
+    ///
+    /// There was no length check in either direction: `messenger_send` took a
+    /// 1 MiB body and stored it, and both shells rendered the newest body raw
+    /// into the conversation list.
+    #[tokio::test]
+    async fn an_enormous_body_is_refused_and_a_long_one_does_not_become_the_thread_row() {
+        let _iso = IsolatedWalletData::new();
+        let me = keyed_account("a1");
+        let peer = keyed_account("b0").address();
+        let my_address = me.address();
+        let http = reqwest::Client::new();
+        let dead = vec!["http://127.0.0.1:1".to_string()];
+
+        let huge = "x".repeat(MAX_MESSAGE_BODY_BYTES + 1);
+        let refused = messenger_send(&http, &me, &my_address, &peer, &huge, &dead, None).await;
+        assert!(
+            refused.is_err(),
+            "a body over the cap was accepted and stored"
+        );
+        assert!(
+            messenger_threads(&me, &my_address).unwrap().is_empty(),
+            "a refused message left a conversation behind"
+        );
+
+        let long = "y".repeat(MAX_MESSAGE_BODY_BYTES);
+        messenger_send(&http, &me, &my_address, &peer, &long, &dead, None)
+            .await
+            .expect("a body at the cap is still a message");
+        let threads = messenger_threads(&me, &my_address).unwrap();
+        assert_eq!(threads.len(), 1);
+        assert!(
+            threads[0].last_message.chars().count() <= THREAD_PREVIEW_CHARS + 3,
+            "the conversation list row is {} characters long",
+            threads[0].last_message.chars().count()
+        );
+        assert_eq!(
+            messenger_messages(&me, &my_address, &peer).unwrap()[0]
+                .body
+                .len(),
+            MAX_MESSAGE_BODY_BYTES,
+            "the preview is a preview; the message itself is kept whole"
+        );
+    }
+
     /// Words in a contact's mouth.
     ///
     /// The relay's send endpoint had no authentication, so `from` was a string
@@ -992,6 +1675,12 @@ mod tests {
             &bob_addr,
             "change of plan, send the 500 HAC to my other address",
             "2026-08-22T09:00:00Z",
+            &EnvelopeBinding {
+                id: "forged-1",
+                from: &alice_addr,
+                to: &bob_addr,
+                v: MESSENGER_CRYPTO_V1,
+            },
         );
         let base = MessengerEnvelope {
             v: MESSENGER_CRYPTO_V1,
@@ -1095,8 +1784,18 @@ mod tests {
             ciphertext: "00".into(),
             sent_at: "2026-08-22T08:00:00Z".into(),
         };
-        let (nonce, ciphertext) =
-            encrypt_body_v1(&alice_addr, &bob_addr, "you there?", "2026-08-22T09:00:00Z");
+        let (nonce, ciphertext) = encrypt_body_v1(
+            &alice_addr,
+            &bob_addr,
+            "you there?",
+            "2026-08-22T09:00:00Z",
+            &EnvelopeBinding {
+                id: "alice-1",
+                from: &alice_addr,
+                to: &bob_addr,
+                v: MESSENGER_CRYPTO_V1,
+            },
+        );
         let genuine = signed_envelope(
             MessengerEnvelope {
                 v: MESSENGER_CRYPTO_V1,

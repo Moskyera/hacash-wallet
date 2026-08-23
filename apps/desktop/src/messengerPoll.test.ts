@@ -14,6 +14,8 @@ function outcome(over: Partial<MessengerPollOutcome> = {}): MessengerPollOutcome
     relays_answered: 1,
     relays_refused: 0,
     rejected_envelopes: 0,
+    undecryptable: 0,
+    store_full: false,
     ...over,
   };
 }
@@ -64,6 +66,30 @@ describe("what the inbox check is allowed to say", () => {
       expect(report.kind).toBe("error");
       expect(report.text).not.toMatch(/nothing new/i);
     }
+  });
+
+
+  it("says so when signed junk had to be cleared, instead of reporting an empty mailbox", () => {
+    // 200 correctly signed envelopes of noise held an inbox at the relay's cap,
+    // every correspondent was refused with "inbox full", and this screen said
+    // "Nothing new" for as long as it went on.
+    const report = pollReport(outcome({ undecryptable: 40 }));
+    expect(report.text).toMatch(/40 item\(s\) were signed by a real key/i);
+    expect(report.text).toMatch(/filling your mailbox/i);
+    expect(report.kind).toBe("error");
+  });
+
+  it("says when the store is full rather than calling that an empty inbox", () => {
+    const report = pollReport(outcome({ store_full: true }));
+    expect(report.text).toMatch(/store is full/i);
+    expect(report.text).toMatch(/still waiting on the relay/i);
+    expect(report.kind).toBe("error");
+  });
+
+  it("keeps the plain 'nothing new' for a poll with nothing to report", () => {
+    const report = pollReport(outcome());
+    expect(report.kind).toBe("info");
+    expect(report.text).toBe("The relay answered. Nothing new.");
   });
 
   it("is what both shipped screens actually call", () => {

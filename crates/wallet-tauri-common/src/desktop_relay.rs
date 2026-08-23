@@ -8,7 +8,7 @@ use hacash_wallet_core::dust_whisper::{
     DustWhisperSettings, is_local_relay_url, listen_addr_from_relay_url,
 };
 use hacash_wallet_core::paths::wallet_data_root;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::AppState;
 
@@ -44,7 +44,9 @@ pub fn stop_managed_relay(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn sync_managed_relay(app: &AppHandle) -> Result<(), String> {
+/// Generic over the runtime so the relay start is reachable outside a real
+/// window server. See `wallet_update_dust_whisper_settings_desktop`.
+pub async fn sync_managed_relay<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let state = app.state::<AppState>();
 
     let (settings, node_url) = {

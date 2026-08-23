@@ -53,7 +53,7 @@ than the table row.
 
 | | |
 |---|---|
-| CPU | One core is plenty for signature checks. The cost that scales is a poll: the relay clones and returns a recipient's whole inbox in one response, with no paging (`peek`, `crates/dust-whisper/src/messenger_relay.rs:161-167`). |
+| CPU | One core is plenty for signature checks. The cost that scales is a poll: the relay clones and returns a recipient's whole inbox in one response, with no paging (`peek`, `crates/dust-whisper/src/messenger_relay.rs`). |
 | Memory | Everything the mailbox holds is in RAM, and the ceiling is far above the usual case. See below. |
 | Disk | Effectively none. One 65 byte key file. The relay writes no message store at all. |
 | Network | One inbound TCP port, default `127.0.0.1:8787`. Outbound to your fullnode, used only by the transaction forwarder, over whatever scheme the node URL you pass uses. Outbound to a recipient scales with what is sitting in their inbox, per the CPU row. |
@@ -64,50 +64,63 @@ than the table row.
 ### Memory, concretely
 
 The mailbox is a `HashMap` in process memory
-(`crates/dust-whisper/src/messenger_relay.rs:1`, `:61-65`). Nothing is written to
-disk, so what bounds your memory is what the code caps:
+(`crates/dust-whisper/src/messenger_relay.rs`). Nothing is written to disk, so
+what bounds your memory is what the code caps. Every one of these is a refusal,
+never a deletion: a relay with no room says so and keeps what it already holds.
 
-- **200 undelivered envelopes per recipient address** (`MAX_PER_RECIPIENT`,
-  `:21`).
-- **20 of those per sender** (`MAX_PER_SENDER`, `:37`). What that does and does
-  not protect is in section 8, and it is less than it sounds.
+- **200 undelivered envelopes per recipient address** (`MAX_PER_RECIPIENT`).
+- **20 of those per sender** (`MAX_PER_SENDER`). What that does and does not
+  protect is in section 8.
+- **16 KiB of ciphertext per envelope** (`MAX_CIPHERTEXT_HEX`, counted in hex
+  characters, so 32768 of them). The wallet will not send a body over 4 KiB
+  (`MAX_MESSAGE_BODY_BYTES`, `crates/wallet-core/src/messenger.rs`), so this is
+  generous for anything a person types.
+- **5,000 distinct mailboxes** (`MAX_INBOXES`), **20,000 undelivered envelopes**
+  (`MAX_TOTAL_ENVELOPES`) and **48 MiB of stored envelope bytes**
+  (`MAX_TOTAL_BYTES`), relay wide.
+- **7 days** before an undelivered envelope expires (`TTL`).
+- **8192 outstanding inbox challenges** relay wide (`MAX_PENDING_CHALLENGES`),
+  each a few dozen bytes, each expiring after 120 seconds. A full table evicts
+  its own oldest entry rather than refusing the next caller.
 - **512 KiB per request** across the whole router (`MAX_SUBMIT_BODY_BYTES`,
-  `crates/dust-whisper/src/relay.rs:24` applied at `:43`). A chat message is a
-  few hundred bytes; that cap is sized for a large transaction, and it applies
-  to envelopes too.
-- **7 days** before an undelivered envelope expires (`TTL`, `:38`).
-- **8192 outstanding inbox challenges** relay wide (`MAX_PENDING_CHALLENGES`,
-  `:46`), each a few dozen bytes, each expiring after 120 seconds.
+  `crates/dust-whisper/src/relay.rs`). That one is sized for a large
+  transaction on the submit path, and is no longer what bounds a chat envelope.
 
-Now multiply the first cap by the third, which is the step the earlier version of
-this section skipped. **200 envelopes at up to 512 KiB each is roughly 100 MB in
-one inbox**, and nothing in the code stops a sender from using the whole
-allowance on every message. Real chat is nowhere near that. A chat message is a
-few hundred bytes, and the process itself idles at about 8 MB (measured on the
-relay the section 5 transcripts came from), so a few dozen people talking
-normally is a handful of megabytes and that is the number you will actually
-observe. But the number an attacker can pick is the other one, and they do not
-need your permission to pick it.
+**So the messenger side of the process cannot exceed about 48 MiB of stored
+mail** plus a few megabytes of overhead. Real chat is nowhere near that: a chat
+message is a few hundred bytes, the process idles at about 8 MB (measured on the
+relay the section 5 transcripts came from), and a few dozen people talking
+normally is a handful of megabytes.
 
-Three consequences of that shape, all of them about somebody else's mail:
+Two earlier claims in this section were wrong and are worth naming, because a
+relay running an older build still has both:
 
-**There is no cap on the number of distinct inboxes.** Memory tracks the number
-of addresses written to since the process started, not the number of people you
-meant to serve. Anyone can generate a keypair, so anyone can create inboxes. One
-address can cost you about 100 MB, and addresses are free, so the ceiling on the
-process is set by your machine and not by the relay.
+**"There is no cap on the number of distinct inboxes" is no longer true.** `to`
+used to be any non-empty string, so a single keypair could invent mailboxes by
+the thousand and the per-sender share multiplied instead of binding. It has to
+be a version-0 Hacash account address now, which is the only kind of address a
+key can ever sign for and therefore the only kind whose inbox anyone could ever
+empty (`is_claimable_address`; held by
+`mail_can_only_be_left_for_an_address_a_key_could_collect` in
+`crates/dust-whisper/tests/messenger_relay_abuse.rs`). With `MAX_INBOXES` on top
+of that, memory tracks the number of real mailboxes and not the attacker's
+imagination.
 
-**A memory limit is an availability decision, not a safety net.** Capping the
-process is still the right thing to do, but be clear about what the cap does when
-it is hit: the process dies, whether the supervisor kills it or an allocation
-fails, and every undelivered message in it is gone, permanently and silently,
-exactly as in the restart transcript in section 5. A memory limit converts "the machine falls over" into "everyone's waiting mail
-disappears". Both of those are worth choosing on purpose.
+**"200 envelopes at up to 512 KiB each is roughly 100 MB in one inbox" is no
+longer true either.** The per-envelope ceiling makes the worst case for one
+inbox about 3 MiB, and the relay-wide byte budget bounds the rest
+(`an_oversized_body_is_refused`, same file).
 
-**Expired mail is swept lazily.** The 7 day sweep runs on the inbox being
-touched (`push`, `peek` and `ack` each call `list.retain`, `:80`, `:166`,
-`:175`). An inbox nobody ever writes to or reads again keeps its bytes until the
-process restarts.
+**A memory limit is still an availability decision, not a safety net.** Capping
+the process is still the right thing to do, and be clear about what the cap does
+when it is hit: the process dies, whether the supervisor kills it or an
+allocation fails, and every undelivered message in it is gone, permanently and
+silently, exactly as in the restart transcript in section 5.
+
+**Expired mail is still swept lazily.** The 7 day sweep runs on the inbox being
+touched (`push`, `peek` and `ack` each prune the one list they are working on).
+An inbox nobody ever writes to or reads again keeps its bytes until the process
+restarts, and it counts against `MAX_TOTAL_BYTES` until then.
 
 So: set a memory limit knowing what it costs when it fires, watch the process
 size rather than assuming it, and treat restarting as normal maintenance rather
@@ -437,6 +450,32 @@ wallets on two machines, send from one and collect on the other. Everything abov
 is loopback and proves only that the process is healthy. Nothing above proves
 delivery end to end; that does.
 
+Half of that is now proven every time the test suite runs, and the half that is
+proven is the half about the software.
+`crates/wallet-tauri-common/tests/messenger_two_wallets_one_relay.rs` starts a
+relay through the same Settings command a person presses, opens two wallets with
+separate vaults and separate message stores, and drives both of them through
+Tauri IPC: one sends by address, the other polls and reads the plaintext, replies
+sealed with ECDH, and the first reads the reply. It then closes both wallets and
+reopens them from disk to show the conversation is still there. A recorder on the
+wire keeps every envelope and shows what you as an operator could do with it: the
+key derived from the two addresses opens the first message of a conversation and
+opens neither of the sealed ones. What that run does not cover is your network:
+the public address, the certificate, the proxy, the open port and the two
+machines. That part is still yours to check, and section 4 is how.
+
+Two more suites run beside it, and they are the ones that speak to what your
+machine is exposed to rather than to whether the messenger works.
+`crates/dust-whisper/tests/messenger_relay_abuse.rs` attacks the shipped router
+over a socket with nothing but an HTTP client: a replayed envelope, a stale one,
+an invented recipient, an oversized body, and a flood of unauthenticated
+challenge requests. `crates/wallet-tauri-common/tests/messenger_wedged_inbox.rs`
+floods a real inbox with two hundred correctly signed envelopes of noise and then
+shows, through the same commands the screens invoke, that the owner is told what
+happened and that the person they talk to can reach them again after one poll.
+Every one of those five things worked before the checks in section 2 and section
+8 existed.
+
 ---
 
 ## 6. What you can see, and what that makes you
@@ -465,12 +504,21 @@ The envelope carries `to`, `from`, `from_pubkey`, `id`, `sent_at` and the
 ciphertext (`crates/dust-whisper/src/protocol.rs:61-84`). Everything except the
 ciphertext is in clear, and it has to be: the relay routes on `to`, and it
 checks the sender's signature against `from` before accepting anything
-(`send_handler`, `crates/dust-whisper/src/messenger_relay.rs:209-224`).
+(`send_handler`, `crates/dust-whisper/src/messenger_relay.rs`).
 
 So for every message crossing your machine you can read: both addresses, the
 sender's public key, the time the sender claims, the time it actually arrived,
-and its size. You also see, from the inbox polling, roughly when each recipient
-is awake and collecting.
+and roughly its size. You also see, from the inbox polling, roughly when each
+recipient is awake and collecting.
+
+"Roughly its size" used to be "its size", exactly: AES-GCM ciphertext is as long
+as its plaintext plus a 16 byte tag, so fifty more characters typed were fifty
+more bytes on your wire, measured rather than estimated. Bodies are padded to a
+256 byte boundary before encryption now
+(`PAD_BUCKET`, `crates/wallet-core/src/messenger_crypto.rs`, held by
+`body_length_does_not_leak_character_for_character`), so what you read is a
+bucket rather than a character count. That is a smaller leak, not no leak, and it
+does nothing at all about the rest of this section.
 
 That is the social graph. It is the part of a private messenger that is usually
 worth more than the messages.
@@ -478,14 +526,15 @@ worth more than the messages.
 ### 6.2 You cannot read sealed bodies. You can read the rest
 
 A sealed message ("v2") is encrypted with a key derived by ECDH between the two
-accounts (`crates/wallet-core/src/messenger_crypto.rs:136-152`, keyed through
-`derive_message_key` at `:71`). You hold neither secret and cannot derive it.
+accounts (`encrypt_body_v2` and `derive_message_key`,
+`crates/wallet-core/src/messenger_crypto.rs`). You hold neither secret and
+cannot derive it.
 Those bodies are genuinely closed to you.
 
 An unsealed message ("v1") is a different story, and pretending otherwise is the
 one thing this document will not do. Its key is
 `SHA256(domain || lower_address || higher_address)`
-(`crates/wallet-core/src/messenger_crypto.rs:51-63`), and both addresses are
+(`pair_key_v1`, `crates/wallet-core/src/messenger_crypto.rs`), and both addresses are
 sitting in the envelope in clear. **Any relay operator can decrypt every v1
 message that passes through, with no key material and no privileged position
 beyond having the envelope.** You do not need the code; you need the two
@@ -501,19 +550,19 @@ those as readable by you.
 So the honest statement of your position is: **everything one person writes to
 another before that other has written back is readable by you.** The wallet
 learns a contact's public key from an envelope that contact sent
-(`store.learn_peer_key`, `crates/wallet-core/src/messenger.rs:468`, from an
-envelope this wallet collected), and the Messages screen offers no other way to
+(`store.learn_peer_key`, `crates/wallet-core/src/messenger.rs`, from an
+envelope this wallet collected that was addressed to it), and the Messages screen offers no other way to
 supply one, so that opening stretch is not a rare case. It is how every new
 conversation starts.
 
 **And the end of that stretch is in your hands, which is the part that is easy to
 miss.** The wallet switches to sealed bodies only once it holds the peer's key
-(`crates/wallet-core/src/messenger.rs:316-323`), and it can only get that key
+(`encrypt_for_send`, `crates/wallet-core/src/messenger.rs`), and it can only get that key
 from an envelope you delivered. An operator who quietly drops one side's mail
 keeps both sides sending v1 forever, and both wallets keep reporting a normal,
 successful send: a send succeeds as soon as any relay accepts the envelope
-(`:341-353`), and there is no delivery receipt anywhere in the poll path
-(`messenger_poll_inbox`, `:404-534`). The user's screen reads "Nothing they have
+(`messenger_send`), and there is no delivery receipt anywhere in the poll path
+(`messenger_poll_inbox`). The user's screen reads "Nothing they have
 sent has reached this wallet" (`apps/desktop/src/messengerPrivacy.ts:36`), which
 a person reads as "my friend has not written back", not as "my relay is holding
 their mail".
@@ -534,11 +583,32 @@ check protects an inbox from other people on the network. It does not protect it
 from you: the mail is in your process's memory, and it is your process.
 
 The same is true of anything the relay refuses to do to a message. Nothing stops
-the operator from dropping a message, delaying it, keeping a copy, or answering
-an inbox claim with less than what is waiting. Wallets can notice some of this
-(a refused claim is reported as a refusal rather than as an empty inbox,
-`apps/desktop/src/messengerPoll.ts`), and they cannot notice most of it. The
-people using your relay are trusting you not to, and they have no way to check.
+the operator from dropping a message, keeping a copy, or answering an inbox claim
+with less than what is waiting. The people using your relay are trusting you not
+to, and for those three they have no way to check.
+
+What a wallet does notice, so that you know which of your options are quiet ones:
+
+- **A refused claim** is reported as a refusal and not as an empty inbox
+  (`apps/desktop/src/messengerPoll.ts`).
+- **A relay that does not answer** is reported as "Messages may be waiting".
+- **A tampered or forged envelope** is counted and discarded, and the wallet says
+  how many.
+- **Delaying a message no longer hides it.** The time on an envelope is the
+  sender's own signed claim, so holding mail back used to file it in the middle
+  of the recipient's history under a plausible clock time, with the thread not
+  even moving to the top of their list. The wallet keeps its own arrival time now
+  and orders the conversation on that, and a message that arrives more than ten
+  minutes after it says it was written is marked "held, arrived ..." with a date
+  (`received_utc`, `crates/wallet-core/src/messenger.rs`;
+  `apps/desktop/src/messengerTiming.ts` and the mobile copy).
+- **Refusing a message tells the sender why.** Your relay's own words, "inbox
+  full" included, now reach the person who tried to send
+  (`delivery_error` on the message `messenger_send` returns).
+
+Dropping mail silently, and answering `auth_ok` with an empty list while holding
+somebody's messages, remain invisible from the wallet side. There is no delivery
+receipt anywhere in the protocol.
 
 ### 6.4 Your logs are the leak you did not plan
 
@@ -603,9 +673,9 @@ Four things that will otherwise cost somebody an evening:
 that accepts.** The mailbox is per relay and relays do not talk to each other.
 Note the asymmetry, because "just add my relay to your list" is not always enough
 advice: sending stops at the **first** relay that accepts the envelope
-(`crates/wallet-core/src/messenger.rs:341-353`, which breaks out of the loop on
+(`messenger_send`, `crates/wallet-core/src/messenger.rs`, which breaks out of the loop on
 the first success), while polling tries **every** relay in the list
-(`:416`, no break). So somebody whose list is `[their own relay, yours]` delivers
+(`messenger_poll_inbox`, no break). So somebody whose list is `[their own relay, yours]` delivers
 to their own relay and never to yours, even though yours is in the list, and
 their correspondent polling only yours sees nothing. When you tell a user to add
 your relay, tell them where in the list: above any relay their correspondent is
@@ -663,7 +733,7 @@ publish the URL.
 **Abuse, and the cap that does less than it sounds like.** Anyone can generate a
 keypair, so anyone can send, and that second fact is what undoes the first
 defence. Be precise about what `MAX_PER_SENDER` buys
-(`messenger_relay.rs:21-37`), because the short version of this paragraph used to
+(`messenger_relay.rs`), because the short version of this paragraph used to
 be wrong:
 
 - **A flood from one identity costs only itself.** Once a sender holds its 20
@@ -687,11 +757,33 @@ be wrong:
   somebody writing to a person who is not reading. Deleting the mail of the
   person they do read was not a delay.
 
-The 512 KiB body limit bounds a single request and does not bound the total
-(section 2). Nothing rate limits by IP, and nothing authenticates who is allowed
-to use your relay. If you want either, it belongs in the reverse proxy in front
-of it. It does not exist in the relay, and no cap the relay has is a substitute
-for it.
+**Three things that used to be free, and are not any more.** Each of these was
+done against a running relay with an HTTP client and nothing else, and each is
+now refused. They are listed so that an operator on an older build knows what
+they are carrying:
+
+- **Replaying one captured envelope deleted the sender's mail.** A stranger who
+  copied a single envelope off an unencrypted hop could post it twenty times;
+  because a replay carries the real sender's real signature, the per-sender cap
+  charged every copy to that sender and evicted twenty of their genuine waiting
+  messages. The relay now refuses an envelope whose id it already holds, and
+  refuses one whose signed `sent_at` is more than 30 minutes old or more than 5
+  minutes ahead (`a_replayed_envelope_cannot_delete_the_senders_mail` and
+  `an_envelope_older_than_the_window_is_refused`,
+  `crates/dust-whisper/tests/messenger_relay_abuse.rs`). If your senders' clocks
+  are badly wrong, they will now be told so instead of being quietly replayable.
+- **Filling the challenge table locked out every inbox on the relay.** 8320
+  unauthenticated GETs, needing no key and no signature, and every honest owner's
+  correctly signed claim came back refused, because a full table handed an empty
+  nonce to everybody. A full table now evicts its own oldest entry instead
+  (`a_challenge_flood_cannot_lock_an_owner_out_of_their_own_inbox`).
+- **Inventing recipients parked unbounded memory on your machine.** Section 2.
+
+**What is still not there.** Nothing rate limits by IP, and nothing
+authenticates who is allowed to use your relay. If you want either, it belongs in
+the reverse proxy in front of it. It does not exist in the relay, and no cap the
+relay has is a substitute for it. The caps above bound what one machine can be
+made to hold; they do not stop the requests arriving.
 
 **No money.** Your relay holds no funds and cannot move anyone's. The worst case
 for the relay key is that transactions submitted through you can be read, which
@@ -726,6 +818,11 @@ before you advertise it, not after.
    machine.** Loopback works long before anything else does. Section 4, step 4.
 9. **Never treat the per sender cap as abuse protection.** It stops one loud
    identity and does nothing about a hundred cheap ones. Section 8.
+10. **Never run a relay build older than the caps in section 2 on a public
+    address.** On an older build, one stranger with an HTTP client can park
+    unbounded memory on your machine, lock every inbox on your relay with
+    unauthenticated GETs, and delete a sender's waiting mail with bytes copied
+    off the wire. Section 8 names all three.
 
 ---
 

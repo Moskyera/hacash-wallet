@@ -36,12 +36,32 @@ export function pollReport(outcome: MessengerPollOutcome | null | undefined): Po
       kind: "error",
     };
   }
-  const rejected =
-    o.rejected_envelopes > 0
-      ? ` ${o.rejected_envelopes} item(s) were discarded because nobody could be shown to have sent them.`
-      : "";
-  if (o.added > 0) {
-    return { text: `${o.added} new message(s).${rejected}`, kind: "success" };
+  const notes: string[] = [];
+  if (o.rejected_envelopes > 0) {
+    notes.push(
+      `${o.rejected_envelopes} item(s) were discarded because nobody could be shown to have sent them, or because they were addressed to somebody else.`,
+    );
   }
-  return { text: `The relay answered. Nothing new.${rejected}`, kind: "info" };
+  if (o.undecryptable > 0) {
+    // Saying nothing about these is what let an inbox be wedged shut in
+    // silence: hundreds of correctly signed envelopes of noise sat at the
+    // relay's per-recipient cap, every correspondent was refused with "inbox
+    // full", and the owner's own screen said the mailbox was empty.
+    notes.push(
+      `${o.undecryptable} item(s) were signed by a real key but could not be read by this wallet, so they were cleared off the relay. Somebody may be filling your mailbox.`,
+    );
+  }
+  if (o.store_full) {
+    notes.push(
+      "This wallet's message store is full, so anything else is still waiting on the relay.",
+    );
+  }
+  const trailer = notes.length > 0 ? ` ${notes.join(" ")}` : "";
+  if (o.added > 0) {
+    return { text: `${o.added} new message(s).${trailer}`, kind: "success" };
+  }
+  if (notes.length > 0) {
+    return { text: `The relay answered. Nothing new.${trailer}`, kind: "error" };
+  }
+  return { text: "The relay answered. Nothing new.", kind: "info" };
 }

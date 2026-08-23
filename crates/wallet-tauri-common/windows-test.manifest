@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Common Controls v6, for cargo test executables on Windows.
+
+  Tauri's window layer imports SetWindowSubclass, RemoveWindowSubclass,
+  DefSubclassProc and TaskDialogIndirect from comctl32.dll. Those four are
+  exports of Common Controls version 6 only. An executable that does not ask
+  for version 6 is bound by the loader to the version 5.82 comctl32 in
+  system32, which does not export them, and the process dies before main with
+  STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
+
+  The shipped desktop application gets this manifest from the Tauri bundler. A
+  cargo test executable gets no such thing, so every test in this workspace
+  that links the Tauri application runtime was unrunnable on Windows. build.rs
+  embeds this file into test executables to close that.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

@@ -39,7 +39,11 @@ fn envelope_for(to: &str, sender: &Account, id: &str) -> MessengerEnvelope {
         from_sig: None,
         nonce: "00112233445566778899aabb".to_string(),
         ciphertext: "deadbeef".to_string(),
-        sent_at: "2026-01-01T00:00:00Z".to_string(),
+        // The relay refuses an envelope whose signed timestamp is outside its
+        // freshness window (`MAX_AGE_PAST_SECS`), which is what stops a captured
+        // envelope being replayed at leisure. A fixture with a hardcoded date
+        // would be testing the clock rather than the cap.
+        sent_at: chrono::Utc::now().to_rfc3339(),
     };
     env.from_sig = Some(hex::encode(sender.do_sign(&envelope_auth_digest(&env))));
     env
