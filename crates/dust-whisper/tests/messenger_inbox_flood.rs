@@ -136,13 +136,18 @@ async fn a_flood_from_one_key_evicts_only_its_own_messages() {
 /// The half that does not hold, and the reason section 8 no longer says a flood
 /// costs the flooder rather than the person being written to.
 ///
-/// Keys are free. Once the inbox is full and the pushing sender is under its own
-/// share, the eviction rule takes from whichever sender holds the most slots,
-/// and after a wide flood of one-message identities that sender is the genuine
-/// correspondent. Nothing here is forged: every envelope is signed by the key
-/// its `from` address derives from, which is all the relay asks for.
+/// Keys are free, so this used to work: eviction took from whichever sender held
+/// the most slots, and after a wide flood of one-message identities that sender
+/// is the person the owner actually talks to. The flood deleted the
+/// correspondent and kept itself, and this test recorded that loss.
+///
+/// It cannot now. A sender holding nothing in a full inbox is refused rather
+/// than allowed to displace stored mail, so a deletion no longer costs the
+/// price of a keypair. Nothing here is forged: every envelope is signed by the
+/// key its `from` address derives from, which is all the relay asks for, and
+/// that is exactly why authentication alone never fixed this.
 #[tokio::test]
-async fn a_flood_from_many_keys_evicts_the_genuine_correspondent() {
+async fn a_flood_from_many_keys_cannot_evict_the_genuine_correspondent() {
     let (relay_url, relay) = spawn_relay().await;
     let http = Client::new();
 
@@ -164,31 +169,43 @@ async fn a_flood_from_many_keys_evicts_the_genuine_correspondent() {
     assert_eq!(count_from(&before, &friend), genuine);
 
     // One throwaway identity per message, which costs an attacker a keypair.
+    // These are no longer unwrapped: once the inbox is full every further
+    // brand new sender is refused, and that refusal is the defence. Counting
+    // them rather than panicking on them is what lets this test assert both
+    // halves - the flood is turned away AND nothing stored is lost.
     let throwaways = MAX_PER_RECIPIENT + 60;
+    let mut refused = 0usize;
     for i in 0..throwaways {
         let one_shot = Account::create_by(&format!("flood-many-throwaway-{i}")).unwrap();
-        send_envelope(
+        if send_envelope(
             &http,
             &relay_url,
             envelope_for(&victim_addr, &one_shot, &format!("junk-{i}")),
         )
         .await
-        .unwrap();
+        .is_err()
+        {
+            refused += 1;
+        }
     }
+    assert!(
+        refused > 0,
+        "a flood this wide must run the inbox out of room and start being refused;          none of {throwaways} were, so the cap is not doing anything"
+    );
 
     let after = read_inbox(&http, &relay_url, &victim).await;
-    assert_eq!(
-        after.len(),
-        MAX_PER_RECIPIENT,
-        "the inbox is capped, so the flood cost somebody their slots"
+    assert!(
+        after.len() <= MAX_PER_RECIPIENT,
+        "the inbox is still capped: {} stored",
+        after.len()
     );
     let survived = count_from(&after, &friend);
-    assert!(
-        survived <= 1,
-        "the per-sender cap does not save the friend here: expected at most 1 of \
-         {genuine} genuine messages to survive, {survived} did. If this now passes \
-         with more, the eviction rule changed and docs/RUNNING-A-RELAY.md sections \
-         2 and 8 need rereading."
+    assert_eq!(
+        survived, genuine,
+        "every one of the {genuine} genuine messages must survive a flood of \
+         throwaway keys, {survived} did. If this drops, a brand new sender can \
+         displace stored mail again and docs/RUNNING-A-RELAY.md sections 2 and 8 \
+         need rereading."
     );
 
     relay.abort();

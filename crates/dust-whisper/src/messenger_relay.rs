@@ -25,15 +25,18 @@ const MAX_PER_RECIPIENT: usize = 200;
 /// deleted the genuine mail that had been waiting longest. Senders are
 /// authenticated now, so the inbox can charge each of them for its own share.
 ///
-/// What that share does and does not buy, because this comment used to claim
-/// more than the code delivers: a flood from ONE identity costs only itself, and
-/// `a_flood_from_one_key_evicts_only_its_own_messages` in
-/// `tests/messenger_inbox_flood.rs` holds that. A flood from MANY identities is
-/// not stopped by it at all. Keys are free, and the branch below takes from
-/// whichever sender holds the most slots, which after a wide flood of one-shot
-/// identities is the genuine correspondent
-/// (`a_flood_from_many_keys_evicts_the_genuine_correspondent`, same file).
-/// Rate limiting by IP, which the relay does not do, is the thing that would.
+/// What that share does and does not buy. A flood from ONE identity costs only
+/// itself, held by `a_flood_from_one_key_evicts_only_its_own_messages` in
+/// `tests/messenger_inbox_flood.rs`.
+///
+/// A flood from MANY identities used to defeat this entirely: keys are free, and
+/// eviction took from whichever sender held the most slots, which after a wide
+/// flood of one-shot identities is the genuine correspondent. That is closed by
+/// the refusal below rather than by this cap - a sender holding nothing in a
+/// full inbox cannot displace what is already there
+/// (`a_flood_from_many_keys_cannot_evict_the_genuine_correspondent`, same file).
+/// Rate limiting by IP, which the relay still does not do, is what would stop
+/// the flood from arriving at all rather than merely from deleting anything.
 const MAX_PER_SENDER: usize = 20;
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const CHALLENGE_TTL: Duration = Duration::from_secs(120);
@@ -88,6 +91,24 @@ impl MessengerInbox {
             if let Some(idx) = list.iter().position(|s| s.envelope.from.trim() == from) {
                 list.remove(idx);
             }
+        } else if list.len() >= MAX_PER_RECIPIENT && from_this_sender == 0 {
+            // The inbox is full and this sender holds nothing in it yet, so
+            // there is no share to charge and nothing here is theirs to take.
+            //
+            // Refusing is the whole defence against a flood spread across
+            // throwaway keys. Evicting instead would take from the sender
+            // holding the most slots, and once every flooder holds one, that is
+            // the person the owner actually talks to: the flood would delete
+            // the correspondent and keep itself. Keys are free, so any rule
+            // that lets a brand new sender displace stored mail is a rule an
+            // attacker can buy for nothing.
+            //
+            // The cost of refusing is real and is the honest trade: a genuine
+            // NEW correspondent cannot reach an inbox that is already full. It
+            // fills only when the owner has not collected for a while, and
+            // collection empties it, so that is a delay. Deleting the person
+            // they talk to is not.
+            return Err("inbox full".into());
         } else if list.len() >= MAX_PER_RECIPIENT {
             // The inbox is full of other people's mail. Evict from whichever
             // sender is taking up the most room, oldest of theirs first. That

@@ -671,14 +671,21 @@ be wrong:
   from somebody else is untouched, however long the flood runs. Held by
   `a_flood_from_one_key_evicts_only_its_own_messages` in
   `crates/dust-whisper/tests/messenger_inbox_flood.rs`.
-- **A flood from many identities destroys the genuine correspondent's mail.**
-  When the inbox is full and the sender pushing is under its own share, the
-  eviction takes from whichever sender holds the **most** slots. After a wide
-  flood of one-message throwaway keys, that is the person the owner actually
-  talks to. In the test beside the one above, a friend's eleven waiting messages
-  are cut to at most one by 260 throwaway keys, every envelope properly signed,
-  nothing forged, no bug exploited
-  (`a_flood_from_many_keys_evicts_the_genuine_correspondent`, same file).
+- **A flood from many identities can no longer destroy stored mail.** It used
+  to: eviction took from whichever sender held the **most** slots, and after a
+  wide flood of one-message throwaway keys that is the person the owner actually
+  talks to, so a friend's eleven waiting messages were cut to at most one by 260
+  keypairs, every envelope properly signed and no bug exploited. A sender that
+  holds nothing in a full inbox is now refused instead of being allowed to
+  displace what is already there, so a deletion no longer costs the price of a
+  key (`a_flood_from_many_keys_cannot_evict_the_genuine_correspondent`, same
+  file, which asserts all eleven survive).
+- **What that costs, and it is a real cost.** A genuine NEW correspondent
+  cannot reach an inbox that is already full, and will be told the inbox is
+  full rather than quietly dropped. An inbox only fills when its owner has not
+  collected for a while, and collecting empties it, so this is a delay for
+  somebody writing to a person who is not reading. Deleting the mail of the
+  person they do read was not a delay.
 
 The 512 KiB body limit bounds a single request and does not bound the total
 (section 2). Nothing rate limits by IP, and nothing authenticates who is allowed
