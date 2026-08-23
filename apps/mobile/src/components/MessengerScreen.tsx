@@ -342,7 +342,9 @@ export default function MessengerScreen({
           <div className="card">
             <p className="warn-text">
               DUST Whisper is off. Turn it on and name a relay (More, then DUST
-              Whisper) before anything can be sent or collected.
+              Whisper) before anything can be sent or collected. There is no
+              public relay, so somebody has to run one and it can be you:
+              docs/RUNNING-A-RELAY.md.
             </p>
           </div>
         )}

@@ -372,6 +372,10 @@ export default function FastPayScreen({
             onChange={(e) => setHubUrl(e.target.value)}
             placeholder="https://hub.example.com"
           />
+          <p className="muted small">
+            There is no public hub, so this is somebody's machine. It can be yours:{" "}
+            <code>docs/HUB-OPERATOR.md</code>.
+          </p>
           <div className="actions-row">
             <button
               disabled={busy}

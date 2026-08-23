@@ -118,7 +118,12 @@ pub async fn submit_tx_hex(
     let core = settings.to_core();
     if core.enabled && !core.relay_urls.iter().any(|u| !u.trim().is_empty()) {
         return Err(WalletError::Node(
-            "DUST Whisper enabled but no relay URL configured".into(),
+            // The field is empty by default because there is no public relay to
+            // ship an address for. Saying only "configure one" leaves a person
+            // who has never seen a relay with nowhere to go, so name where one
+            // comes from: `dust-whisper-relay` in this repo, and the guide for
+            // running it.
+            "DUST Whisper enabled but no relay URL configured. Somebody has to run a relay, and it can be you: docs/RUNNING-A-RELAY.md".into(),
         ));
     }
 

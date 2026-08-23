@@ -20,7 +20,7 @@ export function pollReport(outcome: MessengerPollOutcome | null | undefined): Po
   const o = outcome ?? null;
   if (!o || o.relays_tried === 0) {
     return {
-      text: "No relay is configured, so there was nothing to check. Set one on the DUST Whisper screen.",
+      text: "No relay is configured, so there was nothing to check. Somebody has to run a relay. Set one on the DUST Whisper screen, or run your own with docs/RUNNING-A-RELAY.md.",
       kind: "error",
     };
   }

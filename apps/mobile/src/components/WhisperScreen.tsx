@@ -49,7 +49,10 @@ export default function WhisperScreen({ initial, onToast }: Props) {
         .map((l) => l.trim())
         .filter(Boolean);
       if (draft.enabled && relay_urls.length === 0) {
-        onToast("Add at least one relay URL.", "error");
+        onToast(
+          "Add at least one relay URL. Somebody has to run a relay, and it can be you: docs/RUNNING-A-RELAY.md.",
+          "error",
+        );
         return;
       }
       const next: DustWhisperSettings = { ...draft, relay_urls, auto_start_relay: false };
@@ -73,6 +76,12 @@ export default function WhisperScreen({ initial, onToast }: Props) {
           IP from the full node. The local relay encrypts transport but does not provide network
           anonymity.
         </p>
+        <p className="muted">
+          The encryption ends at the relay, not at the node. A relay decrypts each transaction in
+          order to forward it, so whoever runs a remote relay sees the whole transaction: amounts,
+          addresses, all of it. The node learns the relay instead of you, and the relay operator
+          learns everything.
+        </p>
         <div className="toggle-row">
           <span>Enable Whisper</span>
           <input
@@ -90,6 +99,11 @@ export default function WhisperScreen({ initial, onToast }: Props) {
           />
         </div>
         <label className="label">Relay URLs (one per line)</label>
+        <p className="muted small">
+          This box is empty on a new wallet because there is no public relay to fill it with.
+          Somebody has to run one, and it can be you, on a computer rather than on this phone:
+          only the desktop wallet can host a relay. See <code>docs/RUNNING-A-RELAY.md</code>.
+        </p>
         <textarea
           value={relayText}
           onChange={(e) => setRelayText(e.target.value)}

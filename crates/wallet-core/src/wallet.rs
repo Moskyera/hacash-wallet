@@ -2170,7 +2170,7 @@ impl WalletService {
         let relays = self.settings.dust_whisper.trimmed_relay_urls();
         if relays.is_empty() {
             return Err(WalletError::Other(
-                "configure at least one DUST Whisper relay URL for messenger".into(),
+                "configure at least one DUST Whisper relay URL for messenger. Somebody has to run a relay, and it can be you: docs/RUNNING-A-RELAY.md".into(),
             ));
         }
         crate::messenger::messenger_send(

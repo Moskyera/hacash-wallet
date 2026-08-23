@@ -49,7 +49,8 @@ export default function DustWhisperPayOptions({
         {!relaysConfigured ? (
           <>
             {" "}
-            Add relay URLs in <strong>More → DUST Whisper</strong> before enabling.
+            Add relay URLs in <strong>More → DUST Whisper</strong> before enabling. Somebody has
+            to run a relay, and it can be you: <code>docs/RUNNING-A-RELAY.md</code>.
           </>
         ) : null}
       </p>

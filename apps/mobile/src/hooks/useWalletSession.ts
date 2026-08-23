@@ -287,7 +287,10 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
       const current = resolveDustWhisper(settings?.dust_whisper, status?.dust_whisper);
       const next: DustWhisperSettings = { ...current, ...patch };
       if (next.enabled && !hasWhisperRelays(next)) {
-        showToast("Add a relay URL in More → DUST Whisper first.", "error");
+        showToast(
+          "Add a relay URL in More → DUST Whisper first. Somebody has to run a relay, and it can be you: docs/RUNNING-A-RELAY.md.",
+          "error",
+        );
         return;
       }
       try {

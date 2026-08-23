@@ -24,6 +24,16 @@ const MAX_PER_RECIPIENT: usize = 200;
 /// Eviction used to be "drop the oldest entry in the list", so a flood of junk
 /// deleted the genuine mail that had been waiting longest. Senders are
 /// authenticated now, so the inbox can charge each of them for its own share.
+///
+/// What that share does and does not buy, because this comment used to claim
+/// more than the code delivers: a flood from ONE identity costs only itself, and
+/// `a_flood_from_one_key_evicts_only_its_own_messages` in
+/// `tests/messenger_inbox_flood.rs` holds that. A flood from MANY identities is
+/// not stopped by it at all. Keys are free, and the branch below takes from
+/// whichever sender holds the most slots, which after a wide flood of one-shot
+/// identities is the genuine correspondent
+/// (`a_flood_from_many_keys_evicts_the_genuine_correspondent`, same file).
+/// Rate limiting by IP, which the relay does not do, is the thing that would.
 const MAX_PER_SENDER: usize = 20;
 const TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const CHALLENGE_TTL: Duration = Duration::from_secs(120);
@@ -80,8 +90,12 @@ impl MessengerInbox {
             }
         } else if list.len() >= MAX_PER_RECIPIENT {
             // The inbox is full of other people's mail. Evict from whichever
-            // sender is taking up the most room, oldest of theirs first, so a
-            // flood costs the flooder and not the person being written to.
+            // sender is taking up the most room, oldest of theirs first. That
+            // charges a single loud sender for its own noise. It does NOT
+            // protect a real correspondent from a flood spread across many
+            // throwaway keys: once every flooder holds one slot, the sender
+            // holding the most is the person the owner actually talks to, and
+            // this branch deletes them first. See MAX_PER_SENDER above.
             let mut counts: HashMap<&str, usize> = HashMap::new();
             for s in list.iter() {
                 *counts.entry(s.envelope.from.trim()).or_default() += 1;

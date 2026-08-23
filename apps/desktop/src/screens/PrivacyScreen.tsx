@@ -137,6 +137,12 @@ export default function PrivacyScreen({
         queries still use your configured node directly.
       </p>
       <p className="muted">
+        The encryption ends at the relay, not at the node. A relay decrypts each transaction in
+        order to forward it, so whoever runs a remote relay sees the whole transaction: amounts,
+        addresses, all of it. That is the trade this setting makes. The node learns the relay
+        instead of you, and the relay operator learns everything.
+      </p>
+      <p className="muted">
         Desktop includes its own local relay. It starts with the wallet and follows the active node
         after a saved change or automatic failover. A local relay improves broadcast separation but
         does not hide your IP from the node.
@@ -203,6 +209,10 @@ export default function PrivacyScreen({
         </div>
       )}
       <label>Relay URLs (one per line)</label>
+      <p className="muted small">
+        This box is empty on a new wallet because there is no public relay to fill it with.
+        Somebody has to run one, and it can be you: <code>docs/RUNNING-A-RELAY.md</code>.
+      </p>
       <textarea
         className="textarea mono"
         rows={3}

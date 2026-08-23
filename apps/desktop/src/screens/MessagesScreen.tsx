@@ -268,6 +268,11 @@ export default function MessagesScreen({
         mailbox both wallets collect from; the two of you have to name the same one.
       </p>
       <p>
+        The wallet ships without one because there is no public relay to ship.
+        Somebody has to run a relay, and it can be you:{" "}
+        <code>docs/RUNNING-A-RELAY.md</code>.
+      </p>
+      <p>
         This computer can run one itself. The Privacy screen offers{" "}
         <code>http://127.0.0.1:8787</code>, and the wallet runs that relay while DUST Whisper
         and its auto-start option are both on. A relay on this computer is reachable only by

@@ -833,7 +833,9 @@ export function useDesktopWallet(
           relay_urls,
         };
         if (next.enabled && relay_urls.length === 0) {
-          onError("Add at least one relay URL to enable DUST Whisper.");
+          onError(
+            "Add at least one relay URL to enable DUST Whisper. Somebody has to run a relay, and it can be you: docs/RUNNING-A-RELAY.md.",
+          );
           return null;
         }
         await api.updateDustWhisperSettings(next);

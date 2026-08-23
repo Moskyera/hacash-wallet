@@ -72,7 +72,8 @@ export default function HubDiscoveryPanel({
       <p className="muted small" style={{ marginTop: "0.5rem" }}>
         Checks the hub URL you entered above, plus a local development hub. There
         is no public directory of providers yet, so paste the address your
-        provider gave you.
+        provider gave you. Somebody has to run a hub, and it can be you:{" "}
+        <code>docs/HUB-OPERATOR.md</code>.
       </p>
       {report && (
         <div className="hub-discovery-list">
