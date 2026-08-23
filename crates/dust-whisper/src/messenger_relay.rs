@@ -13,9 +13,10 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::protocol::{
-    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_SEND_PATH,
-    MessengerAckRequest, MessengerAckResponse, MessengerChallengeResponse, MessengerEnvelope,
-    MessengerInboxRequest, MessengerInboxResponse, MessengerSendRequest, MessengerSendResponse,
+    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_PUBKEY_PATH,
+    MESSENGER_SEND_PATH, MessengerAckRequest, MessengerAckResponse, MessengerChallengeResponse,
+    MessengerEnvelope, MessengerInboxRequest, MessengerInboxResponse, MessengerPubkeyRequest,
+    MessengerPubkeyResponse, MessengerSendRequest, MessengerSendResponse,
 };
 
 const MAX_PER_RECIPIENT: usize = 200;
@@ -104,6 +105,33 @@ const MAX_AGE_PAST_SECS: i64 = 30 * 60;
 /// How far ahead of the relay's own clock an envelope may claim to be, so that
 /// an honest sender whose clock is a little fast is not refused.
 const MAX_SKEW_FUTURE_SECS: i64 = 5 * 60;
+/// How many "last key seen for this address" entries the directory will hold.
+///
+/// Keys are free, so a flood of throwaway senders can push honest entries out
+/// of this table. That costs the flooder a signed, accepted envelope each and
+/// buys nothing: an evicted entry means the relay answers "no key", which is
+/// the answer it gave before this table existed, and the sending wallet falls
+/// back to v1 and says on screen that the message is not sealed. There is no
+/// state here whose loss can be turned into a false claim.
+const MAX_DIRECTORY_ENTRIES: usize = 20_000;
+/// How long the directory remembers a key after last seeing that address send.
+///
+/// This is not a cache lifetime, it is a retention limit. Answering "who has a
+/// key for this address" tells the asker that the address has used this relay
+/// (section 6.2 of docs/RUNNING-A-RELAY.md), and an entry that is never dropped
+/// is that fact kept forever. A month is long enough that an ordinary
+/// correspondent is still reachable sealed and short enough that a relay does
+/// not accumulate a permanent roster of everyone who ever touched it.
+const DIRECTORY_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
+/// How many stale entries a full directory drops at once when it has to make
+/// room.
+///
+/// Evicting exactly one per insert means an O(n) scan on every insert once the
+/// table is full, which is a lever an attacker holds for the price of a signed
+/// envelope. Dropping a batch pays the sort once per this many inserts instead.
+/// Entries dropped early are entries the relay answers "no key" for, which is
+/// the answer it gave before this table existed.
+const DIRECTORY_EVICT_BATCH: usize = MAX_DIRECTORY_ENTRIES / 16;
 
 #[derive(Clone)]
 struct Stored {
@@ -188,11 +216,29 @@ impl Inboxes {
     }
 }
 
+/// One address's last seen sending key, and when it was last seen.
+#[derive(Clone)]
+struct DirectoryEntry {
+    pubkey: String,
+    seen: Instant,
+}
+
 #[derive(Clone, Default)]
 pub struct MessengerInbox {
     inner: Arc<Mutex<Inboxes>>,
     /// Nonce -> the address it was issued for. Never keyed by address.
     challenges: Arc<Mutex<HashMap<String, Challenge>>>,
+    /// Address -> the last public key an accepted envelope from it carried.
+    ///
+    /// Every envelope already arrives with `from_pubkey`, and `send_handler`
+    /// refuses it unless that key derives to `from` and signed the envelope, so
+    /// this table is not new knowledge: it is the relay writing down something
+    /// it is handed on every send and currently throws away when the envelope
+    /// is collected. It exists so a wallet with nothing to seal to can ask for
+    /// a key and check it, instead of sending the first message of every
+    /// conversation under a key this operator can derive from the two addresses
+    /// on the envelope.
+    directory: Arc<Mutex<HashMap<String, DirectoryEntry>>>,
 }
 
 /// True when this string is an address a key could ever sign for.
@@ -341,6 +387,80 @@ impl MessengerInbox {
         Ok(())
     }
 
+    /// Write down the key an accepted envelope was sent with.
+    ///
+    /// The binding is re-checked here rather than assumed from the caller. It
+    /// costs one hash per accepted send and it means the table cannot hold an
+    /// entry whose key does not derive to its own address even if some future
+    /// caller forgets to authenticate first. That is defence in depth and not
+    /// the guarantee: the guarantee is that the asking wallet checks it again.
+    async fn remember_sender_key(&self, envelope: &MessengerEnvelope) {
+        let from = envelope.from.trim();
+        let Some(pubkey_hex) = envelope.from_pubkey.as_deref().map(str::trim) else {
+            return;
+        };
+        let Ok(bytes) = hex::decode(pubkey_hex) else {
+            return;
+        };
+        let Ok(pubkey): Result<[u8; 33], _> = bytes.try_into() else {
+            return;
+        };
+        if !crate::messenger_auth::pubkey_matches_address(&pubkey, from) {
+            return;
+        }
+        let now = Instant::now();
+        let mut dir = self.directory.lock().await;
+        // A full table drops its stalest entries rather than refusing to learn.
+        // Either way the worst case is "no key", which is the honest fallback.
+        //
+        // Expiry and eviction both happen here, on the write path, and both are
+        // done in batches. The write path is the expensive place to be: it costs
+        // the caller a signed envelope this relay has already verified and
+        // accepted, and a batch of `DIRECTORY_EVICT_BATCH` means the sort is
+        // paid once per that many inserts rather than a full scan per insert.
+        // The read path does neither, so an unauthenticated question is never
+        // the thing that walks the table. See `sender_key`.
+        if dir.len() >= MAX_DIRECTORY_ENTRIES {
+            dir.retain(|_, entry| now.duration_since(entry.seen) < DIRECTORY_TTL);
+        }
+        if dir.len() >= MAX_DIRECTORY_ENTRIES && !dir.contains_key(from) {
+            let mut by_age: Vec<(String, Instant)> =
+                dir.iter().map(|(k, e)| (k.clone(), e.seen)).collect();
+            by_age.sort_by_key(|(_, seen)| *seen);
+            let want = dir.len() + 1 - MAX_DIRECTORY_ENTRIES;
+            for (stale, _) in by_age.into_iter().take(want.max(DIRECTORY_EVICT_BATCH)) {
+                dir.remove(&stale);
+            }
+        }
+        dir.insert(
+            from.to_string(),
+            DirectoryEntry {
+                pubkey: hex::encode(pubkey),
+                seen: now,
+            },
+        );
+    }
+
+    /// The last key seen for this address, or nothing.
+    ///
+    /// One lookup and one age comparison, and deliberately no sweep: this is
+    /// the only unauthenticated question the directory answers, and a sweep
+    /// here would let anyone who can reach the port make the relay walk the
+    /// whole table, under the same lock an accepted send needs, for the price
+    /// of a request. Expiry is enforced by refusing to answer with an entry
+    /// past its TTL, which is indistinguishable from the entry being gone;
+    /// the storage it occupies is reclaimed on the write path, which costs the
+    /// caller a signed envelope. See `remember_sender_key`.
+    async fn sender_key(&self, address: &str) -> Option<String> {
+        let now = Instant::now();
+        let dir = self.directory.lock().await;
+        let entry = dir.get(address)?;
+        if now.duration_since(entry.seen) >= DIRECTORY_TTL {
+            return None;
+        }
+        Some(entry.pubkey.clone())
+    }
+
     async fn issue_challenge(&self, to: &str) -> MessengerChallengeResponse {
         let mut nonce_bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -440,6 +560,7 @@ pub fn messenger_routes() -> Router<RelayAppState> {
         .route(MESSENGER_CHALLENGE_PATH, get(challenge_handler))
         .route(MESSENGER_INBOX_PATH, post(inbox_handler))
         .route(MESSENGER_ACK_PATH, post(ack_handler))
+        .route(MESSENGER_PUBKEY_PATH, post(pubkey_handler))
 }
 
 async fn send_handler(
@@ -455,16 +576,58 @@ async fn send_handler(
             err: Some("envelope is not signed by the key its sender address derives from".into()),
         });
     }
+    // Cloned before the move so the directory records the key of an envelope
+    // this relay actually accepted, and only then.
+    let accepted = req.envelope.clone();
     match state.inbox.push(req.envelope).await {
-        Ok(()) => Json(MessengerSendResponse {
-            ok: true,
-            err: None,
-        }),
+        Ok(()) => {
+            state.inbox.remember_sender_key(&accepted).await;
+            Json(MessengerSendResponse {
+                ok: true,
+                err: None,
+            })
+        }
         Err(e) => Json(MessengerSendResponse {
             ok: false,
             err: Some(e),
         }),
     }
+}
+
+/// The last public key this relay saw the named address send with.
+///
+/// # What this answers, and what it gives away
+///
+/// It is unauthenticated, because the wallet that needs it is by definition a
+/// stranger to the address it is asking about: that is the whole case this
+/// endpoint exists for. So anybody can ask about anybody, and a `pubkey` in the
+/// answer tells the asker that this address has sent through this relay inside
+/// `DIRECTORY_TTL`. The key itself is not a secret - it is on the chain the
+/// moment that account signs anything, and it rides in clear on every envelope
+/// this relay already forwards. The new fact is the association between an
+/// address and this relay, and it is a fact the operator already holds in full.
+/// Section 6.2 of docs/RUNNING-A-RELAY.md states it for the operator to weigh.
+///
+/// It is deliberately not made cheaper to abuse than it has to be: an address
+/// no key could ever sign for is refused without touching the table, the answer
+/// for an unknown address is byte-identical to the answer for an address whose
+/// entry has expired, and answering costs one hash lookup rather than a walk of
+/// the table (`sender_key`).
+///
+/// It is a POST, not a GET, so the address being asked about does not end up in
+/// this relay's access log or in the log of any proxy in front of it. That is
+/// the operator's own metadata hygiene, not the wallet's: see section 6.4.
+async fn pubkey_handler(
+    State(state): State<RelayAppState>,
+    Json(req): Json<MessengerPubkeyRequest>,
+) -> Json<MessengerPubkeyResponse> {
+    let address = req.address.trim();
+    if address.is_empty() || !is_claimable_address(address) {
+        return Json(MessengerPubkeyResponse { pubkey: None });
+    }
+    Json(MessengerPubkeyResponse {
+        pubkey: state.inbox.sender_key(address).await,
+    })
 }
 
 async fn challenge_handler(

@@ -87,14 +87,22 @@ export default function MessengerScreen({
    * Ask the wallet what is true about this conversation, and say only that.
    *
    * A message is sealed to a contact's own key only when this wallet holds that
-   * key, which it learns from an envelope the contact signed. Without one,
-   * `encrypt_for_send` in crates/wallet-core/src/messenger.rs falls back to a
-   * key derived from the two addresses, and the relay stores both of those in
-   * clear next to the body, so the operator can read the message. The answer
-   * also carries how many messages already in this thread were sent that way,
-   * because a banner about the next message says nothing about the ones already
-   * on screen. When the answer cannot be obtained the banner stays silent
-   * instead of guessing.
+   * key. It learns one from an envelope the contact signed, and on a first
+   * message it asks the configured relays for one and keeps it only if it
+   * derives back to that contact's address (`lookup_peer_key`,
+   * crates/wallet-core/src/messenger.rs). Without a key that survives that,
+   * `encrypt_for_send` falls back to one derived from the two addresses, and
+   * the relay stores both of those in clear next to the body, so the operator
+   * can read the message. The answer also carries how many messages already in
+   * this thread were sent that way, because a banner about the next message
+   * says nothing about the ones already on screen. When the answer cannot be
+   * obtained the banner stays silent instead of guessing.
+   *
+   * This is read from disk, so before the very first send it says the wallet
+   * holds no key even when the send is about to fetch and verify one. Under
+   * claiming is the only direction that cannot turn into a false claim, and it
+   * corrects itself immediately after the send, which is why every call site
+   * refreshes once the send returns.
    */
   const refreshPeerSecurity = useCallback(async (peer: string) => {
     try {
@@ -352,10 +360,13 @@ export default function MessengerScreen({
         <div className="card">
           <h2>Messages</h2>
           <p className="muted small">
-            A conversation is sealed to a contact's own key only once they have
-            written to you and this wallet has their key. Until then the relay
-            operator can read what you send. Open a conversation to see where it
-            stands.
+            A conversation is sealed to a contact's own key only once this
+            wallet holds that key. It learns one from anything they have sent
+            you, and before a first message it asks the relays you have named
+            for one, using an answer only if that key proves it belongs to that
+            address. If none does, the relay operator can read what you send.
+            Open a conversation to see where it stands, and read each message's
+            own marker for how it actually travelled.
           </p>
           <label className="label">New chat. Hacash address</label>
           <div className="row-btns">

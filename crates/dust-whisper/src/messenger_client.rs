@@ -1,11 +1,14 @@
+use std::time::Duration;
+
 use reqwest::Client;
 
 use crate::error::{WhisperError, WhisperResult};
-use crate::http_util::ensure_success;
+use crate::http_util::{ensure_success, json_capped};
 use crate::protocol::{
-    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_SEND_PATH,
-    MessengerAckRequest, MessengerAckResponse, MessengerChallengeResponse, MessengerEnvelope,
-    MessengerInboxRequest, MessengerInboxResponse, MessengerSendRequest, MessengerSendResponse,
+    MESSENGER_ACK_PATH, MESSENGER_CHALLENGE_PATH, MESSENGER_INBOX_PATH, MESSENGER_PUBKEY_PATH,
+    MESSENGER_SEND_PATH, MessengerAckRequest, MessengerAckResponse, MessengerChallengeResponse,
+    MessengerEnvelope, MessengerInboxRequest, MessengerInboxResponse, MessengerPubkeyRequest,
+    MessengerPubkeyResponse, MessengerSendRequest, MessengerSendResponse,
 };
 
 fn base_url(relay_url: &str) -> String {
@@ -56,6 +59,56 @@ pub async fn fetch_challenge(
     resp.json()
         .await
         .map_err(|e| WhisperError::Relay(format!("messenger challenge json: {e}")))
+}
+
+/// The most this will read of a directory answer.
+///
+/// A real answer is a 66 character hex key inside a small JSON object. Anything
+/// past a kilobyte is not an answer, and reading it would only spend this
+/// wallet's memory on a peer's say-so.
+pub const MAX_PUBKEY_RESPONSE_BYTES: usize = 1024;
+
+/// Ask a relay for the last public key it saw an address send with.
+///
+/// The answer is a claim by the relay and this function does nothing to check
+/// it. It is a string of hex, or nothing. The caller
+/// (`wallet-core/src/messenger.rs::lookup_peer_key`) re-derives the address
+/// from it and discards it unless it matches the address that was asked about,
+/// which is the only reason it is safe to ask a relay this question at all.
+///
+/// # Why the caller has to name a deadline
+///
+/// This runs on the send path, before the message moves, and it is asked of
+/// relays this wallet has no relationship with yet. On the shared client's
+/// 20 second budget three unreachable relays put a minute on the clock of a
+/// person pressing Send, every time, because a lookup that finds nothing
+/// learns nothing and so is repeated on the next message too. The caller owns
+/// the whole lookup's budget and passes what is left of it here, so a stalling
+/// relay costs a short wait and then the honest v1 fallback.
+///
+/// The address is posted in a body rather than hung off a query string, so it
+/// does not land in the access log of every relay asked. See
+/// `MessengerPubkeyRequest`.
+pub async fn fetch_peer_pubkey(
+    http: &Client,
+    relay_url: &str,
+    address: &str,
+    timeout: Duration,
+) -> WhisperResult<Option<String>> {
+    let url = format!("{}{MESSENGER_PUBKEY_PATH}", base_url(relay_url));
+    let resp = http
+        .post(url)
+        .timeout(timeout)
+        .json(&MessengerPubkeyRequest {
+            address: address.to_string(),
+        })
+        .send()
+        .await
+        .map_err(|e| WhisperError::Relay(format!("messenger pubkey: {e}")))?;
+    let resp = ensure_success(resp, "messenger pubkey").await?;
+    let body: MessengerPubkeyResponse =
+        json_capped(resp, MAX_PUBKEY_RESPONSE_BYTES, "messenger pubkey").await?;
+    Ok(body.pubkey)
 }
 
 /// Fetch an inbox and report the whole answer, not just its contents.

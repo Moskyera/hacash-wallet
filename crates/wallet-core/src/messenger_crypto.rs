@@ -95,6 +95,35 @@ pub fn verify_pubkey_address(pubkey: &[u8; 33], expected_addr: &str) -> bool {
     Account::to_readable(&derived) == expected_addr
 }
 
+/// A peer key this wallet is willing to seal to, or nothing at all.
+///
+/// # Why this is the whole trust decision
+///
+/// A Hacash account address is `base58check(0 || RIPEMD160(SHA256(pubkey)))`
+/// (`sys::Account::get_address_by_public_key`). So a public key that derives to
+/// address X is *the* key of X. Finding a second, different key that also
+/// derives to X is a second preimage on that hash, not a claim somebody can
+/// make. That is what lets this wallet accept a key from a source it does not
+/// trust at all - a relay, a directory, a stranger - and still seal to it: it
+/// is not believing the source, it is checking the key.
+///
+/// Three things have to hold, and the third is not decoration. `PublicKey::
+/// from_slice` is what rejects 33 bytes that are not a point on the curve; an
+/// unchecked one would sail past the address check only via a hash collision,
+/// but would then fail inside `encrypt_body_v2` and turn a lookup that should
+/// have quietly fallen back to v1 into a send that fails outright.
+///
+/// `None` means "no key", and every caller has to treat that exactly as it
+/// treats never having asked.
+pub fn verified_peer_pubkey(pubkey_hex_str: &str, peer_addr: &str) -> Option<[u8; 33]> {
+    let parsed = parse_pubkey_hex(pubkey_hex_str).ok()?;
+    if !verify_pubkey_address(&parsed, peer_addr) {
+        return None;
+    }
+    PublicKey::from_slice(&parsed).ok()?;
+    Some(parsed)
+}
+
 fn pair_key_v1(addr_a: &str, addr_b: &str) -> [u8; 32] {
     let (lo, hi) = if addr_a < addr_b {
         (addr_a, addr_b)
@@ -574,6 +603,148 @@ mod tests {
         let plain =
             decrypt_body(&b, &b_addr, &a_addr, None, &nonce, &ciphertext, &binding).unwrap();
         assert_eq!(plain.body, "short");
+    }
+
+    /// The one check that lets this wallet take a key from a source it does
+    /// not trust.
+    ///
+    /// An address is `base58check(0 || RIPEMD160(SHA256(pubkey)))`, so a key
+    /// that derives to an address is that address's key and there is no second
+    /// one short of a preimage. Everything a hostile relay can actually send
+    /// back is below, and every one of them has to come out as `None`, because
+    /// `None` is what puts the sender back on the v1 path it was already on.
+    #[test]
+    fn a_key_is_taken_only_from_the_address_it_derives_to() {
+        let bob = Account::create_by("verified-bob").unwrap();
+        let mallory = Account::create_by("verified-mallory").unwrap();
+        let bob_addr = bob.readable().to_string();
+        let bob_pk = hex::encode(bob.public_key().serialize_compressed());
+
+        assert_eq!(
+            verified_peer_pubkey(&bob_pk, &bob_addr),
+            Some(bob.public_key().serialize_compressed()),
+            "Bob's own key, checked against Bob's own address, has to be accepted"
+        );
+
+        // A real, valid, on-curve public key belonging to somebody else. This
+        // is the answer a hostile relay gives when it wants to read the first
+        // message: it is a key it holds the secret for.
+        let mallory_pk = hex::encode(mallory.public_key().serialize_compressed());
+        assert_eq!(
+            verified_peer_pubkey(&mallory_pk, &bob_addr),
+            None,
+            "a key that derives to somebody else's address was accepted for Bob"
+        );
+
+        // 33 bytes that are not a point on the curve at all. This cannot reach
+        // the address check without a collision, but if it ever did it would
+        // fail inside `encrypt_body_v2` and turn a quiet fallback into a failed
+        // send, so it is refused here instead.
+        let mut off_curve = [0u8; 33];
+        off_curve[0] = 0x02;
+        off_curve[32] = 0x01;
+        assert_eq!(
+            verified_peer_pubkey(&hex::encode(off_curve), &bob_addr),
+            None
+        );
+
+        // And everything that is not a key at all.
+        for junk in ["", "  ", "zz", &bob_pk[..64], &format!("{bob_pk}00")] {
+            assert_eq!(
+                verified_peer_pubkey(junk, &bob_addr),
+                None,
+                "{junk:?} was accepted as a peer key"
+            );
+        }
+
+        // Trailing whitespace is not a different key: `parse_pubkey_hex` trims,
+        // and the honest case must not be lost to a stray newline off a wire.
+        assert_eq!(
+            verified_peer_pubkey(&format!("  {bob_pk}\n"), &bob_addr),
+            Some(bob.public_key().serialize_compressed())
+        );
+    }
+
+    /// A key that passes the check is a key only its owner can open, which is
+    /// the property the whole directory idea rests on. Sealing to a key served
+    /// by a third party is safe precisely because the third party cannot read
+    /// what was sealed to it.
+    #[test]
+    fn sealing_to_a_verified_key_is_readable_only_by_that_address() {
+        let alice = Account::create_by("seal-alice").unwrap();
+        let bob = Account::create_by("seal-bob").unwrap();
+        let operator = Account::create_by("seal-operator").unwrap();
+        let a_addr = alice.readable().to_string();
+        let b_addr = bob.readable().to_string();
+
+        // Alice never met Bob. Some untrusted party handed her this hex.
+        let handed_over = hex::encode(bob.public_key().serialize_compressed());
+        let bob_pk = verified_peer_pubkey(&handed_over, &b_addr)
+            .expect("it derives to Bob's address, so it is Bob's key");
+
+        let binding = EnvelopeBinding {
+            id: "first-contact",
+            from: &a_addr,
+            to: &b_addr,
+            v: MESSENGER_CRYPTO_V2,
+        };
+        let (nonce, ciphertext) = encrypt_body_v2(
+            &alice,
+            &a_addr,
+            &b_addr,
+            &bob_pk,
+            "the opening message",
+            "2026-01-01T00:00:00Z",
+            &binding,
+        )
+        .unwrap();
+
+        // Bob reads it.
+        assert_eq!(
+            decrypt_body(
+                &bob,
+                &b_addr,
+                &a_addr,
+                Some(&alice.public_key().serialize_compressed()),
+                &nonce,
+                &ciphertext,
+                &binding
+            )
+            .unwrap()
+            .body,
+            "the opening message"
+        );
+
+        // The party that handed the key over cannot, with its own key or with
+        // the v1 key it derives from the two addresses on the envelope.
+        assert!(
+            decrypt_body(
+                &operator,
+                &b_addr,
+                &a_addr,
+                Some(&alice.public_key().serialize_compressed()),
+                &nonce,
+                &ciphertext,
+                &binding
+            )
+            .is_err()
+        );
+        assert!(
+            decrypt_body(
+                &operator,
+                &a_addr,
+                &b_addr,
+                None,
+                &nonce,
+                &ciphertext,
+                &EnvelopeBinding {
+                    v: MESSENGER_CRYPTO_V1,
+                    ..binding
+                }
+            )
+            .is_err(),
+            "the address-derived key opened a message sealed to a verified peer key"
+        );
     }
 
     #[test]

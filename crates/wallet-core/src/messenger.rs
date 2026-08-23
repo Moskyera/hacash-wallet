@@ -1,6 +1,7 @@
 //! Encrypted wallet-to-wallet chat via DUST Whisper relay + encrypted local history.
 
 use std::fs;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use dust_whisper::protocol::{MessengerAckRequest, MessengerEnvelope, MessengerInboxRequest};
@@ -14,7 +15,7 @@ use crate::error::{WalletError, WalletResult};
 use crate::messenger_crypto::{
     EnvelopeBinding, MESSENGER_CRYPTO_V1, MESSENGER_CRYPTO_V2, decrypt_body, decrypt_store,
     encrypt_body_v1, encrypt_body_v2, encrypt_store, parse_pubkey_hex, pubkey_hex, sign_inbox_auth,
-    storage_key_from_secret, verify_pubkey_address,
+    storage_key_from_secret, verified_peer_pubkey,
 };
 use crate::paths::{messenger_path, secure_write};
 
@@ -34,6 +35,24 @@ pub const MAX_MESSAGE_BODY_BYTES: usize = 4096;
 /// inbox cap already had to be talked out of. Messages the store has no room for
 /// are left on the relay, and the poll says so.
 const MAX_STORED_MESSAGES: usize = 10_000;
+/// The whole of what a peer-key lookup may spend before the send goes ahead
+/// without one.
+///
+/// The lookup runs in front of a person pressing Send, and it runs on exactly
+/// the case this wallet cannot avoid: a first message, where nothing is known
+/// about the peer and nothing is learned if the answer does not come. Left on
+/// the shared client's 20 second per-request budget, three relays that accept a
+/// connection and never reply cost a minute, on that message and on every one
+/// after it until the peer writes back. Running out here is not a failure: it
+/// is the v1 fallback the sender was on before this existed, marked not sealed.
+const PEER_KEY_LOOKUP_BUDGET: Duration = Duration::from_secs(6);
+/// The most any one relay may take to answer the lookup.
+///
+/// A directory answer is a hash lookup and 66 characters of hex. A relay that
+/// cannot produce that quickly is not going to produce it usefully, and one
+/// slow or deliberately stalling entry in a list must not eat the budget the
+/// rest of the list needs.
+const PEER_KEY_RELAY_TIMEOUT: Duration = Duration::from_secs(3);
 /// How much of a message the conversation list is given for its preview line.
 ///
 /// Both shells render `last_message` straight into the thread row, so without
@@ -96,7 +115,17 @@ impl ChatMessage {
 /// What the screen is allowed to say about one conversation's privacy.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessengerPeerSecurity {
-    /// This wallet holds a verified key for the peer, so the next send is v2.
+    /// This wallet already holds a verified key for the peer, so the next send
+    /// is v2 without asking anybody anything.
+    ///
+    /// `false` no longer means the next send cannot be sealed: it means this
+    /// wallet holds nothing yet, and `messenger_send` will ask the configured
+    /// relays for a key and check it against the peer's own address before
+    /// using it (`lookup_peer_key`). This is read without touching the network,
+    /// so it cannot say how that will go. It errs to `false`, which is the
+    /// direction that cannot turn into a claim the crypto did not make; the
+    /// per-message `sealed` flag is what records what actually happened, and it
+    /// is set from the version that was really used.
     pub sends_sealed: bool,
     /// Messages already in this thread that are not known to have been sealed.
     pub unsealed_messages: u32,
@@ -156,10 +185,18 @@ pub struct ChatThread {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct MessengerStore {
     messages: Vec<ChatMessage>,
-    /// Peer address -> compressed secp256k1 pubkey hex, learned from inbound
-    /// envelopes and kept only after the key derives back to that address.
-    /// Without it a send has nothing to seal against and falls back to v1,
-    /// whose key is the two public addresses and therefore no secret at all.
+    /// Peer address -> compressed secp256k1 pubkey hex, kept only after the key
+    /// derives back to that address. Without it a send has nothing to seal
+    /// against and falls back to v1, whose key is the two public addresses and
+    /// therefore no secret at all.
+    ///
+    /// Two things fill this in, and they are held to the same check. An inbound
+    /// envelope addressed to this wallet carries its sender's key
+    /// (`learn_peer_key` in the poll), and a relay asked before a send can serve
+    /// the last key it saw for an address (`lookup_peer_key`). Neither source is
+    /// trusted: an address is the hash of its key, so a key that derives to the
+    /// address is that address's key no matter who handed it over, and one that
+    /// does not is discarded.
     #[serde(default)]
     peer_keys: std::collections::BTreeMap<String, String>,
 }
@@ -296,12 +333,9 @@ impl MessengerStore {
     /// holder of the matching secret can open the message. Supplying a *wrong*
     /// key is what this rejects. Returns true when the stored key changed.
     fn learn_peer_key(&mut self, peer: &str, pubkey_hex_str: &str) -> bool {
-        let Ok(parsed) = parse_pubkey_hex(pubkey_hex_str) else {
+        let Some(parsed) = verified_peer_pubkey(pubkey_hex_str, peer) else {
             return false;
         };
-        if !verify_pubkey_address(&parsed, peer) {
-            return false;
-        }
         let normalized = hex::encode(parsed);
         if self.peer_keys.get(peer) == Some(&normalized) {
             return false;
@@ -310,10 +344,11 @@ impl MessengerStore {
         true
     }
 
+    /// Re-checked on the way out, not only on the way in. A store file is a
+    /// file on a disk; the derivation is cheap and the guarantee is that
+    /// nothing is ever sealed to a key this wallet has not just verified.
     fn peer_key(&self, peer: &str) -> Option<[u8; 33]> {
-        let stored = self.peer_keys.get(peer)?;
-        let parsed = parse_pubkey_hex(stored).ok()?;
-        verify_pubkey_address(&parsed, peer).then_some(parsed)
+        verified_peer_pubkey(self.peer_keys.get(peer)?, peer)
     }
 }
 
@@ -373,6 +408,99 @@ fn encrypt_for_send(
             Some(pubkey_hex(ctx.account)),
         ))
     }
+}
+
+/// Ask the configured relays for a key for `peer`, and verify every answer.
+///
+/// # The gap this closes
+///
+/// Until the other person had written back, a sender held no key of theirs, so
+/// `encrypt_for_send` fell back to v1, whose key is `SHA256(domain || the two
+/// addresses)` and both addresses are printed in clear on the envelope. The
+/// relay operator has both. That made the FIRST message of every conversation
+/// readable by whoever runs the relay, and since no screen offers a way to
+/// supply a correspondent's key in advance, that is how every conversation
+/// started.
+///
+/// # Why asking the relay is not trusting it
+///
+/// Every envelope already carries `from_pubkey`, so a relay has seen the public
+/// key of everyone who has sent through it, and it can serve the last one it
+/// saw for an address. It is not believed. `verified_peer_pubkey` re-derives
+/// the address from whatever comes back and throws it away unless it matches
+/// the address that was asked about, and a Hacash address IS the hash of its
+/// public key, so a key that passes that check is that address's key. A hostile
+/// relay's only moves are to answer nothing, or to answer something that fails
+/// the check. Both return `None` here, which is exactly "this wallet holds no
+/// key", which is where the sender was before this function existed: v1, and a
+/// screen that says the message is not sealed.
+///
+/// # What it costs, in time
+///
+/// One unauthenticated request per configured relay, and only on a send to a
+/// peer this wallet holds no key for. A relay that is down, slow or hostile
+/// costs a failed request and nothing else: every arm here falls through to the
+/// next relay and then to `None`.
+///
+/// The time that costs is bounded here rather than inherited. On the shared
+/// client's 20 second per-request budget, three relays that accept a connection
+/// and never answer put a full minute in front of a person pressing Send, and
+/// because a lookup that finds nothing writes nothing down, that minute is paid
+/// again on the next message and the one after. So the whole lookup gets
+/// `PEER_KEY_LOOKUP_BUDGET`, each relay gets at most
+/// `PEER_KEY_RELAY_TIMEOUT` of it, and what is left over is what the next relay
+/// may spend. Running out of budget is the same outcome as a relay with no key:
+/// v1, and a screen that says so.
+///
+/// # What it costs, in metadata
+///
+/// This asks every configured relay until one answers with a key that checks
+/// out, while the send itself stops at the first relay that accepts the
+/// envelope. So a relay that never carries the message can still be told the
+/// recipient's address. That is a real disclosure to a party outside the
+/// delivery path, it is stated on both shells' banner and in section 6.1 of
+/// docs/RUNNING-A-RELAY.md, and it is the price of sealing an opening message
+/// at all: the wallet cannot know which relay holds the key without asking, and
+/// the alternative is the v1 fallback, in which the operator reads the message
+/// itself and learns the same address from the envelope a moment later.
+///
+/// It is kept as small as it can be. The question is a POST, so the address
+/// does not land in an access log, and the loop stops at the first relay whose
+/// answer survives checking rather than polling them all.
+async fn lookup_peer_key(
+    http: &reqwest::Client,
+    relay_urls: &[String],
+    peer: &str,
+) -> Option<[u8; 33]> {
+    let deadline = Instant::now() + PEER_KEY_LOOKUP_BUDGET;
+    for url in relay_urls {
+        let u = url.trim();
+        if u.is_empty() {
+            continue;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            // The budget is spent. Stop asking rather than let a stalled relay
+            // list hold a send open; this is the same outcome as no answer.
+            break;
+        }
+        let budget = left.min(PEER_KEY_RELAY_TIMEOUT);
+        let claimed =
+            match dust_whisper::messenger_client::fetch_peer_pubkey(http, u, peer, budget).await {
+                Ok(Some(claimed)) => claimed,
+                // No key, no answer at all, or no answer in time. All are "ask
+                // the next one", and if there is no next one, all are the
+                // honest v1 fallback.
+                Ok(None) | Err(_) => continue,
+            };
+        // The check that makes the whole thing safe. A wrong answer is treated
+        // as no answer, and the next relay is asked, rather than the send being
+        // failed or - far worse - the answer being used.
+        if let Some(verified) = verified_peer_pubkey(&claimed, peer) {
+            return Some(verified);
+        }
+    }
+    None
 }
 
 /// The recipient of a message, checked against what can actually collect one.
@@ -449,10 +577,34 @@ pub async fn messenger_send(
              was sent. Nothing here deletes messages for you"
         )));
     }
-    let peer_pk = match peer_pubkey_hex {
-        Some(hex_str) => Some(parse_pubkey_hex(hex_str)?),
+    let mut peer_pk = match peer_pubkey_hex {
+        // A key handed in by a caller is checked against the address here, the
+        // same way a relay's answer is, rather than being parsed and left for
+        // `encrypt_body_v2` to refuse further down. No shipped screen passes
+        // this yet; when one does, the rule that nothing is sealed to an
+        // unverified key is already enforced at the point the key enters.
+        Some(hex_str) => Some(verified_peer_pubkey(hex_str, peer).ok_or_else(|| {
+            WalletError::Other(
+                "that public key does not belong to this address, so nothing was sent. A Hacash \
+                 address is the hash of its own public key, and this one does not hash to it"
+                    .into(),
+            )
+        })?),
         None => store.peer_key(peer),
     };
+    // Nothing of theirs on hand, which used to mean the opening message of the
+    // conversation travelled v1 and the relay operator read it. Ask the relays
+    // for the key they have already seen this address send with, and use it
+    // only if it derives back to this address. See `lookup_peer_key`.
+    if peer_pk.is_none()
+        && let Some(found) = lookup_peer_key(http, relay_urls, peer).await
+    {
+        // Kept, so the screen's banner catches up with what the send actually
+        // did and the next message does not ask again. `learn_peer_key`
+        // verifies once more before it writes anything down.
+        store.learn_peer_key(peer, &hex::encode(found));
+        peer_pk = Some(found);
+    }
     let (crypto_v, nonce, ciphertext, from_pubkey) =
         encrypt_for_send(&ctx, peer, trimmed, &sent_at, &id, peer_pk.as_ref())?;
 
@@ -1831,5 +1983,115 @@ mod tests {
             Some(false),
             "a v1 message is not sealed to the peer's key, and the record has to say so"
         );
+    }
+
+    /// A relay list that never answers must not hold a person on Send.
+    ///
+    /// The lookup runs before the message moves and only on first contact,
+    /// which is exactly the case where nothing is learned if it fails, so the
+    /// wait is paid again on the next message and the one after. On the shared
+    /// client's 20 second per-request budget, three relays that accept the
+    /// connection and go quiet measured 60.0 seconds in review. The budget here
+    /// is the whole lookup's, not one relay's, so the third relay is not even
+    /// asked once the first two have spent it.
+    #[tokio::test]
+    async fn a_relay_list_that_never_answers_cannot_hold_a_send_open() {
+        use axum::Router;
+        use axum::routing::any;
+        use std::sync::{Arc, Mutex};
+
+        let asked = Arc::new(Mutex::new(0usize));
+        let counter = asked.clone();
+        let app = Router::new().fallback(any(move || {
+            let counter = counter.clone();
+            async move {
+                *counter.lock().unwrap() += 1;
+                tokio::time::sleep(Duration::from_secs(120)).await;
+                "{}"
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let relay = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}");
+        let relays = vec![url.clone(), url.clone(), url.clone()];
+
+        let bob = keyed_account("b0");
+        let http = reqwest::Client::new();
+        let started = Instant::now();
+        let found = lookup_peer_key(&http, &relays, &bob.address()).await;
+        let took = started.elapsed();
+        relay.abort();
+
+        assert!(
+            found.is_none(),
+            "a relay that never answered was somehow turned into a key"
+        );
+        assert!(
+            took < PEER_KEY_LOOKUP_BUDGET + PEER_KEY_RELAY_TIMEOUT,
+            "three silent relays held the send for {took:?}, against a budget of \
+             {PEER_KEY_LOOKUP_BUDGET:?}"
+        );
+        let asked = *asked.lock().unwrap();
+        assert!(
+            asked < 3,
+            "the budget was spent and the last relay was asked anyway ({asked} of 3 asked)"
+        );
+    }
+
+    /// A key handed to `messenger_send` by a caller is checked against the
+    /// address before anything is sealed or sent, not left for the encryption
+    /// to refuse further down.
+    ///
+    /// No shipped screen passes `peer_pubkey_hex` yet. This pins the rule at
+    /// the point the key enters, so wiring a screen to it later cannot quietly
+    /// become a way in for an unverified key.
+    #[tokio::test]
+    async fn a_caller_supplied_key_for_the_wrong_address_is_refused_before_anything_is_sent() {
+        let _iso = IsolatedWalletData::new();
+        let alice = keyed_account("a1");
+        let bob = keyed_account("b0");
+        let mallory = keyed_account("cc");
+        let http = reqwest::Client::new();
+
+        // Mallory's real, on-curve, perfectly valid key - for the wrong address.
+        let err = messenger_send(
+            &http,
+            &alice,
+            &alice.address(),
+            &bob.address(),
+            "sealed to whom?",
+            &[],
+            Some(&pubkey_hex(mallory.inner())),
+        )
+        .await
+        .expect_err("a key that does not derive to the recipient was accepted");
+        assert!(
+            err.to_string().contains("does not belong to this address"),
+            "refused for the wrong reason: {err}"
+        );
+        assert!(
+            messenger_messages(&alice, &alice.address(), &bob.address())
+                .unwrap()
+                .is_empty(),
+            "a message was stored despite the send being refused"
+        );
+
+        // The honest control on the same path: Bob's own key is accepted and
+        // the message is sealed.
+        let sent = messenger_send(
+            &http,
+            &alice,
+            &alice.address(),
+            &bob.address(),
+            "sealed to Bob",
+            &[],
+            Some(&pubkey_hex(bob.inner())),
+        )
+        .await
+        .expect("the recipient's own key must be usable");
+        assert_eq!(sent.sealed, Some(true));
     }
 }

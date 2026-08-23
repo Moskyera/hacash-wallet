@@ -65,8 +65,9 @@ than the table row.
 
 The mailbox is a `HashMap` in process memory
 (`crates/dust-whisper/src/messenger_relay.rs`). Nothing is written to disk, so
-what bounds your memory is what the code caps. Every one of these is a refusal,
-never a deletion: a relay with no room says so and keeps what it already holds.
+what bounds your memory is what the code caps. Every one of these is a refusal
+rather than a deletion, with one exception named as such below: a relay with no
+room for mail says so and keeps what it already holds.
 
 - **200 undelivered envelopes per recipient address** (`MAX_PER_RECIPIENT`).
 - **20 of those per sender** (`MAX_PER_SENDER`). What that does and does not
@@ -85,6 +86,20 @@ never a deletion: a relay with no room says so and keeps what it already holds.
 - **512 KiB per request** across the whole router (`MAX_SUBMIT_BODY_BYTES`,
   `crates/dust-whisper/src/relay.rs`). That one is sized for a large
   transaction on the submit path, and is no longer what bounds a chat envelope.
+- **20,000 addresses in the key directory** (`MAX_DIRECTORY_ENTRIES`), each one
+  an address and a 66 character key, expiring **30 days** after that address was
+  last seen sending (`DIRECTORY_TTL`). Call it 3 MiB full. **This is the one
+  that evicts rather than refuses**, and it is the exception to the sentence
+  above: a full table drops its stalest entries in a batch to make room for the
+  address that just sent. That is deliberate and it is safe for a reason worth
+  stating, because it is not the reason the mail caps refuse. Dropping a
+  directory entry loses nothing anybody is owed: the relay then answers "no key"
+  for that address, which is the answer it gave before the table existed, and
+  the wallet that asked falls back to v1 and tells its user the message is not
+  sealed. There is no state here whose loss can be turned into a false claim,
+  which is exactly what makes eviction the right choice here and the wrong
+  choice for stored mail. What the directory is for is section 6.2; what it
+  costs you to run is section 8.
 
 **So the messenger side of the process cannot exceed about 48 MiB of stored
 mail** plus a few megabytes of overhead. Real chat is nowhere near that: a chat
@@ -121,6 +136,14 @@ silently, exactly as in the restart transcript in section 5.
 touched (`push`, `peek` and `ack` each prune the one list they are working on).
 An inbox nobody ever writes to or reads again keeps its bytes until the process
 restarts, and it counts against `MAX_TOTAL_BYTES` until then.
+
+**The directory's 30 days is lazy in the same way, and deliberately so.** An
+entry past its TTL is never answered with, from the moment it expires: the
+lookup checks the one entry's age and refuses it, so what you serve is correct
+to the second. The storage it occupies is reclaimed when the table next fills,
+not on a timer, because sweeping the whole table is work and the only request
+that could trigger it is the unauthenticated one. That is the trade: at most
+20,000 entries of memory, and never an answer you should not have given.
 
 So: set a memory limit knowing what it costs when it fires, watch the process
 size rather than assuming it, and treat restarting as normal maintenance rather
@@ -520,6 +543,24 @@ more bytes on your wire, measured rather than estimated. Bodies are padded to a
 bucket rather than a character count. That is a smaller leak, not no leak, and it
 does nothing at all about the rest of this section.
 
+**You also see who somebody is about to write to, and this reaches further than
+the mail does.** Before a wallet sends a first message it asks for a key for the
+recipient (section 6.2), and it asks the relays it is configured with one after
+another until an answer survives checking. The send itself stops at the first
+relay that accepts the envelope. Those are not the same list. So if you are
+second in somebody's relay list, you can be told "this person is about to write
+to address B" for a conversation whose envelopes you will never carry and whose
+existence you would otherwise have no way to know about.
+
+The wallet says this to its user in the same breath as the benefit
+(`apps/desktop/src/messengerPrivacy.ts` and the mobile copy of it, held by the
+`names the cost of asking, not only the benefit` case in
+`messengerPrivacy.test.ts`), because it is not a cost the sender pays alone. The
+question is a POST rather than a GET, so the address does not land in your access
+log by default (`the_address_asked_about_is_never_put_in_the_url`,
+`crates/dust-whisper/tests/messenger_pubkey_directory.rs`). What you do with it
+after that is section 6.4.
+
 That is the social graph. It is the part of a private messenger that is usually
 worth more than the messages.
 
@@ -540,37 +581,109 @@ message that passes through, with no key material and no privileged position
 beyond having the envelope.** You do not need the code; you need the two
 addresses that are printed on the outside.
 
-A wallet sends v1 when it has not yet learned the other party's public key, which
-is the case until that person has written back. The wallet says exactly this to
-its user: "the relay operator can read what you send here. That changes once they
-write to you" (`apps/desktop/src/messengerPrivacy.ts`). It also counts the
-messages in a thread that are not known to be sealed and tells the user to treat
-those as readable by you.
+A wallet sends v1 when it holds no public key for the other party and cannot get
+one it is able to check. Until recently that was every opening message without
+exception, because a wallet only ever learned a contact's key from an envelope
+that contact had already sent it (`store.learn_peer_key`,
+`crates/wallet-core/src/messenger.rs`) and no screen offered another way to supply
+one. **The first message of every conversation on your relay was readable by
+you.**
 
-So the honest statement of your position is: **everything one person writes to
-another before that other has written back is readable by you.** The wallet
-learns a contact's public key from an envelope that contact sent
-(`store.learn_peer_key`, `crates/wallet-core/src/messenger.rs`, from an
-envelope this wallet collected that was addressed to it), and the Messages screen offers no other way to
-supply one, so that opening stretch is not a rare case. It is how every new
-conversation starts.
+That is no longer automatic, and the reason is worth understanding before you
+decide how you feel about the endpoint it added.
 
-**And the end of that stretch is in your hands, which is the part that is easy to
-miss.** The wallet switches to sealed bodies only once it holds the peer's key
-(`encrypt_for_send`, `crates/wallet-core/src/messenger.rs`), and it can only get that key
-from an envelope you delivered. An operator who quietly drops one side's mail
-keeps both sides sending v1 forever, and both wallets keep reporting a normal,
-successful send: a send succeeds as soon as any relay accepts the envelope
-(`messenger_send`), and there is no delivery receipt anywhere in the poll path
-(`messenger_poll_inbox`). The user's screen reads "Nothing they have
-sent has reached this wallet" (`apps/desktop/src/messengerPrivacy.ts:36`), which
-a person reads as "my friend has not written back", not as "my relay is holding
-their mail".
+**Your relay now serves the last public key it saw for an address**
+(`MESSENGER_PUBKEY_PATH`, `pubkey_handler`,
+`crates/dust-whisper/src/messenger_relay.rs`). It is a POST carrying the address
+in a JSON body, deliberately not a GET carrying it in a query string, so that
+asking does not write the address into your access log or into the log of any
+proxy you put in front of this. It is not being given anything new to hold:
+`from_pubkey` rides in clear on every envelope you have ever accepted and you
+already check it against `from` before storing the envelope. The directory is
+your relay writing that down for up to thirty days instead of discarding it when
+the envelope is collected, capped at 20,000 addresses (section 2, which also says
+what happens when that cap is reached and why eviction is right there and wrong
+for mail).
+
+**The wallet asking does not trust your answer, and this is the whole point.** A
+Hacash account address is `base58check(0 || RIPEMD160(SHA256(pubkey)))`
+(`sys::Account::get_address_by_public_key`), so a public key that derives to
+address X is X's key: producing a different one is a second preimage on that
+hash, not something an operator can decide to do. Before sealing anything, the
+sending wallet re-derives the address from whatever you served and discards it
+unless it matches the address it asked about (`verified_peer_pubkey`,
+`crates/wallet-core/src/messenger_crypto.rs`, and `lookup_peer_key`,
+`crates/wallet-core/src/messenger.rs`).
+
+So there are exactly two things you can do to a wallet that asks, and neither of
+them helps you:
+
+- **Answer nothing.** The wallet falls back to v1 and marks the message not
+  sealed. That is where every sender already was.
+- **Answer with a key of your own.** It fails the derivation check, is treated as
+  no answer at all, and the wallet falls back to v1 and marks the message not
+  sealed. It never seals to a key it has not itself verified.
+
+Both are held by
+`crates/wallet-tauri-common/tests/messenger_two_wallets_one_relay.rs`, which runs
+a recorder in the position you occupy: it forges a directory answer, watches the
+send fall back, and reads that message. It also watches the honest case and
+cannot read that one.
+
+There is a third thing, and it is time rather than secrets: **answer very
+slowly.** A relay that accepts the connection and never replies used to cost the
+sender the shared client's twenty second budget, and three of them a full minute,
+in front of a person who had pressed Send, on the first message of every
+conversation and on every message after it until the other side wrote back,
+because a lookup that finds nothing writes nothing down. The lookup now owns a
+six second budget for the whole relay list and gives no single relay more than
+three seconds of it, and running out is the same outcome as having no key:
+v1, sent, marked not sealed (`PEER_KEY_LOOKUP_BUDGET`,
+`crates/wallet-core/src/messenger.rs`, held by
+`a_relay_list_that_never_answers_cannot_hold_a_send_open`). Your relay being slow
+still costs your users a wait; it can no longer cost them a minute of one.
+
+**What this costs you to serve, and it is not nothing.** Answering "do you have a
+key for this address" tells the asker that the address has sent through your
+relay inside the retention window. You already knew that; the asker did not. The
+lookup is unauthenticated, because a wallet opening a first conversation is by
+definition a stranger to the address it is asking about, so anyone can probe any
+address one at a time and learn whether it is one of your users. The key itself
+is not the secret being given away: it is on the chain the moment that account
+signs anything. The association between an address and your machine is.
+
+**And what it tells you, which is the other half and belongs to somebody else.**
+Being asked is itself a fact: it tells you that whoever asked is about to write
+to that address, and because a wallet asks every relay it is configured with
+while sending to only the first that accepts, you can learn that about
+conversations you will never carry. That is in section 6.1 with the rest of the
+social graph, and it is on the sender's screen. It is worth reading twice before
+you decide your logging policy, because it is the one thing here that a person
+who is not your user pays for.
+
+Weigh it against what it replaces, which is the honest comparison: without it,
+the opening message of every conversation on your relay arrives in a form you can
+read in full, and you learn the same address anyway from the envelope that
+follows a second later. Requiring the asker to authenticate would not fix the
+probing, because keys are free, and it would hand you a record of who asked about
+whom. If you would rather not run the directory at all, an operator who does not
+serve that endpoint costs their users exactly the old behaviour and nothing more.
+
+**The end of the unsealed stretch is still partly in your hands.** A wallet that
+holds no key and gets no usable answer from any relay keeps sending v1, and both
+wallets keep reporting a normal, successful send: a send succeeds as soon as any
+relay accepts the envelope (`messenger_send`), and there is no delivery receipt
+anywhere in the poll path (`messenger_poll_inbox`). An operator who serves an
+empty directory and quietly drops one side's mail keeps both sides on v1 forever.
+The user's screen says the wallet holds no key for this contact and that the
+operator can read what they send if no key survives checking
+(`apps/desktop/src/messengerPrivacy.ts`), which a person may read as "my friend
+has not written back" rather than "my relay is withholding".
 
 Do not write this off as a thing you would never do. It is the reason the
-sentence above stops where it does. "Everything after it is closed to you" would
-be a claim about your own future conduct, not about the code, and this document
-does not make those.
+sentences above stop where they do. "Everything after the first message is closed
+to you" would be a claim about your own future conduct, not about the code, and
+this document does not make those.
 
 ### 6.3 The inbox authentication does not apply to you
 
@@ -635,6 +748,17 @@ That line is a person's address and the moment they checked their mail. Debug
 logging is for debugging, and a relay left at `debug` is keeping records its
 users would not expect it to keep.
 
+**The key lookup is a POST for exactly this reason.** It carries the address it
+asks about in a JSON body, not a query string, so it does not appear in that
+line or in your proxy's access log by default
+(`the_address_asked_about_is_never_put_in_the_url`,
+`crates/dust-whisper/tests/messenger_pubkey_directory.rs`). That matters more
+than it does for the challenge, because the challenge is asked by the owner of
+the mailbox about themselves, while the lookup is asked by a stranger about
+somebody else, and it reaches relays that never carry the message (section 6.1).
+It is not a defence against you. Body logging is a setting, and if you turn it
+on you are keeping that record too.
+
 ### 6.5 You decrypt transactions
 
 Separate from chat, and easy to forget because it is the same process. The
@@ -651,11 +775,16 @@ else.
 
 ### 6.6 In one sentence
 
-**Running a relay means holding other people's metadata, and the early part of
-their conversations in plaintext.** If that is not a thing you want to hold,
-run a relay for yourself and people you already know, or do not run one. Both
-are respectable. Publishing a relay to strangers while telling them it is
-private is not.
+**Running a relay means holding other people's metadata, answering whether a
+given address is one of your users, being told who somebody is about to write
+to even when you will not carry it, and reading in plaintext every message
+written before either party could get a key for the other.** That last group is
+smaller than it was, because your relay can now hand a sender the key it already
+saw and the sender checks it against the address rather than trusting you (6.2).
+It is not empty, and the metadata is not affected at all. If that is not a thing
+you want to hold, run a relay for yourself and people you already know, or do
+not run one. Both are respectable. Publishing a relay to strangers while telling
+them it is private is not.
 
 ---
 
@@ -778,6 +907,26 @@ they are carrying:
   nonce to everybody. A full table now evicts its own oldest entry instead
   (`a_challenge_flood_cannot_lock_an_owner_out_of_their_own_inbox`).
 - **Inventing recipients parked unbounded memory on your machine.** Section 2.
+
+**The key directory, which is new and which you should size up yourself.** It
+adds one table and one unauthenticated endpoint, and both are levers:
+
+- **Flooding it out.** Keys are free, so a flood of throwaway senders can push
+  honest entries out of the 20,000 slots. It costs the flooder one signed,
+  accepted envelope per entry, which is the same price as filling an inbox, and
+  it buys strictly less: an evicted entry means you answer "no key", the asking
+  wallet sends v1 and says on its own screen that the message is not sealed.
+  Nothing is deleted that anyone was promised, and nothing false is ever
+  produced. Compare that to the mail caps, where eviction was the bug.
+- **Probing it.** The lookup needs no key and no signature, so anyone who can
+  reach the port can ask about any address as fast as your network allows and
+  learn which addresses use your relay. Answering costs one hash lookup and no
+  walk of the table on purpose (`sender_key`), and expiry and eviction are both
+  done on the write path, which costs a signed envelope. So the cheap question
+  stays cheap for you as well as for them. What it gives away is section 6.2.
+- **What neither of them can do.** Nothing an asker sends changes what you hold,
+  and nothing you answer changes what a wallet seals to, because the wallet
+  re-derives the address from your answer before it uses it (section 6.2).
 
 **What is still not there.** Nothing rate limits by IP, and nothing
 authenticates who is allowed to use your relay. If you want either, it belongs in

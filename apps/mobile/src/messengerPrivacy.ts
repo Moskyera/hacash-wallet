@@ -25,6 +25,21 @@ export type PrivacyNotice = { text: string; tone: "ok" | "warn" };
  *
  * `null` in means the wallet was not asked or did not answer, and the screen
  * then says nothing rather than guessing.
+ *
+ * `sends_sealed: false` is a fact about what this wallet holds on disk, not a
+ * prediction. The first message of a conversation can now be sealed to a key
+ * fetched from a relay and checked against the recipient's own address
+ * (`lookup_peer_key`, crates/wallet-core/src/messenger.rs), so the banner in
+ * that state says what will be tried and what happens if it fails, and points
+ * at the per-message marker for what actually happened. It promises neither.
+ *
+ * It also names the cost of asking, because that cost is paid by the person
+ * reading the banner and not by them alone. The lookup walks every relay this
+ * wallet is configured with until one answers with a key that survives the
+ * check, while the send itself stops at the first relay that accepts the
+ * envelope. So a relay that never carries this message can still be told the
+ * recipient's address. Section 6.1 of docs/RUNNING-A-RELAY.md says the same
+ * thing from the operator's side.
  */
 export function privacyNotice(
   security: MessengerPeerSecurity | null | undefined,
@@ -33,7 +48,7 @@ export function privacyNotice(
   const unsealed = security.unsealed_messages ?? 0;
   if (!security.sends_sealed) {
     return {
-      text: "Not sealed to this contact yet. Nothing they have sent has reached this wallet, so it holds no key of theirs and the relay operator can read what you send here. That changes once they write to you.",
+      text: "Not sealed to this contact yet. Nothing they have sent has reached this wallet, so it holds no key of theirs. Before sending, this wallet asks the relays you have named whether they have seen a key for this address, and uses an answer only if that key proves it belongs to this address. Asking tells a relay who you are about to write to, including a relay that never carries the message. If no key survives the check, the relay operator can read what you send here. Either way the message is marked with which way it actually travelled.",
       tone: "warn",
     };
   }

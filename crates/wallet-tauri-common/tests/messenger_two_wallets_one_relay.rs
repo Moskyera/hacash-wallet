@@ -57,22 +57,40 @@
 //! nothing listens on, so any accidental node call fails loudly instead of
 //! reaching anybody.
 //!
-//! The first message of a conversation travels v1, and that is not an accident
-//! of this test: no shipped screen passes `peer_pubkey` to `messenger_send`, so
-//! a wallet has nothing to seal to until the peer has written to it once. The
-//! run below states that plainly rather than hiding it.
+//! # The first message
+//!
+//! The first message of a conversation used to travel v1 always: no shipped
+//! screen passes `peer_pubkey` to `messenger_send`, so a wallet had nothing to
+//! seal to until the peer had written to it once, and v1's key is a hash of the
+//! two addresses printed in clear on the envelope. The recorder in this file
+//! read Alice's opening message word for word, and that is still what section 6
+//! shows, because at that moment nothing anywhere held a key for Bob.
+//!
+//! Sections 8 to 11 are the case that changed. A relay has seen `from_pubkey`
+//! on every envelope ever posted through it, so it can serve the last public
+//! key it saw for an address, and a sender can check that answer before using
+//! it: a Hacash address is `base58check(0 || RIPEMD160(SHA256(pubkey)))`, so a
+//! key that derives to an address IS that address's key, and a relay cannot
+//! substitute another without a second preimage on that hash. Carol opens a
+//! conversation with Bob having never heard from him, seals it, and the
+//! recorder cannot read it. The two paths where no key survives checking are
+//! run beside it and both land exactly where every sender was before: v1, and a
+//! record that says the message is not sealed.
 
 #![cfg(feature = "desktop")]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use dust_whisper::protocol::{MESSENGER_SEND_PATH, MessengerEnvelope, MessengerSendRequest};
+use dust_whisper::protocol::{
+    MESSENGER_PUBKEY_PATH, MESSENGER_SEND_PATH, MessengerEnvelope, MessengerPubkeyResponse,
+    MessengerSendRequest,
+};
 use hacash_wallet_core::WalletService;
 use hacash_wallet_core::account::WalletAccount;
 use hacash_wallet_core::messenger_crypto::{
     EnvelopeBinding, MESSENGER_CRYPTO_V1, MESSENGER_CRYPTO_V2, decrypt_body, parse_pubkey_hex,
-    verify_pubkey_address,
+    pubkey_hex, verify_pubkey_address,
 };
 use serde_json::{Value, json};
 use tauri::test::MockRuntime;
@@ -81,10 +99,20 @@ use wallet_tauri_common::AppState;
 
 const PASSPHRASE_A: &str = "two wallets one relay alpha 4417";
 const PASSPHRASE_B: &str = "two wallets one relay bravo 9268";
+const PASSPHRASE_C: &str = "two wallets one relay charlie 3390";
+const PASSPHRASE_D: &str = "two wallets one relay delta 7715";
 
 const FIRST: &str = "A to B: first contact, and this one is not sealed yet.";
 const REPLY: &str = "B to A: got it. This reply is sealed to your key.";
 const SECOND: &str = "A to B: now I hold your key, so this one is sealed too.";
+/// Carol's opening message to Bob. Carol has never heard from Bob and holds no
+/// key of his, but the relay has seen Bob send, so this one can be sealed.
+const CAROL_FIRST: &str = "C to B: opening message, and the operator must not read this one.";
+/// Carol's opening message to Dave, who has never sent through this relay. The
+/// relay has no key for him, so this is the honest v1 fallback, unchanged.
+const CAROL_TO_DAVE: &str = "C to D: nobody has a key for Dave, so this one is readable.";
+/// Dave's opening message to Bob while the operator forges directory answers.
+const DAVE_UNDER_FORGERY: &str = "D to B: the relay lied about Bob's key, so this is readable.";
 
 // ---------------------------------------------------------------------------
 // One wallet's whole world.
@@ -217,20 +245,31 @@ fn set_relay(shell: &Shell, relay_url: &str, auto_start: bool) {
 // The relay operator's view of the wire.
 // ---------------------------------------------------------------------------
 
-/// Every envelope posted towards the relay, kept as posted.
+/// Every envelope posted towards the relay, kept as posted, plus the one lever
+/// a hostile operator has over the key directory.
 ///
 /// This is not more than a relay operator has. The relay is handed these
 /// bytes; it stores them; it hands them to whoever can sign for the recipient
 /// address. What an operator can do with them is the question this file
 /// answers below.
+///
+/// `forged_pubkey` is the hostile case for the directory added in act 8. The
+/// relay serves the last public key it saw for an address; an operator can
+/// serve anything at all instead, and this is how the run makes it do so.
 #[derive(Clone, Default)]
 struct OperatorView {
     envelopes: Arc<Mutex<Vec<MessengerEnvelope>>>,
+    forged_pubkey: Arc<Mutex<Option<String>>>,
 }
 
 impl OperatorView {
     fn recorded(&self) -> Vec<MessengerEnvelope> {
         self.envelopes.lock().expect("operator view").clone()
+    }
+
+    /// Answer every directory lookup with this key instead of the truth.
+    fn forge_directory(&self, pubkey_hex: Option<String>) {
+        *self.forged_pubkey.lock().expect("operator view") = pubkey_hex;
     }
 }
 
@@ -259,6 +298,28 @@ async fn tap(
             .lock()
             .expect("operator view")
             .push(sent.envelope);
+    }
+    // A hostile operator answering the key directory with a key of its own
+    // choosing. The request never reaches the relay behind it.
+    if parts.uri.path() == MESSENGER_PUBKEY_PATH {
+        let forged = state
+            .view
+            .forged_pubkey
+            .lock()
+            .expect("operator view")
+            .clone();
+        if let Some(pubkey) = forged {
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&MessengerPubkeyResponse {
+                        pubkey: Some(pubkey),
+                    })
+                    .expect("forged directory answer"),
+                ))
+                .expect("forged directory response");
+        }
     }
     let target = format!(
         "{}{}",
@@ -375,10 +436,21 @@ fn two_wallets_exchange_a_message_through_one_relay_and_still_have_it_after_a_co
     let operator_dir = tempfile::tempdir().expect("operator dir");
     let alice_dir = tempfile::tempdir().expect("alice dir");
     let bob_dir = tempfile::tempdir().expect("bob dir");
+    // Two more strangers, for the first-contact acts in sections 8 to 11.
+    let carol_dir = tempfile::tempdir().expect("carol dir");
+    let dave_dir = tempfile::tempdir().expect("dave dir");
     let operator_root = operator_dir.path().join("wallet-data");
     let alice_root = alice_dir.path().join("wallet-data");
     let bob_root = bob_dir.path().join("wallet-data");
-    for root in [&operator_root, &alice_root, &bob_root] {
+    let carol_root = carol_dir.path().join("wallet-data");
+    let dave_root = dave_dir.path().join("wallet-data");
+    for root in [
+        &operator_root,
+        &alice_root,
+        &bob_root,
+        &carol_root,
+        &dave_root,
+    ] {
         std::fs::create_dir_all(root).expect("wallet root");
     }
 
@@ -455,13 +527,15 @@ fn two_wallets_exchange_a_message_through_one_relay_and_still_have_it_after_a_co
     println!("body      {FIRST}");
     println!("delivered {}  sealed {}", sent["delivered"], sent["sealed"]);
     println!(
-        "not sealed, and that is the honest state of a first message: no shipped screen passes\n\
-         peer_pubkey, so Alice has nothing of Bob's to seal to until Bob has written to her."
+        "not sealed, and that is the honest state of THIS first message. Alice's wallet holds no\n\
+         key of Bob's, and it did ask the relay for one, but this relay has never seen Bob send:\n\
+         it has nothing to serve. Section 8 is the same opening move against a relay that has."
     );
     assert_eq!(
         sent["sealed"],
         json!(false),
-        "the first message cannot be sealed; nothing has taught Alice a key for Bob"
+        "nothing has taught Alice a key for Bob, and the relay has never seen Bob send either, \
+         so there is nothing to seal to and the record has to say so"
     );
 
     // -- 4. Bob polls, receives, and reads it. ------------------------------
@@ -595,11 +669,181 @@ fn two_wallets_exchange_a_message_through_one_relay_and_still_have_it_after_a_co
         "the reply and the second message travelled the ECDH path"
     );
     println!(
-        "The first message is the only one the operator can read. The reply and the message after\n\
-         it are ECDH to the recipient's own key, and the operator holds nothing that opens them."
+        "Alice's opening is the only one of these three the operator can read: nothing had ever\n\
+         taught her a key for Bob, and at that moment the relay had never seen Bob send either."
     );
 
-    // -- 7. Cold start. Close both wallets, open them from disk. -----------
+    // -- 8. A first message that IS sealed, without trusting the relay. -----
+    //
+    // The relay has now seen Bob send (his reply above), so it holds Bob's
+    // public key: every envelope carries `from_pubkey` and this one was signed
+    // by the key `from` derives from. Carol has never heard from Bob and holds
+    // nothing of his. She asks, checks the answer against Bob's address
+    // herself, and seals to it. The recorder below is the proof.
+    let carol = open_shell("Carol", &carol_root, &node_url);
+    let dave = open_shell("Dave", &dave_root, &node_url);
+    let carol_address = invoke(
+        &carol,
+        "wallet_create",
+        json!({ "passphrase": PASSPHRASE_C }),
+    )
+    .as_str()
+    .expect("carol address")
+    .to_string();
+    let dave_address = invoke(
+        &dave,
+        "wallet_create",
+        json!({ "passphrase": PASSPHRASE_D }),
+    )
+    .as_str()
+    .expect("dave address")
+    .to_string();
+    set_relay(&carol, &tap_url, false);
+    set_relay(&dave, &tap_url, false);
+
+    println!("\n== 8. A FIRST MESSAGE THAT IS SEALED ==");
+    println!("Carol {carol_address}");
+    println!("Dave  {dave_address}  (has never sent through this relay)");
+
+    // Before she writes: her wallet holds nothing of Bob's, and says so.
+    let carol_before = invoke(
+        &carol,
+        "messenger_peer_security",
+        json!({ "peer": bob_address }),
+    );
+    assert_eq!(
+        carol_before["sends_sealed"],
+        json!(false),
+        "Carol has never heard from Bob, so her wallet holds no key of his: {carol_before}"
+    );
+
+    let carol_opening = invoke(
+        &carol,
+        "messenger_send",
+        json!({ "peer": bob_address, "body": CAROL_FIRST }),
+    );
+    assert_eq!(carol_opening["delivered"], json!(true), "{carol_opening}");
+    assert_eq!(
+        carol_opening["sealed"],
+        json!(true),
+        "the relay had seen Bob send, and Carol checked the key it served against Bob's own \
+         address before using it, so her opening message must be sealed: {carol_opening}"
+    );
+
+    // And Bob really reads it, which is what proves the key she sealed to was
+    // his and not a shape that merely passed a check.
+    let bob_poll_three = invoke(&bob, "messenger_poll_inbox", json!({}));
+    assert_eq!(bob_poll_three["added"], json!(1), "{bob_poll_three}");
+    let bob_from_carol = invoke(&bob, "messenger_messages", json!({ "peer": carol_address }));
+    assert_eq!(
+        body_of(&bob_from_carol, 0),
+        CAROL_FIRST,
+        "Bob could not read the first message Carol sealed to him"
+    );
+    assert_eq!(bob_from_carol[0]["sealed"], json!(true), "{bob_from_carol}");
+    println!("Carol's opening to Bob: sealed {}", carol_opening["sealed"]);
+    println!("Bob reads it: {}", body_of(&bob_from_carol, 0));
+
+    // -- 9. The control: nobody has a key for Dave, so nothing changes. -----
+    //
+    // This is the path that had to survive untouched. Dave has never sent
+    // through this relay, so the directory has nothing for him, and Carol is
+    // exactly where every sender was before any of this: v1, and the record
+    // says the message is not sealed.
+    let carol_to_dave = invoke(
+        &carol,
+        "messenger_send",
+        json!({ "peer": dave_address, "body": CAROL_TO_DAVE }),
+    );
+    assert_eq!(carol_to_dave["delivered"], json!(true), "{carol_to_dave}");
+    assert_eq!(
+        carol_to_dave["sealed"],
+        json!(false),
+        "no relay has ever seen Dave send, so there is nothing to seal to and the record must \
+         say so rather than claiming otherwise: {carol_to_dave}"
+    );
+
+    // -- 10. The hostile relay: an answer that fails the check is no answer. -
+    //
+    // The operator now serves a key of its own for every directory lookup.
+    // Dave holds nothing of Bob's and asks. The key that comes back does not
+    // derive to Bob's address, so Dave's wallet discards it and falls straight
+    // through to v1. The one thing that must never happen is that it seals to
+    // a key it has not itself verified.
+    let operator_key = pubkey_hex(any_account().inner());
+    view.forge_directory(Some(operator_key.clone()));
+    let dave_to_bob = invoke(
+        &dave,
+        "messenger_send",
+        json!({ "peer": bob_address, "body": DAVE_UNDER_FORGERY }),
+    );
+    view.forge_directory(None);
+    assert_eq!(dave_to_bob["delivered"], json!(true), "{dave_to_bob}");
+    assert_eq!(
+        dave_to_bob["sealed"],
+        json!(false),
+        "the relay answered with a key that is not Bob's, and the only acceptable outcome is the \
+         fallback that already existed: {dave_to_bob}"
+    );
+    let dave_after = invoke(
+        &dave,
+        "messenger_peer_security",
+        json!({ "peer": bob_address }),
+    );
+    assert_eq!(
+        dave_after["sends_sealed"],
+        json!(false),
+        "a key that failed the address check was written into Dave's store: {dave_after}"
+    );
+
+    // -- 11. All three read off the wire, not off a flag. -------------------
+    let wire = view.recorded();
+    let since = &wire[3..];
+    assert_eq!(
+        since.len(),
+        3,
+        "three more envelopes crossed the wire, not {}",
+        since.len()
+    );
+    println!("\n== 11. WHAT THE OPERATOR HOLDS, SECOND PASS ==");
+    let mut readable = Vec::new();
+    for envelope in since {
+        let opened = operator_attempt(envelope);
+        println!(
+            "v{} {} -> {}  address-derived key opens it: {}",
+            envelope.v,
+            &envelope.from[..8],
+            &envelope.to[..8],
+            match &opened {
+                Some(text) => format!("YES, and it reads {text:?}"),
+                None => "NO".to_string(),
+            }
+        );
+        if let Some(text) = opened {
+            readable.push(text);
+        }
+    }
+    assert_eq!(
+        since[0].v, MESSENGER_CRYPTO_V2,
+        "Carol's opening message to Bob had to travel the ECDH path"
+    );
+    assert!(
+        !readable.contains(&CAROL_FIRST.to_string()),
+        "the operator read the FIRST message of Carol's conversation with Bob: {readable:?}"
+    );
+    assert_eq!(
+        readable,
+        vec![CAROL_TO_DAVE.to_string(), DAVE_UNDER_FORGERY.to_string()],
+        "exactly the two messages with no verified key behind them are readable, and in order"
+    );
+    println!(
+        "Carol's opening to Bob is closed to the operator. The two the operator can still read are\n\
+         the two where no key survived checking: nobody had ever seen Dave send, and the forged\n\
+         answer for Bob did not derive to Bob's address. Both land on v1, which is where every\n\
+         sender was before, and both say so on screen."
+    );
+
+    // -- 12. Cold start. Close both wallets, open them from disk. ----------
     drop(alice);
     drop(bob);
     let alice = open_shell("Alice", &alice_root, &node_url);
@@ -647,7 +891,7 @@ fn two_wallets_exchange_a_message_through_one_relay_and_still_have_it_after_a_co
         "exactly the first message was not sealed: {alice_security}"
     );
 
-    println!("\n== 7. COLD START ==");
+    println!("\n== 12. COLD START ==");
     println!("both wallets dropped and reopened from disk, unlocked with their passphrases");
     println!(
         "Alice sees {} messages",

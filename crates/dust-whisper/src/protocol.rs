@@ -7,6 +7,7 @@ pub const MESSENGER_SEND_PATH: &str = "/whisper/v1/messenger/send";
 pub const MESSENGER_INBOX_PATH: &str = "/whisper/v1/messenger/inbox";
 pub const MESSENGER_CHALLENGE_PATH: &str = "/whisper/v1/messenger/challenge";
 pub const MESSENGER_ACK_PATH: &str = "/whisper/v1/messenger/ack";
+pub const MESSENGER_PUBKEY_PATH: &str = "/whisper/v1/messenger/pubkey";
 pub const HKDF_INFO: &[u8] = b"dust-whisper-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,6 +118,43 @@ pub struct MessengerInboxResponse {
 pub struct MessengerChallengeResponse {
     pub nonce: String,
     pub expires_at: String,
+}
+
+/// The last public key this relay saw an address send with, if it saw one.
+///
+/// # Why an untrusted answer is still useful
+///
+/// A Hacash account address IS `base58check(0 || RIPEMD160(SHA256(pubkey)))`
+/// (`sys::Account::get_address_by_public_key`). So a public key that derives to
+/// address X is the key of X: producing a different one is a second preimage on
+/// that hash, not a lie a relay can tell. The asking wallet re-derives the
+/// address from whatever comes back and throws the answer away unless it
+/// matches the address it asked about, so a hostile relay's only moves are to
+/// answer nothing or to answer something that fails that check. Both leave the
+/// sender exactly where it would be without this endpoint: the v1 fallback, and
+/// a screen that says the message is not sealed.
+///
+/// `None` is the answer for an address this relay has never seen send.
+///
+/// # Why this is asked with a POST and not a query string
+///
+/// The address being asked about is the one piece of metadata in this exchange,
+/// and a query string is the one place a request is certain to be written down:
+/// it lands in the access log of every relay asked and of every reverse proxy in
+/// front of them, which is exactly where an operator is most likely to ship logs
+/// somewhere else without thinking about it. The send path already posts the
+/// same address in a JSON body. This one does too, so the two are consistent and
+/// neither is logged by default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessengerPubkeyRequest {
+    pub address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessengerPubkeyResponse {
+    /// Compressed secp256k1 public key, hex. Never trusted by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
