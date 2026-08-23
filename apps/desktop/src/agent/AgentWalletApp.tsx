@@ -704,8 +704,11 @@ function CreateAgentWallet({
           <strong>Mainnet trusted bounded pilot</strong>
           <p>
             Fast Pay depends on the selected Hub. Until unilateral L1 exit is
-            independently verified, hard ceilings remain 1 HAC per payment,
-            10 HAC per channel and 100 HAC aggregate Hub TVL.
+            independently verified, no Hub may exceed 1 HAC per payment,
+            10 HAC per channel and 100 HAC aggregate TVL. Those are the
+            ceilings this build refuses to cross, not the limits you get. A
+            Hub declares its own and they are often far lower. What your Hub
+            declares is what applies to you.
           </p>
           <label>
             <input
@@ -713,7 +716,7 @@ function CreateAgentWallet({
               checked={mainnetAcknowledged}
               onChange={(event) => setMainnetAcknowledged(event.target.checked)}
             />
-            I understand the bounded pilot and recovery limitations.
+            {AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT}
           </label>
         </div>
       )}

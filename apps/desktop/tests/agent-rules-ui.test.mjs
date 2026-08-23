@@ -116,11 +116,23 @@ test("expired mobile pairing offers cannot remain actionable", () => {
 test("new mainnet Agent Wallet creation is explicit, bounded and fail closed", () => {
   assert.match(agentAppSource, /<option value="mainnet"/);
   assert.match(agentAppSource, /mainnetNodeUrl\.startsWith\("https:\/\/"\)/);
-  assert.match(agentAppSource, /AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT/);
   assert.match(agentAppSource, /mainnetAcknowledged/);
+  // The acknowledgement must be RENDERED, not merely mentioned. It used to be
+  // imported and put in the create payload while the checkbox beside it read
+  // "I understand the bounded pilot and recovery limitations", so the sentence
+  // naming the loss was verified for string equality against a person who had
+  // never been shown it. Matching the bare identifier passed that whole time.
+  // Match the JSX braces, which only the rendered use has.
+  assert.match(agentAppSource, /\{AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT\}/);
+  assert.doesNotMatch(agentAppSource, /I understand the bounded pilot and recovery limitations/);
+  // The numbers are what no Hub may exceed. A Hub declares its own and the
+  // only one ever measured on mainnet declared a hundredth of these, so the
+  // screen must not offer them as the limits the person actually gets.
   assert.match(agentAppSource, /1 HAC per payment/);
   assert.match(agentAppSource, /10 HAC per channel/);
-  assert.match(agentAppSource, /100 HAC aggregate Hub TVL/);
+  assert.match(agentAppSource, /100 HAC aggregate TVL/);
+  assert.match(agentAppSource, /no Hub may exceed/);
+  assert.match(agentAppSource, /What your Hub\s+declares is what applies/);
 });
 
 test("Agent Wallet routing never uses payment readiness as a navigation redirect", () => {

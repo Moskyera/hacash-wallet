@@ -24,6 +24,10 @@ import {
   readyProbe,
   type AsyncProbe,
 } from "../asyncProbe";
+import {
+  FAST_PAY_MAINNET_CEILINGS,
+  FAST_PAY_MAINNET_CONSENT,
+} from "@hacash/wallet-ui";
 
 type Props = {
   fastPay: FastPayStatus | null;
@@ -316,18 +320,14 @@ export default function FastPayChannelScreen({
         {settings?.network_mode === "mainnet" ? (
           <div className="warning-box" role="note">
             <strong>Bounded mainnet pilot</strong>
-            <p className="muted small">
-              Fast Pay depends on the selected Hub and is not a trustless L1 exit.
-              Hard ceilings are 1 HAC per payment, 10 HAC per channel and 100 HAC
-              total Hub TVL.
-            </p>
+            <p className="muted small">{FAST_PAY_MAINNET_CEILINGS}</p>
             <label>
               <input
                 type="checkbox"
                 checked={trustedMainnetPilot}
                 onChange={(event) => setTrustedMainnetPilot(event.target.checked)}
               />
-              I understand the Hub dependency and want to use the capped mainnet pilot.
+              {FAST_PAY_MAINNET_CONSENT}
             </label>
             {trustedMainnetPilot && !settings.trusted_mainnet_fast_pay_pilot ? (
               <>
