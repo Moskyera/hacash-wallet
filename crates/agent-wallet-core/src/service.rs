@@ -110,7 +110,17 @@ const ZERO_HASH_HEX: &str = "000000000000000000000000000000000000000000000000000
 /// which was true and told a reader neither the amount at risk nor what
 /// trusted costs them. This names both, because a consent that does not name
 /// the number is not consent to the number.
-pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand that this provider holds my channel funds. If it stops answering, or if it puts an old receipt on chain while I am offline, I could lose part or all of what is in this channel. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
+///
+/// The failure it names was corrected on 2026-08-23. It used to say the
+/// provider could put an old receipt on chain while the owner slept and take
+/// the difference. That is wrong on both rails this build can run. Native
+/// ChannelPay registers only action 3 and `channel_close` in the node checks
+/// BOTH signatures, so a provider acting alone cannot move the money; on the
+/// HVM registry rail a stale receipt pays the owner MORE, which is why
+/// `decide_user_exit_action` finishes what is standing rather than answering
+/// it. The real exposure, and the one the 10 HAC cap is for, is that the money
+/// comes out only if the provider co-signs.
+pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand that this provider holds my channel funds. This channel can only be closed if the provider co-signs it: the chain requires both signatures and no unilateral exit exists on this rail, so if it stops answering, refuses to sign, or disappears, what is in this channel stays locked and nobody can release it for me. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
 
 const fn is_false(value: &bool) -> bool {
     !*value

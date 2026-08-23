@@ -38,6 +38,21 @@ pub const ROLLBACK_ANCHOR_LATCHED_BLOCKER: &str = "rollback_anchor_channels_latc
 /// identifier.
 pub const ROLLBACK_ANCHOR_IDENTITY_UNREADABLE_BLOCKER: &str =
     "rollback_anchor_witness_identity_unreadable";
+/// Nobody answers the objection window while the owner is asleep.
+///
+/// A fixed identifier, used by every push and every filter that mentions this
+/// condition, because it is now published from two different lists and a typo
+/// in one of them would silently drop the item from the document rather than
+/// fail to compile.
+pub const OFFLINE_OWNER_UNDEFENDED_BLOCKER: &str = "no_watcher_answers_for_an_offline_owner";
+/// The dispute path is not enforceable without the counterparty.
+pub const UNILATERAL_DISPUTE_PATH_BLOCKER: &str = "unilateral_l1_dispute_path_is_not_ready";
+/// No wallet on any platform can build the exit transaction.
+pub const WALLET_CANNOT_EXIT_BLOCKER: &str =
+    "wallet_cannot_build_a_unilateral_exit_without_the_hub";
+/// No verified external monotonic rollback witness.
+pub const EXTERNAL_ROLLBACK_ANCHOR_BLOCKER: &str =
+    "external_monotonic_rollback_anchor_is_not_ready";
 
 pub fn is_mainnet_pilot_profile(profile: &str) -> bool {
     matches!(
@@ -180,6 +195,39 @@ pub struct MainnetReadinessV1 {
     pub settlement_model: &'static str,
     pub blockers: Vec<String>,
     pub close_blockers: Vec<String>,
+    /// Conditions that are outstanding and true, and that this profile has
+    /// deliberately decided not to gate on.
+    ///
+    /// **Why this field exists at all.** `blockers` and `close_blockers` are
+    /// gates, and a profile that waives a gate used to waive the *sentence*
+    /// with it: on `MAINNET_BOUNDED_PILOT_PROFILE` the whole dispute-path
+    /// branch was skipped, so `no_watcher_answers_for_an_offline_owner` was
+    /// never pushed anywhere and the served document read
+    /// `"blockers":[],"close_blockers":[]`. To a person and to a script alike
+    /// that says "nothing outstanding", while the single largest way to lose
+    /// money on this system - a provider settling an old receipt during the
+    /// objection window while the owner is offline - was outstanding and
+    /// unmeasured. Waiving a gate is a legitimate product decision. Waiving
+    /// the disclosure is not, and the two had no way to be told apart because
+    /// the distinction lived in a comment instead of in the type.
+    ///
+    /// So this is the third list, and the invariant is stated rather than
+    /// implied: **`blockers` and `disclosed_blockers` are disjoint, and their
+    /// union is everything this Hub knows to be outstanding.** An item moves
+    /// between them when the profile changes, never disappears. A reader who
+    /// wants "is anything wrong" reads both; a script that wants "may I pay"
+    /// reads `payments_enabled`; a script that wants "may I close" reads
+    /// `close_enabled`. Nothing here changes what any of those three answer.
+    ///
+    /// Items filtered out of `close_blockers` are *not* repeated here: they are
+    /// still in `blockers`, so they are already visible, and duplicating them
+    /// would make the union stop meaning anything.
+    ///
+    /// `#[serde(default)]` so a wallet built before this field can still read a
+    /// newer Hub. It defaults to empty, which is the safe direction for a list
+    /// that nothing gates on.
+    #[serde(default)]
+    pub disclosed_blockers: Vec<String>,
     pub limitations: Vec<String>,
 }
 
@@ -244,15 +292,35 @@ impl MainnetReadinessV1 {
             && user_side_unilateral_exit_ready
             && offline_user_defended;
         let mut blockers = Vec::new();
+        // Outstanding and true, but not gating on this profile. See the field
+        // doc on `disclosed_blockers`: a waived gate is a decision, a waived
+        // sentence is a lie by omission, and this list is what keeps them apart.
+        let mut disclosed_blockers: Vec<String> = Vec::new();
         if !hub_operational_ready {
             blockers.push("hub_signer_authenticated_storage_or_recovery_gate_is_not_ready".into());
         }
         let is_bounded_pilot = profile == MAINNET_BOUNDED_PILOT_PROFILE;
-        if !external_rollback_anchor_ready && !is_bounded_pilot {
-            blockers.push("external_monotonic_rollback_anchor_is_not_ready".into());
+        // The bounded pilot waives these two gates on purpose - that waiver is
+        // the whole point of the profile, and putting them back into `blockers`
+        // would set `payments_enabled` false and wedge the profile shut. So the
+        // waiver stays exactly as it was and only the *reporting* changes: the
+        // identifiers still get computed, and they still get published, in the
+        // list that says out loud that nothing is gating on them.
+        if !external_rollback_anchor_ready {
+            let sink = if is_bounded_pilot {
+                &mut disclosed_blockers
+            } else {
+                &mut blockers
+            };
+            sink.push(EXTERNAL_ROLLBACK_ANCHOR_BLOCKER.into());
         }
-        if !l1_dispute_path_ready && !is_bounded_pilot {
-            blockers.push("unilateral_l1_dispute_path_is_not_ready".into());
+        if !l1_dispute_path_ready {
+            let sink = if is_bounded_pilot {
+                &mut disclosed_blockers
+            } else {
+                &mut blockers
+            };
+            sink.push(UNILATERAL_DISPUTE_PATH_BLOCKER.into());
             // Say which half is missing, because the two fail for very
             // different reasons and the reader deserves the one that is
             // actually true. The line above reads like "the chain is not
@@ -261,7 +329,7 @@ impl MainnetReadinessV1 {
             // or claim transaction, so a user holding a perfectly valid
             // countersigned bill still has no instrument to present it with.
             if !user_side_unilateral_exit_ready {
-                blockers.push("wallet_cannot_build_a_unilateral_exit_without_the_hub".into());
+                sink.push(WALLET_CANNOT_EXIT_BLOCKER.into());
             }
             // And the half that stays missing after the wallet can leave: a
             // provider can settle an old receipt while the owner is offline,
@@ -269,7 +337,7 @@ impl MainnetReadinessV1 {
             // because it fails for a different reason than the two above and
             // is not fixed by either of them.
             if !offline_user_defended {
-                blockers.push("no_watcher_answers_for_an_offline_owner".into());
+                sink.push(OFFLINE_OWNER_UNDEFENDED_BLOCKER.into());
             }
         }
         let is_mainnet_pilot = is_mainnet_pilot_profile(profile);
@@ -335,15 +403,21 @@ impl MainnetReadinessV1 {
             .filter(|blocker| {
                 blocker.as_str() != "fullnode_missing_required_channel_open_action_2"
                     && blocker.as_str() != ADMISSION_NOT_EVALUATED
-                    && blocker.as_str() != "external_monotonic_rollback_anchor_is_not_ready"
-                    && blocker.as_str() != "unilateral_l1_dispute_path_is_not_ready"
-                    && blocker.as_str() != "wallet_cannot_build_a_unilateral_exit_without_the_hub"
+                    && blocker.as_str() != EXTERNAL_ROLLBACK_ANCHOR_BLOCKER
+                    && blocker.as_str() != UNILATERAL_DISPUTE_PATH_BLOCKER
+                    && blocker.as_str() != WALLET_CANNOT_EXIT_BLOCKER
                     // Closing is the owner's way out and must never be the
                     // thing a missing guarantee takes away. A watcher answers
                     // a window during a dispute; it has nothing to do with
                     // whether a cooperative close may proceed, and blocking
                     // close over it would strand people to protect them.
-                    && blocker.as_str() != "no_watcher_answers_for_an_offline_owner"
+                    //
+                    // Filtered out of the *gate*, not out of the document: on
+                    // every profile that reaches this filter the identifier is
+                    // still sitting in `blockers` above, and on the bounded
+                    // pilot it is in `disclosed_blockers`. It is never absent
+                    // from both.
+                    && blocker.as_str() != OFFLINE_OWNER_UNDEFENDED_BLOCKER
                     && blocker.as_str()
                         != "fullnode_does_not_report_verified_registry_unilateral_exit"
                     && !blocker.starts_with("mainnet payment cap")
@@ -356,6 +430,20 @@ impl MainnetReadinessV1 {
             "the active Hacash mainnet exposes cooperative original-funding close action 3".into(),
             "pilot exposure must remain inside the configured payment and channel caps".into(),
         ];
+        // The identifier in `disclosed_blockers` is for scripts. This is the
+        // same fact for a person, because an identifier nobody can expand is
+        // only marginally better than an empty list.
+        if !offline_user_defended {
+            limitations.push(format!(
+                "{OFFLINE_OWNER_UNDEFENDED_BLOCKER}: nobody answers the objection window on an \
+                     offline owner's behalf, and nothing finalizes or claims for them either. On \
+                     the shipped one-directional rail this cannot cost them principal, because a \
+                     stale split pays the left party MORE and the driver deliberately declines to \
+                     answer it; that rests on two checks (a refused non-zero hub deposit and a \
+                     ledger that only subtracts from the left balance) rather than on the \
+                     protocol. It is disclosed and it does not block closing"
+            ));
+        }
         // The posture in plain words as well as in the document, because a
         // nested boolean is easy to miss and this is the sentence a person
         // choosing a hub has to see. It is a limitation and not a blocker on
@@ -420,6 +508,7 @@ impl MainnetReadinessV1 {
             settlement_model: "official Hacash ChannelPay bills with hub-coordinated bounded mainnet pilot",
             blockers,
             close_blockers,
+            disclosed_blockers,
             limitations,
         }
     }
@@ -1767,10 +1856,31 @@ pub fn measure_l1_dispute_path_ready(capabilities: Option<&FullnodeCapabilitiesV
 /// from whether an awake one can leave.
 ///
 /// The exit answers the provider that stops answering. It does not answer the
-/// provider that puts an OLD receipt on chain at the moment the owner is
-/// offline: there is a fixed window to reply with the newer one, and if nobody
-/// replies the stale split settles. Measured on a real chain, that took 300,000
-/// zhu from a channel owing 900,000.
+/// provider that acts while the owner is offline: a settlement can be started
+/// and finished without them, and nothing here presses `finalize` or `claim`
+/// on their behalf either.
+///
+/// # What this is NOT, because this comment used to get it backwards
+///
+/// It used to say a stale receipt settling costs the sleeping owner the
+/// difference, and cited "300,000 zhu from a channel owing 900,000". No such
+/// measurement exists, and the direction is wrong on the rail this build
+/// ships. `HvmRegistryBindingV2::validate` refuses any binding with
+/// `right_hub_deposit_zhu != 0`, and the bill ledger only ever subtracts from
+/// the left balance, so every later bill pays the left party strictly LESS and
+/// a stale one pays them MORE. Answering a stale challenge hands money back:
+/// `decide_user_exit_action` returns `finish_whatever_is_standing` rather than
+/// responding, and `registry_response_watch` refuses to sign the response at
+/// all. The real measurement, in
+/// `tests/registry_response_watch.rs::a_response_that_would_cost_the_user_money_is_refused`,
+/// is a 1,000,000 zhu channel whose head bill pays 300,000 while the stale
+/// challenge owes 950,000: a dutiful watcher cost its own user 650,000 zhu.
+///
+/// So the exposure this term names is not stolen principal. It is that the
+/// ending does not happen by itself, and that the protection above is a
+/// property of those two checks rather than of the protocol. Change either and
+/// the stale-receipt attack becomes real, which is the reason this stays false
+/// rather than being deleted as solved.
 ///
 /// This is its own term because the two used to be one. Lifting the user-side
 /// driver constant satisfied `l1_dispute_path_ready` and, through it, published
@@ -2523,6 +2633,166 @@ mod tests {
                 .require_payment_ready(HacAmount::from_millimeis(1))
                 .is_err()
         );
+    }
+
+    /// The bounded pilot may waive the gate. It may not waive the sentence.
+    ///
+    /// This is the exact document the live mainnet Hub serves, and before this
+    /// it went out as `"blockers":[],"close_blockers":[]` while the largest way
+    /// to lose money on this system was outstanding: a provider that settles an
+    /// old receipt during the objection window while the owner is offline. The
+    /// waiver itself is correct and deliberately unchanged here - putting the
+    /// identifier back into `blockers` would set `payments_enabled` false and
+    /// wedge the profile that exists to allow bounded mainnet payments. What
+    /// was wrong was that waiving the gate deleted the only outward sign the
+    /// condition existed, so a green list and a genuinely clean Hub were
+    /// indistinguishable on the wire.
+    ///
+    /// Every assertion below is therefore paired: the gate still opens, and
+    /// the document still says what it opened over.
+    #[test]
+    fn the_bounded_pilot_publishes_the_offline_owner_gap_it_declines_to_gate_on() {
+        let mut readiness = MainnetReadinessV1::evaluate(
+            MAINNET_BOUNDED_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            false,
+            None,
+            false,
+            Ok(capabilities()),
+        );
+        let policy = MainnetPilotAdmissionPolicy::try_new(
+            ["1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW"],
+            MAINNET_PILOT_MAX_AGGREGATE_TVL_HAC_ZHU,
+        )
+        .unwrap();
+        readiness.apply_mainnet_admission(&policy, Ok(0));
+
+        // The waiver, untouched: this is the fully admitted bounded pilot and
+        // both gates are open. If either of these ever fails, the fix has
+        // started blocking money instead of describing it.
+        assert!(readiness.payments_enabled, "{:?}", readiness.blockers);
+        assert!(readiness.close_enabled, "{:?}", readiness.close_blockers);
+        assert!(readiness.blockers.is_empty(), "{:?}", readiness.blockers);
+        assert!(
+            readiness.close_blockers.is_empty(),
+            "{:?}",
+            readiness.close_blockers
+        );
+
+        // And the disclosure, which is the thing that did not exist.
+        assert!(
+            readiness
+                .disclosed_blockers
+                .iter()
+                .any(|it| it == OFFLINE_OWNER_UNDEFENDED_BLOCKER),
+            "an empty blocker list on this profile must not be the whole document, got {:?}",
+            readiness.disclosed_blockers
+        );
+        assert!(
+            readiness
+                .disclosed_blockers
+                .iter()
+                .any(|it| it == UNILATERAL_DISPUTE_PATH_BLOCKER),
+            "{:?}",
+            readiness.disclosed_blockers
+        );
+        assert!(
+            readiness
+                .disclosed_blockers
+                .iter()
+                .any(|it| it == EXTERNAL_ROLLBACK_ANCHOR_BLOCKER),
+            "the anchor waiver is disclosed on the same terms, got {:?}",
+            readiness.disclosed_blockers
+        );
+
+        // Disjoint, so the union is the whole outstanding set and a reader can
+        // rely on that rather than on a comment.
+        for disclosed in &readiness.disclosed_blockers {
+            assert!(
+                !readiness.blockers.contains(disclosed),
+                "{disclosed} is in both lists, so the union no longer means anything"
+            );
+        }
+
+        // The same fact in words, because an identifier nobody can expand is
+        // only marginally better than an empty list.
+        let spelled_out = readiness
+            .limitations
+            .iter()
+            .find(|it| it.contains(OFFLINE_OWNER_UNDEFENDED_BLOCKER))
+            .unwrap_or_else(|| panic!("{:?}", readiness.limitations));
+        assert!(spelled_out.contains("offline"));
+        // And in the right DIRECTION. The first version of this sentence said
+        // a stale settlement takes the difference from a sleeping owner, which
+        // is backwards here: a non-zero hub deposit is refused at binding
+        // validation and the ledger only subtracts from the left balance, so a
+        // stale split pays the left party more and the driver declines to
+        // answer it. Disclosing a loss that cannot happen on this rail is not
+        // a safe error - it teaches an owner to distrust the disclosures that
+        // are real, and it hides the exposure that actually exists.
+        assert!(
+            spelled_out.contains("cannot cost them principal"),
+            "the disclosure must not invert the direction of the money: {spelled_out}"
+        );
+        assert!(
+            spelled_out.contains("nothing finalizes or claims for them"),
+            "the exposure that IS real must be named: {spelled_out}"
+        );
+        assert!(
+            spelled_out.contains("rather than on the protocol"),
+            "the protection is a property of two checks and must not read as a guarantee: \
+             {spelled_out}"
+        );
+
+        // It survives serialisation, which is the only place any of this is
+        // read from.
+        let wire = serde_json::to_value(&readiness).unwrap();
+        assert_eq!(wire["blockers"].as_array().unwrap().len(), 0);
+        assert!(
+            wire["disclosed_blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|it| it == OFFLINE_OWNER_UNDEFENDED_BLOCKER),
+            "{wire}"
+        );
+    }
+
+    /// The full mainnet pilot profile is unchanged by the disclosure work.
+    ///
+    /// It never waived the dispute-path gate, so the identifier belongs in
+    /// `blockers` there and must not be duplicated into the disclosure list -
+    /// otherwise "outstanding" would be counted twice and the disjointness the
+    /// field doc promises would be a lie on the profile that matters most.
+    #[test]
+    fn the_full_pilot_still_blocks_rather_than_discloses() {
+        let readiness = MainnetReadinessV1::evaluate(
+            MAINNET_PILOT_PROFILE,
+            MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU,
+            MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU,
+            true,
+            true,
+            Some(&anchor_evidence(crate::node::now_unix())),
+            true,
+            Ok(capabilities()),
+        );
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|it| it == OFFLINE_OWNER_UNDEFENDED_BLOCKER)
+        );
+        assert!(
+            !readiness
+                .disclosed_blockers
+                .iter()
+                .any(|it| it == OFFLINE_OWNER_UNDEFENDED_BLOCKER),
+            "already visible in blockers, so disclosing it again breaks disjointness"
+        );
+        // Still not close-blocking. That was true before and stays true.
+        assert!(readiness.close_enabled);
     }
 
     /// The node half of the dispute-path measurement must follow the node's

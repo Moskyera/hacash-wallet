@@ -973,6 +973,14 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
                   asked, it says so instead. */}
               <p className="agent-warning" role="status">{exitView.leaseLine}</p>
               <p>{exitView.windowLine}</p>
+              {/* The window running the other way. It sits directly under the
+                  window sentence because the two are the same clock and an
+                  owner who reads only the first one comes away believing the
+                  objection window is a thing that protects them. Marked as a
+                  warning and given role="status" for the same reason the lease
+                  line is: this is the other way the money goes, and neither of
+                  them may be something a reader has to open. */}
+              <p className="agent-warning" role="status">{exitView.noWatcherLine}</p>
               <p>{exitView.feeLine}</p>
               {/* An exit outlives the app. Most of one is an objection window
                   measured in blocks, so an owner coming back to a laptop they

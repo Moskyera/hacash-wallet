@@ -19,6 +19,100 @@ pub const TYPE4_SIGNATURE_OVERHEAD_BYTES: usize = 5000;
 
 const FEE_HEADROOM: f64 = 1.10;
 
+/// One thing this fee estimate had to guess because the node did not answer.
+///
+/// Both variants carry the node's own error text verbatim. A reason that has
+/// been reduced to "the node was unavailable" cannot be acted on; the string
+/// the node actually returned can be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeeGuess {
+    /// `/query/fee/average` failed, so the purity in this estimate is the
+    /// wallet's own compiled-in floor rather than anything the network said.
+    PurityFromLocalFloor { node_error: String },
+    /// The node could not build the unsigned body, so the size this fee is
+    /// priced from is a default rather than a measurement of the transaction
+    /// that will actually be signed.
+    SizeFromDefault {
+        node_error: String,
+        assumed_bytes: usize,
+    },
+}
+
+impl FeeGuess {
+    /// A sentence for a person, not a log line.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::PurityFromLocalFloor { node_error } => format!(
+                "the node did not answer the fee query, so this fee is the wallet's own minimum rather than the current network rate ({node_error})"
+            ),
+            Self::SizeFromDefault {
+                node_error,
+                assumed_bytes,
+            } => format!(
+                "the node did not build the transaction body, so this fee is priced from an assumed {assumed_bytes} bytes rather than the real size ({node_error})"
+            ),
+        }
+    }
+}
+
+/// Where the numbers in a fee estimate came from.
+///
+/// # Why an estimate carries this at all
+///
+/// The fee path had two fallbacks that ran in silence. `/query/fee/average`
+/// failing dropped the estimate to a compiled-in floor purity, and a failed
+/// body build dropped it to a default byte count, and in both cases the caller
+/// received an ordinary-looking `Ok(estimate)` with no way to tell a measured
+/// fee from a guessed one. That is the same defect `PaymentPlan::
+/// fast_pay_declined` was added to fix on the routing side: the fallback is
+/// right, falling back in silence is not.
+///
+/// Empty means every number in the estimate was measured. Non-empty means at
+/// least one was guessed, and says which and why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeeEstimateProvenance {
+    guesses: Vec<FeeGuess>,
+}
+
+impl FeeEstimateProvenance {
+    /// Everything in this estimate was measured against the node.
+    pub fn measured() -> Self {
+        Self::default()
+    }
+
+    pub fn with(mut self, guess: FeeGuess) -> Self {
+        if !self.guesses.contains(&guess) {
+            self.guesses.push(guess);
+        }
+        self
+    }
+
+    /// True when any number in the estimate is a guess.
+    pub fn is_degraded(&self) -> bool {
+        !self.guesses.is_empty()
+    }
+
+    pub fn guesses(&self) -> &[FeeGuess] {
+        &self.guesses
+    }
+
+    pub fn reasons(&self) -> Vec<String> {
+        self.guesses.iter().map(FeeGuess::reason).collect()
+    }
+
+    /// The line to put in front of a person before they pay, or `None` when
+    /// there is nothing to warn about.
+    pub fn warning(&self) -> Option<String> {
+        if self.guesses.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "This fee is an estimate the wallet made without the node: {}. It may be too low to confirm.",
+            self.reasons().join("; ")
+        ))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Type4FeeEstimate {
     pub fee_mei: f64,
@@ -28,6 +122,18 @@ pub struct Type4FeeEstimate {
     pub fee_wire: String,
     pub wire_bytes: usize,
     pub purity: u64,
+    /// Which of the numbers above were measured and which were guessed.
+    pub provenance: FeeEstimateProvenance,
+}
+
+impl Type4FeeEstimate {
+    pub fn is_degraded(&self) -> bool {
+        self.provenance.is_degraded()
+    }
+
+    pub fn warning(&self) -> Option<String> {
+        self.provenance.warning()
+    }
 }
 
 pub fn mei_to_fee_wire(mei: f64) -> String {
@@ -58,12 +164,31 @@ pub fn estimate_signed_wire_bytes(unsigned_body_bytes: usize) -> usize {
         .max(TYPE4_MIN_SIGNED_WIRE_BYTES)
 }
 
+/// The wallet's own floor fee for a size, asked of nobody.
+///
+/// This is legitimately local when it is used as the *minimum* an estimate may
+/// not fall below. It is a guess only when it is used as the estimate itself
+/// after the node refused to answer, and that case must be built through
+/// [`local_fee_from_wire_bytes_after_node_error`] so the caller can see it.
 pub fn local_fee_from_wire_bytes(wire_bytes: usize) -> Type4FeeEstimate {
     let purity = TYPE4_DEFAULT_LOWEST_FEE_PURITY;
     let fee_238 = (purity as u128)
         .saturating_mul(wire_bytes as u128)
         .min(u64::MAX as u128) as u64;
     fee_from_unit238(fee_238.max(1), wire_bytes, purity)
+}
+
+/// The same floor fee, marked as what it is: a fee the wallet invented because
+/// the node did not answer.
+pub fn local_fee_from_wire_bytes_after_node_error(
+    wire_bytes: usize,
+    node_error: &str,
+) -> Type4FeeEstimate {
+    let mut est = local_fee_from_wire_bytes(wire_bytes);
+    est.provenance = est.provenance.with(FeeGuess::PurityFromLocalFloor {
+        node_error: node_error.to_owned(),
+    });
+    est
 }
 
 fn fee_from_unit238(fee_238: u64, wire_bytes: usize, purity: u64) -> Type4FeeEstimate {
@@ -78,6 +203,7 @@ fn fee_from_unit238(fee_238: u64, wire_bytes: usize, purity: u64) -> Type4FeeEst
         fee_wire,
         wire_bytes,
         purity,
+        provenance: FeeEstimateProvenance::measured(),
     }
 }
 
@@ -94,6 +220,7 @@ pub fn fee_from_node_average(
         fee_wire: mei_to_fee_wire(fee_mei),
         wire_bytes,
         purity,
+        provenance: FeeEstimateProvenance::measured(),
     })
 }
 

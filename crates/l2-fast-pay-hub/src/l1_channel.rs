@@ -16,6 +16,56 @@ use crate::error::{HubError, HubResult};
 pub const L1_CHANNEL_OPEN_SCHEMA: &str = "hpay-l1-channel-open/3";
 pub const HACASH_MAINNET_CHAIN_ID: u32 = 0;
 pub const MAX_CHANNEL_TRANSACTION_BYTES: usize = 64 * 1024;
+/// The most any one channel or exit transaction may pay in network fee.
+///
+/// # What this number was checked against, and what it clears
+///
+/// It is a compile-time ceiling with no estimation behind it, so the only
+/// honest thing to record here is the margin it was measured to have.
+///
+/// The binding case is the exit's `challenge` and `respond` transactions,
+/// because they are the largest the exit sends and a per-byte fee floor costs
+/// most on the largest transaction. `crates/wallet-core/tests/
+/// exit_fee_quote_per_step.rs` builds them with the shipped builder and reads
+/// `billing_size()` off the signed bytes with the fullnode's own decoder:
+/// **414 bytes minimum, 443 bytes maximum**, printed by that test on every run.
+///
+/// Against that measurement:
+///
+/// | floor                                        | per byte     | 443 bytes needs | this ceiling is |
+/// |----------------------------------------------|--------------|-----------------|-----------------|
+/// | consensus gas floor `VM_LOWEST_FEE_PURITY`   | 50,000:238   | 221,500 zhu     | 4.51x           |
+/// | node default relay floor `LOWEST_FEE_PURITY` | 6,024:238    | 26,687 zhu      | 37.5x           |
+///
+/// `VM_LOWEST_FEE_PURITY` is `hacash-fullnodedev/protocol/src/params.rs:18`;
+/// the relay floor is the default `lowest_fee_purity` at
+/// `hacash-fullnodedev/basis/src/config/engine.rs:115` (`1_000_000 / 166`),
+/// enforced at `mint/src/api/submit_transaction.rs:44` and
+/// `node/src/core/protocol.rs:372`.
+///
+/// `crates/wallet-core/tests/exit_fee_quote_per_step.rs` asserts both margins
+/// against the same measured sizes, so the table above cannot go stale without
+/// a test failing.
+///
+/// # What that margin does NOT cover
+///
+/// Both floors are constants. Neither is a fee market. Miners order a full
+/// block by `fee_purity()`, and nothing here or in the node bounds how high a
+/// congested mempool's clearing purity can go, so "4.51x the floor" is not
+/// "4.51x what it takes to confirm". Nothing has ever tested this under
+/// pressure: chain 7 and `MemChain` have no fee market, and no transaction from
+/// this software has ever been on mainnet.
+///
+/// This ceiling is also a hard stop with no bump path. `crates/agent-wallet-
+/// core/src/signer.rs` refuses to sign an exit step whose `network_fee_zhu`
+/// exceeds it, so an exit that is not clearing cannot be re-signed higher: it
+/// waits at the fee it has. Inside a challenge window that is not a delay, it
+/// is a loss, because the window closes and the older and worse split settles.
+///
+/// Raising the number would not fix that, it would only move the same hard stop
+/// somewhere else, and an unjustified larger constant is a different guess
+/// rather than an estimate. The missing piece is a live-purity check on the
+/// exit path and a re-sign-higher path under the ceiling. Neither exists today.
 pub const MAX_CHANNEL_NETWORK_FEE_ZHU: u64 = 1_000_000;
 const REQUEST_MAX_LIFETIME_SECONDS: u64 = 300;
 const TRANSACTION_MAX_AGE_SECONDS: u64 = 600;

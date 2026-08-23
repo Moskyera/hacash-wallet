@@ -10,7 +10,7 @@ node. Where something is an inference it says so.
 
 `GET /v1/readiness/mainnet` on a running Hub is the machine-readable answer.
 It is evaluated by `MainnetReadinessV1::evaluate`
-(`crates/l2-fast-pay-hub/src/readiness.rs:213-425`). Ask it rather than trusting
+(`crates/l2-fast-pay-hub/src/readiness.rs:259-511`). Ask it rather than trusting
 a checklist.
 
 The measurement that matters is a mainnet-profile Hub pointed at the real
@@ -69,7 +69,7 @@ close_blockers  []
 ```
 
 `close_blockers` is empty on both, so cooperative close is available on both
-profiles even while the full profile refuses payments (`readiness.rs:314-330`
+profiles even while the full profile refuses payments (`readiness.rs:399-430`
 filters the waived and admission identifiers out of `blockers`).
 
 Two identifiers that look like blockers and are not. The control, the same two
@@ -85,24 +85,47 @@ mainnet-bounded-pilot  blockers  mainnet_pilot_requires_hacash_mainnet_fullnode
                                  fullnode_below_pinned_mainnet_checkpoint_765432
 ```
 
-`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:276-278`) and
-`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:279-284`) are
+`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:361-363`) and
+`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:364-369`) are
 artefacts of pointing a mainnet profile at the wrong chain. They vanish against
 the real mainnet node, as the two documents above show, and are not work.
 
 ## Two mainnet routes exist, and they are not the same thing
 
-`readiness.rs:239-245` branches on `is_bounded_pilot`:
+`readiness.rs:300-336` branches on `is_bounded_pilot`:
 
 ```rust
 let is_bounded_pilot = profile == MAINNET_BOUNDED_PILOT_PROFILE;
-if !external_rollback_anchor_ready && !is_bounded_pilot { blockers.push(...) }
-if !l1_dispute_path_ready && !is_bounded_pilot { blockers.push(...) }
+// the identifier is computed either way; only which list it lands in changes
+let sink = if is_bounded_pilot { &mut disclosed_blockers } else { &mut blockers };
 ```
 
-and on the profile again at `readiness.rs:293-297`, which raises
-`fullnode_does_not_report_verified_registry_unilateral_exit` on `mainnet-pilot`
-only.
+The waiver moves an identifier between lists. It does not delete it. Until
+2026-08-23 it did delete it: the whole branch was skipped on the bounded
+profile, so the served document read `"blockers":[],"close_blockers":[]` while
+`no_watcher_answers_for_an_offline_owner` was outstanding, and an empty list was
+indistinguishable from a clean Hub. `disclosed_blockers` is the third list and
+the invariant is in the type, not in a comment: `blockers` and
+`disclosed_blockers` are disjoint, and their union is everything the Hub knows
+to be outstanding. `payments_enabled` and `close_enabled` still read only the
+first two, so nothing the bounded pilot was allowed to do changed.
+
+The dispute-path branch is gated on the profile again at `readiness.rs:378-381`,
+which raises `fullnode_does_not_report_verified_registry_unilateral_exit` on
+`mainnet-pilot` only.
+
+What the disclosure says matters as much as that it exists. The first version of
+the plain-words limitation claimed that a provider settling an old receipt while
+the owner sleeps takes the difference from them. On the rail this build ships
+that is backwards: `HvmRegistryBindingV2::validate` refuses any binding with a
+non-zero hub deposit, and the bill ledger only ever subtracts from the left
+balance, so every later receipt pays the owner strictly less and a stale one
+pays them more. Answering a stale challenge hands money back, which is why
+`decide_user_exit_action` finishes what is standing instead of responding and
+`registry_response_watch` refuses to sign such a response at all. The real
+exposure, and what the limitation now says, is that the ending does not happen
+by itself for an absent owner, and that the protection above is a property of
+those two checks rather than a guarantee from the protocol.
 
 **Bounded pilot** waives those three blockers and nothing else. It is the route
 the code is built to reach today, and has reached: mainnet with deliberately
@@ -111,12 +134,12 @@ bounded profile identically:
 
 | demand | where |
 | --- | --- |
-| Hub signer plus authenticated durable storage | `readiness.rs:236-238` |
-| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:257-270`, `readiness.rs:719-725` |
-| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:275-284` |
-| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:285-292` |
-| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:608-641` |
-| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:694-716` |
+| Hub signer plus authenticated durable storage | `readiness.rs:297-299` |
+| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:342-355`, `readiness.rs:805-820` |
+| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:361-369` |
+| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:370-377` |
+| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:719-745` |
+| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:754-790` |
 
 **Full mainnet** does not waive them. It needs all three to be genuinely true.
 
@@ -133,7 +156,7 @@ rather than hiding it.
 
 ## Why full mainnet cannot be reached today
 
-`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:387-393`)
+`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:500-503`)
 publishes the measurement:
 
 ```rust
@@ -169,7 +192,7 @@ wallet gating on one could never be un-bricked by the guarantee arriving.
 gating on `HubHealth` for one is a compile error.
 
 `HubHardGuarantees::production_mainnet_ready` still exists as the Hub's internal
-aggregate measurement (`readiness.rs:1857-1863`); it is simply no longer exported
+aggregate measurement (`readiness.rs:1967-1973`); it is simply no longer exported
 on the liveness endpoint.
 
 ### 1. Unilateral L1 dispute path

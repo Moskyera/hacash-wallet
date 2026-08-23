@@ -308,6 +308,12 @@ export type SendPreview = {
     // not to use it. The blockchain fallback is correct; doing it in
     // silence was not.
     fast_pay_declined?: string | null;
+    // Set when the fee above is a guess rather than a quote, because the node
+    // did not answer the fee query or could not build the body. The fallback
+    // is correct; showing an invented fee as though the network had quoted it
+    // was not. An under-priced transfer that sits unconfirmed inside a channel
+    // challenge window loses the window, and the older split settles.
+    fee_estimate_degraded?: string | null;
   };
   from: string;
   to: string;

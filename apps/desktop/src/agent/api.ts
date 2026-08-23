@@ -182,6 +182,8 @@ export type AgentChannelSetupReview = {
   network_fee_units: string;
   wallet_fee_units: string;
   total_debit_units: string;
+  /** Why the network fee is a guess, when it is one. Null means the node quoted it. */
+  fee_estimate_degraded: string | null;
   phase: AgentChannelSetupPhase;
 };
 
@@ -209,6 +211,8 @@ export type AgentChannelCloseReview = {
   final_agent_units: string;
   network_fee_units: string;
   wallet_fee_units: string;
+  /** Why the network fee is a guess, when it is one. Null means the node quoted it. */
+  fee_estimate_degraded: string | null;
   phase: AgentChannelClosePhase;
 };
 

@@ -343,6 +343,11 @@ export default function SendScreen({
                   {preview.plan.fast_pay_declined}
                 </p>
               ) : null}
+              {preview.plan.fee_estimate_degraded ? (
+                <p className="alert" role="note">
+                  {preview.plan.fee_estimate_degraded}
+                </p>
+              ) : null}
               <p>
                 <strong>{formatHacMei(preview.amount_mei)} HAC</strong> →{" "}
                 <code>{maskAddress(preview.to, hideAddresses)}</code>

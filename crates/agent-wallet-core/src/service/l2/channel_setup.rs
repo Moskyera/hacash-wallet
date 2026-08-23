@@ -118,7 +118,7 @@ impl AgentWalletManager {
         if reuse_version != 1 {
             return Err(AgentWalletError::SigningBlocked);
         }
-        let (built, network_fee) = build_channel_open_tx_with_dynamic_fee(
+        let (built, network_fee, fee_estimate_degraded) = build_channel_open_tx_with_dynamic_fee(
             &node,
             network_binding.chain_id,
             &state.address,
@@ -131,6 +131,16 @@ impl AgentWalletManager {
         )
         .await
         .map_err(|_| AgentWalletError::NodeRejected)?;
+        // This used to refuse outright on a degraded fee, on the stated
+        // grounds that an unattended open has no screen and nobody to ask.
+        // That was wrong about this function: it returns an
+        // `AgentChannelSetupReview` that
+        // `agent_wallet_prepare_fast_pay_channel` hands to an owner-controlled
+        // panel with its own confirm step, so there IS somebody to ask. The
+        // refusal also collapsed the node's own explanation into a bare
+        // `NodeRejected`, discarding exactly the reason this work existed to
+        // preserve. The warning travels on the review instead, bound by the
+        // review commitment, and the owner decides.
         let unsigned_transaction_hex = built.body.ok_or(AgentWalletError::NodeRejected)?;
         let network_fee_units =
             HacUnits::from_decimal(&network_fee).map_err(|_| AgentWalletError::InvalidAmount)?;
@@ -161,6 +171,7 @@ impl AgentWalletManager {
             network_fee_units,
             wallet_fee_units: HacUnits::ZERO,
             total_debit_units,
+            fee_estimate_degraded,
             phase: AgentChannelSetupPhase::Prepared,
         };
         let mut operation = AgentChannelSetupOperation {

@@ -96,6 +96,28 @@ pub struct HubMainnetReadiness {
     /// Required on the wire for the same reason as `trusted_bounded_pilot`: an
     /// omitted list used to read as "the Hub raised no close objection".
     pub close_blockers: Vec<String>,
+    /// What the Hub says is outstanding and has deliberately decided not to
+    /// gate on, carried across the last hop rather than dropped at it.
+    ///
+    /// Kept for the same reason `rollback_anchor_witness_identity_break` is
+    /// kept: the Hub measures a thing precisely so the wallet can tell two
+    /// situations apart, and dropping the field here throws that away in the
+    /// party it was written for. `blockers` empty used to be the whole story a
+    /// wallet could tell, so a bounded-pilot Hub with a real outstanding gap
+    /// and a hypothetically perfect one decoded to the same value.
+    ///
+    /// It deliberately produces **no refusal**. These are conditions the
+    /// profile has already decided are not gates, and turning a disclosure
+    /// into a refusal here would make the honest Hub the one that cannot pay -
+    /// which is how disclosure lists get quietly emptied again.
+    /// [`Self::disclosed_gaps`] is how a surface asks for them.
+    ///
+    /// `#[serde(default)]` because an older Hub does not send it, and an
+    /// absent list from an older Hub is genuinely unknown rather than empty.
+    /// The distinction is not lost: an older Hub is one that also cannot have
+    /// waived anything this list would name.
+    #[serde(default)]
+    pub disclosed_blockers: Vec<String>,
     pub limitations: Vec<String>,
     /// Published by a Hub whose one rollback-anchor witness is no longer the
     /// durable store it pinned.
@@ -126,6 +148,25 @@ impl HubMainnetReadiness {
     /// a thing to wait out and not a thing to adjudicate.
     pub fn witness_identity_is_broken(&self) -> bool {
         self.rollback_anchor_witness_identity_break.is_some()
+    }
+
+    /// Everything this Hub reports as outstanding, gating or not.
+    ///
+    /// `blockers` answers "why can I not pay". This answers "what is wrong",
+    /// which is a different question and the one a person asks before they put
+    /// money in rather than after they are refused. On a bounded pilot the
+    /// first list is empty by design and the second is not, so a surface that
+    /// reads only the first shows a clean bill of health for a Hub that has
+    /// disclosed a real gap.
+    ///
+    /// Order is the Hub's own, gating items first, and duplicates cannot occur
+    /// because the Hub keeps the two lists disjoint.
+    pub fn disclosed_gaps(&self) -> Vec<String> {
+        self.blockers
+            .iter()
+            .chain(self.disclosed_blockers.iter())
+            .cloned()
+            .collect()
     }
 }
 
@@ -2608,6 +2649,73 @@ mod transport_tests {
         value["trustless_finality"] = serde_json::json!(false);
         value["unilateral_l1_enforceable"] = serde_json::json!(unilateral_l1_enforceable);
         value
+    }
+
+    /// The wallet decodes the Hub's disclosure list, and merges it gating-first.
+    ///
+    /// Without this the field was `#[serde(default)]` and nothing ever set it,
+    /// so the wire shape would have decoded identically with the field absent
+    /// and `disclosed_gaps` had no exercise at all. That is the state in which
+    /// a "the Hub disclosed nothing" reading of an empty list survives review.
+    ///
+    /// Three cases, because the third is the one that is easy to get wrong:
+    /// a bounded pilot (gates empty, disclosure not), a full pilot (the
+    /// identifier gates and must not be duplicated), and an older Hub that
+    /// does not send the field at all.
+    #[test]
+    fn the_wallet_reads_the_hubs_disclosure_list_and_keeps_gates_first() {
+        let mut bounded = readiness_json(true, vec![], 500_000);
+        bounded["disclosed_blockers"] = serde_json::json!([
+            "unilateral_l1_dispute_path_is_not_ready",
+            "no_watcher_answers_for_an_offline_owner"
+        ]);
+        let bounded: HubMainnetReadiness = serde_json::from_value(bounded).unwrap();
+        assert!(
+            bounded.blockers.is_empty(),
+            "a bounded pilot gates on nothing, which is exactly why the other list has to arrive"
+        );
+        assert_eq!(
+            bounded.disclosed_gaps(),
+            vec![
+                "unilateral_l1_dispute_path_is_not_ready".to_string(),
+                "no_watcher_answers_for_an_offline_owner".to_string(),
+            ],
+            "an empty `blockers` must not read as a clean bill of health"
+        );
+
+        let full = readiness_json(
+            false,
+            vec!["unilateral_l1_dispute_path_is_not_ready"],
+            500_000,
+        );
+        let full: HubMainnetReadiness = serde_json::from_value(full).unwrap();
+        assert_eq!(
+            full.disclosed_gaps(),
+            vec!["unilateral_l1_dispute_path_is_not_ready".to_string()],
+            "a gating identifier is reported once, not twice"
+        );
+
+        // An older Hub sends no such field. That must decode, and must not
+        // invent a disclosure the Hub never made.
+        let mut legacy = readiness_json(
+            false,
+            vec!["external_monotonic_rollback_anchor_is_not_ready"],
+            500_000,
+        );
+        assert!(
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("disclosed_blockers")
+                .is_none(),
+            "the shared fixture must not already carry the field this case is about"
+        );
+        let legacy: HubMainnetReadiness = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.disclosed_blockers.is_empty());
+        assert_eq!(
+            legacy.disclosed_gaps(),
+            vec!["external_monotonic_rollback_anchor_is_not_ready".to_string()]
+        );
     }
 
     async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {

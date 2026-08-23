@@ -6,6 +6,7 @@ import {
   DESKTOP_OPEN_SECTION,
   REGISTRY_EXIT_COST,
   REGISTRY_EXIT_LEASE,
+  REGISTRY_EXIT_NO_WATCHER,
   REGISTRY_EXIT_PHONE_CANNOT,
   REGISTRY_EXIT_REASSURANCE,
   REGISTRY_EXIT_ROUTE,
@@ -91,6 +92,7 @@ describe("the phone tells the truth about what it can and cannot do", () => {
       REGISTRY_EXIT_REASSURANCE,
       REGISTRY_EXIT_COST,
       REGISTRY_EXIT_LEASE,
+      REGISTRY_EXIT_NO_WATCHER,
       REGISTRY_EXIT_PHONE_CANNOT,
       REGISTRY_EXIT_ROUTE,
       REGISTRY_OPEN_PHONE_CANNOT,
@@ -111,6 +113,45 @@ describe("the phone tells the truth about what it can and cannot do", () => {
     expect(REGISTRY_EXIT_COST).toContain(
       "spent whether or not your provider ever comes back",
     );
+  });
+
+  /**
+   * A settlement can start without the owner, and the phone says so.
+   *
+   * The direction matters as much as the fact. An earlier draft said a stale
+   * receipt takes the difference from a sleeping owner; on the shipped
+   * one-directional rail it pays them MORE, and the wallet declines to answer
+   * it for exactly that reason. These assertions pin the exposure that is real
+   * and forbid the reversal returning.
+   */
+  it("says a settlement can start without the owner, in the direction the rail runs", () => {
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain(
+      "start a settlement without you",
+    );
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain("while you are asleep");
+    // The direction, which is why this constant was rewritten.
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain(
+      "cannot pay you less than your newest receipt",
+    );
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain("owes you more");
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain("would hand money back");
+    // Undefended, said outright. Not "no watchtower configured", which reads
+    // as a setting somebody could change from this screen.
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain("nothing watches for it");
+    // The exposure that is real: the ending does not happen by itself.
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain("waits in the contract");
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain("only the desktop can press");
+    // And the reason an owner cannot fix it by finding somebody they trust:
+    // there is no way to get the receipt out of either app.
+    expect(REGISTRY_EXIT_NO_WATCHER).toContain(
+      "hand your receipt to anyone else",
+    );
+    // The reversal must not come back. "gone for good" belongs to the lease.
+    expect(REGISTRY_EXIT_NO_WATCHER).not.toMatch(
+      /gone for good|the difference is gone/i,
+    );
+    // No promise of a build that is not scheduled.
+    expect(REGISTRY_EXIT_NO_WATCHER).not.toMatch(/yet|soon|future release/i);
   });
 
   it("carries the one clock that destroys the money, without overstating it", () => {
@@ -147,12 +188,16 @@ describe("it is rendered on the phone, not merely written", () => {
   it("is not folded away behind a disclosure", () => {
     // The lease is the one thing here that has a deadline, and a summary an
     // owner never opens is the same as not saying it.
-    const index = security.indexOf("{REGISTRY_EXIT_LEASE}");
-    expect(index).toBeGreaterThan(0);
-    const before = security.slice(0, index);
-    expect(
-      before.split("<details").length - before.split("</details>").length,
-    ).toBe(0);
+    // Same for the unwatched window: it is the other way the money goes
+    // rather than waits, so it is held to the same standard.
+    for (const token of ["{REGISTRY_EXIT_LEASE}", "{REGISTRY_EXIT_NO_WATCHER}"]) {
+      const index = security.indexOf(token);
+      expect(index, `${token} is never rendered`).toBeGreaterThan(0);
+      const before = security.slice(0, index);
+      expect(
+        before.split("<details").length - before.split("</details>").length,
+      ).toBe(0);
+    }
   });
 
   it("is shown in every build, including the read-only companion", () => {

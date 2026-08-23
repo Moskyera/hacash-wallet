@@ -145,6 +145,31 @@ export type RegistryExitView = {
   yourMoneyLine: string;
   /** How long the provider has to object, in blocks and in hours. */
   windowLine: string;
+  /**
+   * That a settlement can start without the owner, and what that does and does
+   * not cost them.
+   *
+   * An earlier draft of this line said the owner loses the difference if
+   * nobody answers a stale settlement. On the rail this build actually ships
+   * that is backwards, and three places in the tree say so. The Hub deposits
+   * nothing (`right_hub_deposit_zhu != 0` is refused outright by
+   * `HvmRegistryBindingV2::validate`) and the bill ledger only ever subtracts
+   * from the left balance, so every later receipt pays the owner strictly
+   * LESS. An older receipt therefore owes them MORE, and answering it hands
+   * money back: `decide_user_exit_action` returns `finish_whatever_is_standing`
+   * instead of responding, `registry_response_watch` refuses to sign such a
+   * response at all, and its own test measured a dutiful answer costing the
+   * user 650,000 zhu on a 1,000,000 zhu channel.
+   *
+   * So what is stated here is the gap that is real: nothing presses the last
+   * two steps for a sleeping owner, and the protection above is a property of
+   * two checks rather than a promise from the chain. No answering window is
+   * quoted, because on this rail the owner should not answer.
+   *
+   * Constant copy, not a measurement: the day either check changes this stops
+   * being true, and it stops being a constant.
+   */
+  noWatcherLine: string;
   /** What it costs, and that the cost stands even if nothing is recovered. */
   feeLine: string;
   /** The storage lease, never folded away, never invented. */
@@ -262,6 +287,16 @@ export function registryExitView(
       : `Once you start, your provider has ${plural(windowBlocks, "block")} (about ${blocksAsHours(windowBlocks)}) ` +
         "to object with a newer receipt. That is normal and it is how the chain decides which receipt is the " +
         "true one. Your money arrives after that window closes, not before.",
+    noWatcherLine:
+      "Your provider can start a settlement without you, including while you are asleep, and nothing " +
+      "here is watching for it. On this kind of channel that cannot pay you less than your newest " +
+      "receipt does: your provider puts no money in, and the running total only ever moves from you to " +
+      "them, so an older receipt owes you more, not less. If one is used, this wallet will not answer " +
+      "it, because answering would hand money back. What being away does cost you is the ending: the " +
+      "money is not taken, it waits in the contract until the last two steps are pressed, and on this " +
+      "build the only one who can press them is you, here. Nothing here can hand your receipt to " +
+      "somebody else to watch it for you. And the protection above is how this channel is set up, not " +
+      "a promise from the chain, so keep what is in it to what you can afford to leave sitting.",
     // The fee sentence used to say "three network fees" and name no amount at
     // all. A measured exit was charged ten times that, and what an owner has
     // to be able to HOLD is larger again: a registry call is an HVM contract

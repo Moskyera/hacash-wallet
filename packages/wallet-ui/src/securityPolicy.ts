@@ -32,12 +32,24 @@ export const AGENT_WALLET_HOW_IT_WORKS_URL =
  *
  * First, neither named the loss. They said "Fast Pay depends on the selected
  * Hub and is not a trustless L1 exit", which is accurate and tells a person
- * nothing about what happens to their money. The way funds are actually lost
- * is specific and worth a sentence of its own: a Hub can put an old receipt on
- * chain while the owner is offline, the challenge window closes with nobody
- * answering for them, and the older, worse split settles. The Agent Wallet's
- * own acknowledgement has named this for a while. Fast Pay never did, and Fast
- * Pay is the path a phone takes by default.
+ * nothing about what happens to their money.
+ *
+ * The mechanism it then named was the wrong one, and that was corrected on
+ * 2026-08-23. It said a Hub can put an old receipt on chain while the owner is
+ * offline and let a challenge window close on them. That is borrowed from the
+ * HVM registry rail. Mainnet Fast Pay rides the NATIVE ChannelPay rail, where
+ * no such thing can happen: the only close the chain registers is action 3,
+ * and `channel_close` in the node
+ * (`hacash-fullnodedev/mint/src/action/channel.rs`) calls `ctx.check_sign` on
+ * BOTH the left and the right address before it will do anything. There is no
+ * challenge action, no unilateral close, and no window to sleep through. A Hub
+ * acting alone cannot move this money at all.
+ *
+ * Which makes the real risk the opposite shape, and worse to be vague about:
+ * the money comes out only if the Hub co-signs. A Hub that stops answering
+ * does not take the funds, it strands them, and there is nothing the owner can
+ * sign by themselves to get them back. That is the sentence a person needs
+ * before they fund a mainnet channel, so that is the sentence they get.
  *
  * Second, the ceilings were offered as the limits. They are not. They are what
  * this build refuses to cross. A Hub declares its own caps, and the only Hub
@@ -56,4 +68,4 @@ export const FAST_PAY_MAINNET_CEILINGS =
  * so a person ticking it has read the thing they are agreeing to.
  */
 export const FAST_PAY_MAINNET_CONSENT =
-  "I understand that the Hub holds my channel funds. If it stops answering, or if it puts an old receipt on chain while I am offline, I could lose part or all of what is in this channel. I will not put in more than I can afford to lose.";
+  "I understand that this channel can only be closed if the Hub co-signs it. There is no way for me to get this money out on my own: the chain requires both signatures, and no unilateral exit exists on this rail. If the Hub stops answering, refuses to sign, or disappears, what is in this channel stays locked and nobody can release it for me. I will not put in more than I can afford to lose.";

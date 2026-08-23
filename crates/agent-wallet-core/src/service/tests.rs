@@ -1016,3 +1016,29 @@ fn personal_like_files_outside_agent_root_are_never_touched() {
         b"personal-settings-sentinel"
     );
 }
+
+/// The consent the backend demands is the consent the screen shows.
+///
+/// `service.rs` compares the owner's acknowledgement byte for byte against
+/// [`AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT`]. The desktop declares its own copy
+/// of the same sentence in `apps/desktop/src/agent/access.ts`, and nothing
+/// checked that the two agreed. Both were edited by hand on 2026-08-23 to
+/// correct the failure they named; a one-character drift between them would
+/// have made every genuine consent unacceptable, and the only symptom would be
+/// an owner unable to enable the pilot for no stated reason.
+///
+/// Read from the source file rather than duplicated here, because a third copy
+/// of the sentence is a third thing to keep in step.
+#[test]
+fn the_screens_acknowledgement_is_byte_identical_to_the_one_the_backend_requires() {
+    let screen = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/desktop/src/agent/access.ts");
+    let source = std::fs::read_to_string(&screen)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", screen.display()));
+    let quoted = format!("\"{AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT}\"");
+    assert!(
+        source.contains(&quoted),
+        "apps/desktop/src/agent/access.ts does not declare the exact sentence the backend \
+         compares against. The backend expects:\n{AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT}"
+    );
+}

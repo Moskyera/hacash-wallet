@@ -79,10 +79,20 @@ pub struct TrustedOperationDisplay {
     pub fields: Vec<TrustedDisplayField>,
 }
 
+/// How many display fields survive into the native biometric prompt.
+///
+/// The platform prompt is a short string, so this truncates. That makes field
+/// ORDER a security property rather than a formatting preference: a field
+/// pushed past this index is not shown to the person whose fingerprint
+/// authorises the transaction, even though the in-app review screen still
+/// lists it. Anything inserted into a display's field vector goes at the END
+/// unless it is more important than what it would displace.
+pub const NATIVE_PROMPT_MAX_FIELDS: usize = 8;
+
 impl TrustedOperationDisplay {
     pub fn native_prompt(&self) -> String {
         let mut prompt = format!("{}\n{}", self.title, self.summary);
-        for field in self.fields.iter().take(8) {
+        for field in self.fields.iter().take(NATIVE_PROMPT_MAX_FIELDS) {
             prompt.push('\n');
             prompt.push_str(&field.label);
             prompt.push_str(": ");
@@ -673,5 +683,88 @@ mod tests {
         let challenge = state.begin_native(&view.id).unwrap();
         assert!(!challenge.message.contains('\n'));
         assert!(!challenge.message.contains('\r'));
+    }
+
+    /// The prompt drops fields past the limit, silently.
+    ///
+    /// Written down because it is invisible at the call site: a display can
+    /// gain a field, every test can stay green, and the thing that fell off
+    /// the end is the amount the owner is agreeing to pay.
+    #[test]
+    fn the_native_prompt_drops_every_field_past_the_limit() {
+        let display = TrustedOperationDisplay {
+            title: "t".into(),
+            summary: "s".into(),
+            fields: (0..NATIVE_PROMPT_MAX_FIELDS + 1)
+                .map(|index| TrustedDisplayField {
+                    label: format!("label{index}"),
+                    value: format!("value{index}"),
+                })
+                .collect(),
+        };
+        let prompt = display.native_prompt();
+        assert!(
+            prompt.contains(&format!("label{}", NATIVE_PROMPT_MAX_FIELDS - 1)),
+            "the last field inside the limit must survive"
+        );
+        assert!(
+            !prompt.contains(&format!("label{NATIVE_PROMPT_MAX_FIELDS}")),
+            "a field past the limit is not shown to the person authorising"
+        );
+    }
+
+    /// The two channel displays put their fee-provenance note LAST.
+    ///
+    /// Both field vectors were already exactly at
+    /// [`NATIVE_PROMPT_MAX_FIELDS`] before their money-bearing field. Adding
+    /// the fee note beside "Network fee" pushed "Final signed-bill
+    /// distribution" - the amount the owner receives on a cooperative close -
+    /// out of the biometric prompt, and nothing failed. This is asserted on
+    /// the source text because the field vectors are built inline inside async
+    /// methods that need a node, and the property being protected is the
+    /// ORDER, which the source states directly.
+    #[test]
+    fn the_channel_displays_keep_the_fee_note_after_their_money_fields() {
+        const SOURCE: &str = include_str!("wallet/authorization_service.rs");
+        // Every prepared display that carries a network fee also states where
+        // that fee came from: HAC send, HACD send, channel open, channel
+        // close. A display that shows a fee with no provenance is the silent
+        // fallback wearing a confirmation screen.
+        assert_eq!(
+            SOURCE.matches("degraded_fee_field(").count(),
+            5,
+            "four call sites plus the one definition; a missing one means some \
+             confirmation screen shows a fee without saying whether it was measured"
+        );
+        let fee_notes: Vec<usize> = SOURCE
+            .match_indices("degraded_fee_field(&fee_estimate_degraded)")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            fee_notes.len(),
+            2,
+            "expected exactly the channel open and channel close displays"
+        );
+        for money_label in [
+            "\"Total wallet debit\"",
+            "\"Final signed-bill distribution\"",
+            "\"Incarnation\"",
+            "\"Original L1 distribution\"",
+        ] {
+            let money = SOURCE
+                .find(money_label)
+                .unwrap_or_else(|| panic!("{money_label} is no longer displayed at all"));
+            let note = fee_notes
+                .iter()
+                .copied()
+                .find(|note| *note > money)
+                .unwrap_or_else(|| {
+                    panic!("{money_label} is not followed by a fee note in its own display")
+                });
+            assert!(
+                note > money,
+                "{money_label} must be listed before the fee note, or truncation hides it"
+            );
+        }
     }
 }

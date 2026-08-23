@@ -84,16 +84,31 @@ zhu. A test caught it.
 
 The consent now reads:
 
-> "I understand that this provider holds my channel funds. If it stops
-> answering, or if it puts an old receipt on chain while I am offline, I could
-> lose part or all of what is in this channel. At most 10 HAC per channel is at
-> risk. I will not put in more than I can afford to lose."
+> "I understand that this provider holds my channel funds. This channel can
+> only be closed if the provider co-signs it: the chain requires both signatures
+> and no unilateral exit exists on this rail, so if it stops answering, refuses
+> to sign, or disappears, what is in this channel stays locked and nobody can
+> release it for me. At most 10 HAC per channel is at risk. I will not put in
+> more than I can afford to lose."
 
-Both failures named, then the number, then the sentence that matters. The
-sleeping-user risk is in it deliberately: it is the one the cap is actually for,
-and a disclosure that omits the failure it bounds is not the choice that was
-made. The string exists in two places - the screen shows one, the backend
-compares the other byte for byte - and they are checked identical.
+The failure named, then the number, then the sentence that matters. The string
+exists in two places - the screen shows one, the backend compares the other byte
+for byte - and they are checked identical.
+
+**Corrected 2026-08-23.** The earlier version of this sentence said the provider
+could put an old receipt on chain while the owner was offline and take the
+difference, and this document argued that the sleeping-user risk was "the one
+the cap is actually for". Both were wrong, on both rails. Native ChannelPay
+registers only action 3, and `channel_close` in
+`hacash-fullnodedev/mint/src/action/channel.rs` calls `ctx.check_sign` on the
+left AND the right address, so a provider acting alone cannot settle anything.
+On the HVM registry rail a stale receipt pays the owner MORE, because a non-zero
+hub deposit is refused at binding validation and the ledger only subtracts from
+the left balance; `decide_user_exit_action` therefore finishes what is standing
+instead of answering, and `registry_response_watch` refuses to sign such a
+response at all, having measured a dutiful answer costing its own user 650,000
+zhu on a 1,000,000 zhu channel. The risk the cap is actually for is the one now
+stated: the money comes out only if the provider co-signs.
 
 A watchtower remains available to whoever wants to run one, and is not a
 guarantee this promises.
@@ -161,9 +176,10 @@ What is still true and worth weighing:
 
 * the exit is proven against a chain with the provider deleted, entered from the
   command's own body, and it survives the app closing mid-sequence;
-* the consent now names both failures - the provider that stops answering, which
-  the exit answers, and the old receipt settled while the owner sleeps, which it
-  does not - and names the amount;
+* the consent names the failure that can actually happen - the provider that
+  will not co-sign, leaving the money stranded - and names the amount. It no
+  longer claims a stale receipt can be settled against the owner, because on
+  neither rail can it be;
 * the cap is 10 HAC per channel, enforced by the wallet independently of
   anything the provider claims;
 * what has never run is a release binary doing this against Hacash mainnet,

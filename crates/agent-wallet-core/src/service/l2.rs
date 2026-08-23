@@ -90,6 +90,22 @@ pub struct AgentChannelCloseReview {
     pub final_agent_units: HacUnits,
     pub network_fee_units: HacUnits,
     pub wallet_fee_units: HacUnits,
+    /// Why the network fee above is a guess, when it is one.
+    ///
+    /// `None` means the node quoted it. `Some` carries the node's own refusal
+    /// text, so the owner reviewing this close sees that the fee was priced
+    /// from the wallet's floor or from an assumed transaction size rather than
+    /// from the network.
+    ///
+    /// It is covered by `recompute_review_commitment`, like every other field
+    /// on this review: a warning an attacker could strip between review and
+    /// signature is not a warning.
+    ///
+    /// `#[serde(default)]` so an operation persisted before this field existed
+    /// still loads. Such a record predates the measurement entirely, and
+    /// `None` is the honest reading of it rather than a silent "fine".
+    #[serde(default)]
+    pub fee_estimate_degraded: Option<String>,
     pub phase: AgentChannelClosePhase,
 }
 
@@ -274,6 +290,10 @@ impl AgentChannelCloseOperation {
             self.plan.transfer_from.as_deref().unwrap_or(""),
             self.plan.transfer_to.as_deref().unwrap_or(""),
             &self.plan.transfer_millimeis.unwrap_or(0).to_string(),
+            // Bound like everything else the owner reads. A fee warning that
+            // could be stripped between the review and the signature would be
+            // decoration, not a disclosure.
+            self.review.fee_estimate_degraded.as_deref().unwrap_or(""),
         ] {
             digest.update((field.len() as u64).to_be_bytes());
             digest.update(field.as_bytes());
@@ -298,6 +318,21 @@ pub struct AgentChannelSetupReview {
     pub network_fee_units: HacUnits,
     pub wallet_fee_units: HacUnits,
     pub total_debit_units: HacUnits,
+    /// Why the network fee above is a guess, when it is one.
+    ///
+    /// `None` means the node quoted it. `Some` carries the node's own refusal
+    /// text. This review is shown to the owner before they confirm, so the
+    /// warning belongs here rather than in a blanket refusal: an earlier draft
+    /// aborted the whole open on a degraded fee on the grounds that "there is
+    /// no screen and no one to ask", which is not true of this call.
+    /// `agent_wallet_prepare_fast_pay_channel` returns this review to a panel
+    /// the owner confirms from, and collapsing it into `NodeRejected` threw
+    /// away the node's reason on the way.
+    ///
+    /// Covered by `recompute_review_commitment`, and `#[serde(default)]` for
+    /// records written before it existed.
+    #[serde(default)]
+    pub fee_estimate_degraded: Option<String>,
     pub phase: AgentChannelSetupPhase,
 }
 
@@ -437,6 +472,9 @@ impl AgentChannelSetupOperation {
             self.network_binding.block_1_hash.as_str(),
             self.network_binding.node_profile_id.as_str(),
             self.network_binding.network_instance_id.as_str(),
+            // Bound like everything else the owner reads, for the same reason
+            // as on the close review.
+            self.review.fee_estimate_degraded.as_deref().unwrap_or(""),
         ] {
             digest.update((field.len() as u64).to_be_bytes());
             digest.update(field.as_bytes());
@@ -1227,6 +1265,7 @@ mod tests {
                 network_fee_units: HacUnits::new(1_000),
                 wallet_fee_units: HacUnits::ZERO,
                 total_debit_units: HacUnits::new(1_001_000),
+                fee_estimate_degraded: None,
                 phase: AgentChannelSetupPhase::Prepared,
             },
             idempotency_key: "hpay:agent-channel-open:test".into(),

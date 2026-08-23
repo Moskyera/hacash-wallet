@@ -190,6 +190,40 @@ describe("what the exit section states before anything is pressed", () => {
     expect(view.windowLine).toContain("1 hour");
   });
 
+  /**
+   * A settlement can start without the owner, and this screen has to say so.
+   *
+   * It also has to say it in the right DIRECTION, which an earlier draft did
+   * not. On the shipped one-directional rail a stale receipt pays the owner
+   * MORE, not less, and the wallet deliberately declines to answer one, so
+   * copy promising that "the difference is gone" describes a loss that cannot
+   * happen here. The assertions below pin the true exposure (the ending does
+   * not happen by itself, and the protection is a setup property rather than a
+   * chain guarantee) and forbid the reversal coming back.
+   */
+  it("says a settlement can start without the owner, in the direction the rail actually runs", () => {
+    const view = viewOf(binding(), READY, [], formatUnits);
+    const line = flatten(view.noWatcherLine);
+    // The mechanism, in the owner's terms rather than as an identifier.
+    expect(line).toContain("start a settlement without you");
+    expect(line).toContain("while you are asleep");
+    // The direction, which is the whole reason this line was rewritten.
+    expect(line).toContain("cannot pay you less than your newest");
+    expect(line).toContain("owes you more");
+    expect(line).toContain("would hand money back");
+    // The exposure that IS real: nothing ends it for them.
+    expect(line).toContain("waits in the contract");
+    expect(line).toContain("the only one who can press them is you");
+    // And why the reassurance is not a guarantee.
+    expect(line).toContain("not a promise from the chain");
+    // The reversal must not come back. "gone for good" belongs to the lease
+    // line, which is the one clock here that really does destroy money.
+    expect(line).not.toMatch(/gone for good|the difference is gone/i);
+    // No promise of a build nobody has scheduled. Held to the same wording as
+    // the mobile test so the two cannot drift.
+    expect(line).not.toMatch(/yet|soon|future release/i);
+  });
+
   it("states the whole cost, gas included, and the amount to keep available", () => {
     const view = viewOf(binding(), READY, [], formatUnits);
     expect(EXIT_CHAIN_FEE_COUNT).toBe(3);
@@ -488,8 +522,12 @@ describe("the exit control is named once and warned about before the press", () 
     expect(index).toBeLessThan(button);
   });
 
-  it("keeps the lease countdown and the amount out of a disclosure too", () => {
-    for (const needle of ["{exitView.leaseLine}", "{exitView.yourMoneyLine}"]) {
+  it("keeps the lease countdown, the amount and the unwatched window out of a disclosure too", () => {
+    for (const needle of [
+      "{exitView.leaseLine}",
+      "{exitView.yourMoneyLine}",
+      "{exitView.noWatcherLine}",
+    ]) {
       const index = admin.indexOf(needle);
       expect(index, `${needle} is never rendered`).toBeGreaterThan(0);
       expect(disclosureDepth(admin, index)).toBe(0);

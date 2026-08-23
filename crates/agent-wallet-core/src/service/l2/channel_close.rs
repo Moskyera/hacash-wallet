@@ -162,6 +162,11 @@ impl AgentWalletManager {
             final_agent_units,
             network_fee_units,
             wallet_fee_units: HacUnits::ZERO,
+            // `prepare_cooperative_channel_close` measures this and used to
+            // set it on a struct field nothing ever read. The close is the
+            // same money as the open and gets the same disclosure; the
+            // asymmetry was an oversight, not a decision.
+            fee_estimate_degraded: plan.fee_estimate_degraded.clone(),
             phase: AgentChannelClosePhase::Prepared,
         };
         let mut operation = AgentChannelCloseOperation {

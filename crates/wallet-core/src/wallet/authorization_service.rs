@@ -269,6 +269,13 @@ impl WalletService {
                 field("Recipient", to),
                 field("Amount", &format!("{} HAC", preview.amount_wire)),
                 field("Network fee", &preview.fee),
+                // The send preview screen already shows this before approval,
+                // but the approval display is the thing that is bound to the
+                // signature and re-read at the signing boundary. A warning
+                // that exists only on the screen before the last one is a
+                // warning an owner can walk past. Three fields here, so
+                // `NATIVE_PROMPT_MAX_FIELDS` truncation is not in play.
+                degraded_fee_field(&preview.plan.fee_estimate_degraded),
             ],
         );
         self.store_prepared(
@@ -366,6 +373,7 @@ impl WalletService {
                 field("Recipient", to),
                 field("HACD", &preview.diamond_names.join(", ")),
                 field("Network fee", &preview.fee_wire),
+                degraded_fee_field(&preview.fee_estimate_degraded),
             ],
         );
         self.store_prepared(
@@ -697,7 +705,7 @@ impl WalletService {
         .require_channel_open_ready(&preview.right_address, &preview.left_deposit)
         .await?;
         let encoded_channel_id = crate::channel::encoded_channel_id(&preview.channel_id)?;
-        let (built, fee) = build_channel_open_tx_with_dynamic_fee(
+        let (built, fee, fee_estimate_degraded) = build_channel_open_tx_with_dynamic_fee(
             &self.node,
             network_binding.chain_id,
             &preview.left_address,
@@ -758,6 +766,13 @@ impl WalletService {
                 ),
                 field("Channel", &preview.channel_id),
                 field("Incarnation", &preview.reuse_version.to_string()),
+                // Last on purpose. `TrustedOperationDisplay::native_prompt`
+                // truncates to the first eight fields, so anything inserted
+                // above pushes a field off the end of the biometric prompt.
+                // Placing it here leaves the eight that were already chosen
+                // exactly where they were; the full review screen shows every
+                // field regardless of order.
+                degraded_fee_field(&fee_estimate_degraded),
             ],
         );
         let wallet_address = preview.left_address.clone();
@@ -1292,7 +1307,7 @@ impl WalletService {
         .require_channel_close_ready(&hub_address, settlement.transfer.is_some())
         .await?;
         let encoded_channel_id = crate::channel::encoded_channel_id(&channel_id)?;
-        let (built, fee) = build_channel_close_tx_with_dynamic_fee(
+        let (built, fee, fee_estimate_degraded) = build_channel_close_tx_with_dynamic_fee(
             &self.node,
             network_binding.chain_id,
             &from,
@@ -1364,6 +1379,13 @@ impl WalletService {
                         })
                         .unwrap_or_else(|| "No principal transfer required".into()),
                 ),
+                // Last on purpose, and here it matters most: this list already
+                // ran to exactly eight fields before the settlement split, and
+                // `native_prompt` truncates at eight. Inserting the fee note
+                // beside "Network fee" pushed "Final signed-bill distribution"
+                // - the amount the owner actually receives - out of the prompt
+                // they authorise with a fingerprint.
+                degraded_fee_field(&fee_estimate_degraded),
             ],
         );
         let now = std::time::SystemTime::now()
@@ -2348,6 +2370,20 @@ fn exact_open_channel_matches(
         && channel.left.satoshi == 0
         && channel.right.satoshi == 0
 }
+
+/// The line that tells an approver the network fee beside it is a guess.
+///
+/// It is always present rather than conditionally pushed, because a field that
+/// appears only in the bad case is a field an approver has never seen before
+/// and will not read carefully. "Quoted by the node" is the reassurance; the
+/// other value is the warning.
+fn degraded_fee_field(warning: &Option<String>) -> TrustedDisplayField {
+    match warning {
+        Some(reason) => field("Fee estimate", reason),
+        None => field("Fee estimate", "Quoted by the node"),
+    }
+}
+
 fn field(label: &str, value: &str) -> TrustedDisplayField {
     TrustedDisplayField {
         label: label.into(),

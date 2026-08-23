@@ -20,8 +20,9 @@ use hacash_wallet_core::hvm_registry_exit::{
     HvmRegistryExitPlanV1, HvmRegistryExitStep, build_exit_kit, build_user_exit_transaction,
 };
 use hacash_wallet_core::hvm_registry_exit_cost::{
-    EXIT_BILLING_FLOOR_ROUNDING_BYTES, exit_gas_reserve_zhu, exit_run_ceiling_zhu,
-    exit_step_billing_floor_bytes, exit_step_ceiling_zhu,
+    EXIT_BILLING_FLOOR_ROUNDING_BYTES, HVM_REGISTRY_EXIT_LOWEST_FEE_PURITY_UNIT238,
+    exit_gas_reserve_zhu, exit_run_ceiling_zhu, exit_step_billing_floor_bytes,
+    exit_step_ceiling_zhu, minimum_network_fee_zhu,
 };
 use l2_fast_pay_hub::hvm_registry::{
     HPAY_REGISTRY_BYTECODE_SHA3, HPAY_REGISTRY_SETTLEMENT_PROFILE, HVM_REGISTRY_BILL_SCHEMA,
@@ -310,4 +311,88 @@ fn the_run_quote_covers_every_step_and_is_tighter_than_the_flat_assumption() {
         "the quote {run} does not cover what the chain can take at the measured sizes: {true_cost}"
     );
     println!("  the chain can take at most {true_cost} zhu at the measured sizes");
+}
+
+/// THE FEE THAT CANNOT MOVE, CHECKED AGAINST THE BYTES IT HAS TO CARRY.
+///
+/// `MAX_CHANNEL_NETWORK_FEE_ZHU` is a compile-time constant with no estimation
+/// behind it and no bump path: `crates/agent-wallet-core/src/signer.rs` refuses
+/// to sign an exit step that exceeds it, so an exit that is not clearing cannot
+/// be re-signed higher. Whether that is safe is an arithmetic question about
+/// the largest transaction the exit sends, and until now nothing asked it.
+///
+/// The binding case is `challenge` and `respond`. They are the largest steps,
+/// and a per-byte fee floor costs most on the largest transaction, which is the
+/// opposite direction from the gas reserve every other assertion in this file
+/// is about. So this deliberately reads the measured **maximum**.
+///
+/// Both floors this checks are real gates. Under the consensus floor the chain
+/// prices the transaction as if it had paid the floor anyway
+/// (`GasPrice::from_tx`, `hacash-fullnodedev/protocol/src/context/gas.rs:62-67`);
+/// under the node's relay floor it is dropped before it is ever gossiped
+/// (`mint/src/api/submit_transaction.rs:44`, `node/src/core/protocol.rs:372`).
+///
+/// What this does NOT establish, and must not be read as establishing: that the
+/// fee is enough to CONFIRM. Both floors are constants, neither is a fee
+/// market, and no transaction from this software has ever been on mainnet.
+#[test]
+fn the_channel_fee_ceiling_clears_the_largest_exit_transaction() {
+    l2_fast_pay_hub::protocol_registry::ensure_hacash_protocol_setup();
+
+    // The node's default relay floor purity: `LOWEST_FEE_PURITY` at
+    // `hacash-fullnodedev/basis/src/config/engine.rs:115`, which is a function
+    // local `const` there and so cannot be imported. Re-derived, not retyped.
+    const NODE_RELAY_FLOOR_PURITY_UNIT238: u64 = 1_000_000 / 166;
+
+    assert_eq!(
+        HVM_REGISTRY_EXIT_LOWEST_FEE_PURITY_UNIT238,
+        protocol::params::VM_LOWEST_FEE_PURITY,
+        "the wallet's copy of the consensus fee floor has drifted from the chain's"
+    );
+
+    for step in [HvmRegistryExitStep::Challenge, HvmRegistryExitStep::Respond] {
+        let (_, largest) = measure(step);
+        let consensus_floor_zhu = minimum_network_fee_zhu(largest);
+        let relay_floor_zhu = NODE_RELAY_FLOOR_PURITY_UNIT238
+            .saturating_mul(largest)
+            .div_ceil(100);
+        let carried_purity = NETWORK_FEE_ZHU.saturating_mul(100) / largest;
+
+        println!(
+            "{:>22}  largest {largest} bytes  consensus floor {consensus_floor_zhu} zhu \
+             ({:.2}x headroom)  relay floor {relay_floor_zhu} zhu ({:.1}x headroom)  \
+             carried purity {carried_purity}:238/byte",
+            step.slug(),
+            NETWORK_FEE_ZHU as f64 / consensus_floor_zhu as f64,
+            NETWORK_FEE_ZHU as f64 / relay_floor_zhu as f64,
+        );
+
+        assert!(
+            NETWORK_FEE_ZHU >= consensus_floor_zhu,
+            "{}: the fee ceiling {NETWORK_FEE_ZHU} zhu is below the chain's own floor \
+             {consensus_floor_zhu} zhu for {largest} bytes",
+            step.slug()
+        );
+        assert!(
+            NETWORK_FEE_ZHU >= relay_floor_zhu,
+            "{}: the fee ceiling {NETWORK_FEE_ZHU} zhu is below the node's relay floor \
+             {relay_floor_zhu} zhu for {largest} bytes",
+            step.slug()
+        );
+        // The margins recorded at the constant in
+        // `crates/l2-fast-pay-hub/src/l1_channel.rs`. Asserted so the table
+        // there cannot go stale while this file still passes.
+        assert!(
+            NETWORK_FEE_ZHU >= consensus_floor_zhu.saturating_mul(4),
+            "{}: the constant no longer carries the 4.5x consensus-floor margin \
+             its documentation claims",
+            step.slug()
+        );
+        assert!(
+            NETWORK_FEE_ZHU >= relay_floor_zhu.saturating_mul(37),
+            "{}: the constant no longer carries the 37x relay-floor margin \
+             its documentation claims",
+            step.slug()
+        );
+    }
 }

@@ -75,6 +75,29 @@ export const REGISTRY_EXIT_COST =
   "It is not instant and it is not free. The chain holds an objection window open first, so your provider has a fixed number of blocks to answer with a newer receipt, and only after that closes is your money sent. It costs three ordinary network fees, and those are spent whether or not your provider ever comes back.";
 
 /**
+ * That a settlement can start without the owner, and what that actually costs.
+ *
+ * An earlier draft of this said a stale settlement takes the difference from a
+ * sleeping owner. On the rail this build ships that is backwards. The Hub
+ * deposits nothing (`right_hub_deposit_zhu != 0` is refused by
+ * `HvmRegistryBindingV2::validate`) and the bill ledger only subtracts from
+ * the left balance, so every later receipt pays the owner strictly less and an
+ * older one owes them more. Answering it hands money back, which is why
+ * `decide_user_exit_action` finishes what is standing instead of responding
+ * and the Hub-side responder refuses to sign that response at all.
+ *
+ * What is left, and what this says, is the real gap: nobody presses the last
+ * two steps for a sleeping owner, and the protection above rests on two checks
+ * rather than on the chain. Saying "not yet" would invite an owner to wait for
+ * a build nobody has scheduled, so this says what is true today.
+ *
+ * It is on the phone for the same reason the lease is: the clock is hours to
+ * days long, the desktop may be shut, and this is the device in their hand.
+ */
+export const REGISTRY_EXIT_NO_WATCHER =
+  "Your provider can start a settlement without you, including while you are asleep, and nothing watches for it. On this kind of channel that cannot pay you less than your newest receipt: your provider puts no money in, and the running total only moves from you to them, so an older receipt owes you more rather than less, and this wallet will not answer one, because answering would hand money back. What being away costs you is the ending. The money is not taken, it waits in the contract until the last two steps are pressed, and only the desktop can press them. Neither this phone nor the desktop can hand your receipt to anyone else to watch it for you. That protection is how this channel is set up rather than a promise from the chain, so keep what is in a provider channel to what you can afford to leave sitting.";
+
+/**
  * The one thing that destroys the money rather than delaying it.
  *
  * It is on the phone because the clock is about a month long and the phone is

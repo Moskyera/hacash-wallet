@@ -625,7 +625,15 @@ pub struct FeeAverageResponse {
     pub ret: i32,
     #[serde(default)]
     pub err: Option<String>,
+    /// Defaulted because a node that is *refusing* sends `{"ret":1,"err":...}`
+    /// with no fee in it. Without the default, serde fails on the missing field
+    /// before `query_fee_average` ever reads `ret`, and the caller is told
+    /// "invalid JSON response: missing field `feasible`" instead of the reason
+    /// the node actually gave. That reason is now shown to the person about to
+    /// pay, so it has to be the node's sentence and not serde's.
+    #[serde(default)]
     pub feasible: String,
+    #[serde(default)]
     pub purity: u64,
 }
 

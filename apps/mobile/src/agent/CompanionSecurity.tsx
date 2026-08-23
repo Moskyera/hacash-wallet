@@ -33,6 +33,7 @@ import {
 import {
   REGISTRY_EXIT_COST,
   REGISTRY_EXIT_LEASE,
+  REGISTRY_EXIT_NO_WATCHER,
   REGISTRY_EXIT_PHONE_CANNOT,
   REGISTRY_EXIT_REASSURANCE,
   REGISTRY_EXIT_ROUTE,
@@ -236,6 +237,14 @@ export function CompanionSecurity({
         <h2>{REGISTRY_EXIT_TITLE}</h2>
         <p>{REGISTRY_EXIT_REASSURANCE}</p>
         <p className="agent-muted">{REGISTRY_EXIT_COST}</p>
+        {/* Directly under the cost sentence, because that sentence describes
+            the objection window as something that happens while the owner
+            leaves, and an owner who reads only that comes away thinking the
+            window protects them. It is the same clock and it also runs the
+            other way. Warning styling and never behind a disclosure, on the
+            same grounds as the lease below: these are the two ways the money
+            goes rather than waits. */}
+        <p className="agent-warning-copy" role="status">{REGISTRY_EXIT_NO_WATCHER}</p>
         {/* Never behind a disclosure: this is the only clock in the system
             that destroys the money instead of delaying it. */}
         <p className="agent-warning-copy" role="status">{REGISTRY_EXIT_LEASE}</p>

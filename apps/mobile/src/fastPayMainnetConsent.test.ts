@@ -30,13 +30,25 @@ describe("mobile bounded mainnet Fast Pay consent", () => {
 });
 
 describe("the words before mainnet money", () => {
-  it("names how the money is actually lost", () => {
+  it("names how the money is actually lost on the rail this consent governs", () => {
     // "Fast Pay depends on the selected Hub and is not a trustless L1 exit" is
-    // true and tells a person nothing. The loss is specific: an old receipt
-    // put on chain while the owner is offline, a challenge window that closes
-    // with nobody answering for them, and the older, worse split settles.
-    expect(FAST_PAY_MAINNET_CONSENT).toMatch(/old receipt on chain while I am offline/);
-    expect(FAST_PAY_MAINNET_CONSENT).toMatch(/lose part or all of what is in this channel/);
+    // true and tells a person nothing.
+    //
+    // What replaced it was borrowed from the wrong rail. It described a Hub
+    // putting an old receipt on chain during a challenge window, which is an
+    // HVM registry story. Mainnet Fast Pay is native ChannelPay, where
+    // `channel_close` checks BOTH signatures and no challenge action exists,
+    // so a Hub acting alone cannot move the money at all.
+    //
+    // The real risk is the mirror image: the money only comes out if the Hub
+    // co-signs. These assertions pin that, and forbid the registry story
+    // coming back to a screen it does not describe.
+    expect(FAST_PAY_MAINNET_CONSENT).toMatch(/only be closed if the Hub co-signs/);
+    expect(FAST_PAY_MAINNET_CONSENT).toMatch(/no way for me to get this money out on my own/);
+    expect(FAST_PAY_MAINNET_CONSENT).toMatch(/requires both signatures/);
+    expect(FAST_PAY_MAINNET_CONSENT).toMatch(/stays locked/);
+    expect(FAST_PAY_MAINNET_CONSENT).not.toMatch(/old receipt/);
+    expect(FAST_PAY_MAINNET_CONSENT).not.toMatch(/challenge window/);
   });
 
   it("offers the ceilings as ceilings, not as the limits a person gets", () => {

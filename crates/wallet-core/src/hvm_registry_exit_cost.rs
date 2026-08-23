@@ -131,6 +131,29 @@ pub const fn exit_gas_reserve_zhu(billing_size_bytes: u64, network_fee_zhu: u64)
     reserve_238.div_ceil(UNIT238_PER_ZHU)
 }
 
+/// The smallest network fee the chain will accept for a transaction of this
+/// billing size, in zhu.
+///
+/// # Why a fee floor exists at all, separately from the gas reserve
+///
+/// `GasPrice::from_tx` (`hacash-fullnodedev/protocol/src/context/gas.rs:62-67`)
+/// prices gas at `max(raw_fee, vm_lowest_fee_purity(height) * billing_size)`.
+/// A transaction that pays less than the floor is not cheaper to run: the chain
+/// prices it *as if* it had paid the floor, and it still has to get into a
+/// block. `mint/src/api/submit_transaction.rs:44` and `node/src/core/protocol.
+/// rs:372` both drop a transaction whose `fee_purity()` is under the node's
+/// configured `lowest_fee_purity` before it is ever relayed.
+///
+/// This is a floor and not an estimate. It is what the chain will not go below;
+/// it says nothing about what a congested mempool would actually clear. See
+/// `MAX_CHANNEL_NETWORK_FEE_ZHU` for the margin between the two and for what
+/// is still missing.
+pub const fn minimum_network_fee_zhu(billing_size_bytes: u64) -> u64 {
+    HVM_REGISTRY_EXIT_LOWEST_FEE_PURITY_UNIT238
+        .saturating_mul(billing_size_bytes)
+        .div_ceil(UNIT238_PER_ZHU)
+}
+
 /// The gas this one step can reserve, at its own measured floor.
 pub const fn exit_step_gas_reserve_zhu(step: HvmRegistryExitStep, network_fee_zhu: u64) -> u64 {
     exit_gas_reserve_zhu(exit_step_billing_floor_bytes(step), network_fee_zhu)

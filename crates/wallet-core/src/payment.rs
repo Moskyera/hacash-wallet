@@ -44,6 +44,20 @@ pub struct PaymentPlan {
     /// Fast Pay was never in play for this send (no provider, no channel), and
     /// there is nothing to explain.
     pub fast_pay_declined: Option<String>,
+    /// Why the fee on this plan is a guess rather than a quote.
+    ///
+    /// The fee path falls back twice when the node does not answer: to the
+    /// wallet's own floor purity when `/query/fee/average` fails, and to a
+    /// default byte count when the node cannot build the body. Both fallbacks
+    /// are correct, because refusing to quote at all when the node blinks would
+    /// be worse than quoting a minimum. Both used to happen in total silence,
+    /// so a user was shown a fee with no way to know it was invented, and an
+    /// under-priced transaction is not a cosmetic problem: a transfer that sits
+    /// unconfirmed inside a channel challenge window loses the window, and the
+    /// older and worse split settles.
+    ///
+    /// `None` means every number behind the fee was measured against the node.
+    pub fee_estimate_degraded: Option<String>,
 }
 
 /// The Fast Pay routing decision for one send.
@@ -125,6 +139,7 @@ impl PaymentRouter {
             options.l1_fee_speed,
         )
         .await?;
+        let fee_estimate_degraded = tier_set.warning();
         let fee_est = tier_set.selected;
         let mut fee_breakdown = SendFeeBreakdown {
             payer_debit_mei: amount_mei + fee_est.fee_mei,
@@ -148,6 +163,7 @@ impl PaymentRouter {
             fee_breakdown,
             l1_fee_tiers: tier_set.tiers,
             fast_pay_declined,
+            fee_estimate_degraded,
         })
     }
 
@@ -237,6 +253,9 @@ impl PaymentRouter {
             fee_breakdown,
             l1_fee_tiers: Vec::new(),
             fast_pay_declined: None,
+            // Fast Pay carries no L1 fee, so there is no fee estimate to be
+            // honest or dishonest about.
+            fee_estimate_degraded: None,
         })))
     }
 
@@ -389,7 +408,29 @@ mod tests {
     /// `trustless_finality`, `unilateral_l1_enforceable`,
     /// `channel_unilateral_exit`, `deployment_verified` - so this fixture can
     /// never pass by being greener than the Hub it came from.
-    const LIVE_BOUNDED_PILOT_READINESS_BODY: &str = r#"{"schema":"hpay-fast-pay-mainnet-readiness/1","evaluated_unix":$EVALUATED$,"valid_until_unix":$VALID_UNTIL$,"profile":"mainnet-bounded-pilot","payments_enabled":true,"close_enabled":true,"mainnet_detected":true,"fullnode_capabilities":{"observed_unix":$EVALUATED$,"api_version":1,"chain_id":0,"height":774025,"next_height":774026,"mainnet":true,"network_kind":"mainnet","node_profile_id":"hacash-mainnet","block_1_hash":"001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56","network_instance_id":"5a310ec0f487a37156a182c67778495f66e5c7502f9871829edc790023b123cf","transaction_format_version":2,"tip_timestamp_unix":$TIP$,"tip_age_seconds":$TIP_AGE$,"registered_actions":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"enabled_actions":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"enabled_transactions":[0,1,2,3],"transaction_submit_bound":true,"hpay_channel_registry_query":false,"channel_unilateral_exit":false,"channel_unilateral_exit_evidence":{"schema":"hpay-hvm-channel-exit-evidence/1","manifest_valid":true,"contract_name":"HPAYChannelExitV1","protocol_domain":"HPAY/HVM-CHANNEL/V1","settlement_profile":"hpay-hvm-channel-v1","source_sha256":"c0a430eb9769d1d506641c379bb8aaf708c7bac7d03694b60a4be03fd001dd06","bytecode_sha3":"11a2efc27a0c951bbc6977186eb58bd076dd331a785f3c57242cf54a72238349","required_action_kinds":[40,41,44],"funding_model":{"left_deposit":"positive","right_hub_deposit":"exactly_zero"},"storage_key_count":18,"must_renew_every_storage_key":true,"deployment":{"enabled":false,"contract_address":null,"deployment_tx_hash":null,"deployment_height":null,"independently_verified":false},"on_chain_verification":{"observed_height":null,"confirmed_tx_height":null,"deployment_tx_confirmed":false,"contract_code_sha3":null,"contract_code_matches":false},"deployment_verified":false}},"rollback_anchor":null,"max_payment_hac_zhu":1000000,"max_channel_funding_hac_zhu":10000000,"allowlist_configured":true,"aggregate_tvl_within_limit":true,"max_aggregate_tvl_hac_zhu":100000000,"max_payment_satoshi":0,"wallet_fee_hac":"0","trustless_finality":false,"unilateral_l1_enforceable":false,"trusted_bounded_pilot":true,"settlement_model":"official Hacash ChannelPay bills with hub-coordinated bounded mainnet pilot","blockers":[],"close_blockers":[],"limitations":["settled does not mean unilateral L1 finality","the active Hacash mainnet exposes cooperative original-funding close action 3","pilot exposure must remain inside the configured payment and channel caps","new channels require an allowlisted user and aggregate Hub TVL at or below 100000000 zhu"]}"#;
+    ///
+    /// **Two things here were not in the original capture and are marked as
+    /// such rather than passed off as measured.** `disclosed_blockers` and the
+    /// `no_watcher_answers_for_an_offline_owner` limitation are derived from
+    /// `MainnetReadinessV1::evaluate` on this same profile - the exact strings
+    /// are asserted by
+    /// `l2_fast_pay_hub::readiness::tests::the_bounded_pilot_publishes_the_offline_owner_gap_it_declines_to_gate_on`,
+    /// which serialises the document and reads them off the wire form. They
+    /// were added because the captured bytes were correct and misleading at
+    /// once: that Hub really did serve `"blockers":[],"close_blockers":[]`, and
+    /// that really did read as "nothing outstanding" while an owner offline
+    /// during an objection window was undefended. Re-capturing against the live
+    /// node would take a Hub rebuilt from this tree and a probe of mainnet, and
+    /// neither happened here, so this says so instead of implying otherwise.
+    ///
+    /// The limitation text was corrected on 2026-08-23. Its first version said
+    /// a stale settlement takes the difference from a sleeping owner, which is
+    /// backwards on this rail: a non-zero hub deposit is refused at binding
+    /// validation and the ledger only subtracts from the left balance, so a
+    /// stale receipt pays the owner MORE and the driver declines to answer it.
+    /// The exposure is that nothing ends the exit for an absent owner, and
+    /// that the protection is a property of those two checks.
+    const LIVE_BOUNDED_PILOT_READINESS_BODY: &str = r#"{"schema":"hpay-fast-pay-mainnet-readiness/1","evaluated_unix":$EVALUATED$,"valid_until_unix":$VALID_UNTIL$,"profile":"mainnet-bounded-pilot","payments_enabled":true,"close_enabled":true,"mainnet_detected":true,"fullnode_capabilities":{"observed_unix":$EVALUATED$,"api_version":1,"chain_id":0,"height":774025,"next_height":774026,"mainnet":true,"network_kind":"mainnet","node_profile_id":"hacash-mainnet","block_1_hash":"001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56","network_instance_id":"5a310ec0f487a37156a182c67778495f66e5c7502f9871829edc790023b123cf","transaction_format_version":2,"tip_timestamp_unix":$TIP$,"tip_age_seconds":$TIP_AGE$,"registered_actions":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"enabled_actions":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"enabled_transactions":[0,1,2,3],"transaction_submit_bound":true,"hpay_channel_registry_query":false,"channel_unilateral_exit":false,"channel_unilateral_exit_evidence":{"schema":"hpay-hvm-channel-exit-evidence/1","manifest_valid":true,"contract_name":"HPAYChannelExitV1","protocol_domain":"HPAY/HVM-CHANNEL/V1","settlement_profile":"hpay-hvm-channel-v1","source_sha256":"c0a430eb9769d1d506641c379bb8aaf708c7bac7d03694b60a4be03fd001dd06","bytecode_sha3":"11a2efc27a0c951bbc6977186eb58bd076dd331a785f3c57242cf54a72238349","required_action_kinds":[40,41,44],"funding_model":{"left_deposit":"positive","right_hub_deposit":"exactly_zero"},"storage_key_count":18,"must_renew_every_storage_key":true,"deployment":{"enabled":false,"contract_address":null,"deployment_tx_hash":null,"deployment_height":null,"independently_verified":false},"on_chain_verification":{"observed_height":null,"confirmed_tx_height":null,"deployment_tx_confirmed":false,"contract_code_sha3":null,"contract_code_matches":false},"deployment_verified":false}},"rollback_anchor":null,"max_payment_hac_zhu":1000000,"max_channel_funding_hac_zhu":10000000,"allowlist_configured":true,"aggregate_tvl_within_limit":true,"max_aggregate_tvl_hac_zhu":100000000,"max_payment_satoshi":0,"wallet_fee_hac":"0","trustless_finality":false,"unilateral_l1_enforceable":false,"trusted_bounded_pilot":true,"settlement_model":"official Hacash ChannelPay bills with hub-coordinated bounded mainnet pilot","blockers":[],"close_blockers":[],"disclosed_blockers":["external_monotonic_rollback_anchor_is_not_ready","unilateral_l1_dispute_path_is_not_ready","no_watcher_answers_for_an_offline_owner"],"limitations":["settled does not mean unilateral L1 finality","the active Hacash mainnet exposes cooperative original-funding close action 3","pilot exposure must remain inside the configured payment and channel caps","no_watcher_answers_for_an_offline_owner: nobody answers the objection window on an offline owner's behalf, and nothing finalizes or claims for them either. On the shipped one-directional rail this cannot cost them principal, because a stale split pays the left party MORE and the driver deliberately declines to answer it; that rests on two checks (a refused non-zero hub deposit and a ledger that only subtracts from the left balance) rather than on the protocol. It is disclosed and it does not block closing","new channels require an allowlisted user and aggregate Hub TVL at or below 100000000 zhu"]}"#;
 
     fn live_bounded_pilot_readiness_body() -> String {
         let now = std::time::SystemTime::now()

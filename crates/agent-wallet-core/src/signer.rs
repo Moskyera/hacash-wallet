@@ -2132,6 +2132,7 @@ mod tests {
             transfer_millimeis: None,
             unsigned_transaction_hex: hex::encode(tx.serialize()),
             network_fee: "0.001".into(),
+            fee_estimate_degraded: None,
         };
         let signed = signer
             .sign_exact_channel_close(

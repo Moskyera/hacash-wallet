@@ -35,9 +35,27 @@ export const HPAY_MAINNET = Object.freeze({
  * is on the table, and that they should not exceed what they can lose. The
  * amount is stated rather than left to a settings screen, because a consent
  * that does not name the number is not consent to the number.
+ *
+ * The failure it names was corrected on 2026-08-23. It used to say the
+ * provider could put an old receipt on chain while the owner was offline and
+ * take the difference. That mechanism belongs to neither rail this build can
+ * actually run on mainnet. Native ChannelPay registers only action 3, and
+ * `channel_close` in the node checks BOTH signatures before it will close
+ * anything, so a provider acting alone cannot move the money at all. On the
+ * HVM registry rail a stale receipt pays the owner MORE, not less, which is
+ * why the exit driver declines to answer one.
+ *
+ * The true failure is the one the cap is actually for, and it is simpler: the
+ * money comes out only if the provider co-signs. A provider that stops
+ * answering does not take the funds, it strands them, and there is nothing the
+ * owner can sign alone to get them back.
+ *
+ * This string is compared byte for byte against
+ * `agent_wallet_core::service::AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT`. Changing
+ * one without the other makes the consent unacceptable to the backend.
  */
 export const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT =
-  "I understand that this provider holds my channel funds. If it stops answering, or if it puts an old receipt on chain while I am offline, I could lose part or all of what is in this channel. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
+  "I understand that this provider holds my channel funds. This channel can only be closed if the provider co-signs it: the chain requires both signatures and no unilateral exit exists on this rail, so if it stops answering, refuses to sign, or disappears, what is in this channel stays locked and nobody can release it for me. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
 
 export type AgentWalletUiState =
   | "loading"

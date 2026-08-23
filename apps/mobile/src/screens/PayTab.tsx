@@ -285,6 +285,11 @@ export default function PayTab({
                   {preview.plan.fast_pay_declined}
                 </p>
               ) : null}
+              {preview.plan.fee_estimate_degraded ? (
+                <p className="alert small" role="note">
+                  {preview.plan.fee_estimate_degraded}
+                </p>
+              ) : null}
               <p>
                 <strong>{preview.amount_mei} HAC</strong> →{" "}
                 <code>{maskAddress(preview.to, hideAddresses)}</code>

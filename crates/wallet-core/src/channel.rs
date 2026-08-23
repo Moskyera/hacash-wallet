@@ -102,6 +102,13 @@ pub struct PreparedCooperativeChannelClose {
     pub transfer_millimeis: Option<u64>,
     pub unsigned_transaction_hex: String,
     pub network_fee: String,
+    /// Why `network_fee` is a guess rather than a quote, when it is one.
+    ///
+    /// The close fee is estimated from the node. When the node does not answer,
+    /// the estimate silently became the wallet's own compiled-in floor, and the
+    /// plan showed that floor as though the network had named it. `None` means
+    /// the fee was measured against the node.
+    pub fee_estimate_degraded: Option<String>,
 }
 
 impl PreparedCooperativeChannelClose {
@@ -165,7 +172,7 @@ pub async fn prepare_cooperative_channel_close(
     }
     let trusted = crate::l2_bill::trusted_channel_state(bills, channel)?;
     let settlement = cooperative_close_settlement(channel, &trusted)?;
-    let (built, network_fee) = build_channel_close_tx_with_dynamic_fee(
+    let (built, network_fee, fee_estimate_degraded) = build_channel_close_tx_with_dynamic_fee(
         node,
         chain_id,
         fee_payer,
@@ -204,6 +211,7 @@ pub async fn prepare_cooperative_channel_close(
         transfer_millimeis,
         unsigned_transaction_hex,
         network_fee,
+        fee_estimate_degraded,
     };
     crate::tx_binding::verify_transaction_intent(
         &plan.unsigned_transaction_hex,
@@ -486,7 +494,7 @@ pub async fn build_channel_open_tx_with_dynamic_fee(
     right_address: &str,
     right_amount: &str,
     speed: L1FeeSpeed,
-) -> WalletResult<(BuildTxResponse, String)> {
+) -> WalletResult<(BuildTxResponse, String, Option<String>)> {
     let probe_fee = crate::hip23::format_l1_fee_mei_for_node(crate::hip23::L1_DEFAULT_FEE_MEI);
     let probe = build_channel_open_tx(
         node,
@@ -522,7 +530,10 @@ pub async fn build_channel_open_tx_with_dynamic_fee(
         &fee.fee_node,
     )
     .await?;
-    Ok((built, fee.fee_node))
+    // The fee may have come from the wallet's own floor rather than from the
+    // node. Money is about to sit in a channel behind it, so the warning goes
+    // out with the plan instead of being dropped on the floor here.
+    Ok((built, fee.fee_node.clone(), fee.warning()))
 }
 
 pub async fn build_channel_close_tx(
@@ -591,7 +602,7 @@ pub(crate) async fn build_channel_close_tx_with_dynamic_fee(
     channel_id_hex: &str,
     settlement: &CooperativeCloseSettlement,
     speed: L1FeeSpeed,
-) -> WalletResult<(BuildTxResponse, String)> {
+) -> WalletResult<(BuildTxResponse, String, Option<String>)> {
     let probe_fee = crate::hip23::format_l1_fee_mei_for_node(crate::hip23::L1_DEFAULT_FEE_MEI);
     let probe = build_channel_close_tx_for_settlement(
         node,
@@ -621,7 +632,7 @@ pub(crate) async fn build_channel_close_tx_with_dynamic_fee(
         &fee.fee_node,
     )
     .await?;
-    Ok((built, fee.fee_node))
+    Ok((built, fee.fee_node.clone(), fee.warning()))
 }
 
 fn parse_address(value: &str, label: &str) -> WalletResult<Address> {

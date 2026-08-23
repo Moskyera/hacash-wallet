@@ -1191,6 +1191,11 @@ function AgentFastPayChannelPanel({
             <span>Wallet fee <strong>{formatUnits(setup.wallet_fee_units)}</strong></span>
             <span>Status <strong>{setup.phase.replace(/_/g, " ")}</strong></span>
           </div>
+          {setup.fee_estimate_degraded ? (
+            <p className="agent-warning" role="status">
+              {setup.fee_estimate_degraded}
+            </p>
+          ) : null}
           <p className="agent-exact-address">{setup.channel_id}</p>
           <div className="agent-control-row">
             {setup.phase === "prepared" ? (
@@ -1262,6 +1267,11 @@ function AgentFastPayChannelPanel({
             <span>Wallet fee <strong>{formatUnits(close.wallet_fee_units)}</strong></span>
             <span>Status <strong>{close.phase.replace(/_/g, " ")}</strong></span>
           </div>
+          {close.fee_estimate_degraded ? (
+            <p className="agent-warning" role="status">
+              {close.fee_estimate_degraded}
+            </p>
+          ) : null}
           {close.phase === "prepared" ? (
             <button
               type="button"
