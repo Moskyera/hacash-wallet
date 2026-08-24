@@ -146,6 +146,39 @@ action_guard           true
 registry rail, which this guide does not use and which costs about 2000 HAC to
 deploy. Nothing on your path reads it.
 
+### The node must be reachable, or it is only half connected
+
+A synced node is not a connected node. Check both directions:
+
+```
+netstat -an | findstr :3337
+```
+
+Listening on `0.0.0.0:3337` only means it is ready to be called. What matters
+is whether anybody calls. Count established inbound connections:
+
+```
+powershell -c "(Get-NetTCPConnection -LocalPort 3337 -State Established).Count"
+```
+
+**Zero is the failure, and it is silent.** A node with outbound peers syncs
+blocks perfectly, reports a fresh tip, answers every readiness clause, and looks
+completely healthy. It is a leaf: it downloads and does not participate. It was
+running exactly like that here for over an hour while two transactions sat in
+its own pool, and the official public node had never heard of either of them.
+
+Windows blocks the inbound port by default and says nothing. Open it yourself,
+in an **Administrator** terminal, because this is a firewall change and nobody
+should make it on your behalf:
+
+```
+netsh advfirewall firewall add rule name="Hacash P2P 3337" dir=in action=allow protocol=TCP localport=3337
+```
+
+If the machine is behind a router, forward TCP 3337 to it as well. Then restart
+the node and count inbound connections again. It should stop being zero within
+a few minutes.
+
 **Freshness matters and it keeps mattering.** The wallet refuses a tip older
 than **3600 seconds**. A node that fell behind while you were making tea will
 refuse to sign, correctly. Keep it running.
