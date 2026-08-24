@@ -96,6 +96,36 @@ export function fatalSkipped(checks: PreflightCheckView[]): PreflightCheckView[]
   );
 }
 
+/**
+ * The id of the item that asks whether anybody can reach this node.
+ *
+ * It is a WARNING in the core, on purpose, so it never blocks the verdict. But
+ * a person about to fund a channel has to see it, and a warning that only
+ * appears in the list below a green READY header is a warning somebody scrolls
+ * past. So this one item is also pulled out and shown directly under the
+ * banner, in both colours.
+ */
+export const NODE_REACH_CHECK_ID = "node_can_be_reached";
+
+export function nodeReachCheck(
+  checks: PreflightCheckView[],
+): PreflightCheckView | undefined {
+  return checks.find((check) => check.id === NODE_REACH_CHECK_ID);
+}
+
+export const PREFLIGHT_LEAF_HEADLINE =
+  "Nothing can reach your node, so it may not be able to pass your payment on";
+
+export const PREFLIGHT_REACH_UNKNOWN_HEADLINE =
+  "Whether anything can reach your node is unknown, which is not the same as fine";
+
+export const PREFLIGHT_REACH_DOES_NOT_BLOCK =
+  "This does not stop you and it is not a reason to distrust what you see above. " +
+  "A node nobody can reach still downloads every block and checks it for itself, " +
+  "so everything else on this screen means what it says. It is here because green " +
+  "above means your node told the truth about the chain, not that your signed " +
+  "transaction can get out to the miners.";
+
 export const PREFLIGHT_GREEN_MEANS =
   "Green means the node and the Hub answered these questions correctly just now, " +
   "over read-only requests. It does not mean your money is safe, it does not make " +
@@ -112,7 +142,8 @@ export const PREFLIGHT_WHAT_IT_DOES =
   "broadcasts nothing. It checks the native ChannelPay rail with a close voucher, " +
   "which is the path you are on. It does not check the HVM registry contract, " +
   "because that rail costs around 2000 HAC to deploy and nothing on your path " +
-  "reads it.";
+  "reads it. It also asks your node how many other nodes have reached it, which " +
+  "you used to have to work out yourself by counting connections in a terminal.";
 
 function statusLabel(check: PreflightCheckView): string {
   if (check.status === "pass") return check.severity === "fatal" ? "PASS" : "OK";
@@ -177,10 +208,16 @@ export function PreflightResult({ report }: { report: NativeRailPreflightView })
   const pass = preflightShowsPass(report.checks);
   const failed = fatalFailed(report.checks);
   const skipped = fatalSkipped(report.checks);
-  const warnings = report.checks.filter(
-    (check) => check.severity === "warning" && check.status !== "pass",
-  );
   const minutes = Math.floor(report.validity_seconds / 60);
+  const reach = nodeReachCheck(report.checks);
+  const reachUnproven = reach !== undefined && reach.status !== "pass";
+  const warnings = report.checks.filter(
+    (check) =>
+      check.severity === "warning" &&
+      check.status !== "pass" &&
+      // Shown in full under the banner instead, rather than twice.
+      !(reachUnproven && check.id === NODE_REACH_CHECK_ID),
+  );
 
   return (
     <>
@@ -202,6 +239,22 @@ export function PreflightResult({ report }: { report: NativeRailPreflightView })
           </p>
         </div>
       </div>
+
+      {reachUnproven && reach && (
+        <div className="alert" role="note">
+          <strong>
+            {reach.status === "fail"
+              ? PREFLIGHT_LEAF_HEADLINE
+              : PREFLIGHT_REACH_UNKNOWN_HEADLINE}
+          </strong>
+          <p className="small">{reach.observed}</p>
+          {reach.reason && <p className="small">{reach.reason}</p>}
+          <p className="muted small">{PREFLIGHT_REACH_DOES_NOT_BLOCK}</p>
+          <p className="muted small">
+            <code>{reach.id}</code>
+          </p>
+        </div>
+      )}
 
       {pass && (
         <p className="small">

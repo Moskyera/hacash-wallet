@@ -175,6 +175,97 @@ describe("the copy does not overclaim", () => {
   });
 });
 
+/**
+ * A green header means the node told the truth about the chain. It does not
+ * mean the node can hand your signed transaction to a miner. That difference
+ * is the whole reason this block exists, and a warning that only shows up in
+ * the list under a READY banner is a warning nobody reads.
+ */
+describe("a node nobody can reach", () => {
+  function reachCheck(
+    status: PreflightCheckStatus,
+    observed: string,
+    reason: string,
+  ): PreflightCheckView {
+    return {
+      id: "node_can_be_reached",
+      title: "Other nodes can reach your node, so it can pass your payment on",
+      severity: "warning",
+      status,
+      observed,
+      reason,
+    };
+  }
+
+  // The exact shape the core produces for the owner's live mainnet node.
+  const leaf = reachCheck(
+    "fail",
+    "no other node has reached this one: every one of its 4 connections was opened by this node itself. In its own words: total 4, inbound 0, outbound 4, public 4, role \"leaf\"",
+    "Your node downloads blocks, checks every one of them itself, and is telling you the truth about the chain. What it cannot do is be reached: nobody can connect to it, it relays for nobody, and nothing proves it can carry your signed channel open or your close voucher out to the miners.",
+  );
+
+  it("is on the screen under a green READY header, not buried in the list", () => {
+    const green = report([check("a", "fatal", "pass"), leaf]);
+    const html = renderToStaticMarkup(<PreflightResult report={green} />);
+    expect(html).toContain("READY");
+    expect(html).toContain(
+      "Nothing can reach your node, so it may not be able to pass your payment on",
+    );
+    // Plain words about the consequence, above the fold, not a bare count.
+    expect(html).toContain("relays for nobody");
+    expect(html).toContain("no other node has reached this one");
+    // And it says out loud that it is not a reason to distrust the green.
+    expect(html).toContain("This does not stop you");
+    expect(html).toContain("not that your signed");
+  });
+
+  it("says unknown when the node never answered the question", () => {
+    const unknown = report([
+      check("a", "fatal", "pass"),
+      reachCheck(
+        "skip",
+        "this node's build does not report who has reached it",
+        "Treat it as unknown rather than as fine.",
+      ),
+    ]);
+    const html = renderToStaticMarkup(<PreflightResult report={unknown} />);
+    expect(html).toContain(
+      "Whether anything can reach your node is unknown, which is not the same as fine",
+    );
+    expect(html).toContain("Treat it as unknown rather than as fine");
+    expect(html).not.toContain("Nothing can reach your node,");
+  });
+
+  it("stays quiet when another node has actually reached this one", () => {
+    const reached = report([
+      check("a", "fatal", "pass"),
+      reachCheck(
+        "pass",
+        "3 other node(s) have reached this one and it accepted them",
+        "Another node reached yours and was accepted.",
+      ),
+    ]);
+    const html = renderToStaticMarkup(<PreflightResult report={reached} />);
+    expect(html).not.toContain("Nothing can reach your node,");
+    expect(html).not.toContain("is unknown, which is not the same as fine");
+    expect(html).toContain("3 other node(s) have reached this one");
+  });
+
+  it("never blocks the verdict, whichever way it went", () => {
+    for (const status of ALL_STATUSES) {
+      const checks = [check("a", "fatal", "pass"), reachCheck(status, "o", "r")];
+      expect(preflightShowsPass(checks)).toBe(true);
+    }
+  });
+
+  it("is shown once, not twice", () => {
+    const html = renderToStaticMarkup(
+      <PreflightResult report={report([check("a", "fatal", "pass"), leaf])} />,
+    );
+    expect(html.split("no other node has reached this one").length - 1).toBe(1);
+  });
+});
+
 describe("the card", () => {
   it("offers the check and renders nothing else until it has been run", () => {
     const html = renderToStaticMarkup(

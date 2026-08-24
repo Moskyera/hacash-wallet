@@ -43,8 +43,57 @@ pub struct NodeCapabilities {
     #[serde(default)]
     pub api: NodeApiCapabilities,
     pub limits: NodeLimits,
+    /// Who has reached this node, if its build can answer at all.
+    ///
+    /// `None` is the older node that has no such field. It is deliberately
+    /// distinct from `Some(NodePeerCapabilities::default())`, which is a node
+    /// that carries the block and reports it could not count. Both are unknown
+    /// and neither is a passing answer, but they have different fixes and the
+    /// person reading the screen is told which one they have.
+    #[serde(default)]
+    pub peers: Option<NodePeerCapabilities>,
     #[serde(default)]
     pub source: CapabilitySource,
+}
+
+/// What a node answers about the peers on the other end of its connections.
+///
+/// The one field that matters is `inbound_established`: the count of peers
+/// that dialed this node and finished the handshake. A bound listening socket
+/// is not a reached socket, so a node can be synced to the tip, fresh, and
+/// answering every readiness clause while this is zero.
+///
+/// Every count is optional because a node that could not measure must not be
+/// able to publish an unmeasured zero as a measured one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct NodePeerCapabilities {
+    /// False when the node carries the block but could not count.
+    pub measured: bool,
+    pub total: Option<u64>,
+    pub inbound_established: Option<u64>,
+    pub outbound_established: Option<u64>,
+    pub public: Option<u64>,
+    /// The node's own summary of the same thing. Never trusted over the count.
+    pub inbound_proven: bool,
+    /// "participant", "leaf" or "unknown", in the node's own words.
+    pub role: Option<String>,
+}
+
+impl NodePeerCapabilities {
+    /// The inbound count, and only when the node says it actually counted.
+    ///
+    /// An unmeasured zero is not a measured zero, so this answers `None`
+    /// rather than `Some(0)` when the node did not measure. Every caller that
+    /// wants to say "nobody has reached this node" has to get a number out of
+    /// here first.
+    pub fn inbound_established_if_measured(&self) -> Option<u64> {
+        if self.measured {
+            self.inbound_established
+        } else {
+            None
+        }
+    }
 }
 
 /// Authenticated network identity reported by a node. Older nodes omit this
@@ -307,6 +356,9 @@ impl NodeCapabilities {
                 gas_max: protocol::context::decode_gas_budget(1),
                 ast_depth: 1,
             },
+            // A legacy node was never asked this and must not look as if it
+            // answered.
+            peers: None,
             source: CapabilitySource::LegacyType2,
         }
     }
@@ -737,6 +789,7 @@ mod tests {
                 gas_max: protocol::context::decode_gas_budget(17),
                 ast_depth: 3,
             },
+            peers: None,
             source: CapabilitySource::Reported,
         }
     }
@@ -899,6 +952,62 @@ mod tests {
         let capabilities = valid_capabilities().validate().unwrap();
         assert_eq!(capabilities.network, NodeNetworkCapabilities::default());
         assert!(!capabilities.supports_agent_local_pilot_payment(&"11".repeat(32)));
+    }
+
+    /// The three answers a node can give about who has reached it, and the
+    /// rule that keeps them apart: a missing answer is not a passing answer,
+    /// and an unmeasured zero is not a measured zero.
+    #[test]
+    fn the_peer_block_keeps_absent_unmeasured_and_measured_zero_apart() {
+        let mut absent = serde_json::to_value(valid_capabilities()).unwrap();
+        absent.as_object_mut().unwrap().remove("peers");
+        let absent: NodeCapabilities = serde_json::from_value(absent).unwrap();
+        assert_eq!(absent.peers, None, "an older node answered nothing");
+
+        // The block is there, and the node says it could not count. Every
+        // count must stay unavailable rather than collapsing to zero.
+        let mut unmeasured = serde_json::to_value(valid_capabilities()).unwrap();
+        unmeasured["peers"] = json!({
+            "measured": false,
+            "total": Value::Null,
+            "inbound_established": Value::Null,
+            "outbound_established": Value::Null,
+            "public": Value::Null,
+            "inbound_proven": false,
+            "role": "unknown"
+        });
+        let unmeasured: NodeCapabilities = serde_json::from_value(unmeasured).unwrap();
+        let unmeasured = unmeasured.peers.unwrap();
+        assert!(!unmeasured.measured);
+        assert_eq!(unmeasured.inbound_established_if_measured(), None);
+
+        // The exact block the live mainnet node answered on 2026-08-24.
+        let mut leaf = serde_json::to_value(valid_capabilities()).unwrap();
+        leaf["peers"] = json!({
+            "measured": true,
+            "total": 4,
+            "inbound_established": 0,
+            "outbound_established": 4,
+            "public": 4,
+            "inbound_proven": false,
+            "role": "leaf"
+        });
+        let leaf: NodeCapabilities = serde_json::from_value(leaf).unwrap();
+        let leaf = leaf.peers.unwrap();
+        assert_eq!(leaf.inbound_established_if_measured(), Some(0));
+        assert_eq!(leaf.outbound_established, Some(4));
+        assert_eq!(leaf.role.as_deref(), Some("leaf"));
+
+        // A node that lies by omission: it claims it measured, then leaves the
+        // count out. That is still not a measured zero.
+        let mut half = serde_json::to_value(valid_capabilities()).unwrap();
+        half["peers"] = json!({ "measured": true, "role": "participant" });
+        let half: NodeCapabilities = serde_json::from_value(half).unwrap();
+        assert_eq!(
+            half.peers.unwrap().inbound_established_if_measured(),
+            None,
+            "a claim to have measured is not a measurement"
+        );
     }
 
     #[test]

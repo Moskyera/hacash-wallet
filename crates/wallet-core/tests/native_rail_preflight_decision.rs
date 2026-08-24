@@ -11,8 +11,8 @@
 //! `native_rail_preflight_never_passes_on_a_failed_fatal.rs`.
 
 use hacash_wallet_core::hpay_native_rail_preflight::{
-    CheckSeverity, CheckStatus, PreflightObservations, PreflightRequest, PreflightVerdict, judge,
-    verdict_for,
+    CheckSeverity, CheckStatus, PreflightCheck, PreflightObservations, PreflightRequest,
+    PreflightVerdict, judge, verdict_for,
 };
 use hacash_wallet_core::l2_hub::{HubHealth, HubMainnetReadiness, VoucherRouteProbe};
 use hacash_wallet_core::node::BlockIntroResponse;
@@ -101,6 +101,18 @@ fn green_capability_json(now: u64) -> Value {
         "limits": {
             "max_tx_size": 16384, "max_tx_actions": 200, "max_type3_signers": 200,
             "gas_max_byte": 99, "gas_max": 111_911, "ast_depth": 6
+        },
+        // A node other nodes have actually reached. The measured shape of the
+        // owner's live node is the leaf below, which is the interesting case
+        // and gets its own test rather than being baked into "green".
+        "peers": {
+            "measured": true,
+            "total": 9,
+            "inbound_established": 5,
+            "outbound_established": 4,
+            "public": 4,
+            "inbound_proven": true,
+            "role": "participant"
         },
         "source": "reported"
     })
@@ -479,6 +491,191 @@ fn plain_http_to_a_remote_node_is_refused_and_loopback_http_is_not() {
     let mut loopback = green();
     loopback.signing_transport = Ok("http://127.0.0.1:8197".to_owned());
     assert_eq!(status_of(&loopback, "signing_transport"), CheckStatus::Pass);
+}
+
+// ------------------------------------------- is this node reached, or a leaf
+
+fn check_of(observations: &PreflightObservations, id: &str) -> PreflightCheck {
+    judge(&green_request(), observations)
+        .checks
+        .into_iter()
+        .find(|check| check.id == id)
+        .unwrap_or_else(|| panic!("no check with id {id}"))
+}
+
+/// The exact block the owner's live mainnet node answered on 2026-08-24: four
+/// peers, every one of them dialed by this node, nobody able to reach it.
+fn leaf_node() -> PreflightObservations {
+    with_capabilities(|raw| {
+        raw.insert(
+            "peers".into(),
+            json!({
+                "measured": true,
+                "total": 4,
+                "inbound_established": 0,
+                "outbound_established": 4,
+                "public": 4,
+                "inbound_proven": false,
+                "role": "leaf"
+            }),
+        );
+    })
+}
+
+#[test]
+fn a_node_nobody_can_reach_says_what_it_cannot_do_rather_than_printing_a_count() {
+    let check = check_of(&leaf_node(), "node_can_be_reached");
+    assert_eq!(check.status, CheckStatus::Fail);
+
+    // The whole point of the item: plain words about the consequence, not a
+    // number left for the reader to interpret.
+    let words = format!("{} {}", check.observed, check.reason.clone().unwrap());
+    assert!(
+        words.contains("no other node has reached this one"),
+        "{words}"
+    );
+    assert!(words.contains("relays for nobody"), "{words}");
+    assert!(
+        words.contains("carry your signed channel open or your close voucher out to the miners"),
+        "{words}"
+    );
+    // And the fix, because a diagnosis with no fix is another kind of silence.
+    assert!(words.contains("TCP 3337"), "{words}");
+    assert!(words.contains("LISTENING is not the same thing"), "{words}");
+    // The counts are still there, underneath the sentence, never instead of it.
+    assert!(check.observed.contains("inbound 0"), "{}", check.observed);
+}
+
+/// The judgement call, pinned so it cannot drift silently: a leaf is a WARNING.
+///
+/// It does not block funding, because a leaf is still right about the chain it
+/// has and because a payment that never reaches a miner never confirms and
+/// leaves the money where it is. It is still on the screen before the deposit,
+/// which is the half that was missing.
+#[test]
+fn a_leaf_node_warns_before_the_deposit_and_does_not_block_it() {
+    let observations = leaf_node();
+    let check = check_of(&observations, "node_can_be_reached");
+    assert_eq!(check.severity, CheckSeverity::Warning);
+    let report = judge(&green_request(), &observations);
+    assert_eq!(report.verdict, PreflightVerdict::Pass);
+    assert_eq!(report.fatal_failed, 0);
+    assert_eq!(report.fatal_skipped, 0);
+    assert!(report.warnings >= 1);
+}
+
+#[test]
+fn a_node_that_has_been_reached_passes_and_the_pass_is_only_for_this_moment() {
+    let check = check_of(&green(), "node_can_be_reached");
+    assert_eq!(check.status, CheckStatus::Pass);
+    assert!(
+        check
+            .observed
+            .contains("5 other node(s) have reached this one"),
+        "{}",
+        check.observed
+    );
+    assert!(
+        check.reason.unwrap().contains("peers come and go"),
+        "a pass here is a snapshot and has to say so"
+    );
+}
+
+/// A missing answer is not a passing answer.
+#[test]
+fn an_older_node_that_cannot_answer_the_question_reads_as_unknown_not_as_fine() {
+    let observations = with_capabilities(|raw| {
+        raw.remove("peers");
+    });
+    let check = check_of(&observations, "node_can_be_reached");
+    assert_eq!(
+        check.status,
+        CheckStatus::Skip,
+        "an absent field must never render as a pass"
+    );
+    assert_ne!(check.status, CheckStatus::Pass);
+    let words = format!("{} {}", check.observed, check.reason.clone().unwrap());
+    assert!(
+        words.contains("does not report who has reached it"),
+        "{words}"
+    );
+    assert!(
+        words.contains("Treat it as unknown rather than as fine"),
+        "{words}"
+    );
+}
+
+/// And an unmeasured zero is not a measured zero. A node that carries the
+/// block and could not count must not be reported as a node nobody reached.
+#[test]
+fn a_node_that_could_not_count_is_not_reported_as_a_node_nobody_reached() {
+    let observations = with_capabilities(|raw| {
+        raw.insert(
+            "peers".into(),
+            json!({
+                "measured": false,
+                "total": Value::Null,
+                "inbound_established": Value::Null,
+                "outbound_established": Value::Null,
+                "public": Value::Null,
+                "inbound_proven": false,
+                "role": "unknown"
+            }),
+        );
+    });
+    let check = check_of(&observations, "node_can_be_reached");
+    assert_eq!(check.status, CheckStatus::Skip);
+    assert!(
+        !check.observed.contains("no other node has reached"),
+        "an unmeasured zero must not be stated as a fact: {}",
+        check.observed
+    );
+    assert!(
+        check
+            .reason
+            .unwrap()
+            .contains("do not read a blank as a yes"),
+        "unknown has to say it is unknown"
+    );
+}
+
+/// The count decides. A node whose own one-word summary disagrees with its own
+/// number is not a node to take a summary from.
+#[test]
+fn a_node_whose_label_contradicts_its_own_count_is_not_believed() {
+    let liar = with_capabilities(|raw| {
+        raw.insert(
+            "peers".into(),
+            json!({
+                "measured": true,
+                "total": 4,
+                "inbound_established": 0,
+                "outbound_established": 4,
+                "public": 4,
+                "inbound_proven": true,
+                "role": "participant"
+            }),
+        );
+    });
+    let check = check_of(&liar, "node_can_be_reached");
+    assert_eq!(
+        check.status,
+        CheckStatus::Fail,
+        "a participant label over a zero count must not buy a pass"
+    );
+    assert!(
+        check.reason.unwrap().contains("contradicts its own count"),
+        "and it has to say why"
+    );
+}
+
+#[test]
+fn a_node_that_cannot_be_read_at_all_leaves_this_question_unanswered() {
+    let mut observations = green();
+    observations.capabilities = Err("connection refused".to_owned());
+    let check = check_of(&observations, "node_can_be_reached");
+    assert_eq!(check.status, CheckStatus::Skip);
+    assert!(check.reason.unwrap().contains("connection refused"));
 }
 
 // -------------------------------------------------------------- hub refusals

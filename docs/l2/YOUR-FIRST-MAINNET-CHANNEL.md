@@ -148,24 +148,63 @@ deploy. Nothing on your path reads it.
 
 ### The node must be reachable, or it is only half connected
 
-A synced node is not a connected node. Check both directions:
+A synced node is not a connected node, and **the app answers this for you now**.
+You no longer have to count sockets in a terminal to find it out.
+
+The node publishes the answer in the same capabilities document you already
+fetched:
 
 ```
-netstat -an | findstr :3337
+curl http://127.0.0.1:8080/query/capabilities
 ```
 
-Listening on `0.0.0.0:3337` only means it is ready to be called. What matters
-is whether anybody calls. Count established inbound connections:
+```json
+"peers": {
+  "measured": true,
+  "total": 4,
+  "inbound_established": 0,
+  "outbound_established": 4,
+  "public": 4,
+  "inbound_proven": false,
+  "role": "leaf"
+}
+```
+
+`inbound_established` is the only number that means anything here. It counts
+peers that dialed **your** node and finished the handshake. `role` is that same
+number in one word: `participant` if anybody reached you, `leaf` if nobody did.
+
+And the wallet reads it. **Run the check** on the Fast Pay screen and the
+preflight now carries an item called
+`node_can_be_reached`, which says in words what a leaf cannot do rather than
+printing a count. On a node nobody has reached it appears directly under the
+banner, in green runs as well as red ones, because that is exactly the case
+that used to look fine.
+
+It is a **warning and not a refusal**, deliberately. A leaf still downloads
+every block and checks it for itself, so everything else the preflight tells you
+is still true, and a payment that never reaches a miner never confirms and
+leaves your money where it is. What it cannot do is be reached, so nothing
+proves it can carry your signed channel open or your close voucher out to the
+miners. You are told before the deposit rather than after, and the decision
+stays yours.
+
+**Zero is the failure, and it used to be silent.** A node with outbound peers
+syncs blocks perfectly, reports a fresh tip, answers every readiness clause, and
+looks completely healthy. It was running exactly like that here for over an hour
+while two transactions sat in its own pool, and the official public node had
+never heard of either of them. Treat that last part as suggestive rather than
+proven: a remote node answering "transaction not found" may simply not serve
+mempool lookups. The zero itself is measured and is not in doubt.
+
+If you want to confirm it against the operating system rather than against the
+node's own word, this is the same fact from outside. Note that
+`netstat -an | findstr :3337` showing `LISTENING` proves nothing: it only means
+the port is ready to be called, not that anybody called.
 
 ```
 powershell -c "(Get-NetTCPConnection -LocalPort 3337 -State Established).Count"
 ```
-
-**Zero is the failure, and it is silent.** A node with outbound peers syncs
-blocks perfectly, reports a fresh tip, answers every readiness clause, and looks
-completely healthy. It is a leaf: it downloads and does not participate. It was
-running exactly like that here for over an hour while two transactions sat in
-its own pool, and the official public node had never heard of either of them.
 
 Windows blocks the inbound port by default and says nothing. Open it yourself,
 in an **Administrator** terminal, because this is a firewall change and nobody
@@ -176,8 +215,12 @@ netsh advfirewall firewall add rule name="Hacash P2P 3337" dir=in action=allow p
 ```
 
 If the machine is behind a router, forward TCP 3337 to it as well. Then restart
-the node and count inbound connections again. It should stop being zero within
-a few minutes.
+the node and run the preflight again. `inbound_established` should stop being
+zero within a few minutes, and the item turns green on its own.
+
+An older node build has no `peers` block at all. The preflight shows that as
+**NOT CHECKED** and never as a pass, because a missing answer is not a passing
+answer.
 
 **Freshness matters and it keeps mattering.** The wallet refuses a tip older
 than **3600 seconds**. A node that fell behind while you were making tea will

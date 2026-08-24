@@ -409,6 +409,7 @@ pub fn judge(request: &PreflightRequest, observed: &PreflightObservations) -> Pr
         check_node_action_set(observed),
         check_registry_rail_is_not_required(observed),
         check_node_api_surface(observed),
+        check_node_can_be_reached(observed),
         check_hub_open_ready(request, observed),
         check_hub_voucher_ready(request, observed),
         check_voucher_route_exists(observed),
@@ -775,6 +776,183 @@ fn check_node_api_surface(observed: &PreflightObservations) -> PreflightCheck {
         api.reconciliation_by_tx_hash,
     );
     PreflightCheck::fatal_from_refusals("node_api_surface", TITLE_API, observed_text, refusals)
+}
+
+const TITLE_REACHED: &str = "Other nodes can reach your node, so it can pass your payment on";
+
+/// Why this is a WARNING and not FATAL, which is the judgement call in this
+/// item and the only place it is made.
+///
+/// A node nobody can reach is a leaf: it dials out, downloads blocks, checks
+/// every one of them for itself and answers for nobody. Three facts decide the
+/// severity between them.
+///
+/// 1. A leaf is still RIGHT about the chain it has. It validated those blocks
+///    itself and it holds the same block 1 anchor this wallet compiled in, so
+///    every other item on this screen means exactly what it says. Refusing to
+///    let a person fund on a node that is telling the truth would be refusing
+///    for the wrong reason.
+/// 2. The harm is a stall, not a loss. If the channel open never reaches a
+///    miner it never confirms, and unconfirmed money is still your money. The
+///    close voucher is bytes you already hold and can hand to any other node,
+///    so a leaf cannot strand the exit either. Nothing here is the kind of
+///    one-way door a fatal item exists to stop.
+/// 3. Zero inbound is PROVEN by the count. That a leaf therefore cannot get
+///    your transaction to a miner is NOT proven: a node that dialed out still
+///    holds a two-way link to the four peers it dialed. We measured two
+///    transactions sitting unmined for an hour on a leaf while the network
+///    mined fifteen others, and a remote node answering "transaction not
+///    found" is not proof it never saw them. Building a hard refusal on
+///    something we cannot prove is the same mistake as printing a count and
+///    calling it a diagnosis.
+///
+/// Against all that: the person still has to be told before the deposit rather
+/// than after, which is why it fails loudly rather than staying quiet, and why
+/// the screen surfaces it even under a green header.
+const REACHED_SEVERITY: CheckSeverity = CheckSeverity::Warning;
+
+fn check_node_can_be_reached(observed: &PreflightObservations) -> PreflightCheck {
+    let skip = |observed_text: String, reason: String| {
+        PreflightCheck::new(
+            "node_can_be_reached",
+            TITLE_REACHED,
+            REACHED_SEVERITY,
+            CheckStatus::Skip,
+            observed_text,
+            Some(reason),
+        )
+    };
+    let capabilities = match observed.capabilities.as_ref() {
+        Ok(capabilities) => capabilities,
+        Err(error) => {
+            return skip(
+                "not reached".to_owned(),
+                format!("the node could not be read at all, so nobody knows: {error}"),
+            );
+        }
+    };
+    // A missing answer is not a passing answer. An older node has no such
+    // field, and the honest reading is that this is unknown, not that it is
+    // fine.
+    let Some(peers) = capabilities.peers.as_ref() else {
+        return skip(
+            "this node's build does not report who has reached it".to_owned(),
+            "This wallet cannot tell whether your node is reachable, because this node build does \
+             not answer the question. Treat it as unknown rather than as fine: if it turns out \
+             nobody can reach your node, it will still sync and still tell you the truth about the \
+             chain, but it will not be able to hand your signed payment on to anyone. Upgrading \
+             the node makes the answer appear here. Until then the manual check is the count of \
+             established inbound connections on TCP 3337, which is not the same as the port being \
+             listed as LISTENING."
+                .to_owned(),
+        );
+    };
+    // And an unmeasured zero is not a measured zero.
+    let Some(inbound) = peers.inbound_established_if_measured() else {
+        return skip(
+            format!(
+                "this node reports it could not count its peers (measured {}, role {})",
+                peers.measured,
+                peers.role.as_deref().unwrap_or("not stated")
+            ),
+            "The node carries the field and left it blank, so this is unknown rather than clean. \
+             Nothing is refused on it, but do not read a blank as a yes."
+                .to_owned(),
+        );
+    };
+
+    let outbound = peers.outbound_established;
+    let observed_text = format!(
+        "{}. In its own words: total {}, inbound {inbound}, outbound {}, public {}, role \"{}\"",
+        if inbound == 0 {
+            match outbound {
+                Some(0) | None => {
+                    "no other node has reached this one, and this one has opened nothing either"
+                        .to_owned()
+                }
+                Some(out) => format!(
+                    "no other node has reached this one: every one of its {out} connections was \
+                     opened by this node itself"
+                ),
+            }
+        } else {
+            format!("{inbound} other node(s) have reached this one and it accepted them")
+        },
+        peers
+            .total
+            .map_or_else(|| "not stated".to_owned(), |value| value.to_string()),
+        outbound.map_or_else(|| "not stated".to_owned(), |value| value.to_string()),
+        peers
+            .public
+            .map_or_else(|| "not stated".to_owned(), |value| value.to_string()),
+        peers.role.as_deref().unwrap_or("not stated"),
+    );
+
+    // The count decides, never the node's own one-word summary of it. A node
+    // whose label disagrees with its own number is not a node to take a label
+    // from.
+    // Only an affirmative label that disagrees counts. A node that publishes
+    // the counts and no label at all has not contradicted anything.
+    let role = peers.role.as_deref();
+    let label_contradicts_count = if inbound == 0 {
+        peers.inbound_proven || role == Some("participant")
+    } else {
+        role == Some("leaf")
+    };
+    if label_contradicts_count {
+        return PreflightCheck::new(
+            "node_can_be_reached",
+            TITLE_REACHED,
+            REACHED_SEVERITY,
+            CheckStatus::Fail,
+            observed_text,
+            Some(
+                "This node's summary of its own connections contradicts its own count, so neither \
+                 can be relied on. Judged on the count, which is the number that was actually \
+                 measured."
+                    .to_owned(),
+            ),
+        );
+    }
+
+    if inbound > 0 {
+        PreflightCheck::new(
+            "node_can_be_reached",
+            TITLE_REACHED,
+            REACHED_SEVERITY,
+            CheckStatus::Pass,
+            observed_text,
+            Some(
+                "Another node reached yours and was accepted, which is the only thing that proves \
+                 your p2p port is open from the outside. It proves it for this moment: peers come \
+                 and go, and a node that had inbound peers an hour ago and has none now reads as \
+                 reachable until you ask again."
+                    .to_owned(),
+            ),
+        )
+    } else {
+        PreflightCheck::new(
+            "node_can_be_reached",
+            TITLE_REACHED,
+            REACHED_SEVERITY,
+            CheckStatus::Fail,
+            observed_text,
+            Some(
+                "Your node downloads blocks, checks every one of them itself, and is telling you \
+                 the truth about the chain. What it cannot do is be reached: nobody can connect to \
+                 it, it relays for nobody, and nothing proves it can carry your signed channel \
+                 open or your close voucher out to the miners. Expect the possibility that a \
+                 transaction you send sits in your own node's pool and never appears on chain. \
+                 This does not block funding, because a payment that never reaches a miner never \
+                 confirms and leaves your money where it is, and because your close voucher is \
+                 yours to broadcast from any other node. The fix is to allow TCP 3337 inbound in \
+                 your firewall, forward that port if you are behind a router, and run this check \
+                 again: it should stop being zero within a few minutes. Being listed as LISTENING \
+                 is not the same thing and never was."
+                    .to_owned(),
+            ),
+        )
+    }
 }
 
 // ----------------------------------------------------------------- hub items
