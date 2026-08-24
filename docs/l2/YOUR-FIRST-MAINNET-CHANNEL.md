@@ -23,24 +23,47 @@ The Hub is you. That matters, and Step 10 explains why.
 
 ## Before you start
 
-- Disk: a full Hacash chain plus index. Give it room.
-- Time: syncing from zero takes days, not hours.
+- Disk: a full Hacash chain plus index. Measured here: the chain to height
+  776093 fits comfortably, and the machine had 346 GB free throughout.
+- Time: **about 7 minutes**, measured, not days. An earlier version of this page
+  said days and that was wrong. Hacash's early blocks are tiny, and the sync ran
+  at roughly 290000 blocks per minute before slowing near the tip.
 - A funded mainnet address with about 0.2 HAC for the canary. Not 7.
 
 ## Step 1: build the fullnode
 
 ```
 cd C:/Users/KQHEX/Documents/hacash-fullnodedev
-cargo build --release -p app --bin fullnode
+set CARGO_TARGET_DIR=C:/hpay/nodetarget
+cargo build --release -p hacash --bin fullnode
 ```
 
-The binary lands in `target/release/fullnode.exe`.
+The package is `hacash`, not `app`. `app` is a library crate in the same
+workspace and `cargo build -p app --bin fullnode` fails with
+`no bin target named fullnode in app package`.
+
+Give this build its **own** `CARGO_TARGET_DIR`. Sharing one target directory
+between the node and the wallet, or between several builds at once, produced
+three separate false failures in one day here, including
+`crate typenum required to be available in rlib format` and two type mismatches
+that vanished on a clean rebuild. If you see an error that makes no sense,
+build into a fresh directory before you believe it.
+
+Copy the binary to where it will live, because the data directory is resolved
+relative to the **executable**, not the working directory:
+
+```
+copy C:\hpay
+odetargeteleaseullnode.exe C:\hpayullnode.exe
+```
 
 ## Step 2: the config, and the trap that silently costs you days
 
 Create `hacash.config.ini` next to the binary:
 
 ```
+data_dir = hacash_mainnet_data
+
 [node]
 listen = 3337
 boots = 54.193.49.59:3337, 182.92.163.225:3337, 54.219.80.127:3337
@@ -73,6 +96,11 @@ whole job is to tell you the truth about your own money, so it verifies.
 **Why `bind = 127.0.0.1`.** The API answers only this machine. Do not widen it
 without a reverse proxy and a reason.
 
+**Where the chain lands.** `data_dir` belongs at the very top, above the first
+`[section]`, because it is read from the ini root. It resolves next to the
+executable, so with the binary at `C:/hpay/fullnode.exe` the chain goes to
+`C:/hpay/hacash_mainnet_data`.
+
 ## Step 3: sync, and know when it is done
 
 ```
@@ -95,6 +123,28 @@ You are ready for the next step when all of these are true:
 That block 1 hash is the anchor. A node claiming mainnet with any other block 1
 is not mainnet, and the wallet works this out for itself rather than believing
 the node's own label.
+
+### A real one, measured
+
+This is a node that had just finished, checked against every clause the wallet
+uses:
+
+```
+chain id 0, mainnet true, height 776093, network kind mainnet
+block 1 anchor         matches
+tip fresh              age 165s of max 3600
+transaction_ready      true      (it is under `network`, not at the top level)
+transaction_format_version 2
+node_profile_id        hacash-mainnet
+network_instance_id    5a310ec0f487a37156a182c67778495f66e5c7502f9871829edc790023b123cf
+api                    all five true, including transaction_submit_bound
+actions enabled        1, 2, 3, 14 and 1041 (ChainAllow 0x0411)
+action_guard           true
+```
+
+`channel_unilateral_exit` reads **false** and that is expected. It belongs to the
+registry rail, which this guide does not use and which costs about 2000 HAC to
+deploy. Nothing on your path reads it.
 
 **Freshness matters and it keeps mattering.** The wallet refuses a tip older
 than **3600 seconds**. A node that fell behind while you were making tea will
