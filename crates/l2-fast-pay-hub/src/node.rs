@@ -1563,6 +1563,19 @@ impl NodeClient {
             .await
     }
 
+    /// A V1 channel payout carries no Action 44: the coin moves through the
+    /// contract's `PermitHAC` hook, which is reached by the Action 14
+    /// `HacFromToTrs` itself. Demanding an Action 44 here would reject the
+    /// watchtower's own claim observation, so the proof required is Action 14
+    /// — no weaker, just the correct one for this shape.
+    pub async fn query_hvm_claim_transaction(
+        &self,
+        transaction_hash: &str,
+    ) -> HubResult<Option<TransactionObservation>> {
+        self.query_transaction_with_contract(transaction_hash, 3, Some(14))
+            .await
+    }
+
     /// The shared HVM registry's own Action 44 contract calls — lease renewal,
     /// challenge, respond and finalize. Unlike the v1 HVM path above, a
     /// registry confirmation is judged against an exact canonical block

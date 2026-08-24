@@ -20,6 +20,16 @@ use crate::l1_channel::{
 };
 
 pub const L1_CHANNEL_CLOSE_SCHEMA: &str = "hpay-l1-channel-close/2";
+/// Status reported when the Hub countersigned a delta-zero close and handed
+/// the exact bytes back to the owner instead of broadcasting them. The channel
+/// is still open, still usable, and no L1 transaction has been submitted.
+///
+/// This is not a trustless exit. The Hub chooses to countersign once, at the
+/// start, and nothing in Hacash can compel it; and once the owner holds these
+/// bytes the Hub carries the whole exposure, because the owner can spend the
+/// channel down and still recover the full deposit at open. It is acceptable
+/// only in this bounded pilot, where the owner runs the Hub.
+pub const L1_CHANNEL_CLOSE_VOUCHER_STATUS: &str = "voucher_issued";
 const REQUEST_MAX_LIFETIME_SECONDS: u64 = 300;
 const TRANSACTION_MAX_AGE_SECONDS: u64 = 600;
 const CLOCK_FUTURE_SKEW_SECONDS: u64 = 30;
@@ -60,6 +70,21 @@ pub struct L1ChannelCloseResponse {
     pub open_height: u64,
     pub status: String,
     pub transaction_hash: Option<String>,
+    /// The exact fully countersigned close bytes, present only on the voucher
+    /// path (`status == L1_CHANNEL_CLOSE_VOUCHER_STATUS`), where the Hub
+    /// returns the transaction instead of broadcasting it.
+    ///
+    /// The cooperative-close path never fills this in: there the Hub owns the
+    /// broadcast, so handing the bytes back would put a second copy of a live
+    /// close in the owner's hands. Absent and skipped in that case, so a
+    /// cooperative-close response is byte-identical to what it was before this
+    /// field existed and older Hubs still deserialize here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_transaction_hex: Option<String>,
+    /// SHA-256 over the exact bytes in `signed_transaction_hex`, so the wallet
+    /// can pin what it stored without re-deriving it from a parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_transaction_commitment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

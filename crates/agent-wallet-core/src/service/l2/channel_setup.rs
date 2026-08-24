@@ -115,6 +115,16 @@ impl AgentWalletManager {
             next_channel_reuse_version(&node, &channel_id, &state.address, &hub_address)
                 .await
                 .map_err(|_| AgentWalletError::NodeRejected)?;
+        // Reuse version 1 or nothing, and the whole exit design depends on it.
+        //
+        // `derive_channel_id` two lines above is called with a hardcoded 1, so
+        // one address pair always yields exactly one channel ID. A close
+        // voucher names a channel ID and nothing else, and has no expiry, so a
+        // voucher kept from an earlier incarnation of that same ID would
+        // reanimate against a later one it was never signed for. Refusing any
+        // incarnation past the first means a given channel ID is opened once
+        // in this wallet's life and a voucher can only ever refer to the
+        // channel it was signed for.
         if reuse_version != 1 {
             return Err(AgentWalletError::SigningBlocked);
         }
@@ -572,12 +582,34 @@ impl AgentWalletManager {
             None,
             now,
         )?;
-        Ok(final_state
+        let review = final_state
             .l2_channel_setup
             .as_ref()
             .ok_or(AgentWalletError::RecoveryRequired)?
             .review
-            .clone())
+            .clone();
+        // The deposit is on chain now, so the exit is taken now.
+        //
+        // The Hub cannot countersign a channel that does not exist, so there
+        // is an unavoidable window between the open confirming and the voucher
+        // arriving in which the money is committed and no exit exists. This
+        // call is here, immediately after the confirmation and before the
+        // caller can do anything else, to make that window as short as the
+        // network allows. It is not closed, and nothing here pretends it is.
+        //
+        // If it fails, this returns the failure rather than a success: the
+        // channel is open but unusable, because Fast Pay payments stay refused
+        // until the voucher is held. `recover_l2_channel_setup` retries it.
+        //
+        // Gated because the voucher module itself is: it needs the pilot
+        // node-snapshot and channel-close signing paths, which a default build
+        // does not compile. Without the gate a default build of this crate does
+        // not compile at all, which is how it stood when this was written. A
+        // default build therefore behaves exactly as it did before the voucher
+        // existed; every build that has a voucher takes one here.
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        self.take_l2_channel_close_voucher(wallet_id, now).await?;
+        Ok(review)
     }
 
     pub async fn recover_l2_channel_setup(
@@ -598,6 +630,12 @@ impl AgentWalletManager {
             .review
             .clone();
         if review.phase == AgentChannelSetupPhase::Confirmed {
+            // A confirmed open is not a finished setup. If the voucher never
+            // arrived, this is the retry: without it Fast Pay stays refused,
+            // and the owner has a funded channel with no way out that does not
+            // depend on the Hub agreeing to close it.
+            #[cfg(feature = "agent-wallet-testnet-pilot")]
+            self.take_l2_channel_close_voucher(wallet_id, now).await?;
             return Ok(review);
         }
         self.confirm_l2_channel_setup(

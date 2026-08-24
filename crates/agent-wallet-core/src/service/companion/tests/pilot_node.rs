@@ -55,6 +55,10 @@ pub(super) struct MockPilotNode {
     pub(super) capabilities: Arc<RwLock<Value>>,
     pub(super) submit_count: Arc<AtomicUsize>,
     pub(super) submitted_bodies: Arc<RwLock<Vec<String>>>,
+    /// Bodies that arrived on `/submit/transaction/hpay-bound`, the route the
+    /// owner's independent voucher broadcast uses.
+    pub(super) bound_submitted_bodies: Arc<RwLock<Vec<String>>>,
+    pub(super) bound_submit_count: Arc<AtomicUsize>,
     /// When set, the node acknowledges a submission with a transaction hash
     /// that is not the one the wallet signed. That is the real production
     /// route into `BroadcastUncertain`: the bytes went out, the acknowledgement
@@ -178,11 +182,15 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
     let capabilities = Arc::new(RwLock::new(official_capabilities()));
     let submit_count = Arc::new(AtomicUsize::new(0));
     let submitted_bodies = Arc::new(RwLock::new(Vec::new()));
+    let bound_submit_count = Arc::new(AtomicUsize::new(0));
+    let bound_submitted_bodies = Arc::new(RwLock::new(Vec::new()));
     let submit_hash_mismatch = Arc::new(AtomicBool::new(false));
     let channels = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
     let capability_state = capabilities.clone();
     let submit_state = submit_count.clone();
     let submitted_body_state = submitted_bodies.clone();
+    let bound_submit_state = bound_submit_count.clone();
+    let bound_submitted_body_state = bound_submitted_bodies.clone();
     let mismatch_state = submit_hash_mismatch.clone();
     let channel_state = channels.clone();
     let app = Router::new()
@@ -256,6 +264,35 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
                     Json(json!({ "ret": 0 }))
                 }
             }),
+        )
+        .route(
+            // The network-bound submit the owner's own voucher broadcast uses.
+            // It records the exact bytes so a test can prove the owner reached
+            // a chain without the Hub, and echoes back the hash the node would
+            // acknowledge.
+            "/submit/transaction/hpay-bound",
+            post(move |body: String| {
+                let submit_state = bound_submit_state.clone();
+                let submitted_body_state = bound_submitted_body_state.clone();
+                async move {
+                    submitted_body_state.write().await.push(body.clone());
+                    submit_state.fetch_add(1, Ordering::SeqCst);
+                    let hash = hex::decode(&body)
+                        .ok()
+                        .and_then(|raw| {
+                            protocol::transaction::transaction_create(&raw)
+                                .ok()
+                                .map(|(transaction, _)| {
+                                    hex::encode(
+                                        basis::interface::TransactionRead::hash(&*transaction)
+                                            .as_bytes(),
+                                    )
+                                })
+                        })
+                        .unwrap_or_default();
+                    Json(json!({ "ret": 0, "hash": hash }))
+                }
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -267,6 +304,8 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
         capabilities,
         submit_count,
         submitted_bodies,
+        bound_submitted_bodies,
+        bound_submit_count,
         submit_hash_mismatch,
         channels,
         task,

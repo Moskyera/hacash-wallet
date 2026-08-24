@@ -49,6 +49,10 @@ fn deterministic_overview(
             .l2_channel_close
             .as_ref()
             .map(|operation| operation.review.clone()),
+        l2_channel_close_voucher: state
+            .l2_channel_close_voucher
+            .as_ref()
+            .map(|operation| operation.view.clone()),
         hvm_channel_binding: state.hvm_channel_binding.clone(),
         hvm_registry_binding: state.hvm_registry_binding.clone(),
         confirmed_balance_units: available_units.map(|available| {

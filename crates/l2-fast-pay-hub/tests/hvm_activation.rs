@@ -24,7 +24,9 @@ use l2_fast_pay_hub::hvm_watchtower::{
     HVM_LEASE_RENEWAL_REQUEST_SCHEMA, HVM_WATCHTOWER_REQUEST_SCHEMA, HvmLeaseRenewalRequestV1,
     HvmWatchtowerMode, HvmWatchtowerRequestV1,
 };
-use l2_fast_pay_hub::hvm_watchtower::{HvmWatchtowerDecision, decide_watchtower_action};
+use l2_fast_pay_hub::hvm_watchtower::{
+    HvmWatchtowerDecision, decide_watchtower_action, recovery_required_reason,
+};
 use l2_fast_pay_hub::node::{
     HPAY_CHANNEL_EXIT_ACTION_KINDS, HPAY_CHANNEL_EXIT_BYTECODE_SHA3,
     HPAY_CHANNEL_EXIT_CONTRACT_NAME, HPAY_CHANNEL_EXIT_EVIDENCE_SCHEMA,
@@ -668,6 +670,88 @@ fn watchtower_handles_stale_challenge_deadline_unknown_serial_and_reorg_snapshot
     assert_eq!(
         decide_watchtower_action(&open, &bundle.binding, &latest).unwrap(),
         HvmWatchtowerDecision::NoAction
+    );
+
+    // FINAL, and the settled principal is still inside the contract. This
+    // answered `NoAction` for the whole life of the V1 rail, which is how
+    // 0.99 HAC came to sit in a finalized chain-7 channel that nothing
+    // shipped could reach.
+    let mut settled = open.clone();
+    settled.storage.status.value = 4;
+    settled.storage.serial.value = latest.serial;
+    settled.storage.left_balance.value = latest.left_balance_zhu;
+    settled.storage.right_balance.value = latest.right_balance_zhu;
+    settled.storage.deadline.value = settled.observed_height;
+    assert_eq!(
+        decide_watchtower_action(&settled, &bundle.binding, &latest).unwrap(),
+        HvmWatchtowerDecision::ClaimLeftPayout
+    );
+
+    // Paid already, by us or by any third party: the payout is permissionless
+    // and `left_claimed` is the contract's own evidence that it happened.
+    let mut claimed = settled.clone();
+    claimed.storage.left_claimed.value = true;
+    assert_eq!(
+        decide_watchtower_action(&claimed, &bundle.binding, &latest).unwrap(),
+        HvmWatchtowerDecision::NoAction
+    );
+
+    // A FINAL split the Hub's own ledger does not hold is a person's problem,
+    // not a payout: claiming there would give away the Hub's earned balance
+    // on a state it cannot explain.
+    let mut disagreeing = settled;
+    disagreeing.storage.left_balance.value = latest.left_balance_zhu + 1;
+    disagreeing.storage.right_balance.value = latest.right_balance_zhu - 1;
+    assert_eq!(
+        decide_watchtower_action(&disagreeing, &bundle.binding, &latest).unwrap(),
+        HvmWatchtowerDecision::RecoveryRequired
+    );
+
+    // `RecoveryRequired` comes back from three unrelated situations and the
+    // caller reports all three with one sentence. That sentence used to be
+    // "chain serial is newer than the authenticated HVM ledger" in every case,
+    // which is the opposite of the truth for the two below, where the serial is
+    // equal. An operator sent after the wrong problem is worse off than one
+    // told nothing, so each cause has to name itself.
+    let newer = recovery_required_reason(&unknown, &latest);
+    assert!(
+        newer.contains("is newer than the authenticated HVM ledger"),
+        "a genuinely newer chain serial must still say so: {newer}"
+    );
+
+    let split = recovery_required_reason(&disagreeing, &latest);
+    assert!(
+        split.contains("FINAL on a split"),
+        "a disagreeing FINAL split must name itself: {split}"
+    );
+    assert!(
+        !split.contains("is newer than"),
+        "the serial here is equal, so the reason must not claim it is newer: {split}"
+    );
+    assert!(
+        split.contains(&latest.left_balance_zhu.to_string())
+            && split.contains(&disagreeing.storage.left_balance.value.to_string()),
+        "the reason must carry both sides of the disagreement: {split}"
+    );
+
+    // The third `RecoveryRequired` branch, `_ =>` on an unhandled chain status,
+    // cannot be reached through `decide_watchtower_action`: it calls
+    // `validate_runtime_binding` first, and that refuses any status outside
+    // `2..=4` with "live HPAY HVM runtime state is inconsistent with its
+    // binding". The arm is defensive, and so is the reason for it. Asserted
+    // against the reason function directly, because the only way to reach it is
+    // for that validator to change.
+    let mut unhandled = disagreeing;
+    unhandled.storage.status.value = 9;
+    unhandled.storage.serial.value = latest.serial;
+    assert!(
+        decide_watchtower_action(&unhandled, &bundle.binding, &latest).is_err(),
+        "an out-of-range chain status must be refused before any decision is reached"
+    );
+    let unhandled_reason = recovery_required_reason(&unhandled, &latest);
+    assert!(
+        unhandled_reason.contains("status 9") && !unhandled_reason.contains("is newer than"),
+        "an unhandled chain status must name the status, not the serial: {unhandled_reason}"
     );
 }
 

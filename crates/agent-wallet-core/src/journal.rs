@@ -199,6 +199,12 @@ pub(crate) enum AgentJournalEventKind {
     ChannelCloseSigned,
     ChannelCloseSubmitted,
     ChannelCloseConfirmed,
+    // The one close voucher this channel will ever have. There is no refresh
+    // phase here on purpose: a second voucher would be a second signed close.
+    ChannelCloseVoucherSignatureMayExist,
+    ChannelCloseVoucherSigned,
+    ChannelCloseVoucherHeld,
+    ChannelCloseVoucherBroadcast,
 }
 
 impl AgentJournalEventKind {
@@ -283,6 +289,10 @@ impl AgentJournalEventKind {
             Self::ChannelCloseSigned => 86,
             Self::ChannelCloseSubmitted => 87,
             Self::ChannelCloseConfirmed => 88,
+            Self::ChannelCloseVoucherSignatureMayExist => 89,
+            Self::ChannelCloseVoucherSigned => 90,
+            Self::ChannelCloseVoucherHeld => 91,
+            Self::ChannelCloseVoucherBroadcast => 92,
         }
     }
 }

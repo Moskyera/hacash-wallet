@@ -1638,6 +1638,43 @@ impl L2HubClient {
         Self::read_hub_json(response, "Hub channel close").await
     }
 
+    /// Ask the Hub to countersign one delta-zero close and return the exact
+    /// bytes rather than broadcasting them.
+    ///
+    /// The Hub is free to refuse. If it does, the deposit stays where it is
+    /// and there is no way to make it sign: nothing in Hacash can compel a
+    /// second signature. Nothing this method returns may be stored before
+    /// `l1_channel_close_safety::verify_channel_close_voucher_bytes` has
+    /// proved it from the bytes themselves.
+    pub async fn issue_channel_close_voucher(
+        &self,
+        request: &l2_fast_pay_hub::l1_channel_close::L1ChannelCloseRequest,
+    ) -> WalletResult<l2_fast_pay_hub::l1_channel_close::L1ChannelCloseResponse> {
+        let binding = l2_fast_pay_hub::l1_channel::L1ChannelNetworkBinding {
+            network_kind: request.network.clone(),
+            chain_id: request.chain_id,
+            mainnet: request.mainnet,
+            block_1_hash: request.block_1_hash.clone(),
+            node_profile_id: request.node_profile_id.clone(),
+            network_instance_id: request.network_instance_id.clone(),
+            transaction_format_version: request.transaction_format_version,
+        };
+        if binding.validate().is_err() || request.mainnet != self.mainnet {
+            return Err(WalletError::L2(
+                "L1 close-voucher request does not match this Hub client's exact network".into(),
+            ));
+        }
+        let url = format!("{}/v1/l1/channel/close-voucher", self.base_url);
+        let response = self
+            .http()?
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| WalletError::L2(format!("Hub close voucher unavailable: {error}")))?;
+        Self::read_hub_json(response, "Hub close voucher").await
+    }
+
     pub async fn payment_status(&self, payment_id: &str) -> WalletResult<FastPayResponse> {
         let url = format!("{}/v1/fast-pay/{payment_id}", self.base_url);
         let response = self

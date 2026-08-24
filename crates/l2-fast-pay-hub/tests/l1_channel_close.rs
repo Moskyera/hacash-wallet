@@ -301,6 +301,412 @@ async fn spawn_close_node(
     (format!("http://{address}"), channel, transactions, handle)
 }
 
+/// A Hub, a node, and one open HPAY channel at delta zero, which is the only
+/// state in which a close voucher may ever be issued.
+struct VoucherFixture {
+    user: Account,
+    hub_account: Account,
+    channel_id: String,
+    hub: HubState,
+    node_url: String,
+    node_channel: Arc<RwLock<Value>>,
+    transactions: Arc<RwLock<HashMap<String, Value>>>,
+    node_handle: tokio::task::JoinHandle<()>,
+    _directory: tempfile::TempDir,
+    state_path: std::path::PathBuf,
+}
+
+fn voucher_hub(
+    name: &str,
+    hub_account: &Account,
+    node_url: &str,
+    state_path: std::path::PathBuf,
+    state_key: &str,
+) -> HubState {
+    HubState::new_secure_with_policy(
+        name,
+        hub_account.readable(),
+        node_url,
+        None,
+        state_path,
+        secret_hex(hub_account),
+        JOURNAL_KEY,
+        state_key,
+        "testnet",
+        100_000_000,
+        100_000_000,
+    )
+    .unwrap()
+}
+
+async fn open_voucher_channel(seed: &str, state_key: &str) -> VoucherFixture {
+    let user = account(&format!("{seed}-user"));
+    let hub_account = account(&format!("{seed}-hub"));
+    let open_request = support::channel_open_request(&user, &hub_account);
+    let channel_id = open_request.channel_id.clone();
+    let channel = json!({
+        "ret": 0,
+        "id": "not-open-yet",
+        "status": 0,
+        "open_height": 900000,
+        "close_height": 0,
+        "reuse_version": 1,
+        "left": {"address": user.readable(), "hacash": "0.01", "satoshi": 0},
+        "right": {"address": hub_account.readable(), "hacash": "0", "satoshi": 0}
+    });
+    let (node_url, node_channel, transactions, node_handle) = spawn_close_node(channel, 6).await;
+    let directory = tempdir().unwrap();
+    let state_path = directory.path().join("voucher-hub-state.json");
+    let hub = voucher_hub(seed, &hub_account, &node_url, state_path.clone(), state_key);
+    hub.open_channel(&open_request).await.unwrap();
+    node_channel.write().await["id"] = json!(channel_id);
+    VoucherFixture {
+        user,
+        hub_account,
+        channel_id,
+        hub,
+        node_url,
+        node_channel,
+        transactions,
+        node_handle,
+        _directory: directory,
+        state_path,
+    }
+}
+
+/// Move `amount` from the user to the Hub on L2, so the channel is no longer
+/// at delta zero.
+async fn settle_payment(fixture: &VoucherFixture, amount: &str) {
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
+    let pending = fixture
+        .hub
+        .settle_fast_pay(&FastPayRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            idempotency_key: idempotency_key.clone(),
+            payer: fixture.user.readable().into(),
+            payee: fixture.hub_account.readable().into(),
+            amount: amount.into(),
+            channel_id: fixture.channel_id.clone(),
+            fee_payer: None,
+        })
+        .await
+        .unwrap();
+    let mut bill = l2_fast_pay_hub::wire::ChannelPayCompleteDocuments::from_bill_hex(
+        pending.bill_hex.as_deref().unwrap(),
+    )
+    .unwrap();
+    bill.chain_payment
+        .fill_sign_by_account(&fixture.user)
+        .unwrap();
+    let confirmed = fixture
+        .hub
+        .confirm_fast_pay(&pending.payment_id, &idempotency_key, &bill.to_bill_hex())
+        .unwrap();
+    assert_eq!(confirmed.status, "settled");
+}
+
+#[tokio::test]
+async fn voucher_is_countersigned_returned_unbroadcast_and_leaves_the_channel_usable() {
+    let fixture = open_voucher_channel("voucher-usable", &"e1".repeat(32)).await;
+    let request = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+
+    let voucher = fixture
+        .hub
+        .issue_channel_close_voucher(&request)
+        .await
+        .unwrap();
+    assert_eq!(voucher.status, "voucher_issued");
+    assert_eq!(voucher.channel_id, fixture.channel_id);
+
+    let signed_hex = voucher.signed_transaction_hex.clone().unwrap();
+    assert_eq!(
+        voucher.signed_transaction_commitment.as_deref().unwrap(),
+        transaction_commitment(&signed_hex).unwrap()
+    );
+    let raw = hex::decode(&signed_hex).unwrap();
+    let (tx, consumed) = protocol::transaction::transaction_create(&raw).unwrap();
+    assert_eq!(consumed, raw.len());
+    // Exactly [ChainAllow, ChannelClose], countersigned by both parties, and
+    // carrying no Action 14: a voucher is delta zero or it is nothing.
+    assert_eq!(tx.actions().len(), 2);
+    assert_eq!(tx.actions()[0].kind(), 0x0411);
+    assert_eq!(tx.actions()[1].kind(), 3);
+    assert_eq!(tx.signs().len(), 2);
+    tx.verify_signature().unwrap();
+    assert_eq!(
+        hex::encode(tx.hash().as_bytes()),
+        voucher.transaction_hash.clone().unwrap()
+    );
+
+    // Nothing was broadcast. The only transaction the node ever saw is the
+    // channel open.
+    let submitted = fixture.transactions.read().await;
+    assert_eq!(submitted.len(), 1);
+    assert!(!submitted.contains_key(voucher.transaction_hash.as_deref().unwrap()));
+    drop(submitted);
+    let current = fixture.node_channel.read().await.clone();
+    assert_eq!(current["status"], json!(0));
+    assert_eq!(current["close_height"], json!(0));
+
+    // The channel was never frozen, so it still pays.
+    settle_payment(&fixture, "0.001").await;
+
+    // Replaying the exact same request returns the exact same bytes. That is
+    // one signature, served twice, not a refreshed voucher: the transaction
+    // hash is unchanged even though the L2 ledger has moved since.
+    let replay = fixture
+        .hub
+        .issue_channel_close_voucher(&request)
+        .await
+        .unwrap();
+    assert_eq!(replay, voucher);
+
+    fixture.node_handle.abort();
+}
+
+#[tokio::test]
+async fn a_second_voucher_for_one_channel_is_refused() {
+    let fixture = open_voucher_channel("voucher-second", &"e2".repeat(32)).await;
+    let first = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let issued = fixture
+        .hub
+        .issue_channel_close_voucher(&first)
+        .await
+        .unwrap();
+
+    // A different request for the same channel is a request for a second
+    // signed close, and is refused rather than satisfied.
+    let second = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    assert_ne!(second.operation_id, first.operation_id);
+    let error = fixture
+        .hub
+        .issue_channel_close_voucher(&second)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("second signed close"),
+        "unexpected refusal: {error}"
+    );
+
+    // Refused before any signing happened, so the stored voucher is untouched.
+    assert_eq!(
+        fixture
+            .hub
+            .issue_channel_close_voucher(&first)
+            .await
+            .unwrap(),
+        issued
+    );
+    fixture.node_handle.abort();
+}
+
+#[tokio::test]
+async fn voucher_then_cooperative_close_is_refused() {
+    let fixture = open_voucher_channel("voucher-then-close", &"e3".repeat(32)).await;
+    let voucher_request = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    fixture
+        .hub
+        .issue_channel_close_voucher(&voucher_request)
+        .await
+        .unwrap();
+
+    let cooperative = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let error = fixture.hub.close_channel(&cooperative).await.unwrap_err();
+    assert!(
+        error.to_string().contains("delta-zero close voucher"),
+        "unexpected refusal: {error}"
+    );
+    // Refused before the freeze, so the channel is still open and still pays.
+    let current = fixture.node_channel.read().await.clone();
+    assert_eq!(current["status"], json!(0));
+    settle_payment(&fixture, "0.001").await;
+    fixture.node_handle.abort();
+}
+
+#[tokio::test]
+async fn cooperative_close_then_voucher_is_refused() {
+    let fixture = open_voucher_channel("close-then-voucher", &"e4".repeat(32)).await;
+    let cooperative = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let closed = fixture.hub.close_channel(&cooperative).await.unwrap();
+    assert_eq!(closed.status, "retired");
+    // The cooperative path still keeps its signed bytes to itself.
+    let public_json = serde_json::to_string(&closed).unwrap();
+    assert!(!public_json.contains("signed_transaction"));
+
+    let voucher_request = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let closed_error = fixture
+        .hub
+        .issue_channel_close_voucher(&voucher_request)
+        .await
+        .unwrap_err();
+    assert!(
+        closed_error.to_string().contains("channel is not open"),
+        "unexpected refusal: {closed_error}"
+    );
+
+    // Now the harder version of the same question: a node that reports the
+    // channel open again, as a reorg or a lying node would, must still not get
+    // a voucher for a channel this Hub has already signed a close for.
+    {
+        let mut channel = fixture.node_channel.write().await;
+        channel["status"] = json!(0);
+        channel["close_height"] = json!(0);
+    }
+    let reorg_request = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let reorg_error = fixture
+        .hub
+        .issue_channel_close_voucher(&reorg_request)
+        .await
+        .unwrap_err();
+    assert!(
+        reorg_error
+            .to_string()
+            .contains("already has a cooperative close"),
+        "unexpected refusal: {reorg_error}"
+    );
+    fixture.node_handle.abort();
+}
+
+#[tokio::test]
+async fn a_restart_between_requests_still_refuses_a_second_voucher() {
+    let fixture = open_voucher_channel("voucher-restart", &"e5".repeat(32)).await;
+    let request = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let issued = fixture
+        .hub
+        .issue_channel_close_voucher(&request)
+        .await
+        .unwrap();
+    drop(fixture.hub);
+
+    let reopened = voucher_hub(
+        "voucher restart hub",
+        &fixture.hub_account,
+        &fixture.node_url,
+        fixture.state_path.clone(),
+        &"e5".repeat(32),
+    );
+    // The exact request still returns the exact bytes across the restart.
+    assert_eq!(
+        reopened
+            .issue_channel_close_voucher(&request)
+            .await
+            .unwrap(),
+        issued
+    );
+    // A different one does not.
+    let second = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let error = reopened
+        .issue_channel_close_voucher(&second)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("second signed close"),
+        "unexpected refusal: {error}"
+    );
+    // And neither does a cooperative close.
+    let cooperative = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let close_error = reopened.close_channel(&cooperative).await.unwrap_err();
+    assert!(
+        close_error.to_string().contains("delta-zero close voucher"),
+        "unexpected refusal: {close_error}"
+    );
+    assert_eq!(fixture.node_channel.read().await["status"], json!(0));
+    fixture.node_handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_voucher_requests_produce_exactly_one_signature() {
+    let fixture = open_voucher_channel("voucher-concurrent", &"e6".repeat(32)).await;
+    let hub = Arc::new(fixture.hub);
+    let first = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let second = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    assert_ne!(first.operation_id, second.operation_id);
+
+    let left = tokio::spawn({
+        let hub = hub.clone();
+        let request = first.clone();
+        async move { hub.issue_channel_close_voucher(&request).await }
+    });
+    let right = tokio::spawn({
+        let hub = hub.clone();
+        let request = second.clone();
+        async move { hub.issue_channel_close_voucher(&request).await }
+    });
+    let results = [left.await.unwrap(), right.await.unwrap()];
+    let issued = results.iter().filter(|result| result.is_ok()).count();
+    assert_eq!(issued, 1, "expected exactly one voucher: {results:?}");
+    let refusal = results
+        .iter()
+        .find_map(|result| result.as_ref().err())
+        .unwrap();
+    assert!(
+        refusal.to_string().contains("second signed close"),
+        "unexpected refusal: {refusal}"
+    );
+
+    // Whichever won, the channel has one voucher and it is stable.
+    let winner = results
+        .iter()
+        .find_map(|result| result.as_ref().ok())
+        .unwrap()
+        .clone();
+    let winning_request = if winner.operation_id == first.operation_id {
+        first
+    } else {
+        second
+    };
+    assert_eq!(
+        hub.issue_channel_close_voucher(&winning_request)
+            .await
+            .unwrap(),
+        winner
+    );
+    assert_eq!(fixture.node_channel.read().await["status"], json!(0));
+    fixture.node_handle.abort();
+}
+
+#[tokio::test]
+async fn voucher_is_refused_after_a_payment_and_for_a_principal_transfer() {
+    let fixture = open_voucher_channel("voucher-delta", &"e7".repeat(32)).await;
+
+    // A voucher may only carry the bare two-action delta-zero form.
+    let with_transfer = close_request_with_transfer(
+        &fixture.user,
+        &fixture.hub_account,
+        &fixture.channel_id,
+        Some("0.001"),
+    );
+    let transfer_error = fixture
+        .hub
+        .issue_channel_close_voucher(&with_transfer)
+        .await
+        .unwrap_err();
+    assert!(
+        transfer_error
+            .to_string()
+            .contains("cannot carry a principal transfer"),
+        "unexpected refusal: {transfer_error}"
+    );
+
+    // Once a payment has moved, the channel is no longer at delta zero and no
+    // voucher may be issued for it at all. There is no refresh.
+    settle_payment(&fixture, "0.001").await;
+    let request = close_request(&fixture.user, &fixture.hub_account, &fixture.channel_id);
+    let delta_error = fixture
+        .hub
+        .issue_channel_close_voucher(&request)
+        .await
+        .unwrap_err();
+    assert!(
+        delta_error
+            .to_string()
+            .contains("authoritative latest L2 ledger"),
+        "unexpected refusal: {delta_error}"
+    );
+    assert_eq!(fixture.node_channel.read().await["status"], json!(0));
+    fixture.node_handle.abort();
+}
+
 #[tokio::test]
 async fn close_freezes_signs_broadcasts_confirms_and_is_restart_idempotent() {
     let user = account("durable-close-user");

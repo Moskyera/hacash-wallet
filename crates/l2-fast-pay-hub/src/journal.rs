@@ -83,6 +83,14 @@ pub enum JournalPhase {
     L1CloseConfirmed,
     L1CloseRetired,
     L1CloseRecoveryRequired,
+    /// A channel-close voucher was reserved for one channel and made durable
+    /// before the Hub signer was called. The entry alone bars this channel from
+    /// ever being issued a second voucher, whether or not the signature that
+    /// followed survived.
+    L1CloseVoucherSignatureMayExist,
+    /// The exact countersigned delta-zero close bytes were made durable and
+    /// handed to the owner. Nothing was broadcast, and the channel stays open.
+    L1CloseVoucherIssued,
     HvmChannelActivated,
     HvmPaymentProposalPersisted,
     HvmPaymentSignatureMayExist,

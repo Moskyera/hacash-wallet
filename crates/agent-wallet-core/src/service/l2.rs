@@ -9,6 +9,8 @@
 mod channel_close;
 mod channel_setup;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
+mod channel_voucher;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
 mod verification;
 
 use hacash_wallet_core::channel::query_channel;
@@ -496,6 +498,454 @@ impl AgentChannelSetupOperation {
         hex::encode(digest.finalize())
     }
 }
+/// How far the wallet has got with the one close voucher this channel will
+/// ever have.
+///
+/// There is no refresh phase and there is no second voucher. A voucher is
+/// taken once, at delta zero, immediately after the open confirms, and is then
+/// only ever read. Refreshing it after payments would leave the owner holding
+/// several valid closes for one channel, each with its own transaction hash,
+/// and the owner would always broadcast the oldest, which is pure loss to the
+/// Hub for no owner benefit: the delta-zero voucher already pays the owner the
+/// most the channel can pay them.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentChannelCloseVoucherPhase {
+    /// The wallet is about to sign, or was interrupted while signing. Written
+    /// before the signer is touched.
+    SignatureMayExist,
+    /// The exact user-signed request is durable. The Hub may or may not have
+    /// seen it; replaying these same bytes is safe and returns the same
+    /// voucher.
+    Signed,
+    /// The Hub countersigned, the wallet verified the bytes itself, and the
+    /// bytes are durable. This is the owner's exit.
+    Held,
+    /// The owner broadcast the voucher themselves, without the Hub.
+    Broadcast,
+    /// The voucher could not be obtained and this channel can never have one.
+    RecoveryRequired,
+}
+
+/// Where the owner sent their own voucher, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentChannelCloseVoucherBroadcast {
+    pub transaction_hash: String,
+    pub node_url: String,
+    pub broadcast_at: u64,
+}
+
+/// The owner's exit from a Fast Pay channel: one delta-zero
+/// `[ChainAllow, ChannelClose]` signed by both the owner and the Hub, held by
+/// the owner and broadcastable by anyone at any future height.
+///
+/// # What this is, exactly
+///
+/// A `ChannelClose` carries only a channel ID. Settlement refunds the balances
+/// recorded when the channel opened, which for a zero-Hub-deposit channel is
+/// the entire deposit to the owner and nothing to the Hub. Nothing in the
+/// transaction names a balance, so nothing about it goes stale: it has no
+/// expiry, it is not bound to whoever broadcasts it, and the owner needs no
+/// on-chain balance at signing time because the fee is charged during
+/// execution.
+///
+/// # What this is not
+///
+/// It is not trustless and must never be described as one. The Hub had to
+/// countersign it, once, at the start, and it could have refused: nothing in
+/// Hacash can compel a second signature, and had it refused, the deposit would
+/// have been stuck with no protocol remedy. There is also a real window
+/// between the open confirming and the voucher arriving during which the
+/// deposit is on-chain and no exit exists yet; the wallet minimises that
+/// window by taking the voucher immediately, and does not pretend it away.
+///
+/// And once these bytes exist the Hub carries the whole exposure: the owner
+/// can spend the channel down to nothing and still recover the full opening
+/// deposit with this transaction. That is acceptable only in this bounded
+/// pilot, where the owner runs the Hub.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentChannelCloseVoucherView {
+    pub wallet_id: AgentWalletId,
+    pub operation_id: String,
+    pub network_mode: String,
+    pub hub_address: String,
+    pub owner_address: String,
+    pub channel_id: String,
+    pub channel_reuse_version: u64,
+    pub channel_open_height: u64,
+    /// What the channel held for the owner when it opened, and therefore what
+    /// this transaction pays the owner when it settles.
+    pub refund_units: HacUnits,
+    pub deposit_units: HacUnits,
+    /// The L1 fee the owner pays out of their own balance when they broadcast
+    /// it, not out of the channel.
+    pub network_fee_units: HacUnits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_hash: Option<String>,
+    /// The exact bytes. Present once the Hub has countersigned and this wallet
+    /// has verified them from the bytes rather than from the Hub's word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_transaction_hex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_transaction_commitment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<u64>,
+    pub phase: AgentChannelCloseVoucherPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast: Option<AgentChannelCloseVoucherBroadcast>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentChannelCloseVoucherOperation {
+    pub(crate) view: AgentChannelCloseVoucherView,
+    pub(crate) idempotency_key: String,
+    pub(crate) created_at: u64,
+    pub(crate) expires_at: u64,
+    pub(crate) node_url: String,
+    pub(crate) network_binding: l2_fast_pay_hub::l1_channel::L1ChannelNetworkBinding,
+    pub(crate) plan: hacash_wallet_core::channel::PreparedCooperativeChannelClose,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) signed_request: Option<l2_fast_pay_hub::l1_channel_close::L1ChannelCloseRequest>,
+}
+
+impl AgentChannelCloseVoucherOperation {
+    pub(crate) fn validate(
+        &self,
+        wallet_id: &AgentWalletId,
+        address: &str,
+    ) -> AgentWalletResult<()> {
+        let expected_refund_units = self
+            .plan
+            .original_left_millimeis
+            .checked_mul(MILLIMEI_IN_AGENT_UNITS)
+            .ok_or(AgentWalletError::RecoveryRequired)?;
+        if &self.view.wallet_id != wallet_id
+            || self.view.operation_id.is_empty()
+            || self.view.owner_address != address
+            || self.view.hub_address.is_empty()
+            || self.view.hub_address == address
+            || self.view.channel_id != self.plan.channel_id
+            // The whole design rests on this being 1. `derive_channel_id` is
+            // called with a hardcoded 1 at open, so one address pair always
+            // yields one channel ID; a voucher that survived into a later
+            // incarnation of the same ID would reanimate against a channel it
+            // was never signed for.
+            || self.view.channel_reuse_version != 1
+            || self.plan.reuse_version != 1
+            || self.view.channel_open_height != self.plan.open_height
+            || self.view.channel_open_height == 0
+            || self.view.refund_units.get() != expected_refund_units
+            || self.view.deposit_units != self.view.refund_units
+            || self.view.refund_units == HacUnits::ZERO
+            || self.view.network_fee_units.to_decimal() != self.plan.network_fee
+            || self.plan.left_address != address
+            || self.plan.right_address != self.view.hub_address
+            || self.idempotency_key.is_empty()
+            || self.node_url.is_empty()
+            || self.expires_at <= self.created_at
+            || self.plan.unsigned_transaction_hex.is_empty()
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        // Delta zero, restated against the plan itself rather than inferred
+        // from the action count. A voucher is only ever taken on a channel
+        // that has moved nothing yet.
+        if self.plan.transfer_millimeis.is_some()
+            || self.plan.transfer_from.is_some()
+            || self.plan.transfer_to.is_some()
+            || self.plan.final_left_millimeis != self.plan.original_left_millimeis
+            || self.plan.original_right_millimeis != 0
+            || self.plan.final_right_millimeis != 0
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        self.network_binding
+            .validate()
+            .map_err(|_| AgentWalletError::RecoveryRequired)?;
+        if (self.view.network_mode == "mainnet") != self.network_binding.mainnet {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        let coherent = match self.view.phase {
+            AgentChannelCloseVoucherPhase::SignatureMayExist => {
+                self.signed_request.is_none()
+                    && self.view.signed_transaction_hex.is_none()
+                    && self.view.broadcast.is_none()
+            }
+            AgentChannelCloseVoucherPhase::Signed => {
+                self.signed_request.is_some()
+                    && self.view.signed_transaction_hex.is_none()
+                    && self.view.broadcast.is_none()
+            }
+            AgentChannelCloseVoucherPhase::Held => {
+                self.signed_request.is_some()
+                    && self.view.signed_transaction_hex.is_some()
+                    && self.view.broadcast.is_none()
+            }
+            AgentChannelCloseVoucherPhase::Broadcast => {
+                self.signed_request.is_some()
+                    && self.view.signed_transaction_hex.is_some()
+                    && self.view.broadcast.is_some()
+            }
+            // A voucher that failed is a voucher that never had bytes. There
+            // is no path from here to holding one: the Hub reserved this
+            // channel's single voucher slot before it signed, so it will never
+            // issue another.
+            AgentChannelCloseVoucherPhase::RecoveryRequired => {
+                self.view.signed_transaction_hex.is_none() && self.view.broadcast.is_none()
+            }
+        };
+        if !coherent
+            || self.view.signed_transaction_hex.is_some()
+                != self.view.signed_transaction_commitment.is_some()
+            || self.view.signed_transaction_hex.is_some() != self.view.transaction_hash.is_some()
+            || self.view.signed_transaction_hex.is_some() != self.view.issued_at.is_some()
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        if let Some(request) = &self.signed_request
+            && (request.operation_id != self.view.operation_id
+                || request.idempotency_key != self.idempotency_key
+                || request.created_unix != self.created_at
+                || request.expires_unix != self.expires_at
+                || request.hub_address != self.view.hub_address
+                || request.user_address != address
+                || !request
+                    .channel_id
+                    .eq_ignore_ascii_case(&self.view.channel_id)
+                || request.reuse_version != self.view.channel_reuse_version
+                || request.open_height != self.view.channel_open_height
+                || request.chain_id != self.network_binding.chain_id
+                || request.mainnet != self.network_binding.mainnet)
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        self.verified_bytes()?;
+        Ok(())
+    }
+
+    /// Re-prove the stored voucher from the bytes on every load.
+    ///
+    /// The owner must never depend on the Hub's word, and that includes the
+    /// Hub's past word. A stored blob that once passed is checked again here,
+    /// so a tampered or truncated state file cannot leave the wallet believing
+    /// it holds an exit it does not hold.
+    pub(crate) fn verified_bytes(
+        &self,
+    ) -> AgentWalletResult<
+        Option<hacash_wallet_core::l1_channel_close_safety::VerifiedChannelCloseVoucher>,
+    > {
+        let Some(signed_transaction_hex) = self.view.signed_transaction_hex.as_deref() else {
+            return Ok(None);
+        };
+        let transaction_hash = self
+            .view
+            .transaction_hash
+            .as_deref()
+            .ok_or(AgentWalletError::RecoveryRequired)?;
+        let commitment = self
+            .view
+            .signed_transaction_commitment
+            .as_deref()
+            .ok_or(AgentWalletError::RecoveryRequired)?;
+        let verified =
+            hacash_wallet_core::l1_channel_close_safety::verify_channel_close_voucher_bytes(
+                signed_transaction_hex,
+                transaction_hash,
+                &self.view.owner_address,
+                &self.view.hub_address,
+                &self.view.channel_id,
+                self.network_binding.chain_id,
+            )
+            .map_err(|_| AgentWalletError::RecoveryRequired)?;
+        if !verified
+            .signed_transaction_commitment
+            .eq_ignore_ascii_case(commitment)
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        Ok(Some(verified))
+    }
+
+    /// True once the owner holds bytes this wallet has verified for itself.
+    ///
+    /// Gated to match its only callers. `request_fast_pay_intent` and the
+    /// voucher module are both behind this feature, so a default build has no
+    /// caller for it and `-D dead-code` refuses the crate without this.
+    #[cfg(any(test, feature = "agent-wallet-testnet-pilot"))]
+    pub(crate) fn is_held(&self) -> bool {
+        matches!(
+            self.view.phase,
+            AgentChannelCloseVoucherPhase::Held | AgentChannelCloseVoucherPhase::Broadcast
+        ) && self.view.signed_transaction_hex.is_some()
+    }
+
+    pub(crate) fn matches_binding(&self, binding: &AgentL2Binding) -> bool {
+        self.view.channel_id == binding.channel_id()
+            && self.view.channel_reuse_version == binding.channel_reuse_version()
+            && self.view.channel_open_height == binding.channel_open_height()
+            && self.view.hub_address == binding.hub_address()
+            && self.view.owner_address == binding.agent_address()
+            && self.view.deposit_units == binding.deposit_units()
+    }
+}
+
+/// The exact chain-7 Local Pilot network binding the test fixtures sign
+/// vouchers under.
+#[cfg(test)]
+pub(crate) fn test_local_pilot_network_binding(
+    block_1_hash: &str,
+) -> l2_fast_pay_hub::l1_channel::L1ChannelNetworkBinding {
+    l2_fast_pay_hub::l1_channel::L1ChannelNetworkBinding {
+        network_kind: hacash_wallet_core::HPAY_LOCAL_PILOT_NETWORK_KIND.into(),
+        chain_id: hacash_wallet_core::HPAY_LOCAL_PILOT_CHAIN_ID,
+        mainnet: false,
+        block_1_hash: block_1_hash.to_owned(),
+        node_profile_id: hacash_wallet_core::HPAY_LOCAL_PILOT_PROFILE_ID.into(),
+        network_instance_id: hacash_wallet_core::network_instance_id(
+            hacash_wallet_core::HPAY_LOCAL_PILOT_NETWORK_KIND,
+            hacash_wallet_core::HPAY_LOCAL_PILOT_CHAIN_ID,
+            false,
+            block_1_hash,
+            hacash_wallet_core::HPAY_LOCAL_PILOT_PROFILE_ID,
+            2,
+        ),
+        transaction_format_version: 2,
+    }
+}
+
+/// Build the exact thing the Hub hands back on the voucher path, so tests can
+/// exercise every gate that depends on holding one without a live Hub.
+///
+/// It signs with the wallet's own restricted signer and then countersigns with
+/// the test Hub account, which is the whole point: a fixture that faked the
+/// signatures would not pass `verified_bytes`, and every gate in this feature
+/// re-derives the voucher from the bytes.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn test_held_close_voucher(
+    signer: &crate::signer::AgentTransactionSigner,
+    permit: &crate::emergency::AgentSafetyPermit,
+    wallet_id: &AgentWalletId,
+    owner_address: &str,
+    binding: &AgentL2Binding,
+    hub: &sys::Account,
+    network_binding: l2_fast_pay_hub::l1_channel::L1ChannelNetworkBinding,
+    node_url: &str,
+    now: u64,
+) -> AgentChannelCloseVoucherOperation {
+    use basis::interface::Transaction;
+    use field::{Address, Amount, ChannelId, Field, Serialize as _, Uint4};
+    use mint::action::ChannelClose;
+    use protocol::action::{ChainAllow, ChainIDList};
+    use protocol::transaction::TransactionType2;
+
+    hacash_wallet_core::protocol_init::ensure_protocol_setup();
+    let network_fee_units = HacUnits::from_decimal("0.001").unwrap();
+    let network_fee = network_fee_units.to_decimal();
+    let mut transaction = TransactionType2::new_by(
+        Address::from_readable(owner_address).unwrap(),
+        Amount::from(&network_fee).unwrap(),
+        now,
+    );
+    let mut guard = ChainAllow::new();
+    guard.chains = ChainIDList::from_list(vec![Uint4::from(network_binding.chain_id)]).unwrap();
+    transaction.push_action(Box::new(guard)).unwrap();
+    let mut close = ChannelClose::new();
+    close.channel_id = ChannelId::must(&hex::decode(binding.channel_id()).unwrap());
+    transaction.push_action(Box::new(close)).unwrap();
+
+    let original_left_millimeis = binding.deposit_units().get() / MILLIMEI_IN_AGENT_UNITS;
+    let plan = hacash_wallet_core::channel::PreparedCooperativeChannelClose {
+        channel_id: binding.channel_id().to_owned(),
+        reuse_version: binding.channel_reuse_version(),
+        open_height: binding.channel_open_height(),
+        bill_auto_number: 0,
+        left_address: owner_address.to_owned(),
+        right_address: binding.hub_address().to_owned(),
+        original_left_millimeis,
+        original_right_millimeis: 0,
+        final_left_millimeis: original_left_millimeis,
+        final_right_millimeis: 0,
+        transfer_from: None,
+        transfer_to: None,
+        transfer_millimeis: None,
+        unsigned_transaction_hex: hex::encode(transaction.serialize()),
+        network_fee: network_fee.clone(),
+        fee_estimate_degraded: None,
+    };
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let idempotency_key = format!("hpay:agent-channel-close-voucher:{operation_id}");
+    let request = signer
+        .sign_exact_channel_close(
+            crate::signer::AgentChannelCloseSigningRequest {
+                wallet_scope: WalletScope::for_agent_wallet(wallet_id),
+                network_mode: binding.network_mode().to_owned(),
+                network_binding: network_binding.clone(),
+                hub_address: binding.hub_address().to_owned(),
+                plan: plan.clone(),
+                operation_id: operation_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+                created_unix: now,
+                expires_unix: now + 300,
+            },
+            permit,
+            now,
+        )
+        .unwrap();
+    let (mut countersigned, consumed) = protocol::transaction::transaction_create(
+        &hex::decode(&request.partial_transaction_hex).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        consumed,
+        request.partial_transaction_hex.len() / 2,
+        "partial voucher bytes must decode exactly"
+    );
+    countersigned.fill_sign(hub).unwrap();
+    let signed = countersigned.serialize();
+    let signed_transaction_hex = hex::encode(&signed);
+    let transaction_hash = hacash_wallet_core::l1_channel_close_safety::transaction_hash_of_hex(
+        &signed_transaction_hex,
+    )
+    .unwrap();
+
+    let operation = AgentChannelCloseVoucherOperation {
+        view: AgentChannelCloseVoucherView {
+            wallet_id: wallet_id.clone(),
+            operation_id,
+            network_mode: binding.network_mode().to_owned(),
+            hub_address: binding.hub_address().to_owned(),
+            owner_address: owner_address.to_owned(),
+            channel_id: binding.channel_id().to_owned(),
+            channel_reuse_version: binding.channel_reuse_version(),
+            channel_open_height: binding.channel_open_height(),
+            refund_units: binding.deposit_units(),
+            deposit_units: binding.deposit_units(),
+            network_fee_units,
+            transaction_hash: Some(transaction_hash),
+            signed_transaction_hex: Some(signed_transaction_hex),
+            signed_transaction_commitment: Some(hex::encode(<Sha256 as Digest>::digest(
+                &signed[..],
+            ))),
+            issued_at: Some(now),
+            phase: AgentChannelCloseVoucherPhase::Held,
+            broadcast: None,
+        },
+        idempotency_key,
+        created_at: now,
+        expires_at: now + 300,
+        node_url: node_url.to_owned(),
+        network_binding,
+        plan,
+        signed_request: Some(request),
+    };
+    operation.validate(wallet_id, owner_address).unwrap();
+    operation
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentL2Binding {
@@ -826,6 +1276,25 @@ impl AgentWalletManager {
         if !binding.is_active() {
             return Err(AgentWalletError::SigningBlocked);
         }
+        // The sequencing rule, as code. No Fast Pay payment may be made until
+        // the owner holds this channel's countersigned delta-zero close, and
+        // that close is taken once, immediately after the open confirms.
+        //
+        // Ordering it this way is the whole point. The Hub cannot countersign
+        // a channel that does not exist, so the deposit is necessarily on
+        // chain before the exit can be signed; spending into the channel
+        // before the exit is in hand would widen that window from seconds to
+        // the whole life of the channel. The bytes are re-proved from the
+        // transaction here rather than read off a stored phase, so a state
+        // file that merely claims an exit does not open this gate.
+        let voucher = state
+            .l2_channel_close_voucher
+            .as_ref()
+            .ok_or(AgentWalletError::SigningBlocked)?;
+        if !voucher.is_held() || !voucher.matches_binding(&binding) {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        voucher.verified_bytes()?;
         if state.l2_channel_close.is_some() {
             return Err(AgentWalletError::RecoveryRequired);
         }
@@ -1393,13 +1862,33 @@ mod tests {
             now,
         )
         .unwrap();
+        let permit = manager
+            .emergency_controller(&created.wallet_id)
+            .unwrap()
+            .issue_safety_permit(false)
+            .unwrap();
         let session = manager.session(&created.wallet_id).unwrap();
         let state_master = *session.state_master;
         let journal_key = *session.journal_key;
+        // No Fast Pay payment is possible until the owner holds this
+        // channel's one countersigned delta-zero close, so every Fast Pay
+        // fixture has to hold one too.
+        let voucher = test_held_close_voucher(
+            &session.signer,
+            &permit,
+            &created.wallet_id,
+            &created.address,
+            &binding,
+            hub.inner(),
+            test_local_pilot_network_binding(TESTNET_ANCHOR),
+            "http://127.0.0.1:1",
+            now,
+        );
         let mut state = manager
             .load_verified_state(&created.wallet_id, &state_master, &journal_key)
             .unwrap();
         state.l2_binding = Some(binding);
+        state.l2_channel_close_voucher = Some(voucher);
         state.updated_at = now;
         manager
             .persist_event(
@@ -1626,6 +2115,74 @@ mod tests {
         assert!(
             serde_json::from_value::<AgentL2Binding>(value).is_err(),
             "a binding without a cryptographically committed node identity must fail closed"
+        );
+    }
+
+    #[test]
+    fn fast_pay_is_refused_until_the_exit_is_held() {
+        // The sequencing rule, proved rather than documented. Everything else
+        // about this wallet is ready to pay: the channel is bound and active,
+        // the agent is paired and inside policy, payments are enabled. Take
+        // away only the countersigned delta-zero close and the payment is
+        // refused, because until the owner holds one the deposit has no route
+        // out that does not depend on the Hub agreeing to close it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (_root, mut manager, wallet_id, agent_id, recipient) =
+            manager_with_binding_and_agent(now);
+        let authorization = authorization_for(
+            &manager,
+            &wallet_id,
+            &agent_id,
+            AgentPermission::CreatePaymentIntent,
+        );
+        let request = AgentFastPayRequest {
+            idempotency_key: "fast-pay-needs-an-exit-0001".into(),
+            amount_units: HacUnits::new(6_000),
+            recipient,
+            reason: "bounded compute request".into(),
+            expires_at: now + 600,
+        };
+        manager
+            .request_fast_pay_intent(&authorization, request.clone(), now + 2)
+            .expect("a held exit is what opens the Fast Pay gate");
+
+        let (state_master, journal_key) = {
+            let session = manager.session(&wallet_id).unwrap();
+            (*session.state_master, *session.journal_key)
+        };
+        let mut state = manager
+            .load_verified_state(&wallet_id, &state_master, &journal_key)
+            .unwrap();
+        state.l2_channel_close_voucher = None;
+        state.fast_pay_operations.clear();
+        state.idempotency.clear();
+        state.updated_at = now + 3;
+        manager
+            .persist_event(
+                &mut state,
+                &state_master,
+                &journal_key,
+                crate::journal::AgentJournalEventKind::L2BindingVerified,
+                None,
+                None,
+                now + 3,
+            )
+            .unwrap();
+        assert!(
+            state
+                .l2_binding
+                .as_ref()
+                .is_some_and(AgentL2Binding::is_active),
+            "the channel is still bound and active; only the exit is gone"
+        );
+        assert_eq!(
+            manager
+                .request_fast_pay_intent(&authorization, request, now + 4)
+                .unwrap_err(),
+            AgentWalletError::SigningBlocked
         );
     }
 

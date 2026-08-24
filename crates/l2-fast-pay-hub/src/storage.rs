@@ -77,11 +77,12 @@ pub(crate) enum HvmChainOperationKind {
     Respond,
     Finalize,
     RenewAllLeases,
-    /// Move the settled principal out of the shared registry contract with an
-    /// Action 14 `HacFromToTrs` whose `from` is the contract. This is the only
-    /// door HAC leaves the contract through: `settle()` only rewrites the
-    /// claimable counters. Registry (V2) profile only; the V1 HVM channel
-    /// contract has no such hook.
+    /// Move the settled principal out of the contract with an Action 14
+    /// `HacFromToTrs` whose `from` is the contract. This is the only door HAC
+    /// leaves either HPAY contract through: on the registry rail `settle()`
+    /// only rewrites the claimable counters, and on the V1 rail `finalize()`
+    /// only writes `status`. Both contracts admit the payout through a
+    /// `PermitHAC` hook that pins the payee and the exact amount.
     Claim,
 }
 
@@ -181,6 +182,19 @@ pub(crate) struct PersistedHvmChainOperation {
     pub expected_right_balance_zhu: Option<u64>,
     pub lease_keys: Vec<String>,
     pub lease_periods: Option<u64>,
+    /// Exact payee of a `Claim`. Absent for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_payee: Option<String>,
+    /// Exact zhu a `Claim` moves. The contract's `PermitHAC` hook demands this
+    /// equal `left_balance` to the zhu, so it is never approximated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_amount_zhu: Option<u64>,
+    /// Observed height at which the exact payout was found already recorded on
+    /// chain by somebody else. Claims are permissionless, so a third party can
+    /// pay the payee first; that settles this operation without a second
+    /// transaction of our own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_settled_elsewhere_height: Option<u64>,
     pub pre_observed_height: u64,
     pub pre_status: u8,
     pub pre_serial: u64,
@@ -485,6 +499,70 @@ pub(crate) struct PersistedL1ChannelClose {
     pub last_error: Option<String>,
 }
 
+/// How far one channel-close voucher got. There are only two states, and no
+/// terminal one: a voucher is never retired, because the Hub never learns
+/// whether the owner broadcast it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum L1ChannelCloseVoucherStatus {
+    /// Made durable **before** the Hub signer was called. A crash here leaves
+    /// the entry in place with no bytes, and the entry alone permanently bars
+    /// this channel from ever being issued another voucher. That is the point:
+    /// the Hub must never be able to produce two conflicting signed closes for
+    /// one channel, so an unrecoverable signature is refused rather than
+    /// replaced.
+    SignatureMayExist,
+    /// The exact countersigned bytes are persisted and were returned.
+    Issued,
+}
+
+/// The one delta-zero close this Hub countersigned for one channel, and handed
+/// back instead of broadcasting.
+///
+/// Kept in its own single-entry-per-channel map rather than in
+/// `l1_channel_closes`, because the two are different promises: a cooperative
+/// close is a transaction the Hub broadcasts and then tracks to finality, and
+/// a voucher is a signature the Hub gives away and never hears about again.
+/// One channel may have one or the other, never both.
+///
+/// Exactly one voucher per channel, ever, at delta zero, never refreshed.
+/// Refreshing after payments would leave the owner holding several valid
+/// closes naming the same channel, each with a distinct transaction hash, only
+/// the first to land winning; the owner would rationally broadcast the oldest,
+/// which is pure loss to the Hub for zero owner benefit, since a delta-zero
+/// voucher already pays the owner the maximum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct PersistedL1ChannelCloseVoucher {
+    pub channel_id: String,
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub request_commitment: String,
+    pub network: String,
+    pub chain_id: u32,
+    pub mainnet: bool,
+    pub block_1_hash: String,
+    pub node_profile_id: String,
+    pub network_instance_id: String,
+    pub transaction_format_version: u64,
+    pub hub_address: String,
+    pub user_address: String,
+    pub reuse_version: u64,
+    pub open_height: u64,
+    /// The distribution recorded on L1 at open, which is what Action 3 refunds
+    /// and therefore what this voucher pays out.
+    pub original_ledger: ChannelLedger,
+    pub partial_transaction_hex: String,
+    pub partial_transaction_commitment: String,
+    pub transaction_hash: String,
+    #[serde(default)]
+    pub signed_transaction_hex: Option<String>,
+    #[serde(default)]
+    pub signed_transaction_commitment: Option<String>,
+    pub status: L1ChannelCloseVoucherStatus,
+    pub created_unix: u64,
+    pub updated_unix: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct HubPersistedState {
     #[serde(default)]
@@ -517,6 +595,12 @@ pub(crate) struct HubPersistedState {
     pub l1_channel_close_idempotency: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub l1_channel_close_commitments: HashMap<String, String>,
+    /// Channel-close vouchers, keyed by channel ID so the map itself enforces
+    /// one per channel. Absent and skipped on every state file written before
+    /// vouchers existed, so the state commitment of a Hub that never issued one
+    /// is byte-identical to what it was.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub l1_channel_close_vouchers: HashMap<String, PersistedL1ChannelCloseVoucher>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hvm_channel_activations: HashMap<String, PersistedHvmChannelActivation>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -901,15 +985,6 @@ fn validate_hvm_channel_activations_v1(state: &HubPersistedState) -> HubResult<(
         }
     }
     for (operation_id, operation) in &state.hvm_chain_operations {
-        // `Claim` exists only for the shared registry (V2) profile, whose
-        // contract exposes the `PermitHAC` payout hook. The V1 HVM channel
-        // contract has no such door, so a V1 operation claiming that kind is
-        // corrupt state, not an unsupported feature.
-        if operation.kind == HvmChainOperationKind::Claim {
-            return Err(HubError::State(
-                "V1 HVM chain operation cannot be a registry claim".into(),
-            ));
-        }
         if operation.operation_id != *operation_id
             || operation.operation_id.trim().is_empty()
             || operation.idempotency_key.trim().is_empty()
@@ -963,6 +1038,53 @@ fn validate_hvm_channel_activations_v1(state: &HubPersistedState) -> HubResult<(
                 "persisted HVM operation bill postcondition is incomplete".into(),
             ));
         }
+        if operation.kind == HvmChainOperationKind::Claim {
+            let binding = &state
+                .hvm_channel_activations
+                .get(&operation.binding_commitment)
+                .ok_or_else(|| HubError::State("HVM claim activation is missing".into()))?
+                .recovery_bundle
+                .binding;
+            let payee = operation
+                .claim_payee
+                .as_deref()
+                .ok_or_else(|| HubError::State("HVM claim lost its exact payee".into()))?;
+            let amount_zhu = operation
+                .claim_amount_zhu
+                .ok_or_else(|| HubError::State("HVM claim lost its exact payout amount".into()))?;
+            // Re-derive the canonical descriptor from the binding rather than
+            // trusting the stored text. A payout record that no longer derives
+            // is a record this Hub must not sign from again.
+            if crate::hvm_watchtower::claim_left_payout_source(binding, payee, amount_zhu)?
+                != operation.call_source
+            {
+                return Err(HubError::State(
+                    "persisted HVM claim payout descriptor is not canonical".into(),
+                ));
+            }
+        } else if operation.claim_payee.is_some()
+            || operation.claim_amount_zhu.is_some()
+            || operation.claim_settled_elsewhere_height.is_some()
+        {
+            return Err(HubError::State(
+                "non-claim HVM operation contains payout state".into(),
+            ));
+        }
+        // A permissionless third party may pay the payee before us. When that
+        // is observed the operation resolves with the contract's own
+        // `left_claimed` flag as its evidence; it never owns a block of its
+        // own, so it must not pretend to.
+        let settled_elsewhere = operation.claim_settled_elsewhere_height;
+        if let Some(height) = settled_elsewhere
+            && (height == 0
+                || operation.status != HvmChainOperationStatus::Confirmed
+                || operation.confirmed_block_height.is_some()
+                || operation.observed_confirmations != 0)
+        {
+            return Err(HubError::State(
+                "HVM claim settled elsewhere carries inconsistent evidence".into(),
+            ));
+        }
         // The abandonment transition belongs to the shared registry table
         // alone, which is where the proof gate and its durable evidence live.
         // A v1 record carrying it has no proof behind it and is refused.
@@ -971,6 +1093,16 @@ fn validate_hvm_channel_activations_v1(state: &HubPersistedState) -> HubResult<(
                 "the v1 HVM chain operation table has no abandonment transition".into(),
             ));
         }
+        // A settled-elsewhere claim keeps its exact signed bytes like every
+        // other record past `SignatureMayExist`. There is no carve-out here.
+        //
+        // There used to be one, for "a claim resolved before it was ever
+        // signed". No v1 production path can reach that state: both callers of
+        // `settle_hvm_claim_paid_elsewhere` sit downstream of points where the
+        // signed bytes and the transaction hash have already been unwrapped.
+        // The relaxation therefore bought nothing, and only widened what a
+        // hand-edited state file could carry past validation, so it was
+        // removed rather than left standing as a dead exemption.
         let signed_required = !matches!(
             operation.status,
             HvmChainOperationStatus::IntentPersisted | HvmChainOperationStatus::SignatureMayExist
@@ -990,6 +1122,7 @@ fn validate_hvm_channel_activations_v1(state: &HubPersistedState) -> HubResult<(
             ));
         }
         if operation.status == HvmChainOperationStatus::Confirmed
+            && settled_elsewhere.is_none()
             && (operation.confirmed_block_height.is_none() || operation.observed_confirmations < 6)
         {
             return Err(HubError::State(

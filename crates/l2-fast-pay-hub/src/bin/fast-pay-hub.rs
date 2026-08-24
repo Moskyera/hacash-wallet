@@ -110,7 +110,11 @@ struct Args {
     )]
     mainnet_max_aggregate_tvl_hac_zhu: u64,
 
-    /// Enable automatic maintenance of all 18 HVM storage leases.
+    /// Run unattended HVM channel maintenance: renew all 18 storage leases on
+    /// both rails, and watch every activated channel so a challenge is
+    /// answered, a passed deadline is finalized, and a finalized channel's
+    /// settled principal is claimed back out of the contract. Without this the
+    /// Hub does none of it and a person has to drive each step by hand.
     #[arg(long, default_value_t = false)]
     hvm_lease_scheduler: bool,
 
@@ -591,10 +595,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         config.validate()?;
         if !hub.health().settlement_ready {
-            return Err("HVM lease scheduler requires authenticated durable Hub storage".into());
+            // This refuses the whole process, not just the scheduler task, and
+            // it is deliberate: a latched state file means a signed
+            // transaction is outstanding whose fate nobody knows, and the only
+            // way out is `hpay-hvm-local-pilot reconcile` with the Hub stopped.
+            // Booting into a Hub that cannot renew a lease would be the silent
+            // version of the same failure. The message says so rather than
+            // leaving an operator to work it out.
+            return Err(
+                "HVM maintenance scheduler requires authenticated durable Hub storage, \
+                        and this state file is not settlement ready: a chain operation is \
+                        outstanding and holding the recovery latch. Run \
+                        `hpay-hvm-local-pilot reconcile` against this state file with the Hub \
+                        stopped, then start again."
+                    .into(),
+            );
         }
         eprintln!(
-            "HVM leases:    automatic, {}s interval, {}-block threshold",
+            "HVM maintenance: automatic, {}s interval, {}-block lease threshold; leases and \
+             watchtower on both rails",
             config.interval_seconds, config.renew_when_live_blocks_at_or_below
         );
         tokio::spawn(l2_fast_pay_hub::hvm_scheduler::run_hvm_lease_scheduler(

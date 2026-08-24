@@ -889,6 +889,7 @@ fn daily_policy_counts_total_debit_of_pending_reservations() {
         l2_binding: None,
         l2_channel_setup: None,
         l2_channel_close: None,
+        l2_channel_close_voucher: None,
         hvm_channel_binding: None,
         hvm_registry_binding: None,
         hvm_registry_exit_head: None,

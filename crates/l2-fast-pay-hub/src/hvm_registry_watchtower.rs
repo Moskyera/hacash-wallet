@@ -184,6 +184,12 @@ pub struct HvmRegistryChainResponseV2 {
     pub transaction_hash: Option<String>,
     pub confirmed_block_height: Option<u64>,
     pub observed_confirmations: u64,
+    /// When this operation's bytes were put on the wire. The v1 twin of this
+    /// field explains why it is surfaced: a transaction dropped from the
+    /// mempool and one merely waiting for a block are the same `submitted`
+    /// answer, forever, unless somebody can see how long it has been saying it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

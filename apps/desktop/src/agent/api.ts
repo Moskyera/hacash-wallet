@@ -216,6 +216,50 @@ export type AgentChannelCloseReview = {
   phase: AgentChannelClosePhase;
 };
 
+export type AgentChannelCloseVoucherPhase =
+  | "signature_may_exist"
+  | "signed"
+  | "held"
+  | "broadcast"
+  | "recovery_required";
+
+export type AgentChannelCloseVoucherBroadcast = {
+  transaction_hash: string;
+  node_url: string;
+  broadcast_at: number;
+};
+
+/**
+ * The owner's exit from a Fast Pay channel: one close transaction, signed by
+ * the owner and countersigned by the Hub, that the owner holds and can
+ * broadcast from their own node at any later time.
+ *
+ * It is not a trustless exit. The Hub had to sign it once, at the start, and it
+ * could have refused. What it removes is the owner's dependence on the Hub
+ * afterwards.
+ */
+export type AgentChannelCloseVoucher = {
+  wallet_id: string;
+  operation_id: string;
+  network_mode: "mainnet" | "testnet";
+  hub_address: string;
+  owner_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  channel_open_height: number;
+  /** What this transaction pays the owner when it settles. */
+  refund_units: string;
+  deposit_units: string;
+  /** The L1 fee the owner pays from their own balance to broadcast it. */
+  network_fee_units: string;
+  transaction_hash?: string | null;
+  signed_transaction_hex?: string | null;
+  signed_transaction_commitment?: string | null;
+  issued_at?: number | null;
+  phase: AgentChannelCloseVoucherPhase;
+  broadcast?: AgentChannelCloseVoucherBroadcast | null;
+};
+
 export type AgentL2Binding = {
   schema_version: number;
   wallet_id: string;
@@ -376,6 +420,7 @@ export type AgentWalletOverview = {
   hvm_registry_binding: AgentHvmRegistryBinding | null;
   l2_channel_setup: AgentChannelSetupReview | null;
   l2_channel_close: AgentChannelCloseReview | null;
+  l2_channel_close_voucher: AgentChannelCloseVoucher | null;
   confirmed_balance_units: string | null;
   reserved_units: string;
   available_units: string | null;
@@ -1128,6 +1173,14 @@ export const agentWalletApi = {
     }),
   recoverFastPayChannelClose: (walletId: string) =>
     invoke<AgentChannelCloseReview>("agent_wallet_recover_fast_pay_channel_close", { walletId }),
+  fastPayChannelVoucher: (walletId: string) =>
+    invoke<AgentChannelCloseVoucher | null>("agent_wallet_fast_pay_channel_voucher", { walletId }),
+  takeFastPayChannelVoucher: (walletId: string) =>
+    invoke<AgentChannelCloseVoucher>("agent_wallet_take_fast_pay_channel_voucher", { walletId }),
+  broadcastFastPayChannelVoucher: (walletId: string) =>
+    invoke<AgentChannelCloseVoucher>("agent_wallet_broadcast_fast_pay_channel_voucher", {
+      walletId,
+    }),
   diagnosticsPreview: (walletId: string) =>
     invoke<AgentPilotDiagnosticsPreview>("agent_wallet_pilot_diagnostics_preview", { walletId }),
   diagnosticsExport: (

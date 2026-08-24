@@ -213,6 +213,29 @@
   border-radius: 14px;
 }
 
+/* A section inside a panel that is about one thing on its own, such as the
+   channel exit. Set apart enough to read as its own subject without becoming a
+   second card competing with the panel it lives in. */
+.agent-subpanel {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border: 1px solid #2d210f;
+  border-radius: 12px;
+  background: #0b0a08;
+  display: grid;
+  gap: 10px;
+}
+
+.agent-subpanel h3 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.agent-subpanel p {
+  margin: 0;
+}
+
 .agent-panel h2 {
   margin-top: 0;
 }

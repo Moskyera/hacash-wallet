@@ -198,6 +198,10 @@ pub fn build_router_with_trusted_proxy(
         )
         .route("/v1/l1/channel/open", post(channel_open_handler))
         .route("/v1/l1/channel/close", post(channel_close_handler))
+        .route(
+            "/v1/l1/channel/close-voucher",
+            post(channel_close_voucher_handler),
+        )
         .route("/v1/fast-pay/inbox/{payee}", get(recipient_inbox_handler))
         .route("/v1/fast-pay/{payment_id}", get(payment_status_handler))
         .route(
@@ -364,6 +368,27 @@ async fn channel_close_handler(
         .peer_mutation_admission
         .check(peer, MAX_MUTATION_REQUESTS_PER_PEER_WINDOW)?;
     Ok(Json(state.hub.close_channel(&request).await?))
+}
+
+/// Countersign one delta-zero close and hand the exact bytes back, without
+/// broadcasting them and without freezing the channel.
+///
+/// This is the owner's exit, not a trustless one. This Hub chooses to sign
+/// here, once, and nothing in Hacash could compel it to; and from the moment
+/// the caller holds the response the Hub carries the whole exposure, because
+/// the returned transaction refunds the balances recorded at open however far
+/// the channel is later spent down. `HubState::issue_channel_close_voucher`
+/// holds the rule that bounds it: exactly one voucher per channel, ever.
+async fn channel_close_voucher_handler(
+    State(state): State<AppState>,
+    PeerIp(peer): PeerIp,
+    Json(request): Json<L1ChannelCloseRequest>,
+) -> Result<Json<L1ChannelCloseResponse>, HubHttpError> {
+    let _global_permit = acquire_global_mutation_permit(&state)?;
+    state
+        .peer_mutation_admission
+        .check(peer, MAX_MUTATION_REQUESTS_PER_PEER_WINDOW)?;
+    Ok(Json(state.hub.issue_channel_close_voucher(&request).await?))
 }
 
 async fn fast_pay_handler(

@@ -125,7 +125,26 @@ fn prepare_fast_pay(now: u64) -> FastPayFixture {
             paired_at: now + 3,
         },
     );
+    let permit = manager
+        .emergency_controller(&wallet_id)
+        .unwrap()
+        .issue_safety_permit(false)
+        .unwrap();
+    // Fast Pay stays refused until the owner holds this channel's one
+    // countersigned delta-zero close, so the fixture has to hold a real one.
+    let voucher = crate::service::l2::test_held_close_voucher(
+        &manager.session(&wallet_id).unwrap().signer,
+        &permit,
+        &wallet_id,
+        &state.address.clone(),
+        &binding,
+        hub.inner(),
+        crate::service::l2::test_local_pilot_network_binding(fixtures::TESTNET_ANCHOR),
+        "http://127.0.0.1:1",
+        now + 3,
+    );
     state.l2_binding = Some(binding);
+    state.l2_channel_close_voucher = Some(voucher);
     state.updated_at = now + 3;
     manager
         .persist_event(
@@ -322,7 +341,24 @@ async fn approved_agent_fast_pay_signs_submits_and_survives_restart_without_l1_f
             paired_at: now + 4,
         },
     );
+    let permit = manager
+        .emergency_controller(&wallet_id)
+        .unwrap()
+        .issue_safety_permit(false)
+        .unwrap();
+    let voucher = crate::service::l2::test_held_close_voucher(
+        &manager.session(&wallet_id).unwrap().signer,
+        &permit,
+        &wallet_id,
+        &state.address.clone(),
+        &binding,
+        &hub_account,
+        crate::service::l2::test_local_pilot_network_binding(fixtures::TESTNET_ANCHOR),
+        &node.url,
+        now + 4,
+    );
     state.l2_binding = Some(binding);
+    state.l2_channel_close_voucher = Some(voucher);
     state.updated_at = now + 4;
     manager
         .persist_event(

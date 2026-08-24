@@ -59,7 +59,8 @@ pub use service::{
     agent_registry_exit_gas_reserve_zhu, agent_registry_exit_transaction_ceiling_zhu,
 };
 pub use service::{
-    AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
+    AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelCloseVoucherBroadcast,
+    AgentChannelCloseVoucherPhase, AgentChannelCloseVoucherView, AgentChannelSetupPhase,
     AgentChannelSetupReview, AgentCompanionPairingAttempt, AgentCompletedCompanionPairing,
     AgentDesktopSessionAttempt, AgentHvmChannelBinding, AgentHvmRegistryBinding,
     AgentHvmRegistryChannelOpen, AgentHvmRegistryCountersignedRefund, AgentHvmRegistryFunding,

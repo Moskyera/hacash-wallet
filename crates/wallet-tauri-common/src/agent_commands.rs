@@ -884,6 +884,96 @@ pub async fn agent_wallet_confirm_fast_pay_channel_close(
     }
 }
 
+/// The one countersigned delta-zero close this channel holds, if it holds one.
+///
+/// Read-only. It reaches no Hub and no node.
+#[tauri::command]
+pub async fn agent_wallet_fast_pay_channel_voucher(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let voucher = require_manager(&state)?
+            .lock()
+            .await
+            .l2_channel_close_voucher(&wallet_id, unix_now()?)
+            .map_err(public_error)?;
+        serde_json::to_value(voucher).map_err(|_| "Agent channel exit encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent channel close is disabled in this build".to_owned())
+    }
+}
+
+/// Ask the Hub for this channel's one close voucher, or resume asking.
+///
+/// Normally the channel open does this by itself the moment it confirms. This
+/// is the retry for when that request did not get through, and it is the only
+/// way to obtain a voucher: there is no refresh, and a channel that already
+/// has one is served the same bytes rather than a second signed close.
+#[tauri::command]
+pub async fn agent_wallet_take_fast_pay_channel_voucher(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let voucher = require_manager(&state)?
+            .lock()
+            .await
+            .take_l2_channel_close_voucher(&wallet_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(voucher).map_err(|_| "Agent channel exit encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent channel close is disabled in this build".to_owned())
+    }
+}
+
+/// Broadcast the held close voucher from the wallet's own node.
+///
+/// This path never contacts the Hub, for anything. It is what the voucher is
+/// for: the Hub countersigned once, at the start, and after that the owner
+/// does not need it again.
+#[tauri::command]
+pub async fn agent_wallet_broadcast_fast_pay_channel_voucher(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let voucher = require_manager(&state)?
+            .lock()
+            .await
+            .broadcast_l2_channel_close_voucher(&wallet_id, unix_now()?)
+            .await
+            .map_err(public_error)?;
+        serde_json::to_value(voucher).map_err(|_| "Agent channel exit encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, state);
+        Err("Agent channel close is disabled in this build".to_owned())
+    }
+}
+
 #[tauri::command]
 pub async fn agent_wallet_recover_fast_pay_channel_close(
     wallet_id: String,

@@ -20,6 +20,10 @@ use crate::types::{AgentId, WalletScope};
 mod backup_recovery_establishment;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod broadcast_crash_recovery;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod chain7_live_voucher;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod close_voucher;
 mod decisions;
 mod desktop_approval;
 #[cfg(feature = "agent-wallet-testnet-pilot")]

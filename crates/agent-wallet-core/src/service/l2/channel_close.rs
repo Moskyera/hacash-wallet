@@ -33,8 +33,9 @@ use super::verification::{
     require_exact_hub_health, require_exact_live_channel, require_exact_node_binding,
 };
 use super::{
-    AgentChannelCloseOperation, AgentChannelClosePhase, AgentChannelCloseReview, AgentL2Binding,
-    AgentWalletManager, MILLIMEI_IN_AGENT_UNITS,
+    AgentChannelCloseOperation, AgentChannelClosePhase, AgentChannelCloseReview,
+    AgentChannelCloseVoucherBroadcast, AgentChannelCloseVoucherPhase, AgentChannelCloseVoucherView,
+    AgentL2Binding, AgentWalletManager, MILLIMEI_IN_AGENT_UNITS,
 };
 
 fn is_exact_closed_incarnation(binding: &AgentL2Binding, channel: &ChannelInfo) -> bool {
@@ -580,6 +581,115 @@ impl AgentWalletManager {
             }
             _ => Err(AgentWalletError::RecoveryRequired),
         }
+    }
+
+    /// Broadcast the stored close voucher, without the Hub.
+    ///
+    /// This is the escape hatch, and it is the only method here that never
+    /// speaks to the Hub at all: not to close, not to countersign, not even to
+    /// read state. Every input comes from the wallet's own durable record and
+    /// the wallet's own configured fullnode, so it still works when the Hub is
+    /// gone, refusing, or hostile.
+    ///
+    /// It is honest about where the trust was, though. The Hub had to
+    /// countersign these bytes once, at the start, and it could have refused;
+    /// nothing in Hacash could have forced it. What this method gives the
+    /// owner is independence from the Hub *afterwards*, not independence from
+    /// it in the first place.
+    ///
+    /// The stored bytes are re-proved here before they are sent. A close that
+    /// is only as good as a JSON field in a state file is not an exit.
+    pub async fn broadcast_l2_channel_close_voucher(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<AgentChannelCloseVoucherView> {
+        self.ensure_session_active(wallet_id, now)?;
+        let (state_master, journal_key) = {
+            let session = self.session(wallet_id)?;
+            (session.state_master.clone(), session.journal_key.clone())
+        };
+        let initial = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        require_agent_spending_network(
+            &initial.network_mode,
+            initial.trusted_mainnet_fast_pay_pilot,
+        )?;
+        let voucher = initial
+            .l2_channel_close_voucher
+            .clone()
+            .ok_or(AgentWalletError::SigningBlocked)?;
+        if !voucher.is_held() {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        let verified = voucher
+            .verified_bytes()?
+            .ok_or(AgentWalletError::RecoveryRequired)?;
+        let signed_transaction_hex = voucher
+            .view
+            .signed_transaction_hex
+            .clone()
+            .ok_or(AgentWalletError::RecoveryRequired)?;
+
+        // The wallet's own node, checked against the binding the voucher was
+        // signed under. No Hub URL is constructed anywhere on this path.
+        let node = verified_agent_node(
+            &initial.node_url,
+            &initial.network_mode,
+            &initial.block_one_fingerprint,
+        )
+        .await?;
+        let live_network = exact_l1_channel_network_binding(&node, &initial.network_mode)
+            .await
+            .map_err(|_| AgentWalletError::NodeCapabilityMismatch)?;
+        if live_network != voucher.network_binding {
+            return Err(AgentWalletError::NodeNetworkMismatch);
+        }
+
+        let submitter = l2_fast_pay_hub::node::NodeClient::new(initial.node_url.clone())
+            .map_err(|_| AgentWalletError::NodeRejected)?;
+        let acknowledged = submitter
+            .submit_transaction_bound(
+                &signed_transaction_hex,
+                &verified.transaction_hash,
+                &live_network,
+            )
+            .await
+            .map_err(|_| AgentWalletError::NodeRejected)?;
+        if !acknowledged.eq_ignore_ascii_case(&verified.transaction_hash) {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+
+        let mut broadcast = voucher;
+        broadcast.view.phase = AgentChannelCloseVoucherPhase::Broadcast;
+        broadcast.view.broadcast = Some(AgentChannelCloseVoucherBroadcast {
+            transaction_hash: verified.transaction_hash.clone(),
+            node_url: initial.node_url.clone(),
+            broadcast_at: now,
+        });
+        let address = initial.address.clone();
+        broadcast.validate(wallet_id, &address)?;
+        let operation_id = broadcast.view.operation_id.clone();
+        let mut state = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        if state
+            .l2_channel_close_voucher
+            .as_ref()
+            .map(|stored| &stored.view.transaction_hash)
+            != Some(&broadcast.view.transaction_hash)
+        {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        state.l2_channel_close_voucher = Some(broadcast.clone());
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &state_master,
+            &journal_key,
+            AgentJournalEventKind::ChannelCloseVoucherBroadcast,
+            Some(operation_id.as_bytes()),
+            None,
+            now,
+        )?;
+        Ok(broadcast.view)
     }
 
     pub async fn recover_l2_channel_close(

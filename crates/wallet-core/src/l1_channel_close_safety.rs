@@ -14,7 +14,10 @@ use l2_fast_pay_hub::journal::{
     AuthenticatedJournal, JournalBinding, JournalEvent, JournalHead, JournalOperationType,
     JournalPhase,
 };
-use l2_fast_pay_hub::l1_channel_close::{L1ChannelCloseRequest, L1ChannelCloseResponse};
+use l2_fast_pay_hub::l1_channel::MAX_CHANNEL_TRANSACTION_BYTES;
+use l2_fast_pay_hub::l1_channel_close::{
+    L1_CHANNEL_CLOSE_VOUCHER_STATUS, L1ChannelCloseRequest, L1ChannelCloseResponse,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -57,6 +60,17 @@ pub enum ChannelCloseStatus {
     HubSubmitted,
     Confirmed,
     RecoveryRequired,
+    /// The Hub countersigned a delta-zero close and handed the exact bytes
+    /// back instead of broadcasting them. The channel is still open and still
+    /// payable; nothing has reached a chain.
+    ///
+    /// This is not a trustless exit and must never be described as one. The
+    /// Hub chose to sign once and could have refused, in which case the
+    /// deposit would have been stuck. Once these bytes exist the Hub carries
+    /// the whole exposure, because they refund the balances recorded at open
+    /// no matter how far the channel is later spent down. That is acceptable
+    /// only in this bounded pilot, where the owner runs the Hub.
+    VoucherHeld,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,6 +322,7 @@ impl ChannelCloseSafety {
             ChannelCloseStatus::Confirmed => JournalPhase::L1CloseConfirmed,
             ChannelCloseStatus::HubSubmitted => JournalPhase::L1CloseSubmitted,
             ChannelCloseStatus::RecoveryRequired => JournalPhase::L1CloseRecoveryRequired,
+            ChannelCloseStatus::VoucherHeld => JournalPhase::L1CloseVoucherIssued,
             _ => unreachable!(),
         };
         self.transition(operation.clone(), phase)?;
@@ -321,6 +336,14 @@ impl ChannelCloseSafety {
         if operation.status == ChannelCloseStatus::Confirmed {
             return Err(WalletError::L2(
                 "confirmed channel-close recovery state is terminal".into(),
+            ));
+        }
+        // A verified voucher in hand is a success, not a failure to recover
+        // from. Overwriting it would throw away the owner's only route out of
+        // the channel that does not need the Hub.
+        if operation.status == ChannelCloseStatus::VoucherHeld {
+            return Err(WalletError::L2(
+                "a verified close voucher is terminal and is never replaced".into(),
             ));
         }
         operation.status = ChannelCloseStatus::RecoveryRequired;
@@ -435,13 +458,224 @@ fn validate_hub_response(
         }
     } else if matches!(
         response.status.as_str(),
-        "submitted" | "confirmed_closed" | "retired"
+        "submitted" | "confirmed_closed" | "retired" | L1_CHANNEL_CLOSE_VOUCHER_STATUS
     ) {
         return Err(WalletError::L2(
             "Hub channel-close response is missing its transaction hash".into(),
         ));
     }
+    validate_voucher_fields(operation, response)
+}
+
+/// Re-prove a voucher response from the bytes, never from the Hub's word.
+///
+/// The Hub already ran this exact check before it signed
+/// (`l2_fast_pay_hub::l1_channel_close::validate_and_cosign_channel_close`).
+/// Repeating it here is deliberate: the wallet is about to store these bytes
+/// as the owner's only route out of the channel without the Hub, so a claim by
+/// the Hub that they are valid is worth nothing. An unverified voucher is
+/// never stored.
+fn validate_voucher_fields(
+    operation: &ChannelCloseOperation,
+    response: &L1ChannelCloseResponse,
+) -> WalletResult<()> {
+    if response.status != L1_CHANNEL_CLOSE_VOUCHER_STATUS {
+        // Only the voucher path returns bytes. On any other status the Hub
+        // owns the broadcast, so a second copy of a live close arriving here
+        // is not something to store quietly.
+        if response.signed_transaction_hex.is_some()
+            || response.signed_transaction_commitment.is_some()
+        {
+            return Err(WalletError::L2(
+                "Hub returned signed close bytes on a status that must never carry them".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let request = operation.request.as_ref().ok_or_else(|| {
+        WalletError::L2(
+            "a close voucher cannot be verified without the exact user-signed request".into(),
+        )
+    })?;
+    let transaction_hash = response.transaction_hash.as_deref().ok_or_else(|| {
+        WalletError::L2("Hub close voucher is missing its transaction hash".into())
+    })?;
+    let signed_transaction_hex = response.signed_transaction_hex.as_deref().ok_or_else(|| {
+        WalletError::L2("Hub close voucher is missing its countersigned bytes".into())
+    })?;
+    let commitment = response
+        .signed_transaction_commitment
+        .as_deref()
+        .ok_or_else(|| {
+            WalletError::L2("Hub close voucher is missing its bytes commitment".into())
+        })?;
+    let verified = verify_channel_close_voucher_bytes(
+        signed_transaction_hex,
+        transaction_hash,
+        &operation.user_address,
+        &operation.hub_identity,
+        &operation.channel_id,
+        request.chain_id,
+    )?;
+    if !verified
+        .signed_transaction_commitment
+        .eq_ignore_ascii_case(commitment)
+    {
+        return Err(WalletError::L2(
+            "Hub close voucher commitment does not cover the returned bytes".into(),
+        ));
+    }
     Ok(())
+}
+
+/// The transaction hash of an encoded transaction, read from the bytes.
+///
+/// Exists so a caller can prove that a countersigned transaction is the one it
+/// authored: `fill_sign` adds a signature without changing `hash()`, so a
+/// voucher whose hash differs from the wallet's own partial bytes is a
+/// different transaction, whatever the Hub called it.
+pub fn transaction_hash_of_hex(transaction_hex: &str) -> WalletResult<String> {
+    let raw = hex::decode(transaction_hex)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    let (transaction, consumed) = protocol::transaction::transaction_create(&raw)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if consumed != raw.len() {
+        return Err(WalletError::L2(
+            "transaction bytes contain trailing data".into(),
+        ));
+    }
+    Ok(hex::encode(transaction.hash().as_bytes()))
+}
+
+/// What a verified delta-zero close voucher is, once the bytes have proved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedChannelCloseVoucher {
+    pub transaction_hash: String,
+    pub signed_transaction_commitment: String,
+}
+
+/// Prove that these exact bytes are a fully countersigned, delta-zero
+/// `[ChainAllow, ChannelClose]` for this exact channel, and nothing else.
+///
+/// Everything here is derived from the bytes themselves, so the caller depends
+/// on the Hub for the signature only, never for the claim about it. The two
+/// action topology is load bearing: a third Action 14 would move principal,
+/// and a delta-zero voucher must move none. `close_channel_default` then
+/// refunds the balances recorded at open, which for a zero-Hub-deposit channel
+/// is the whole deposit to the owner.
+pub fn verify_channel_close_voucher_bytes(
+    signed_transaction_hex: &str,
+    expected_transaction_hash: &str,
+    owner_address: &str,
+    hub_address: &str,
+    channel_id: &str,
+    chain_id: u32,
+) -> WalletResult<VerifiedChannelCloseVoucher> {
+    if owner_address.is_empty() || hub_address.is_empty() || owner_address == hub_address {
+        return Err(WalletError::L2(
+            "close voucher parties are missing or identical".into(),
+        ));
+    }
+    if expected_transaction_hash.len() != 64
+        || !expected_transaction_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(WalletError::L2(
+            "close voucher transaction hash is malformed".into(),
+        ));
+    }
+    let raw = hex::decode(signed_transaction_hex)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if raw.is_empty() || raw.len() > MAX_CHANNEL_TRANSACTION_BYTES {
+        return Err(WalletError::L2(
+            "close voucher bytes are empty or oversized".into(),
+        ));
+    }
+    let (transaction, consumed) = protocol::transaction::transaction_create(&raw)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if consumed != raw.len() {
+        return Err(WalletError::L2(
+            "close voucher bytes contain trailing data".into(),
+        ));
+    }
+    if transaction.ty() != 2 {
+        return Err(WalletError::L2(
+            "close voucher must be a Type 2 transaction".into(),
+        ));
+    }
+    let actions = transaction.actions();
+    if actions.len() != 2 || actions[0].kind() != 0x0411 || actions[1].kind() != 3 {
+        return Err(WalletError::L2(
+            "close voucher actions must be exactly [ChainAllow, ChannelClose]".into(),
+        ));
+    }
+    if actions
+        .iter()
+        .any(|action| protocol::action::HacFromToTrs::downcast(action).is_some())
+    {
+        return Err(WalletError::L2(
+            "close voucher carries a principal transfer and is not delta zero".into(),
+        ));
+    }
+    let guard = protocol::action::ChainAllow::downcast(&actions[0])
+        .ok_or_else(|| WalletError::L2("close voucher ChainAllow codec mismatch".into()))?;
+    let chains = guard.chains.as_list();
+    if chains.len() != 1 || chains[0].uint() != chain_id {
+        return Err(WalletError::L2(format!(
+            "close voucher must bind exactly chain {chain_id}"
+        )));
+    }
+    let close = mint::action::ChannelClose::downcast(&actions[1])
+        .ok_or_else(|| WalletError::L2("close voucher ChannelClose codec mismatch".into()))?;
+    if hex::encode(close.channel_id.as_bytes()) != channel_id.to_ascii_lowercase() {
+        return Err(WalletError::L2(
+            "close voucher names a different channel".into(),
+        ));
+    }
+    let owner = field::Address::from_readable(owner_address)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    let hub = field::Address::from_readable(hub_address)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if transaction.main() != owner {
+        return Err(WalletError::L2(
+            "close voucher fee payer is not the channel owner".into(),
+        ));
+    }
+    if !hex::encode(transaction.hash().as_bytes()).eq_ignore_ascii_case(expected_transaction_hash) {
+        return Err(WalletError::L2(
+            "close voucher bytes hash to a different transaction".into(),
+        ));
+    }
+    if transaction.signs().len() != 2 {
+        return Err(WalletError::L2(
+            "close voucher must carry exactly the two party signatures".into(),
+        ));
+    }
+    let signers: Vec<field::Address> = transaction
+        .signs()
+        .iter()
+        .map(|sign| field::Address::from(sys::Account::get_address_by_public_key(*sign.publickey)))
+        .collect();
+    if !signers.contains(&owner) || !signers.contains(&hub) {
+        return Err(WalletError::L2(
+            "close voucher signatures are not the owner and the Hub".into(),
+        ));
+    }
+    let owner_verified =
+        protocol::transaction::verify_target_signature(&owner, transaction.as_read())
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+    let hub_verified = protocol::transaction::verify_target_signature(&hub, transaction.as_read())
+        .map_err(|error| WalletError::L2(error.to_string()))?;
+    if !owner_verified || !hub_verified {
+        return Err(WalletError::L2(
+            "close voucher is missing a verified party signature".into(),
+        ));
+    }
+    Ok(VerifiedChannelCloseVoucher {
+        transaction_hash: expected_transaction_hash.to_ascii_lowercase(),
+        signed_transaction_commitment: hex::encode(Sha256::digest(&raw)),
+    })
 }
 
 fn durable_status_for_hub_status(status: &str) -> Option<ChannelCloseStatus> {
@@ -449,6 +683,7 @@ fn durable_status_for_hub_status(status: &str) -> Option<ChannelCloseStatus> {
         "retired" => Some(ChannelCloseStatus::Confirmed),
         "submitted" | "confirmed_closed" => Some(ChannelCloseStatus::HubSubmitted),
         "recovery_required" => Some(ChannelCloseStatus::RecoveryRequired),
+        L1_CHANNEL_CLOSE_VOUCHER_STATUS => Some(ChannelCloseStatus::VoucherHeld),
         _ => None,
     }
 }
@@ -457,9 +692,19 @@ fn can_accept_hub_status(current: ChannelCloseStatus, next: ChannelCloseStatus) 
     use ChannelCloseStatus::*;
     match current {
         Confirmed => next == Confirmed,
+        // Holding a voucher is its own terminal shape. The Hub broadcasts
+        // nothing on this path, so there is no later submission or
+        // confirmation for it to report, and a channel that has a voucher can
+        // never also be closed cooperatively.
+        VoucherHeld => next == VoucherHeld,
         PersistedBeforeSigning | SignatureMayExist | UserSigned => {
-            matches!(next, HubSubmitted | RecoveryRequired | Confirmed)
+            matches!(
+                next,
+                HubSubmitted | RecoveryRequired | Confirmed | VoucherHeld
+            )
         }
+        // Once a close was submitted or has failed into recovery, a voucher
+        // for the same operation would be a second signed close.
         HubSubmitted | RecoveryRequired => {
             matches!(next, HubSubmitted | RecoveryRequired | Confirmed)
         }
@@ -719,6 +964,261 @@ fn io_error(error: std::io::Error) -> WalletError {
 
 fn hub_error(error: l2_fast_pay_hub::HubError) -> WalletError {
     WalletError::L2(error.to_string())
+}
+
+#[cfg(test)]
+mod voucher_tests {
+    use basis::interface::{Transaction, TransactionRead};
+    use field::{AddrOrPtr, Address, Amount, ChannelId, Field, Serialize as _, Uint4};
+    use l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA;
+    use mint::action::ChannelClose;
+    use protocol::action::{ChainAllow, ChainIDList, HacFromToTrs};
+    use protocol::transaction::TransactionType2;
+    use sys::Account;
+
+    use super::*;
+
+    const CHANNEL_ID: &str = "00112233445566778899aabbccddeeff";
+    const CHAIN_ID: u32 = 7;
+
+    fn account(byte: u8) -> Account {
+        Account::create_by(&hex::encode([byte; 32])).unwrap()
+    }
+
+    struct VoucherFixture {
+        owner: String,
+        hub: String,
+        operation: ChannelCloseOperation,
+        response: L1ChannelCloseResponse,
+    }
+
+    /// Build the exact thing the Hub returns on the voucher path: a Type 2
+    /// `[ChainAllow, ChannelClose]` carrying both party signatures.
+    fn voucher_fixture(with_principal_transfer: bool, sign_hub: bool) -> VoucherFixture {
+        crate::protocol_init::ensure_protocol_setup();
+        let owner = account(41);
+        let hub = account(43);
+        let mut close = ChannelClose::new();
+        close.channel_id =
+            ChannelId::from(<[u8; 16]>::try_from(hex::decode(CHANNEL_ID).unwrap()).unwrap());
+        let now = 1_700_000_000_u64;
+        let mut tx = TransactionType2::new_by(
+            Address::from_readable(owner.readable()).unwrap(),
+            Amount::from("0.0001").unwrap(),
+            now,
+        );
+        let mut guard = ChainAllow::new();
+        guard.chains = ChainIDList::from_list(vec![Uint4::from(CHAIN_ID)]).unwrap();
+        tx.push_action(Box::new(guard)).unwrap();
+        tx.push_action(Box::new(close)).unwrap();
+        if with_principal_transfer {
+            let mut principal = HacFromToTrs::new();
+            principal.from = AddrOrPtr::from_addr(Address::from_readable(hub.readable()).unwrap());
+            principal.to = AddrOrPtr::from_addr(Address::from_readable(owner.readable()).unwrap());
+            principal.hacash = Amount::from("0.5").unwrap();
+            tx.push_action(Box::new(principal)).unwrap();
+        }
+        tx.fill_sign(&owner).unwrap();
+        let partial_transaction_hex = hex::encode(tx.serialize());
+        if sign_hub {
+            tx.fill_sign(&hub).unwrap();
+        }
+        let signed = tx.serialize();
+        let signed_transaction_hex = hex::encode(&signed);
+        let transaction_hash = hex::encode(tx.hash().as_bytes());
+
+        let request = L1ChannelCloseRequest {
+            schema: L1_CHANNEL_CLOSE_SCHEMA.into(),
+            network: "testnet".into(),
+            chain_id: CHAIN_ID,
+            mainnet: false,
+            block_1_hash: "11".repeat(32),
+            node_profile_id: "hpay-pilot".into(),
+            network_instance_id: "aa".repeat(16),
+            transaction_format_version: 2,
+            operation_id: "8a5b3fb0-2f0f-4a34-92a2-4a4b7d0a1b11".into(),
+            idempotency_key: "hpay:test:voucher:one".into(),
+            created_unix: now,
+            expires_unix: now + 300,
+            hub_address: hub.readable().into(),
+            user_address: owner.readable().into(),
+            channel_id: CHANNEL_ID.into(),
+            reuse_version: 1,
+            open_height: 900_000,
+            partial_transaction_commitment: hex::encode(Sha256::digest(
+                partial_transaction_hex.as_bytes(),
+            )),
+            partial_transaction_hex,
+            authorization_public_key_hex: hex::encode(owner.public_key().serialize_compressed()),
+            authorization_signature_hex: String::new(),
+        };
+        let operation = ChannelCloseOperation {
+            operation_id: request.operation_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            wallet_scope: "agent_wallet:voucher".into(),
+            hub_identity: hub.readable().into(),
+            channel_id: CHANNEL_ID.into(),
+            reuse_version: 1,
+            open_height: 900_000,
+            user_address: owner.readable().into(),
+            unsigned_transaction_hex: "020001".into(),
+            created_unix: now,
+            expires_unix: now + 300,
+            status: ChannelCloseStatus::UserSigned,
+            request: Some(request),
+            response: None,
+            updated_unix: now,
+        };
+        let response = L1ChannelCloseResponse {
+            schema: l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA.into(),
+            operation_id: operation.operation_id.clone(),
+            channel_id: CHANNEL_ID.into(),
+            reuse_version: 1,
+            open_height: 900_000,
+            status: L1_CHANNEL_CLOSE_VOUCHER_STATUS.into(),
+            transaction_hash: Some(transaction_hash),
+            signed_transaction_hex: Some(signed_transaction_hex),
+            signed_transaction_commitment: Some(hex::encode(Sha256::digest(&signed))),
+        };
+        VoucherFixture {
+            owner: owner.readable().into(),
+            hub: hub.readable().into(),
+            operation,
+            response,
+        }
+    }
+
+    #[test]
+    fn voucher_issued_is_a_durable_wallet_state_that_never_moves_on() {
+        assert_eq!(
+            durable_status_for_hub_status(L1_CHANNEL_CLOSE_VOUCHER_STATUS),
+            Some(ChannelCloseStatus::VoucherHeld)
+        );
+        assert!(can_accept_hub_status(
+            ChannelCloseStatus::UserSigned,
+            ChannelCloseStatus::VoucherHeld
+        ));
+        assert!(can_accept_hub_status(
+            ChannelCloseStatus::VoucherHeld,
+            ChannelCloseStatus::VoucherHeld
+        ));
+        for next in [
+            ChannelCloseStatus::HubSubmitted,
+            ChannelCloseStatus::Confirmed,
+            ChannelCloseStatus::RecoveryRequired,
+        ] {
+            assert!(
+                !can_accept_hub_status(ChannelCloseStatus::VoucherHeld, next),
+                "a held voucher must not move to {next:?}"
+            );
+            assert!(
+                !can_accept_hub_status(next, ChannelCloseStatus::VoucherHeld),
+                "{next:?} must not become a voucher"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_countersigned_delta_zero_voucher_is_accepted() {
+        let fixture = voucher_fixture(false, true);
+        validate_hub_response(&fixture.operation, &fixture.response).unwrap();
+        let verified = verify_channel_close_voucher_bytes(
+            fixture.response.signed_transaction_hex.as_deref().unwrap(),
+            fixture.response.transaction_hash.as_deref().unwrap(),
+            &fixture.owner,
+            &fixture.hub,
+            CHANNEL_ID,
+            CHAIN_ID,
+        )
+        .unwrap();
+        assert_eq!(
+            Some(verified.signed_transaction_commitment.as_str()),
+            fixture.response.signed_transaction_commitment.as_deref()
+        );
+    }
+
+    #[test]
+    fn every_missing_voucher_property_is_refused() {
+        let good = voucher_fixture(false, true);
+        let hex_bytes = good.response.signed_transaction_hex.clone().unwrap();
+
+        // Only one signature: the Hub never countersigned.
+        let unsigned_by_hub = voucher_fixture(false, false);
+        let error = validate_hub_response(&unsigned_by_hub.operation, &unsigned_by_hub.response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("two party signatures"), "{error}");
+
+        // A principal transfer is not delta zero.
+        let transfer = voucher_fixture(true, true);
+        let error = validate_hub_response(&transfer.operation, &transfer.response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[ChainAllow, ChannelClose]"), "{error}");
+
+        // Trailing bytes.
+        let mut trailing = good.response.clone();
+        trailing.signed_transaction_hex = Some(format!("{hex_bytes}00"));
+        assert!(validate_hub_response(&good.operation, &trailing).is_err());
+
+        // Bytes that do not hash to the announced transaction.
+        let mut wrong_hash = good.response.clone();
+        wrong_hash.transaction_hash = Some("cd".repeat(32));
+        assert!(validate_hub_response(&good.operation, &wrong_hash).is_err());
+
+        // Missing bytes on a voucher status.
+        let mut no_bytes = good.response.clone();
+        no_bytes.signed_transaction_hex = None;
+        let error = validate_hub_response(&good.operation, &no_bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("countersigned bytes"), "{error}");
+
+        // Missing or wrong commitment over those bytes.
+        let mut bad_commitment = good.response.clone();
+        bad_commitment.signed_transaction_commitment = Some("00".repeat(32));
+        let error = validate_hub_response(&good.operation, &bad_commitment)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("commitment"), "{error}");
+
+        // A different Hub address in the durable operation.
+        let mut other_hub = good.operation.clone();
+        other_hub.hub_identity = account(97).readable().into();
+        assert!(validate_hub_response(&other_hub, &good.response).is_err());
+
+        // A different chain in the durable request.
+        let mut other_chain = good.operation.clone();
+        other_chain.request.as_mut().unwrap().chain_id = 0;
+        let error = validate_hub_response(&other_chain, &good.response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bind exactly chain 0"), "{error}");
+
+        // A different channel.
+        let error = verify_channel_close_voucher_bytes(
+            &hex_bytes,
+            good.response.transaction_hash.as_deref().unwrap(),
+            &good.owner,
+            &good.hub,
+            "ffeeddccbbaa99887766554433221100",
+            CHAIN_ID,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("different channel"), "{error}");
+    }
+
+    #[test]
+    fn signed_bytes_on_a_cooperative_close_status_are_refused() {
+        let fixture = voucher_fixture(false, true);
+        let mut response = fixture.response.clone();
+        response.status = "submitted".into();
+        let error = validate_hub_response(&fixture.operation, &response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must never carry them"), "{error}");
+    }
 }
 
 #[cfg(test)]

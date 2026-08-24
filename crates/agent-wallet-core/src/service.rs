@@ -80,9 +80,12 @@ pub use hvm_registry::{AgentHvmRegistryBinding, AgentHvmRegistryExitHead};
 pub use hvm_registry_open::{
     AgentHvmRegistryChannelOpen, AgentHvmRegistryCountersignedRefund, AgentHvmRegistryFunding,
 };
-use l2::{AgentChannelCloseOperation, AgentChannelSetupOperation};
+use l2::{
+    AgentChannelCloseOperation, AgentChannelCloseVoucherOperation, AgentChannelSetupOperation,
+};
 pub use l2::{
-    AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelSetupPhase,
+    AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelCloseVoucherBroadcast,
+    AgentChannelCloseVoucherPhase, AgentChannelCloseVoucherView, AgentChannelSetupPhase,
     AgentChannelSetupReview, AgentL2Binding,
 };
 
@@ -177,6 +180,11 @@ pub struct AgentWalletOverview {
     pub l2_channel_setup: Option<AgentChannelSetupReview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l2_channel_close: Option<AgentChannelCloseReview>,
+    /// The one delta-zero close the owner holds for this channel, if the Hub
+    /// countersigned it. Surfaced so a person can see that an exit exists,
+    /// what it pays them, and that broadcasting it needs no Hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_channel_close_voucher: Option<AgentChannelCloseVoucherView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hvm_channel_binding: Option<AgentHvmChannelBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,6 +258,14 @@ struct AgentWalletState {
     l2_channel_setup: Option<AgentChannelSetupOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     l2_channel_close: Option<AgentChannelCloseOperation>,
+    /// The owner's exit from the Fast Pay channel: one countersigned
+    /// delta-zero close, taken once immediately after the open confirms and
+    /// never refreshed. Written through the same encrypted `persist_event`
+    /// path as everything else here and carried in the encrypted backup, so it
+    /// survives a restore. A voucher that does not survive a restore is not an
+    /// exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_channel_close_voucher: Option<AgentChannelCloseVoucherOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hvm_channel_binding: Option<AgentHvmChannelBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -737,6 +753,7 @@ impl AgentWalletManager {
             l2_binding: None,
             l2_channel_setup: None,
             l2_channel_close: None,
+            l2_channel_close_voucher: None,
             hvm_channel_binding: None,
             hvm_registry_binding: None,
             hvm_registry_exit_head: None,
@@ -1016,6 +1033,7 @@ impl AgentWalletManager {
                     l2_binding: None,
                     l2_channel_setup: None,
                     l2_channel_close: None,
+                    l2_channel_close_voucher: None,
                     hvm_channel_binding: None,
                     hvm_registry_binding: None,
                     confirmed_balance_units: None,
@@ -1123,6 +1141,10 @@ impl AgentWalletManager {
                 .l2_channel_close
                 .as_ref()
                 .map(|operation| operation.review.clone()),
+            l2_channel_close_voucher: state
+                .l2_channel_close_voucher
+                .as_ref()
+                .map(|operation| operation.view.clone()),
             hvm_channel_binding: state.hvm_channel_binding.clone(),
             hvm_registry_binding: state.hvm_registry_binding.clone(),
             confirmed_balance_units: confirmed,

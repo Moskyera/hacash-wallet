@@ -58,6 +58,7 @@ const overview = (overrides: Partial<AgentWalletOverview> = {}): AgentWalletOver
   hvm_registry_binding: null,
   l2_channel_setup: null,
   l2_channel_close: null,
+  l2_channel_close_voucher: null,
   confirmed_balance_units: "1000000",
   reserved_units: "0",
   available_units: "1000000",

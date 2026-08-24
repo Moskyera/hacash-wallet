@@ -129,8 +129,11 @@ enum Command {
         #[arg(long, default_value_t = 255)]
         gas_max: u8,
     },
-    /// Shows the exact 200 HAC source-to-Hub transfer, fee, gas and short
+    /// Shows the exact 2000 HAC source-to-Hub transfer, fee, gas and short
     /// signing-validity window without opening a signer, node or journal.
+    /// The figure is `HVM_REGISTRY_DEPLOY_PROTOCOL_COST_ZHU`, 200_000_000_000
+    /// Zhu. It is ten times the V1 channel cost, which is the 200 HAC quoted
+    /// in the canary runbook; do not confuse the two.
     PreviewPrefund {
         #[arg(long)]
         left_address: String,
@@ -145,7 +148,8 @@ enum Command {
         #[arg(long, default_value_t = 255)]
         gas_max: u8,
     },
-    /// Durably transfers exactly the 200 HAC deployment protocol cost from
+    /// Durably transfers exactly the 2000 HAC deployment protocol cost
+    /// (`HVM_REGISTRY_DEPLOY_PROTOCOL_COST_ZHU`, 200_000_000_000 Zhu) from
     /// the isolated pilot-left identity to the exact DPAPI Hub identity.
     PrefundHub {
         /// Exact unsigned commitment printed by PreviewPrefund.

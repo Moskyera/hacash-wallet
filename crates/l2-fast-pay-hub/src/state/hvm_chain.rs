@@ -4,9 +4,10 @@ use super::HubState;
 use crate::error::{HubError, HubResult};
 use crate::hvm_watchtower::{
     HVM_STORAGE_KEYS, HvmLeaseRenewalRequestV1, HvmWatchtowerDecision, HvmWatchtowerMode,
-    HvmWatchtowerRequestV1, HvmWatchtowerResponseV1, build_signed_hvm_call_transaction,
-    challenge_call_source, decide_watchtower_action, finalize_call_source, renew_all_call_source,
-    respond_call_source,
+    HvmWatchtowerRequestV1, HvmWatchtowerResponseV1, HvmWatchtowerSituationV1,
+    build_signed_hvm_call_transaction, build_signed_hvm_claim_transaction, challenge_call_source,
+    claim_left_payout_source, decide_watchtower_action, finalize_call_source,
+    read_exact_hvm_claim_transaction, renew_all_call_source, respond_call_source,
 };
 use crate::journal::{JournalEvent, JournalOperationType, JournalPhase};
 use crate::storage::{
@@ -25,11 +26,23 @@ fn required_recover_blocks(
     }
 }
 
-/// The Action 14 payout claim belongs to the shared registry (V2) profile,
-/// whose contract exposes the `PermitHAC` hook. The V1 HVM channel contract
-/// has no payout door at all, so a V1 operation can never carry this kind.
-fn v1_cannot_claim() -> HubError {
-    HubError::State("V1 HVM chain operations have no registry claim".into())
+/// The exact payee and amount of a durable claim, or an error naming what the
+/// record lost. Both halves are re-read from the record on every step that
+/// touches the key; neither is ever inferred.
+fn hvm_claim_terms(operation: &PersistedHvmChainOperation) -> HubResult<(&str, u64)> {
+    if operation.kind != HvmChainOperationKind::Claim {
+        return Err(HubError::State(
+            "only an HVM claim carries payout terms".into(),
+        ));
+    }
+    let payee = operation
+        .claim_payee
+        .as_deref()
+        .ok_or_else(|| HubError::State("HVM claim lost its exact payee".into()))?;
+    let amount_zhu = operation
+        .claim_amount_zhu
+        .ok_or_else(|| HubError::State("HVM claim lost its exact payout amount".into()))?;
+    Ok((payee, amount_zhu))
 }
 
 fn lease_renewal_is_due(
@@ -99,15 +112,14 @@ impl HubState {
         };
         let mode = match operation.kind {
             HvmChainOperationKind::Challenge => HvmWatchtowerMode::BeginChallenge,
-            HvmChainOperationKind::Respond | HvmChainOperationKind::Finalize => {
-                HvmWatchtowerMode::Monitor
-            }
+            HvmChainOperationKind::Respond
+            | HvmChainOperationKind::Finalize
+            | HvmChainOperationKind::Claim => HvmWatchtowerMode::Monitor,
             HvmChainOperationKind::RenewAllLeases => {
                 return Err(HubError::State(
                     "HVM operation id belongs to a lease renewal".into(),
                 ));
             }
-            HvmChainOperationKind::Claim => return Err(v1_cannot_claim()),
         };
         let request = HvmWatchtowerRequestV1 {
             schema: crate::hvm_watchtower::HVM_WATCHTOWER_REQUEST_SCHEMA.into(),
@@ -163,24 +175,66 @@ impl HubState {
 
     /// One channel's lease pass.
     ///
-    /// The operation is named after a one-minute clock window, so two passes
-    /// inside the same minute deliberately land on the same record — that is
-    /// what makes a repeat a resume instead of a duplicate. But the name is the
-    /// only part of the request the window makes stable: `commitment()` covers
-    /// `timestamp` and `created_unix` too, and `run_hvm_lease_renewal` refuses
-    /// a retry whose commitment moved. Minting a fresh `now` here would
-    /// therefore hand the same record a different request one second later and
-    /// the Hub would refuse its own work, leaving a signed transaction with
-    /// nobody driving it.
+    /// # Outstanding work first, and only then the clock
     ///
-    /// So the durable record is the tick's memory of when it first acted: if
-    /// one exists under this name, its exact request is rebuilt from it, and a
-    /// fresh `now` is read only when there is nothing to resume.
+    /// The renewal this tick signed last time comes first, driven by the
+    /// byte-identical request it was created from, before any new name is
+    /// minted. That ordering is the whole of this function, and it is load
+    /// bearing in both directions.
+    ///
+    /// Signing a renewal puts its record into `Signed` and then `Submitted`,
+    /// and `persisted_state_requires_recovery` counts both, so
+    /// `refresh_recovery_gate` raises the process-wide `recovery_required`
+    /// latch the moment the transaction exists. That latch is correct: a signed
+    /// transaction whose fate is unknown is outstanding, and the Hub must not
+    /// sign anything new beside it. It is released by nothing but that same
+    /// operation reaching `Confirmed`.
+    ///
+    /// The only code that can carry it there is keyed to its operation id — and
+    /// the id is bucketed to a one-minute clock window while the scheduler
+    /// interval is at least sixty seconds, so the next pass is always in a
+    /// later window and can never say that name again. Asking the clock first
+    /// therefore produced a name with no record behind it, fell through to
+    /// `ensure_settlement_ready`, and was refused by the latch its own
+    /// submission had raised. Forever: the tick renewed exactly once per
+    /// process and then reported `state: RecoveryRequired` on every pass, even
+    /// when the transaction had confirmed seconds later, because nothing was
+    /// left that could notice.
+    ///
+    /// Looking the outstanding record up by *binding* instead reaches
+    /// `run_hvm_lease_renewal`'s resume branch, and through it
+    /// `ensure_hvm_chain_reconciliation_allowed` — the door that already exists
+    /// for exactly this, and which lets a latched Hub finish one operation only
+    /// while it is the sole reason the latch is up and the request is byte for
+    /// byte the durable one. Nothing here clears a latch or relaxes a check; it
+    /// stops hiding the work from the door built to let it through.
+    ///
+    /// # Whose operation it is
+    ///
+    /// A channel is allowed one unresolved chain operation at a time
+    /// (`validate_hvm_state`), so anything outstanding against this binding
+    /// blocks the tick whether the tick opened it or not. The two cases are not
+    /// the same, though: its own it drives, and anybody else's — a CLI renewal,
+    /// an operator's challenge — it names and leaves strictly alone. The pass
+    /// records that refusal against this binding and moves to the next channel.
+    ///
+    /// # And only then the clock
+    ///
+    /// With nothing outstanding, a fresh `now` is read and the window names a
+    /// new operation. Within one window a second pass still lands on that same
+    /// record, and rebuilds its request from the durable copy rather than
+    /// minting one: `commitment()` covers `timestamp` and `created_unix`, so a
+    /// fresh `now` a second later would be a different request under the same
+    /// name and `run_hvm_lease_renewal` would refuse the Hub's own work.
     async fn hvm_lease_channel_tick(
         &self,
         binding_commitment: &str,
         config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
     ) -> HubResult<HvmWatchtowerResponseV1> {
+        if let Some(existing) = self.unresolved_hvm_chain_operation(binding_commitment)? {
+            let request = self.hvm_lease_tick_request(&existing, config)?;
+            return self.run_hvm_lease_renewal(request).await;
+        }
         let now = crate::node::now_unix();
         let (operation_id, idempotency_key) =
             crate::hvm_scheduler::operation_identity(binding_commitment, now);
@@ -202,6 +256,231 @@ impl HubState {
             },
         };
         self.run_hvm_lease_renewal(request).await
+    }
+
+    /// The one chain operation still outstanding against this channel, if any.
+    ///
+    /// `validate_hvm_state` permits at most one, so this is a lookup and not a
+    /// search: whatever it returns is the single record standing between this
+    /// binding and any new work. `Confirmed` is the only status that resolves
+    /// one here — the v1 table has no abandonment transition, and a record
+    /// carrying it is refused on load — so every other status leaves a signed
+    /// transaction whose fate is still open.
+    fn unresolved_hvm_chain_operation(
+        &self,
+        binding_commitment: &str,
+    ) -> HubResult<Option<PersistedHvmChainOperation>> {
+        Ok(self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?
+            .hvm_chain_operations
+            .values()
+            .find(|operation| {
+                operation.binding_commitment == binding_commitment
+                    && operation.status != HvmChainOperationStatus::Confirmed
+            })
+            .cloned())
+    }
+
+    /// Rebuild the exact durable request an outstanding lease-tick renewal was
+    /// created from, or refuse to touch the record.
+    ///
+    /// Two refusals, and neither is a formality. A record this tick did not
+    /// open belongs to whoever did — driving it would broadcast a transaction
+    /// on somebody else's behalf — and a record that is not a lease renewal at
+    /// all cannot be rebuilt as one. Both leave the operation exactly as it
+    /// was found and report against this binding alone.
+    ///
+    /// The rebuild itself goes through [`Self::hvm_lease_renewal_request`],
+    /// which reads every field the commitment covers back off the record and
+    /// then re-derives that commitment as a self-check. So this is the original
+    /// request rather than a lookalike — and an operator who moved
+    /// `renew_when_live_blocks_at_or_below` underneath a live operation is told
+    /// so by name, instead of it surfacing later as a bare retry refusal.
+    fn hvm_lease_tick_request(
+        &self,
+        operation: &PersistedHvmChainOperation,
+        config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
+    ) -> HubResult<HvmLeaseRenewalRequestV1> {
+        if !crate::hvm_scheduler::lease_tick_owns(
+            &operation.operation_id,
+            &operation.idempotency_key,
+            crate::hvm_scheduler::HVM_LEASE_OPERATION_PREFIX,
+            crate::hvm_scheduler::HVM_LEASE_IDEMPOTENCY_PREFIX,
+        ) {
+            return Err(HubError::State(format!(
+                "HVM chain operation {} is unresolved on this channel and was not opened by the lease tick; the tick will not drive it",
+                operation.operation_id
+            )));
+        }
+        if operation.kind != HvmChainOperationKind::RenewAllLeases {
+            return Err(HubError::State(format!(
+                "HVM chain operation {} is not a lease renewal",
+                operation.operation_id
+            )));
+        }
+        self.hvm_lease_renewal_request(
+            &operation.operation_id,
+            config.renew_when_live_blocks_at_or_below,
+        )?
+        .ok_or_else(|| {
+            HubError::State(format!(
+                "HVM lease renewal {} vanished between lookup and rebuild",
+                operation.operation_id
+            ))
+        })
+    }
+
+    /// Evaluate the v1 watchtower once for every activated HVM channel.
+    ///
+    /// This is the driver the v1 watchtower never had, and its absence was the
+    /// second half of the stranded-payout defect. The claim arm was added to
+    /// [`decide_watchtower_action`] and proven on chain, but the only caller of
+    /// [`Self::run_hvm_watchtower`] outside the test tree was a CLI behind a
+    /// non-default feature. A Hub daemon compiled the decision and never asked
+    /// it anything, so an unattended Hub still finalized nothing, claimed
+    /// nothing and responded to nothing on this rail. Money the contract was
+    /// willing to release stayed inside it unless a person happened to be
+    /// watching.
+    ///
+    /// It rides the existing lease scheduler loop, takes its fee and gas
+    /// ceiling from the same operator-set configuration those ticks use, and
+    /// reaches the chain only through [`Self::run_hvm_watchtower`] — the same
+    /// guarded entry point the CLI calls, in the same `Monitor` mode. It
+    /// cannot sign or submit anything the manual path could not, because it is
+    /// not a second path: it is a caller of the first one. In particular it
+    /// never begins a challenge, which is the one mode that spends a key on a
+    /// state the chain has not yet moved to.
+    ///
+    /// Every channel is attempted and every outcome is recorded against its
+    /// own binding, so one channel latched in recovery does not stop the pass.
+    pub async fn hvm_watchtower_tick(
+        &self,
+        config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
+    ) -> HubResult<crate::hvm_scheduler::HvmWatchtowerMaintenanceResults> {
+        config.validate()?;
+        // Mainnet stays refused, and refused before any node traffic.
+        if crate::readiness::is_mainnet_pilot_profile(&self.deployment_profile) {
+            return Err(HubError::Admission(
+                "HVM watchtower broadcast is not enabled for a mainnet profile".into(),
+            ));
+        }
+        let commitments = self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?
+            .hvm_channel_activations
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut results = Vec::with_capacity(commitments.len());
+        for commitment in commitments {
+            let outcome = self.hvm_watchtower_channel_tick(&commitment, config).await;
+            results.push(match outcome {
+                Ok(crate::hvm_scheduler::HvmWatchtowerPass::Evaluated(response)) => {
+                    crate::hvm_scheduler::HvmWatchtowerMaintenanceResult {
+                        binding_commitment: commitment,
+                        response: Some(response),
+                        deferred_to_lease_operation: None,
+                        error: None,
+                    }
+                }
+                Ok(crate::hvm_scheduler::HvmWatchtowerPass::DeferredToLease(operation_id)) => {
+                    crate::hvm_scheduler::HvmWatchtowerMaintenanceResult {
+                        binding_commitment: commitment,
+                        response: None,
+                        deferred_to_lease_operation: Some(operation_id),
+                        error: None,
+                    }
+                }
+                Err(error) => crate::hvm_scheduler::HvmWatchtowerMaintenanceResult {
+                    binding_commitment: commitment,
+                    response: None,
+                    deferred_to_lease_operation: None,
+                    error: Some(error.to_string()),
+                },
+            });
+        }
+        Ok(results)
+    }
+
+    /// One channel's watchtower pass.
+    ///
+    /// Outstanding work comes first and is driven by the byte-identical
+    /// request it was created from, exactly as the lease tick does. It has to:
+    /// our own confirmed response changes the chain, so by the next pass the
+    /// situation this channel is in has already moved on from the one that
+    /// named the record. Going looking for a fresh name here would strand a
+    /// signed transaction nobody is reconciling — which is precisely how the
+    /// lease tick used to wedge.
+    ///
+    /// A record this tick did not open is named and left strictly alone.
+    async fn hvm_watchtower_channel_tick(
+        &self,
+        binding_commitment: &str,
+        config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
+    ) -> HubResult<crate::hvm_scheduler::HvmWatchtowerPass> {
+        if let Some(existing) = self.unresolved_hvm_chain_operation(binding_commitment)? {
+            // The lease tick runs first on this same loop and a channel gets
+            // exactly one unresolved operation, so finding its renewal here is
+            // ordinary rather than a fault. Name it, leave it alone, and say so
+            // quietly; the tower gets this channel back the pass after that
+            // renewal confirms.
+            if crate::hvm_scheduler::lease_tick_owns(
+                &existing.operation_id,
+                &existing.idempotency_key,
+                crate::hvm_scheduler::HVM_LEASE_OPERATION_PREFIX,
+                crate::hvm_scheduler::HVM_LEASE_IDEMPOTENCY_PREFIX,
+            ) {
+                return Ok(crate::hvm_scheduler::HvmWatchtowerPass::DeferredToLease(
+                    existing.operation_id,
+                ));
+            }
+            let request = hvm_watchtower_tick_request(&existing)?;
+            return self
+                .run_hvm_watchtower(request)
+                .await
+                .map(crate::hvm_scheduler::HvmWatchtowerPass::Evaluated);
+        }
+        let activation = self.hvm_activation(binding_commitment)?;
+        let latest = self.hvm_latest_bill(binding_commitment)?;
+        let snapshot = self
+            .node
+            .verify_hvm_runtime_channel(
+                &activation.recovery_bundle,
+                activation.minimum_required_live_blocks,
+                activation.minimum_required_recover_blocks.max(1),
+            )
+            .await?;
+        let situation = HvmWatchtowerSituationV1::from_evidence(&snapshot, &latest);
+        let (operation_id, idempotency_key) =
+            crate::hvm_scheduler::watchtower_operation_identity(binding_commitment, &situation);
+        // A record already filed under this name is this same situation seen
+        // again. Rebuild its exact request rather than a fresh one: the
+        // commitment covers `timestamp` and `created_unix`, so a fresh `now` a
+        // second later would be a different request under the same name and
+        // `run_hvm_watchtower` would refuse the Hub's own work.
+        let request = match self.load_hvm_chain_operation(&operation_id)? {
+            Some(existing) => hvm_watchtower_tick_request(&existing)?,
+            None => {
+                let now = crate::node::now_unix();
+                HvmWatchtowerRequestV1 {
+                    schema: crate::hvm_watchtower::HVM_WATCHTOWER_REQUEST_SCHEMA.into(),
+                    operation_id,
+                    idempotency_key,
+                    binding_commitment: binding_commitment.to_owned(),
+                    mode: HvmWatchtowerMode::Monitor,
+                    network_fee_zhu: config.network_fee_zhu,
+                    timestamp: now,
+                    gas_max: config.gas_max,
+                    created_unix: now,
+                }
+            }
+        };
+        self.run_hvm_watchtower(request)
+            .await
+            .map(crate::hvm_scheduler::HvmWatchtowerPass::Evaluated)
     }
 
     pub async fn run_hvm_lease_renewal(
@@ -267,6 +546,10 @@ impl HubState {
                 transaction_hash: None,
                 confirmed_block_height: None,
                 observed_confirmations: 0,
+                submitted_unix: None,
+                claim_payee: None,
+                claim_amount_zhu: None,
+                claim_settled_elsewhere_height: None,
             });
         }
         let source = renew_all_call_source(&activation.recovery_bundle.binding, request.periods)?;
@@ -283,6 +566,9 @@ impl HubState {
                 .iter()
                 .map(|key| (*key).to_owned())
                 .collect(),
+            claim_payee: None,
+            claim_amount_zhu: None,
+            claim_settled_elsewhere_height: None,
             lease_periods: Some(request.periods),
             pre_observed_height: snapshot.observed_height,
             pre_status: snapshot.storage.status.value,
@@ -340,7 +626,7 @@ impl HubState {
         let hash = operation.transaction_hash.clone().ok_or_else(|| {
             HubError::State("RecoveryRequired: HVM operation has no transaction hash".into())
         })?;
-        match self.node.query_hvm_transaction(&hash).await {
+        match self.query_hvm_chain_transaction(&operation, &hash).await {
             Ok(Some(observation)) => {
                 return self.apply_hvm_observation(operation, observation).await;
             }
@@ -354,6 +640,16 @@ impl HubState {
                 return self.mark_hvm_chain_recovery(operation, &error.to_string());
             }
             Ok(None) => {}
+        }
+        // Our bytes are not on chain. For a claim that is not the same as the
+        // payout not having happened: anybody may trigger it, and if the exact
+        // approved payout is already recorded then resubmitting ours would
+        // only buy a `HPAY_LEFT_ALREADY_CLAIMED` throw and a spent fee.
+        if operation.kind == HvmChainOperationKind::Claim {
+            let activation = self.hvm_activation(&operation.binding_commitment)?;
+            if let Some(height) = self.hvm_claim_already_paid(&operation, &activation).await? {
+                return self.settle_hvm_claim_paid_elsewhere(operation, height);
+            }
         }
         if !allow_exact_resubmit {
             return Ok(hvm_chain_response(&operation));
@@ -387,7 +683,7 @@ impl HubState {
         operation.submitted_unix = Some(crate::node::now_unix());
         operation.last_error = None;
         self.persist_hvm_chain_operation(operation.clone(), JournalPhase::HvmChainSubmitted)?;
-        match self.node.query_hvm_transaction(&hash).await {
+        match self.query_hvm_chain_transaction(&operation, &hash).await {
             Ok(Some(observation)) => self.apply_hvm_observation(operation, observation).await,
             Ok(None) => Ok(hvm_chain_response(&operation)),
             Err(error) => self.mark_hvm_chain_recovery(operation, &error.to_string()),
@@ -557,6 +853,7 @@ impl HubState {
         } else {
             &latest
         };
+        let mut claim: Option<(String, u64)> = None;
         let (kind, source, serial, expected_left, expected_right) = match (request.mode, decision) {
             (HvmWatchtowerMode::BeginChallenge, _) => (
                 HvmChainOperationKind::Challenge,
@@ -579,6 +876,30 @@ impl HubState {
                 None,
                 None,
             ),
+            (_, HvmWatchtowerDecision::ClaimLeftPayout) => {
+                // The payout amount is read straight off the live contract
+                // storage, never inferred from the durable bill: `PermitHAC`
+                // rejects anything that is not exactly `left_balance`, and the
+                // payee is the contract's own `left`, which
+                // `validate_runtime_binding` has already pinned to
+                // `binding.left_address`.
+                claim = Some((
+                    activation.recovery_bundle.binding.left_address.clone(),
+                    snapshot.storage.left_balance.value,
+                ));
+                let (payee, amount_zhu) = claim.as_ref().expect("just set");
+                (
+                    HvmChainOperationKind::Claim,
+                    claim_left_payout_source(
+                        &activation.recovery_bundle.binding,
+                        payee,
+                        *amount_zhu,
+                    )?,
+                    None,
+                    None,
+                    None,
+                )
+            }
             (_, HvmWatchtowerDecision::NoAction) => {
                 return Ok(HvmWatchtowerResponseV1 {
                     operation_id: request.operation_id,
@@ -587,13 +908,17 @@ impl HubState {
                     transaction_hash: None,
                     confirmed_block_height: None,
                     observed_confirmations: 0,
+                    submitted_unix: None,
+                    claim_payee: None,
+                    claim_amount_zhu: None,
+                    claim_settled_elsewhere_height: None,
                 });
             }
             (_, HvmWatchtowerDecision::RecoveryRequired) => {
-                return Err(HubError::State(
-                    "RecoveryRequired: chain serial is newer than the authenticated HVM ledger"
-                        .into(),
-                ));
+                return Err(HubError::State(format!(
+                    "RecoveryRequired: {}",
+                    crate::hvm_watchtower::recovery_required_reason(&snapshot, &latest)
+                )));
             }
         };
         let operation = PersistedHvmChainOperation {
@@ -607,6 +932,9 @@ impl HubState {
             expected_right_balance_zhu: expected_right,
             lease_keys: Vec::new(),
             lease_periods: None,
+            claim_payee: claim.as_ref().map(|(payee, _)| payee.clone()),
+            claim_amount_zhu: claim.as_ref().map(|(_, amount_zhu)| *amount_zhu),
+            claim_settled_elsewhere_height: None,
             pre_observed_height: snapshot.observed_height,
             pre_status: snapshot.storage.status.value,
             pre_serial: snapshot.storage.serial.value,
@@ -725,17 +1053,7 @@ impl HubState {
                 operation.clone(),
                 JournalPhase::HvmChainSignatureMayExist,
             )?;
-            let signed = build_signed_hvm_call_transaction(
-                self.hub_signer
-                    .as_ref()
-                    .ok_or_else(|| HubError::State("Hub signer unavailable".into()))?
-                    .account(),
-                &activation.recovery_bundle.binding,
-                source,
-                operation.network_fee_zhu,
-                operation.transaction_timestamp,
-                operation.gas_max,
-            )?;
+            let signed = self.sign_hvm_chain_operation(&operation, &activation, source)?;
             operation.signed_transaction_hex = Some(signed.signed_transaction_hex);
             operation.transaction_hash = Some(signed.transaction_hash);
             operation.status = HvmChainOperationStatus::Signed;
@@ -785,15 +1103,150 @@ impl HubState {
             self.persist_hvm_chain_operation(operation.clone(), JournalPhase::HvmChainSubmitted)?;
         }
         let hash = operation.transaction_hash.clone().unwrap_or_default();
-        match self.node.query_hvm_transaction(&hash).await {
+        match self.query_hvm_chain_transaction(&operation, &hash).await {
             Ok(Some(observation)) => self.apply_hvm_observation(operation, observation).await,
             Ok(None) if operation.confirmed_block_height.is_some() => self.mark_hvm_chain_recovery(
                 operation,
                 "previously observed HVM transaction disappeared before finality",
             ),
+            Ok(None) if operation.kind == HvmChainOperationKind::Claim => {
+                let activation = self.hvm_activation(&operation.binding_commitment)?;
+                match self.hvm_claim_already_paid(&operation, &activation).await? {
+                    Some(height) => self.settle_hvm_claim_paid_elsewhere(operation, height),
+                    None => Ok(hvm_chain_response(&operation)),
+                }
+            }
             Ok(None) => Ok(hvm_chain_response(&operation)),
             Err(error) => self.mark_hvm_chain_recovery(operation, &error.to_string()),
         }
+    }
+
+    /// A claim is observed through its Action 14 proof; every other kind is
+    /// observed through its Action 44 proof. Neither is loosened for the other.
+    async fn query_hvm_chain_transaction(
+        &self,
+        operation: &PersistedHvmChainOperation,
+        transaction_hash: &str,
+    ) -> HubResult<Option<crate::node::TransactionObservation>> {
+        if operation.kind == HvmChainOperationKind::Claim {
+            return self
+                .node
+                .query_hvm_claim_transaction(transaction_hash)
+                .await;
+        }
+        self.node.query_hvm_transaction(transaction_hash).await
+    }
+
+    /// Has the exact approved payout already been recorded on chain?
+    ///
+    /// Claims are permissionless: `intrinsic_req_sign` never adds the contract
+    /// (it is not `is_privakey()`), so anybody willing to pay the fee can
+    /// trigger the payout. When they do, the contract sets `left_claimed` and
+    /// the money has already reached the payee. Answering "yes" here is what
+    /// stops this Hub from chasing a payout that has happened, and what stops
+    /// it latching recovery over somebody else's success.
+    ///
+    /// The answer is deliberately narrow: the exact amount and the exact payee
+    /// are compared too, and a zero amount is never treated as settled.
+    async fn hvm_claim_already_paid(
+        &self,
+        operation: &PersistedHvmChainOperation,
+        activation: &crate::storage::PersistedHvmChannelActivation,
+    ) -> HubResult<Option<u64>> {
+        if operation.kind != HvmChainOperationKind::Claim {
+            return Ok(None);
+        }
+        let (payee, amount_zhu) = hvm_claim_terms(operation)?;
+        let snapshot = self
+            .node
+            .verify_hvm_runtime_channel(
+                &activation.recovery_bundle,
+                activation.minimum_required_live_blocks,
+                activation.minimum_required_recover_blocks.max(1),
+            )
+            .await?;
+        let settled = snapshot.storage.status.value == 4
+            && snapshot.storage.left_claimed.value
+            && amount_zhu > 0
+            && snapshot.storage.left_balance.value == amount_zhu
+            && snapshot.storage.left.value == payee;
+        Ok(settled.then_some(snapshot.observed_height))
+    }
+
+    /// Resolve a claim whose payout already happened without us. There is no
+    /// transaction of ours to anchor, so none is invented: the durable record
+    /// keeps the observed height as its evidence and stays free of block
+    /// finality fields it does not own.
+    fn settle_hvm_claim_paid_elsewhere(
+        &self,
+        mut operation: PersistedHvmChainOperation,
+        observed_height: u64,
+    ) -> HubResult<HvmWatchtowerResponseV1> {
+        if operation.kind != HvmChainOperationKind::Claim || observed_height == 0 {
+            return Err(HubError::State(
+                "only an HVM claim can settle on a third-party payout".into(),
+            ));
+        }
+        operation.claim_settled_elsewhere_height = Some(observed_height);
+        operation.confirmed_block_height = None;
+        operation.observed_confirmations = 0;
+        operation.status = HvmChainOperationStatus::Confirmed;
+        operation.last_error = None;
+        operation.updated_unix = crate::node::now_unix();
+        self.persist_hvm_chain_operation(operation.clone(), JournalPhase::HvmChainConfirmed)?;
+        Ok(hvm_chain_response(&operation))
+    }
+
+    /// Produce the exact signed transaction this operation's kind calls for.
+    ///
+    /// A claim is an Action 14 payout with no fitsh source to compile; every
+    /// other kind is an Action 44 contract call. The durable `call_source` is
+    /// the canonical descriptor in both cases and is re-derived here, never
+    /// trusted as free text.
+    fn sign_hvm_chain_operation(
+        &self,
+        operation: &PersistedHvmChainOperation,
+        activation: &crate::storage::PersistedHvmChannelActivation,
+        source: String,
+    ) -> HubResult<crate::hvm_watchtower::SignedHvmCallTransaction> {
+        let signer = self
+            .hub_signer
+            .as_ref()
+            .ok_or_else(|| HubError::State("Hub signer unavailable".into()))?
+            .account();
+        let binding = &activation.recovery_bundle.binding;
+        if operation.kind == HvmChainOperationKind::Claim {
+            let (payee, amount_zhu) = hvm_claim_terms(operation)?;
+            if claim_left_payout_source(binding, payee, amount_zhu)? != source {
+                return Err(HubError::State(
+                    "HVM claim payout descriptor is not canonical".into(),
+                ));
+            }
+            let signed = build_signed_hvm_claim_transaction(
+                signer,
+                binding,
+                payee,
+                amount_zhu,
+                operation.network_fee_zhu,
+                operation.transaction_timestamp,
+                operation.gas_max,
+            )?;
+            read_exact_hvm_claim_transaction(
+                &signed.signed_transaction_hex,
+                binding,
+                payee,
+                amount_zhu,
+            )?;
+            return Ok(signed);
+        }
+        build_signed_hvm_call_transaction(
+            signer,
+            binding,
+            source,
+            operation.network_fee_zhu,
+            operation.transaction_timestamp,
+            operation.gas_max,
+        )
     }
 
     fn is_local_pilot_stale_challenge(
@@ -896,7 +1349,25 @@ impl HubState {
                     ));
                 }
             }
-            HvmChainOperationKind::Claim => return Err(v1_cannot_claim()),
+            HvmChainOperationKind::Claim => {
+                let (payee, amount_zhu) = hvm_claim_terms(operation)?;
+                // `PermitHAC` pays the left party only from FINAL state, only
+                // once, and only the exact `left_balance`. Every one of those
+                // is re-read here, against live evidence, immediately before
+                // the key is used and again before submission.
+                if snapshot.storage.status.value != 4
+                    || operation.pre_status != 4
+                    || snapshot.storage.left_claimed.value
+                    || snapshot.storage.left_balance.value != amount_zhu
+                    || amount_zhu == 0
+                    || snapshot.storage.left.value != payee
+                    || snapshot.storage.serial.value != operation.pre_serial
+                {
+                    return Err(HubError::State(
+                        "HVM claim precondition is no longer true".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -984,7 +1455,23 @@ impl HubState {
                     ));
                 }
             }
-            HvmChainOperationKind::Claim => return Err(v1_cannot_claim()),
+            HvmChainOperationKind::Claim => {
+                let (payee, amount_zhu) = hvm_claim_terms(operation)?;
+                // The contract's own evidence that this payout happened, and
+                // the only evidence there is: `PermitHAC` sets `left_claimed`
+                // and leaves `left_balance` standing as the record of what it
+                // paid. A confirmed claim that did not move that flag did not
+                // pay anybody.
+                if snapshot.storage.status.value != 4
+                    || !snapshot.storage.left_claimed.value
+                    || snapshot.storage.left_balance.value != amount_zhu
+                    || snapshot.storage.left.value != payee
+                {
+                    return Err(HubError::State(
+                        "confirmed HVM claim did not record the exact payout".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1070,6 +1557,59 @@ impl HubState {
     }
 }
 
+/// Rebuild the exact durable request an outstanding watchtower-tick operation
+/// was created from, or refuse to touch the record.
+///
+/// Two refusals, and neither is a formality. A record this tick did not open
+/// belongs to whoever did — an operator's `pilot-watch-…` challenge, say — and
+/// driving it would put that person's transaction on the wire without them.
+/// A record that is not a monitor action cannot be rebuilt as one: the tick
+/// monitors, so it never rebuilds a request that would begin a challenge or
+/// renew a lease.
+fn hvm_watchtower_tick_request(
+    operation: &PersistedHvmChainOperation,
+) -> HubResult<HvmWatchtowerRequestV1> {
+    if !operation
+        .operation_id
+        .starts_with(crate::hvm_scheduler::HVM_WATCHTOWER_OPERATION_PREFIX)
+        || operation
+            .operation_id
+            .starts_with(crate::hvm_scheduler::HVM_WATCHTOWER_IDEMPOTENCY_PREFIX)
+        || !operation
+            .idempotency_key
+            .starts_with(crate::hvm_scheduler::HVM_WATCHTOWER_IDEMPOTENCY_PREFIX)
+    {
+        return Err(HubError::State(format!(
+            "HVM chain operation {} is unresolved on this channel and was not opened by the watchtower tick; the tick will not drive it",
+            operation.operation_id
+        )));
+    }
+    if !matches!(
+        operation.kind,
+        HvmChainOperationKind::Respond
+            | HvmChainOperationKind::Finalize
+            | HvmChainOperationKind::Claim
+    ) {
+        return Err(HubError::State(format!(
+            "HVM chain operation {} is not a watchtower monitor action",
+            operation.operation_id
+        )));
+    }
+    let request = HvmWatchtowerRequestV1 {
+        schema: crate::hvm_watchtower::HVM_WATCHTOWER_REQUEST_SCHEMA.into(),
+        operation_id: operation.operation_id.clone(),
+        idempotency_key: operation.idempotency_key.clone(),
+        binding_commitment: operation.binding_commitment.clone(),
+        mode: HvmWatchtowerMode::Monitor,
+        network_fee_zhu: operation.network_fee_zhu,
+        timestamp: operation.transaction_timestamp,
+        gas_max: operation.gas_max,
+        created_unix: operation.created_unix,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
 fn hvm_chain_response(operation: &PersistedHvmChainOperation) -> HvmWatchtowerResponseV1 {
     HvmWatchtowerResponseV1 {
         operation_id: operation.operation_id.clone(),
@@ -1078,6 +1618,10 @@ fn hvm_chain_response(operation: &PersistedHvmChainOperation) -> HvmWatchtowerRe
         transaction_hash: operation.transaction_hash.clone(),
         confirmed_block_height: operation.confirmed_block_height,
         observed_confirmations: operation.observed_confirmations,
+        submitted_unix: operation.submitted_unix,
+        claim_payee: operation.claim_payee.clone(),
+        claim_amount_zhu: operation.claim_amount_zhu,
+        claim_settled_elsewhere_height: operation.claim_settled_elsewhere_height,
     }
 }
 

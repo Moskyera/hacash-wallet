@@ -134,7 +134,10 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         expires_seconds: u64,
     },
-    /// Run the production challenge/monitor/finalize watchtower state machine.
+    /// Run the production challenge/monitor/finalize/claim watchtower state
+    /// machine. In monitor mode a FINAL channel whose left balance is still
+    /// unclaimed is paid out with an Action 14 through the contract's
+    /// `PermitHAC` hook; the Hub's own share has no automated claim.
     Watchtower {
         #[arg(long)]
         hub_state_file: PathBuf,
@@ -932,6 +935,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(hash) = response.transaction_hash.as_deref() {
                 println!("Transaction: {hash}");
             }
+            // A payout is the one action here that moves coin rather than
+            // contract state, so it says where the coin went and how much of
+            // it moved instead of leaving that to be decoded from the bytes.
+            if let Some(payee) = response.claim_payee.as_deref() {
+                println!("Payout to: {payee}");
+                println!(
+                    "Payout amount (Zhu): {}",
+                    response.claim_amount_zhu.unwrap_or_default()
+                );
+                println!(
+                    "Hub share still inside the contract: no automated claim on this rail; \
+                     the watchtower claims the left party's settled balance only"
+                );
+            }
+            if let Some(height) = response.claim_settled_elsewhere_height {
+                println!(
+                    "Payout was already recorded on chain by another party, observed at height {height}"
+                );
+            }
             println!("Confirmations: {}", response.observed_confirmations);
         }
         Command::Reconcile {
@@ -991,13 +1013,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Stage: exact durable reconciliation confirmed");
             println!("Operation: {operation_id}");
             println!("Action: {}", response.action);
-            println!(
-                "Transaction: {}",
-                response
-                    .transaction_hash
-                    .as_deref()
-                    .ok_or("confirmed reconciliation omitted transaction hash")?
-            );
+            // A payout that a third party made first resolves on the contract's
+            // own `left_claimed` evidence and owns no transaction of ours. It
+            // must say so rather than be reported as a missing hash.
+            if let Some(height) = response.claim_settled_elsewhere_height {
+                println!(
+                    "Payout was already recorded on chain by another party, observed at height {height}"
+                );
+            } else {
+                println!(
+                    "Transaction: {}",
+                    response
+                        .transaction_hash
+                        .as_deref()
+                        .ok_or("confirmed reconciliation omitted transaction hash")?
+                );
+            }
+            if let Some(payee) = response.claim_payee.as_deref() {
+                println!("Payout to: {payee}");
+                println!(
+                    "Payout amount (Zhu): {}",
+                    response.claim_amount_zhu.unwrap_or_default()
+                );
+                println!(
+                    "Hub share still inside the contract: no automated claim on this rail; \
+                     the watchtower claims the left party's settled balance only"
+                );
+            }
             println!("Confirmations: {}", response.observed_confirmations);
         }
     }

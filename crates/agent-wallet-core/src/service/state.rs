@@ -324,6 +324,22 @@ pub(super) fn validate_state(
     {
         return Err(AgentWalletError::RecoveryRequired);
     }
+    // A voucher only means anything against the channel it names. It is taken
+    // once, immediately after that channel's open confirms, so a voucher
+    // without a binding, or one naming a different channel than the binding,
+    // means this wallet is carrying an exit for a channel it is not in.
+    if let Some(voucher) = state.l2_channel_close_voucher.as_ref()
+        && (voucher
+            .validate(expected_wallet_id, &state.address)
+            .is_err()
+            || voucher.view.network_mode != state.network_mode
+            || state
+                .l2_binding
+                .as_ref()
+                .is_none_or(|binding| !voucher.matches_binding(binding)))
+    {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
     if let Some(binding) = state.hvm_channel_binding.as_ref()
         && binding
             .validate(expected_wallet_id, &state.address, &state.network_mode)

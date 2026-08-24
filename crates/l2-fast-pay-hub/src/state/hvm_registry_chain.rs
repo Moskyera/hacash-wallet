@@ -15,6 +15,7 @@ use crate::hvm_registry_watchtower::{
     registry_response_window_is_safe, require_fresh_registry_evidence,
 };
 use crate::hvm_scheduler::{
+    HVM_REGISTRY_LEASE_IDEMPOTENCY_PREFIX, HVM_REGISTRY_LEASE_OPERATION_PREFIX,
     HVM_REGISTRY_WATCHTOWER_IDEMPOTENCY_PREFIX, HVM_REGISTRY_WATCHTOWER_OPERATION_PREFIX,
     HvmRegistryWatchtowerMaintenanceResult, HvmRegistryWatchtowerMaintenanceResults,
     registry_watchtower_operation_identity,
@@ -63,26 +64,42 @@ impl HubState {
         Ok(results)
     }
 
-    /// One channel's lease pass.
+    /// One channel's lease pass, and the exact twin of
+    /// [`Self::hvm_lease_channel_tick`] — same defect, same fix, same
+    /// scheduler loop driving both.
     ///
-    /// The operation is named after a one-minute clock window, so two passes
-    /// inside the same minute deliberately land on the same record — that is
-    /// what makes a repeat a resume instead of a duplicate. But the name is the
-    /// only part of the request the window makes stable: `commitment()` covers
-    /// `timestamp` and `created_unix` too, and `run_hvm_registry_lease_renewal`
-    /// refuses a retry whose commitment moved. Minting a fresh `now` here would
-    /// therefore hand the same record a different request one second later and
-    /// the Hub would refuse its own work, leaving a signed transaction with
-    /// nobody driving it.
+    /// The renewal this tick signed last time comes first, rebuilt from its
+    /// durable record and driven by binding rather than by name. Signing raises
+    /// the process-wide `recovery_required` latch (registry chain operations
+    /// are counted by `persisted_state_requires_recovery` exactly as v1 ones
+    /// are), the latch is released only by that operation confirming, and the
+    /// operation id is bucketed to a one-minute window that the next pass —
+    /// at least sixty seconds later — can never name again. Asking the clock
+    /// first left the tick refused by the latch its own submission had raised,
+    /// with nothing able to notice the confirmation.
     ///
-    /// So the durable record is the tick's memory of when it first acted: if
-    /// one exists under this name, its exact request is rebuilt from it, and a
-    /// fresh `now` is read only when there is nothing to resume.
+    /// Resuming by binding reaches `run_hvm_registry_lease_renewal`'s resume
+    /// branch and through it `ensure_hvm_registry_chain_reconciliation_allowed`,
+    /// which lets a latched Hub finish one operation only while it is the sole
+    /// reason the latch is up. No latch is cleared and no check is relaxed
+    /// here; the work simply stops being hidden from the door built for it.
+    ///
+    /// An unresolved operation the tick did not open is named and left alone —
+    /// the registry table's `Abandoned` counts as resolved, so a record proven
+    /// inadmissible does not block the next renewal.
+    ///
+    /// With nothing outstanding, a fresh `now` names a new operation, and a
+    /// second pass inside that same window rebuilds from the durable record
+    /// rather than minting a clock reading `commitment()` would refuse.
     async fn hvm_registry_lease_channel_tick(
         &self,
         binding_commitment: &str,
         config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
     ) -> HubResult<HvmRegistryChainResponseV2> {
+        if let Some(existing) = self.unresolved_registry_chain_operation(binding_commitment)? {
+            let request = self.registry_lease_tick_request(&existing, config)?;
+            return self.run_hvm_registry_lease_renewal(request).await;
+        }
         let now = crate::node::now_unix();
         let (operation_id, idempotency_key) =
             crate::hvm_scheduler::registry_operation_identity(binding_commitment, now);
@@ -105,6 +122,45 @@ impl HubState {
             },
         };
         self.run_hvm_registry_lease_renewal(request).await
+    }
+
+    /// Rebuild the exact durable request an outstanding registry lease-tick
+    /// renewal was created from, or refuse to touch the record. The twin of
+    /// [`Self::hvm_lease_tick_request`], and it refuses for the same two
+    /// reasons: a record this tick did not open belongs to whoever did, and a
+    /// record that is not a lease renewal cannot be rebuilt as one.
+    fn registry_lease_tick_request(
+        &self,
+        operation: &PersistedHvmRegistryChainOperation,
+        config: &crate::hvm_scheduler::HvmLeaseSchedulerConfig,
+    ) -> HubResult<HvmRegistryLeaseRenewalRequestV2> {
+        if !crate::hvm_scheduler::lease_tick_owns(
+            &operation.operation_id,
+            &operation.idempotency_key,
+            HVM_REGISTRY_LEASE_OPERATION_PREFIX,
+            HVM_REGISTRY_LEASE_IDEMPOTENCY_PREFIX,
+        ) {
+            return Err(HubError::State(format!(
+                "registry chain operation {} is unresolved on this channel and was not opened by the lease tick; the tick will not drive it",
+                operation.operation_id
+            )));
+        }
+        if operation.kind != HvmChainOperationKind::RenewAllLeases {
+            return Err(HubError::State(format!(
+                "registry chain operation {} is not a lease renewal",
+                operation.operation_id
+            )));
+        }
+        self.hvm_registry_lease_renewal_request(
+            &operation.operation_id,
+            config.renew_when_live_blocks_at_or_below,
+        )?
+        .ok_or_else(|| {
+            HubError::State(format!(
+                "registry lease renewal {} vanished between lookup and rebuild",
+                operation.operation_id
+            ))
+        })
     }
 
     /// Evaluate the watchtower once for every activated registry channel.
@@ -1899,6 +1955,7 @@ fn registry_chain_response(
         transaction_hash: operation.transaction_hash.clone(),
         confirmed_block_height: operation.confirmed_block_height,
         observed_confirmations: operation.observed_confirmations,
+        submitted_unix: operation.submitted_unix,
     }
 }
 
@@ -1910,5 +1967,6 @@ fn no_registry_action_response(operation_id: &str) -> HvmRegistryChainResponseV2
         transaction_hash: None,
         confirmed_block_height: None,
         observed_confirmations: 0,
+        submitted_unix: None,
     }
 }

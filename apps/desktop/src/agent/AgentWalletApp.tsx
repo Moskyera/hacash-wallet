@@ -1270,6 +1270,15 @@ function AgentFastPayChannelPanel({
         </div>
       )}
 
+      {active && (
+        <ChannelExit
+          overview={overview}
+          busy={busy}
+          run={run}
+          finish={finish}
+        />
+      )}
+
       {active && !close && (
         <button
           type="button"
@@ -1337,6 +1346,111 @@ function AgentFastPayChannelPanel({
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * The owner's exit from the channel, and an honest account of where it came
+ * from.
+ *
+ * Two things have to come across, and neither of them is "you are safe". The
+ * first is what the owner actually holds: a finished transaction that pays them
+ * a stated amount and that their own node will accept without the hub. The
+ * second is that the hub had to sign it, once, and could have said no.
+ */
+function ChannelExit({
+  overview,
+  busy,
+  run,
+  finish,
+}: {
+  overview: AgentWalletOverview;
+  busy: boolean;
+  run: (work: () => Promise<void>) => Promise<void>;
+  finish: (message: string) => Promise<void>;
+}) {
+  const voucher = overview.l2_channel_close_voucher;
+  const held = voucher?.phase === "held" || voucher?.phase === "broadcast";
+
+  if (!voucher || !held) {
+    return (
+      <div className="agent-subpanel">
+        <h3>Your way out</h3>
+        <p className="agent-warning" role="status">
+          You do not hold a signed exit for this channel yet. Until you do, this wallet will not
+          make Fast Pay payments, because the deposit is on chain and the only way to get it back
+          is to ask the hub to close the channel.
+        </p>
+        <p>
+          The exit is a closing transaction the hub has to countersign. It can only be signed after
+          the channel exists, so there is a short gap between the deposit landing and the exit
+          arriving. This is that gap.
+        </p>
+        <button
+          type="button"
+          className="agent-primary"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await agentWalletApi.takeFastPayChannelVoucher(overview.wallet_id);
+              await finish("The hub countersigned your exit. Fast Pay is now available.");
+            })
+          }
+        >
+          Ask the hub for the exit
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="agent-subpanel">
+      <h3>Your way out</h3>
+      <div className="agent-stats-row">
+        <span>
+          Pays you back <strong>{formatUnits(voucher.refund_units)}</strong>
+        </span>
+        <span>
+          Costs you to send <strong>{formatUnits(voucher.network_fee_units)}</strong>
+        </span>
+        <span>
+          Status <strong>{voucher.phase === "broadcast" ? "sent" : "in hand"}</strong>
+        </span>
+      </div>
+      <p>
+        You are holding a finished closing transaction for this channel, signed by you and by the
+        hub. Sending it returns {formatUnits(voucher.refund_units)} to your wallet. It does not
+        expire, and you can send it from your own node whenever you want. The hub is not involved
+        in sending it and cannot stop it.
+      </p>
+      <p className="agent-warning" role="status">
+        The hub had to sign this once, when the channel opened, and it could have refused. Nothing
+        in Hacash could have forced it to sign. What you hold removes your need for the hub from
+        here on; it does not mean you never needed it.
+      </p>
+      {voucher.transaction_hash ? (
+        <p className="agent-exact-address">{voucher.transaction_hash}</p>
+      ) : null}
+      {voucher.phase === "broadcast" && voucher.broadcast ? (
+        <p>
+          Sent from {voucher.broadcast.node_url}. Once it is in a block the channel is closed and
+          the deposit is back in your wallet.
+        </p>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await agentWalletApi.broadcastFastPayChannelVoucher(overview.wallet_id);
+              await finish("Your exit was sent from your own node. The hub was not involved.");
+            })
+          }
+        >
+          Send my exit without the hub
+        </button>
+      )}
+    </div>
   );
 }
 

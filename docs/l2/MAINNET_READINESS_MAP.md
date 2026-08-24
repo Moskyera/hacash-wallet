@@ -535,6 +535,17 @@ earlier pilot ran on and not a fresh one.
    `mint/src/check/block_accept.rs`, so lowering the target time would make the
    node reject its own stored history.
 
+The same off-by-ten-times claim was still live in the product after this
+document was corrected. `hpay-hvm-registry-local-pilot`'s own `--help` described
+both `preview-prefund` and `prefund-hub` as moving "200 HAC", while the constant
+those commands actually drive is `HVM_REGISTRY_DEPLOY_PROTOCOL_COST_ZHU`, which
+is 2000 HAC. Corrected 2026-08-23, with the V1 figure named alongside it so the
+two are not confused again. The 200 HAC in `MAINNET_CANARY_RUNBOOK.md` is a
+different constant and is correct: `HVM_PILOT_DEPLOY_PROTOCOL_COST_ZHU` is
+20_000_000_000 Zhu, which really is 200 HAC. Both derive from an
+`Amount::unit238` mantissa, so the arithmetic is
+`mantissa * 10^(238 - 248)` HAC in each case.
+
 Nothing here was worked around. No constant was lowered, no pin was moved and no
 state was re-sealed.
 
@@ -560,25 +571,396 @@ The contract's own storage, read now through `/query/hpay/channel-exit`, agrees:
 `left_claimed false`, `right_claimed false`, `all_keys_active true`.
 
 So challenge, respond and finalize are no longer simulator-only on this rail.
-The payout still is.
+Neither is the payout, as of 2026-08-23. What follows replaces the section that
+said it had no production caller.
 
-### The Action 14 payout has no production caller on this rail
+### The Action 14 payout now has a production caller on this rail
 
-`decide_watchtower_action` in `hvm_watchtower.rs` maps chain status 4 to
-`NoAction`. There is no `ClaimLeftPayout` arm in the V1 watchtower at all; that
-arm exists only in `hvm_registry_watchtower.rs`. Run against this exact channel,
-the production watchtower prints:
+**Corrected 2026-08-23.** The previous version of this section was accurate when
+it was written and is quoted here so the correction can be checked:
+
+> `decide_watchtower_action` in `hvm_watchtower.rs` maps chain status 4 to
+> `NoAction`. There is no `ClaimLeftPayout` arm in the V1 watchtower at all;
+> that arm exists only in `hvm_registry_watchtower.rs`. Run against this exact
+> channel, the production watchtower prints `Stage: watchtower no_action` and
+> `Action: none`.
+
+`decide_watchtower_action` now answers `ClaimLeftPayout` on chain status 4 when
+the chain split matches the Hub's own head bill, `left_claimed` is false and
+`left_balance` is positive. Behind it, `claim_left_payout_source`,
+`build_signed_hvm_claim_transaction` and `read_exact_hvm_claim_transaction` in
+`crates/l2-fast-pay-hub/src/hvm_watchtower.rs` build and re-read the exact Type 3
+`[ChainAllow, HacFromToTrs]` payout, and
+`crates/l2-fast-pay-hub/src/state/hvm_chain.rs` carries it as a durable
+`HvmChainOperationKind::Claim` with its own precondition, postcondition and
+Action 14 observation proof. Nothing about it is a harness: the operator command
+is `hpay-hvm-local-pilot watchtower --action monitor`, exactly the command that
+used to print `no_action`.
+
+**The 0.99 HAC left this contract on 2026-08-23.** Read back from the node's own
+block store, the payout built and signed by that production path:
 
 ```
+block   4358  6ed3c2a0329b92c183ed7fb7fe9c8469f2da7a02034d07e6d2e5625704c6f0d6
+type    3
+main    12ZCnDaGiZW9cZhYombd4mhUNLYnXcBjq7   (the Hub, fee payer only)
+action  1041 ChainAllow chains [7]
+action  14   from ncJoygx8qBSHAw4sJbo5jTk1FJthJ1QLw
+             to   1KCRLdAATCyeEPPtYn27RpJTdLV9Ueamk
+             hacash 99:246                     (99000000 Zhu, 0.99 HAC)
+```
+
+The contract's own storage moved with it, read through
+`/query/hpay/channel-exit`: `left_claimed` went `false` to `true` while
+`left_balance` stayed at `99000000`, which is the contract recording what it paid
+rather than forgetting it. The contract's HAC balance went from `1:248` (1 HAC)
+to `1:246` (0.01 HAC), and `1:246` is exactly the `right_balance` the Hub has no
+automated claim for. The lifecycle table above therefore gains a seventh line:
+
+```
+4358  6ed3c2a0329b92c183ed7fb7fe9c8469f2da7a02034d07e6d2e5625704c6f0d6  claim, left payout 99000000 Zhu
+```
+
+**What this payout does not prove.** The Hub could not afford the claim's
+up-front gas budget at the time, so its fee wallet was topped up first with 3
+HAC in transaction
+`a21ba75c9d993ecac983e8eac14dc9c3077958a4bc42746caa1d6da4456df46b` at height
+4356. That transfer came from `1KCRLdAATCyeEPPtYn27RpJTdLV9Ueamk`, which is the
+same pilot-left identity the 0.99 HAC was then paid back to. On chain 7 every
+identity here is held by one person, so the money went in a circle, and the run
+therefore proves that the mechanism executes and that the contract released the
+funds. It does not prove anything about an adversarial counterparty, because
+there was not one. The permissionless-payout property below is read from the
+protocol source rather than demonstrated by a hostile party on this chain.
+
+Three properties are worth stating because they are what make a Hub-signed
+payout safe:
+
+- The payee is not chosen by the signer. `PermitHAC` pays `left` or `right` and
+  nobody else, and `claim_left_payout_source` refuses any payee that is not
+  `binding.left_address`, which `validate_runtime_binding` has already pinned to
+  the contract's own `left`.
+- The amount is not chosen by the signer either. `PermitHAC` demands
+  `amount == left_balance` to the zhu, so the builder reads it off live contract
+  storage and refuses an amount that cannot be carried exactly on the wire.
+- The payout is permissionless. Action 14 declares `req_sign = [self.from]`, but
+  `intrinsic_req_sign` only demands a signature from an address that
+  `is_privakey()`, and a contract address is not. The Hub key pays the fee and
+  has no authority over the money. When a third party claims first, the durable
+  record resolves on the contract's own `left_claimed` evidence rather than
+  latching recovery.
+
+**What is still not built, said plainly.** The V1 contract's `PermitHAC` also
+pays the right side, guarded by a per-channel `right_claimed`, and no shipped
+code claims it. That leaves the Hub's own `right_balance` share, 1000000 Zhu on
+this channel, inside the contract with no automated path out. This is a
+deliberate limit, not an oversight: a watchtower exists to protect the
+counterparty's principal, and an arm that pays the Hub itself is a new authority
+rather than a bug fix. The watchtower prints the limit on every payout it makes:
+
+```
+Hub share still inside the contract: no automated claim on this rail; the
+watchtower claims the left party's settled balance only
+```
+
+**Nobody pressed the button, and now something does. Closed 2026-08-24.** The
+sentence above, "nothing about it is a harness", was true and was not enough.
+The claim arm existed, it was correct, and it had moved real money, but nothing
+ran it on its own. Traced on 2026-08-23:
+
+- `run_hvm_watchtower` had exactly one caller outside the test tree,
+  `crates/l2-fast-pay-hub/src/bin/hpay-hvm-local-pilot.rs`.
+- That binary carries `required-features = ["local-pilot-tools"]`, the crate's
+  `default` feature set is empty, and the binary's own `about` string reads
+  "Fail-closed HPAY HVM lifecycle tool for the private chain-7 Local Pilot only".
+- `hvm_scheduler.rs` ran three ticks on its loop: the V1 lease tick, the
+  registry lease tick and the registry watchtower tick. There was no V1
+  watchtower tick.
+
+That last line was the whole gap, and it is worth being precise about what it
+was not. There is no HTTP route for the V1 watchtower, but there is none for the
+registry watchtower either, and that is deliberate rather than missing:
+`registry_public_routes_expose_payments_but_not_owner_or_watchtower_controls` in
+`server.rs` asserts that `/v2/hvm-registry/watchtower`, `activate`, `lease` and
+`reconcile` are all absent from the production route table, and fails if any of
+them appears. Owner and watchtower controls are deliberately not reachable over
+the network on either rail. So the fix was not a route, and adding one would
+break that test on purpose.
+
+The difference between the rails was the scheduler tick and nothing else, and
+that tick now exists. `HubState::hvm_watchtower_tick` in
+`crates/l2-fast-pay-hub/src/state/hvm_chain.rs` evaluates every activated V1
+channel once per pass, and `run_hvm_lease_scheduler` in
+`crates/l2-fast-pay-hub/src/hvm_scheduler.rs` calls it on the same loop and at
+the same cadence as the three ticks that were already there. It reaches the
+chain only through `run_hvm_watchtower`, in the same `Monitor` mode the CLI
+uses, so it can sign or submit nothing the manual path could not: it is a caller
+of that path, not a second one. It never begins a challenge, which is the one
+mode that spends a key on a state the chain has not yet moved to.
+
+The feature boundary is the part that actually changed, so it is worth stating
+exactly. `run_hvm_lease_scheduler` and the tick both live in the library, behind
+no feature at all. The `fast-pay-hub` binary that spawns it requires `server`,
+which is simply what a Hub daemon is built with. The old and only caller,
+`hpay-hvm-local-pilot`, requires `local-pilot-tools`. So the claim path moved
+from a private chain-7 tool a person runs by hand to the ordinary Hub daemon's
+own background loop. Traced by name, with no test binary in the chain:
+
+```
+bin/fast-pay-hub.rs   tokio::spawn(run_hvm_lease_scheduler(hub, config))   [feature "server"]
+hvm_scheduler.rs      run_hvm_lease_scheduler -> hub.hvm_watchtower_tick   [no feature]
+state/hvm_chain.rs    HubState::hvm_watchtower_tick                        [no feature]
+state/hvm_chain.rs    hvm_watchtower_channel_tick -> run_hvm_watchtower    [no feature]
+```
+
+Two properties are carried over from the lease-tick fix deliberately, because
+the same wedge would otherwise appear here:
+
+- **Outstanding work is found by binding, not by name.** The tick's own
+  confirmed action changes the chain, so by the next pass the situation has
+  moved on from the one that named the record. Looking for a fresh name would
+  strand a signed transaction nobody is reconciling. `HvmWatchtowerSituationV1`
+  gives an operation the name of the situation that called for it, so a retry of
+  the same situation is the same operation and every lifecycle step earns a new
+  one.
+- **An operation the tick did not open is named and left alone.** An operator's
+  `pilot-watch-...` record on the channel is somebody else's in-flight
+  transaction. `hvm_watchtower_tick_request` refuses it by name rather than
+  driving it, and refuses anything that is not a monitor action.
+
+The `--hvm-lease-scheduler` flag's help text now says what it actually does:
+leases on both rails, plus watching every activated channel so a challenge is
+answered, a passed deadline is finalized, and a finalized channel's settled
+principal is claimed back out of the contract. The flag name is now narrower
+than the behaviour and is left alone rather than renamed, because renaming a
+shipped flag breaks whatever already invokes it.
+
+`readiness.rs` is deliberately not changed by this, and its line "nothing here
+presses `finalize` or `claim` on their behalf" is still correct where it stands.
+That line is part of `measure_offline_user_defended`, which is a statement about
+what a *user* may rely on, and a user cannot rely on a counterparty's Hub having
+been started with this flag. What changed is what a Hub operator's own process
+does for the channels it holds. Those are different questions and only the
+second one is answered here.
+
+Judged against the two options this work was given, add the claim path or write
+down that V1 channels have no claim path, it is now option (a) end to end: the
+mechanism exists, it moved real money on chain 7, and an unattended Hub reaches
+it without a person.
+
+**The two ticks share one operation slot, and a live run is how that was
+found.** A channel permits exactly one unresolved chain operation, and the lease
+tick and the watchtower tick both want it. The lease tick runs first on the
+loop, so whenever a renewal is in flight the tower gets nothing to do on that
+channel. Two consequences, and only the second was a defect.
+
+The first is a real limitation and is left standing: on a channel with a
+renewal outstanding, a claim waits until that renewal confirms. It is
+fail-closed, it is not a regression against a rail where the tower never ran at
+all, and the wait is bounded by six confirmations. It is written here rather
+than fixed, because giving the tower priority over a lease would trade a
+delayed payout for a shortened lease, and the lease is the path this document
+calls the only one that destroys a deposit outright.
+
+The second was a defect in the first version of this tick, and running the
+shipped binary against chain 7 is what exposed it. The tower reported that
+ordinary deferral as a failed-closed channel:
+
+```
+ERROR HVM watchtower channel failed closed
+      binding_commitment=6dfb2664f38c5805... error=state: HVM chain operation
+      hvm-lease-6dfb2664f38c5805...-29792223 is unresolved on this channel and
+      was not opened by the watchtower tick; the tick will not drive it
+```
+
+That line would have appeared on every pass for as long as a renewal was
+outstanding, which was 29, 83 and 48 passes on the three renewals timed here. An
+operator who learns to scroll past it will scroll past the one that matters,
+which is the exact alarm-fatigue failure the severity work above exists to
+prevent. `HvmWatchtowerPass::DeferredToLease` now names the renewal holding the
+slot and reports it at `debug!`, while a record the lease tick did *not* open,
+meaning somebody's hand-opened operation, stays an `error!`. Re-run on chain 7
+with the fix, same channel:
+
+```
+INFO  HVM lease maintenance      operation_id=hvm-lease-6dfb2664f38c5805...-29792228 status=submitted
+DEBUG HVM watchtower deferred: this channel's one operation slot is held by the
+      lease renewal above  lease_operation_id=hvm-lease-6dfb2664f38c5805...-29792228
+```
+
+Pinned in `a_lease_renewal_in_flight_defers_the_watchtower_instead_of_failing_it`,
+which asserts the deferral names the renewal, carries no error, broadcasts
+nothing, and that the tower gets the channel back with its claim intact on the
+first pass after the renewal confirms.
+
+**What the live run did and did not show.** It showed the shipped
+`fast-pay-hub`, started with `--hvm-lease-scheduler` and nothing else, calling
+the V1 watchtower tick on its own loop against the running fullnode. That is the
+reachability claim and it is now demonstrated rather than argued. It did not
+show the tower reaching a decision on this particular channel, because this
+channel's activation carries `minimum_required_recover_blocks == 0`, which makes
+`lease_renewal_is_due` true on every pass regardless of the threshold flag, so
+the lease tick takes the slot every time. Confirmed by running it again with
+`--hvm-lease-threshold-blocks 1`, which renewed anyway. The decision paths are
+covered by `hvm_watchtower_tick_claims.rs` against a mock whose mempool and
+contract storage the test drives, and by the 0.99 HAC that actually left the
+contract on 2026-08-23.
+
+**The restart gate, printed by the shipped binary.** The same run demonstrated
+the corrected boot message, because the first run left a submitted renewal in
+its private state copy and the second refused to start:
+
+```
+Error: "HVM maintenance scheduler requires authenticated durable Hub storage, and
+this state file is not settlement ready: a chain operation is outstanding and
+holding the recovery latch. Run `hpay-hvm-local-pilot reconcile` against this
+state file with the Hub stopped, then start again."
+```
+
+The gate is unchanged and still refuses the whole process. Only the sentence is
+new, and it now names the cause and the remedy instead of neither.
+
+**The new branch used to report the opposite of what happened.**
+`decide_watchtower_action` returns `RecoveryRequired` from three unrelated
+places, and the caller reported all three with one sentence: "chain serial is
+newer than the authenticated HVM ledger". That is true of the original branch,
+where the chain serial really is ahead. It is the reverse of the truth for the
+branch this work added, a FINAL channel whose split disagrees with the head
+bill, where the serial is equal and the balances differ. An operator was being
+sent after a reorg that had not happened. Corrected 2026-08-23:
+`recovery_required_reason` re-derives the cause from the same snapshot and head
+bill the decision was made from, so a disagreeing split now names itself and
+prints both sides of the disagreement. No decision changed; only what the Hub
+says about it. Pinned in
+`watchtower_handles_stale_challenge_deadline_unknown_serial_and_reorg_snapshot`,
+which fails with the old sentence quoted back at it.
+
+**And the case that refusal creates is now named too.** A FINAL channel whose
+split disagrees with the Hub's head bill gets no automated payout at all, which
+is a case the old unconditional `4 => NoAction` did not have because it never
+claimed on any FINAL channel. The refusal is correct: on this one-directional
+rail a chain behind the head bill pays the left party more than the Hub's own
+books say it owes, and giving that away on an unexplained state is a person's
+decision. What was missing was the other half of the truth, which is that the
+left party is not stranded by it. The payout is permissionless, so they can
+trigger it themselves at any time without the Hub, and the message says so
+rather than leaving an operator to work out whether principal is at risk.
+
+**One relaxation in the claim work bought nothing, and was removed 2026-08-24.**
+`settled_elsewhere_before_signing` in `storage.rs` switched off the "lost its
+exact signed transaction" requirement for a settled-elsewhere claim that had no
+signed bytes, no transaction hash and no `submitted_unix`. No production path
+could produce that combination: both callers of
+`settle_hvm_claim_paid_elsewhere` sit downstream of points where those fields
+have already been unwrapped, one behind two `ok_or_else` guards that fail with
+"RecoveryRequired: HVM operation has no durable signed bytes", the other behind
+a submission that sets `submitted_unix`. So the carve-out never fired for real
+work and only widened what a hand-edited state file could carry past validation.
+It is gone; a settled-elsewhere claim now keeps its exact signed bytes like every
+other record past `SignatureMayExist`. The two remaining carve-outs, which let
+such a record lack a confirmed block height and confirmations, stay: a payout
+made by a third party genuinely owns no block of its own, and both are gated on
+`claim_settled_elsewhere_height`, which only `settle_hvm_claim_paid_elsewhere`
+can set and only after a freshly verified live snapshot has shown `status == 4`,
+`left_claimed == true`, the exact amount and the exact payee. The registry
+rail's identical carve-out is left alone: it has four callers rather than two,
+and proving it dead is separate work.
+
+**The durable claim path had no automated coverage at all, and that was the
+weakest part of this work. Closed 2026-08-24.** Two pure functions at the two
+ends were tested: the decision, in `hvm_activation.rs`, and the builder and
+reader, in `hvm_watchtower.rs`. Everything between them had been exercised
+exactly once, by hand, on chain 7, and nothing would have caught it if it broke.
+`crates/l2-fast-pay-hub/tests/hvm_watchtower_tick_claims.rs` now runs that
+middle, driving `hvm_watchtower_tick`, the function the shipped scheduler loop
+calls, against a mock fullnode whose mempool and contract storage are under the
+test's control:
+
+- a FINAL channel still holding the left share is claimed, submitted once,
+  resumed without rebroadcasting, confirmed against the contract's own
+  `left_claimed`, and then correctly answered `no_action`;
+- a permissionless third-party payout resolves the record on the contract's
+  evidence instead of latching recovery over somebody else's success;
+- a confirmed claim that did not move `left_claimed` paid nobody, and the
+  postcondition latches recovery;
+- an operator's `pilot-watch-...` record is named and left strictly alone, with
+  nothing broadcast.
+
+Each test reopens the durable state file afterwards, so `validate_hvm_state`
+runs its claim rules on load and a record that only passes on write does not
+survive. Red-checked twice on 2026-08-24, restoring both files by checksum
+afterwards: disabling the status-4 claim arm fails all four tests with
+`left: "none" right: "claim"`, and removing the resume-by-binding lookup fails
+three of them, one with the verbatim `state: RecoveryRequired` that was the
+lease tick's own signature.
+
+Worth recording alongside: the third branch, `_ =>` on an unhandled chain
+status, is unreachable through `decide_watchtower_action`. That function calls
+`validate_runtime_binding` first, and `node.rs` refuses any status outside
+`2..=4`. The arm is defensive and the test asserts the refusal rather than
+pretending the arm can fire.
+
+**Re-read live on 2026-08-23, after the payout.** Chain id 7 and
+`mainnet:false` re-verified from `/query/capabilities` first. The contract state
+through `/query/hpay/channel-exit`:
+
+```
+status         4          left_balance   99000000
+serial         2          left_claimed   true
+                          right_balance  1000000
+                          right_claimed  false
+contract HAC balance      1:246   (0.01 HAC)
+```
+
+Running the shipped operator command again against that state:
+
+```
+hpay-hvm-local-pilot watchtower --action monitor
 Stage: watchtower no_action
 Action: none
 ```
 
-The V1 contract does have the payout: `PermitHAC` in
-`vm/contracts/hpay_channel_exit_v1.fitsh`, guarded by `left_claimed`. So 0.99 HAC
-sits settled inside a finalized channel on a real chain, while the code that
-would release it lives on the other rail. Building an Action 14 by hand to move
-it would be a harness, not evidence, and was not done.
+That `no_action` is the second claim being refused, and it is refused four times
+over: the decision arm returns `NoAction` once `left_claimed` is true; the
+durable precondition re-reads `left_claimed` off a live snapshot immediately
+before the key is used; `validate_hvm_state` allows only one unresolved chain
+operation per binding; and `PermitHAC` itself throws `HPAY_LEFT_ALREADY_CLAIMED`.
+The same two words that used to be the defect are now the correct answer, which
+is why the printed output alone was never evidence of anything.
+
+### The Hub fee wallet is the real constraint, and nothing tops it up
+
+Driving the payout on chain 7 surfaced a second thing worth writing down,
+because it blocks every V1 watchtower action and not just the claim.
+
+The node charges `tx.main` the whole gas budget up front and refunds the unused
+part (`gas_initialize` in `protocol/src/context/gas.rs`), and the charge is
+`budget * fee / billing_size`. At the shipped CLI default `--gas-max 255`, which
+the node clamps to `TX_GAS_BUDGET_CAP_BYTE` 99 and decodes to a budget of
+111911, a claim of 209 billing bytes at a 0.01 HAC fee wants 5.3545933015 HAC in
+the Hub's wallet before it will run. The Hub held 3.3722580581 HAC, so the first
+attempt was refused by the node at submission:
+
+```
+node: [REVERT] address 12ZCnDaGiZW9cZhYombd4mhUNLYnXcBjq7 balance
+33722580581:238 is insufficient, at least 53545933015:238
+```
+
+That refusal is durable and correct, and the shipped recovery command resolves
+it once the wallet can pay:
+
+```
+hpay-hvm-local-pilot reconcile --operation-id pilot-watch-4f39dab6... \
+  --allow-exact-resubmit
+```
+
+The gap is that nothing in the product moves HAC to a Hub identity.
+`build_hvm_pilot_exact_transfer` exists in `hvm_pilot.rs` and is `pub(crate)`,
+reachable only from the registry pilot's `PrefundHub`, which sends a fixed
+`HVM_REGISTRY_DEPLOY_PROTOCOL_COST_ZHU` and nothing else. An operator whose Hub
+fee wallet runs dry has no shipped command to fill it, and a Hub with an empty
+fee wallet cannot renew a lease either, which is the one path here that destroys
+a deposit outright.
 
 ### The storage lease, driven against a real node with a real clock
 
@@ -604,7 +986,11 @@ unconfirmed for several minutes and confirmed when mining resumed. That is the
 "renewal that fails to confirm" case, and it exposed something worth writing
 down.
 
-### The scheduler renews once and then stands still until a person intervenes
+### The scheduler renewed once and then stood still, and why
+
+This was found on chain 7 and is now fixed. The symptom, the cause and the fix
+are all recorded here because the symptom is the sort that reads as a transient
+and is not one.
 
 Every one of the three runs went the same way. Tick one submits. Tick two, sixty
 seconds later, fails closed:
@@ -631,11 +1017,275 @@ here that was proven with the Hub down: the record is recoverable from the chain
 alone. It is not the owner walking out with their money, and it must not be read
 as that.
 
-An unattended Hub, on this evidence, renews once and then stands still, and the
-lease is the only path in this system that destroys a deposit outright. The
-default `--hvm-lease-threshold-blocks` is 10000 and the recovery buffer is
-months, so this is not urgent, but it is a real gap between what the scheduler is
-described as doing and what it does.
+An unattended Hub, on that evidence, renewed once and then stood still, and the
+lease is the only path in this system that destroys a deposit outright.
+
+**The cause was the operation's name, not the latch.** Signing a renewal moves
+its durable record to `Signed` and then `Submitted`, and
+`persisted_state_requires_recovery` counts both, so `refresh_recovery_gate`
+raises the process-wide `recovery_required` latch the instant the transaction
+exists. That latch is correct and stays: a signed transaction whose fate is
+unknown must stop the Hub signing beside it, which is also why
+`/v1/health` reported `settlement_ready: false` throughout. It is released by
+one thing only, that same operation reaching `Confirmed`.
+
+The only code that can carry it there is keyed to its operation id, and the id
+was bucketed to a one minute clock window while the scheduler interval is at
+least sixty seconds. So every pass after the first asked the clock for a name
+the record did not have, found nothing to resume, fell through to
+`ensure_settlement_ready`, and was refused by the latch its own submission had
+raised. The confirmation that arrived one second later had nothing left
+watching for it.
+
+**The fix is that the tick looks for its own outstanding work by channel before
+it asks the clock for a name.** `hvm_lease_channel_tick` and its registry twin
+now resume the record they left behind, rebuilt byte for byte from the durable
+copy, which reaches `run_hvm_lease_renewal`'s resume branch and through it
+`ensure_hvm_chain_reconciliation_allowed`. That door already existed for exactly
+this: it lets a latched Hub finish one operation, and only while that operation
+is the sole reason the latch is up and the request matches the durable one
+exactly. No latch is cleared on a timer, no assertion is relaxed, and no
+readiness flag is set by hand. The work simply stops being hidden from the door
+built to let it through.
+
+An operation the tick did not open is named and left alone rather than adopted,
+so an operator's own record still blocks the tick, and blocks it out loud:
+
+```
+channel 6dfb2664f38c5805 FAILED CLOSED: state: HVM chain operation
+pilot-watch-4f39dab6... is unresolved on this channel and was not opened by the
+lease tick; the tick will not drive it
+```
+
+`crates/l2-fast-pay-hub/tests/hvm_lease_tick_keeps_renewing.rs` holds the
+regression across real window boundaries: three renewals, each opened in one
+window and confirmed from a later one, with the latch asserted up while the
+transaction is outstanding and down again once it confirms, plus the registry
+twin. Reverting either half fails it on the first boundary with the original
+`state: RecoveryRequired`.
+
+**Driven on chain 7, 2026-08-23.** The tick itself, against the running
+fullnode, on this same channel `6dfb2664f38c5805`, one pass per window for 59
+consecutive windows. Read the next sentence before reading the trace: this run
+called `hvm_lease_maintenance_tick` from a private driver, not from
+`fast-pay-hub --hvm-lease-scheduler`, because the shipped binary could not boot
+against a state file that was latched at the time. It is the same public entry
+point the scheduler calls, but it is not the shipped process, and the
+distinction matters exactly here. The shipped binary was driven separately and
+that run is recorded below.
+
+```
+pass 1  window 29791914  opens hvm-lease-...-29791914  tx 6dc1f21b...  submitted
+                         settlement_ready true -> false
+pass 2..41                same operation resumed, 40 later windows, never refused
+pass 41                   confirmed at height 4366, 6 confirmations
+                         settlement_ready false -> true
+pass 42 window 29791959  opens hvm-lease-...-29791959  tx 9795802e...  submitted
+        (restart here)    resumed from the durable record after a process restart
+                          confirmed at height 4374, 6 confirmations
+pass 4  window 29791978  opens hvm-lease-...-29791978  tx 5e89d3a1...  submitted
+```
+
+Three renewals, two of them confirmed on chain and the third on the wire.
+Before the fix, pass 2 was the end of it.
+
+That trace says "restart here" and an earlier draft of this section also called
+it "one unattended process". Both cannot be true and the trace is the honest
+one: the process was restarted between renewal 2 and renewal 3, and renewal 3
+was resumed from the durable record rather than carried in memory. Surviving a
+restart is a real property and worth having; it is not the same claim as running
+unattended, and the two were run together here.
+
+**Driven again on 2026-08-23, this time by the shipped binary.** The run above
+went through a private driver, so the obvious objection is that the shipped
+process was never shown doing this. It has been now. Chain id 7 and
+`mainnet:false` re-verified from `/query/capabilities` before the run and
+throughout it. The command is the product's own, with no test hooks:
+
+```
+fast-pay-hub --listen 127.0.0.1:8796 --node-url http://127.0.0.1:8197 \
+  --state-file <private copy> --identity-dpapi-file <hub identity> \
+  --hvm-lease-scheduler --hvm-lease-interval-seconds 60 \
+  --hvm-lease-threshold-blocks 50000 --hvm-lease-periods 1 \
+  --hvm-lease-network-fee-zhu 200000 --hvm-lease-gas-max 255
+```
+
+It ran unattended for two hours and forty minutes, made 160 passes, and drove
+three complete renewal cycles. The number in the operation id is the one-minute
+clock bucket the operation was opened in; the whole point is that it stops
+changing while a transaction is outstanding, and changes again only when the
+next renewal is opened:
+
+```
+21:26:50  opens hvm-lease-...-29792006   submitted
+21:27:48  same operation id              submitted   <- old code died here
+   ... 27 further passes, each in a later one-minute window ...
+21:54:48  same operation id              confirmed        29 windows, one operation
+21:55:48  opens hvm-lease-...-29792035   submitted
+   ... 82 passes, each in a later window ...
+23:18:08  same operation id              confirmed        83 windows, one operation
+23:19:03  opens hvm-lease-...-29792118   submitted
+   ... 47 passes, each in a later window ...
+00:05:47  same operation id              confirmed        48 windows, one operation
+```
+
+Three renewals, all three opened by the Hub itself and all three confirmed on
+chain, from one process that nobody touched. Pass two of the first renewal is
+exactly where the old code returned `state: RecoveryRequired` and stopped for
+the rest of the process lifetime. Across all 160 passes the scheduler logged
+zero errors and zero failed-closed channels.
+
+`/v1/health`, sampled every twenty seconds for the whole run, changed value five
+times and no more:
+
+```
+21:27:25  settlement_ready false     renewal 1 outstanding
+21:54:59  settlement_ready true      released by renewal 1 confirming, nothing else
+21:56:01  settlement_ready false     renewal 2 outstanding
+23:18:08  settlement_ready true      released by renewal 2 confirming
+23:18:50  settlement_ready false     renewal 3 outstanding
+00:06:06  settlement_ready true      released by renewal 3 confirming
+```
+
+That flag does not stay true across a renewal and it must not. `settlement_ready`
+is false for exactly as long as a signed transaction's fate is unknown, which is
+the protection the latch exists to give. What was broken was that it went false
+once and stayed false forever; what is fixed is that it comes back, every time,
+on the confirmation alone. A run that showed it pinned true throughout would
+mean the guard had been removed rather than that the defect had been fixed.
+
+The three renewals reached the contract, read back from the node's own storage:
+`minimum_recover_blocks` went 40400 to 40700, which is exactly three lease
+periods at `--hvm-lease-periods 1`, and `minimum_live_blocks` went 46320 to
+46596.
+
+Nothing was signed or broadcast twice. The Hub's durable journal records exactly
+one `hvm_chain_signed` and one `hvm_chain_submission_started` per operation,
+against 29, 83 and 48 `hvm_chain_submitted` entries, which are the same record
+being re-persisted at the same phase by each resume rather than new
+transactions. The Hub's on-chain balance is the independent check: it moved once
+per renewal, by 0.026965 HAC each time, and not at all across the resume passes
+in between.
+
+**Fixing the wedge nearly cost the alarm that reported it.** Before the fix, a
+latched channel came back from the tick as a `None` result and the scheduler
+logged it with `tracing::error!` as "channel failed closed". After the fix the
+tick finds that operation, names it, and returns it as an ordinary response with
+`status=recovery_required`, which arrived at the `Some` arm and was logged with
+`tracing::info!` in exactly the shape of a healthy renewal. The wedge got harder
+to reach and, in the one case where it still happens, quieter to notice. That is
+a bad trade and it has been undone: `operation_needs_an_operator` in
+`hvm_scheduler.rs` now reads severity off the status, so `recovery_required`
+logs at `error!` on all three ticks with the consequence spelled out, and every
+status the tick is legitimately carrying stays at `info!`. Pinned by
+`only_the_status_an_operator_must_clear_is_logged_as_an_alert`.
+
+**One stuck channel stops lease renewal on every other channel, and that is the
+sharpest edge in this whole area.** The latch is process-wide, not per-channel.
+A channel with nothing outstanding of its own takes the create path in
+`run_hvm_lease_renewal`, which calls `ensure_settlement_ready()` and is refused
+while any other channel holds the latch up; and the resume path is no way round
+it, because `ensure_hvm_chain_reconciliation_allowed` will only drive an
+operation that is the sole reason the latch is up. So a single channel whose
+operation has reached `recovery_required`, and which therefore needs a human,
+freezes lease maintenance for every channel the Hub serves until that human
+arrives.
+
+The guard itself is right, and it should not be relaxed: a Hub with a signed
+transaction of unknown fate must not sign new money beside it. But it is worth
+stating in the same breath as the sentence elsewhere in this document that calls
+the storage lease "the only path here that destroys a deposit outright". The two
+facts together say that one wedged channel puts every other channel's deposit on
+a clock. Nothing about this changed with the tick fix, in either direction; it
+was true before and it is true now. It is recorded here because a fix whose
+subject is deposits destroyed by unrenewed leases should not leave it unsaid.
+
+**Changing the threshold flag while a renewal is outstanding stops the tick, and
+the error does not say so.** `hvm_lease_renewal_request` rebuilds every field of
+the durable request from the durable record except one: the caller supplies
+`renew_when_live_blocks_at_or_below`, and the tick supplies it from the running
+config. The authenticated request commitment covers that field, which is the
+point, since it is what proves a retry did not quietly change the request. The
+consequence is that restarting a Hub with a different
+`--hvm-lease-threshold-blocks` while an operation is still outstanding makes the
+tick fail its own self-check every pass with:
+
+```
+durable HVM lease renewal request commitment is inconsistent
+```
+
+This is recoverable and it is not a permanent wedge: setting the flag back to
+its previous value lets the tick resume, and `hpay-hvm-local-pilot reconcile`
+works either way because it drives `reconcile_hvm_watchtower` off the durable
+record and never rebuilds the request. But the message names neither the cause
+nor either remedy, and nothing in the product prints the threshold the
+outstanding operation was created with, so an operator has to already know this
+to get out of it. The guard is right; the diagnostic is not.
+
+**A renewal dropped from the mempool used to look healthy forever. Half fixed
+2026-08-24.** The tick queries the chain for its outstanding transaction; a
+transaction that is simply gone answers `Ok(None)`, which is the same answer as
+"not mined yet". The pass then reported `status=submitted` at `info!`, and would
+do that on every pass for the rest of the process lifetime while the lease it was
+supposed to renew ran down. There was no staleness check at all: `submitted_unix`
+was written in four places (`hvm_chain.rs` and `hvm_registry_chain.rs`) and the
+only two reads of it were `is_none()` guards inside a claim carve-out in
+`storage.rs`. Nothing compared it to a clock.
+
+`submitted_unix` is now carried on both chain responses and read by
+`submission_has_gone_quiet` in `hvm_scheduler.rs`. An operation that has been
+`submitted` for at least fifteen minutes is logged at `warn!` with its
+transaction hash and its age, on every one of the four tick arms, saying that
+the lease or the channel is not advancing while it stands. The threshold is far
+past "the next block is taking a while" on a chain that reaches six
+confirmations in minutes, and well inside the window where a lease can still be
+renewed by hand. Pinned in
+`only_a_submission_that_has_stopped_being_ordinary_is_called_out`, which also
+covers a clock that moved backwards.
+
+This changes no decision and rebroadcasts nothing. Resubmitting signed bytes is
+`reconcile --allow-exact-resubmit` and stays an operator's call, deliberately.
+So the Hub now says a transaction has gone quiet; it still does not act on it,
+and it still cannot tell a dropped transaction from a slow one, because the
+fullnode gives the same answer for both. A block-counted staleness threshold
+would be the stronger form and is not built.
+
+The other half is untouched. An operator still cannot ask. The Hub's own channel
+endpoint, `/v1/hvm/channel/{binding_commitment}`, returns the binding, the
+recovery bundle and the latest signed bill, and no chain-operation state at all:
+not the operation id, not the transaction hash, not how long it has been
+outstanding. Confirmed live during the run below, where the transaction hash had
+to be recovered from the Hub's journal file rather than from any read path the
+product offers. The log line is now honest; the read path still does not carry
+the question.
+
+**Still true, and separate, and worse than "the scheduler does not start".** A
+Hub restarted while an operation is outstanding does not merely skip lease
+maintenance. `fast-pay-hub.rs` gates the scheduler on
+`hub.health().settlement_ready`, which a latched state file makes false at boot,
+and the gate is a `return Err(...)` out of `main`:
+
+```rust
+if !hub.health().settlement_ready {
+    return Err("HVM maintenance scheduler requires authenticated durable Hub storage, \
+                and this state file is not settlement ready: a chain operation is \
+                outstanding and holding the recovery latch. Run \
+                `hpay-hvm-local-pilot reconcile` against this state file with the Hub \
+                stopped, then start again."
+        .into());
+}
+```
+
+So the entire Hub process refuses to start with `--hvm-lease-scheduler`. It does
+not come up and serve payments with leases unattended; it does not come up at
+all. An operator who restarts a Hub at the wrong moment gets a dead service.
+
+The gate itself is left standing, and it is not a bug: a latched state file means
+a signed transaction is outstanding whose fate nobody knows, the only way out is
+`hpay-hvm-local-pilot reconcile` with the Hub stopped, and booting into a Hub
+that cannot renew a lease would be the silent version of the same failure. What
+was wrong was the message, which named neither the cause nor the remedy. It was
+corrected on 2026-08-24 and is quoted above as it now reads.
 
 ### The one thing standing between here and a registry V2 lifecycle
 

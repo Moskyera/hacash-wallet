@@ -3,13 +3,13 @@ use sha2::{Digest, Sha256};
 use super::*;
 use crate::l1_channel_close::{
     ChannelCloseSettlement, ExpectedChannelIncarnation, L1_CHANNEL_CLOSE_SCHEMA,
-    L1ChannelCloseRequest, L1ChannelCloseResponse, close_request_commitment,
-    validate_and_cosign_channel_close, validate_channel_close,
+    L1_CHANNEL_CLOSE_VOUCHER_STATUS, L1ChannelCloseRequest, L1ChannelCloseResponse,
+    close_request_commitment, validate_and_cosign_channel_close, validate_channel_close,
 };
 use crate::node::ChannelInfo;
 use crate::storage::{
-    ChannelLifecycleStatus, L1ChannelCloseStatus, PersistedChannelLifecycle,
-    PersistedL1ChannelClose,
+    ChannelLifecycleStatus, L1ChannelCloseStatus, L1ChannelCloseVoucherStatus,
+    PersistedChannelLifecycle, PersistedL1ChannelClose, PersistedL1ChannelCloseVoucher,
 };
 const SUBMITTED_EXACT_RETRY_GRACE_SECONDS: u64 = 30;
 const L1_CLOSE_MIN_CONFIRMATIONS: u64 = 6;
@@ -92,6 +92,17 @@ impl HubState {
             {
                 existing
             } else {
+                // One channel, one Hub signature over one close. If a voucher
+                // was already issued here, the owner is holding countersigned
+                // close bytes that can land at any future height, so
+                // countersigning a cooperative close as well would put two
+                // conflicting signed closes for one channel into the world.
+                if guard.l1_channel_close_vouchers.contains_key(&channel.id) {
+                    return Err(HubError::Channel(
+                        "this channel already has a delta-zero close voucher and cannot also be closed cooperatively"
+                            .into(),
+                    ));
+                }
                 let effective_ledger = require_channel_can_freeze(
                     &guard,
                     &channel,
@@ -191,6 +202,317 @@ impl HubState {
             }
         };
         self.resume_channel_close(&operation.operation_id).await
+    }
+
+    /// Countersign one delta-zero close for one channel and hand the exact
+    /// bytes back, without freezing the channel and without broadcasting.
+    ///
+    /// This is deliberately a separate entry point from [`Self::close_channel`]
+    /// and shares none of its state. `close_channel` writes `channel_lifecycle`
+    /// at request time and refuses a second close forever after, which is its
+    /// safety property and not an oversight: it guarantees the Hub can never
+    /// hold two conflicting signed closes. Asking that path for a countersigned
+    /// close therefore permanently freezes the channel, which is exactly what a
+    /// voucher must not do, because the whole point is that the channel keeps
+    /// working afterwards.
+    ///
+    /// What this path gives up in exchange is stated plainly:
+    ///
+    /// * It is not trustless and must never be described as such. The Hub
+    ///   chooses to countersign, once, at the start of the channel's life, and
+    ///   nothing in Hacash can compel it. If it never signs, the deposit stays
+    ///   in the channel until the Hub cooperates. There is a real hostage
+    ///   window between the open confirming and the voucher arriving, because
+    ///   the Hub cannot countersign a close for a channel that does not exist
+    ///   on chain yet. That window is minimised, not argued away.
+    /// * Once the owner holds these bytes the Hub carries the whole exposure.
+    ///   The owner can spend the channel down to zero and still broadcast a
+    ///   close that refunds the full deposit recorded at open, because
+    ///   `close_channel_default` refunds the balances stored at open and the
+    ///   transaction never names any later balance. That is acceptable here
+    ///   only because the owner runs the Hub.
+    ///
+    /// The one rule that makes the exposure bounded rather than open-ended:
+    /// exactly one voucher per channel, ever, at delta zero, never refreshed.
+    /// It is enforced by [`HubPersistedState::l1_channel_close_vouchers`] being
+    /// keyed by channel ID and written under the same lock that checks it.
+    pub async fn issue_channel_close_voucher(
+        &self,
+        request: &L1ChannelCloseRequest,
+    ) -> HubResult<L1ChannelCloseResponse> {
+        self.ensure_settlement_ready()?;
+        let request_commitment = close_request_commitment(request)?;
+
+        // A dropped response must not cost the owner their exit, so replaying
+        // the exact same request returns the exact same bytes. That is not a
+        // second voucher: it is the same transaction hash, and only one copy
+        // of it can ever be mined.
+        if let Some(existing) = self.existing_close_voucher(&request.channel_id)? {
+            return self.replay_channel_close_voucher(&existing, request, &request_commitment);
+        }
+
+        let live_network = self
+            .node
+            .capabilities()
+            .await?
+            .l1_channel_network_binding()?;
+        let claimed = ExpectedChannelIncarnation {
+            channel_id: request.channel_id.clone(),
+            user_address: request.user_address.clone(),
+            hub_address: self.hub_address.clone(),
+            reuse_version: request.reuse_version,
+            open_height: request.open_height,
+        };
+        let claimed_intent =
+            validate_channel_close(request, &claimed, &live_network, crate::node::now_unix())?;
+        require_delta_zero_voucher_settlement(&claimed_intent.settlement)?;
+        self.require_mainnet_cooperative_close_ready(false).await?;
+
+        let channel = self.node.query_channel(&request.channel_id).await?;
+        let expected = expected_incarnation(&channel, request, &self.hub_address, true)?;
+        let intent =
+            validate_channel_close(request, &expected, &live_network, crate::node::now_unix())?;
+        require_delta_zero_voucher_settlement(&intent.settlement)?;
+        let original_ledger = channel_ledger_from_l1(&channel)?;
+
+        // No liquidity check and no fee check for the Hub: at delta zero
+        // nothing moves to or from the Hub, the owner pays the network fee out
+        // of their own balance at whatever future height they broadcast, and
+        // this Hub broadcasts nothing here.
+        let signer = self
+            .hub_signer
+            .as_ref()
+            .ok_or_else(|| HubError::State("Hub L1 channel signer is not configured".into()))?;
+
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?;
+
+        // Re-checked under the write lock that also performs the insert, so two
+        // concurrent requests for one channel cannot both pass.
+        if let Some(existing) = guard.l1_channel_close_vouchers.get(&channel.id).cloned() {
+            return self.replay_channel_close_voucher(&existing, request, &request_commitment);
+        }
+        if guard.channel_lifecycle.contains_key(&channel.id)
+            || guard
+                .l1_channel_closes
+                .values()
+                .any(|operation| operation.channel_id == channel.id)
+        {
+            return Err(HubError::Channel(
+                "this channel already has a cooperative close and cannot also be issued a voucher"
+                    .into(),
+            ));
+        }
+
+        let effective_ledger = require_channel_can_freeze(
+            &guard,
+            &channel,
+            &self.hub_address,
+            &original_ledger,
+            &intent.settlement,
+        )?;
+        require_untouched_delta_zero_ledger(&effective_ledger, &original_ledger)?;
+
+        let now = crate::node::now_unix();
+        let reserved = PersistedL1ChannelCloseVoucher {
+            channel_id: channel.id.clone(),
+            operation_id: request.operation_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            request_commitment: request_commitment.clone(),
+            network: live_network.network_kind.clone(),
+            chain_id: live_network.chain_id,
+            mainnet: live_network.mainnet,
+            block_1_hash: live_network.block_1_hash.clone(),
+            node_profile_id: live_network.node_profile_id.clone(),
+            network_instance_id: live_network.network_instance_id.clone(),
+            transaction_format_version: live_network.transaction_format_version,
+            hub_address: self.hub_address.clone(),
+            user_address: expected.user_address.clone(),
+            reuse_version: expected.reuse_version,
+            open_height: expected.open_height,
+            original_ledger,
+            partial_transaction_hex: request.partial_transaction_hex.clone(),
+            partial_transaction_commitment: request.partial_transaction_commitment.clone(),
+            transaction_hash: intent.transaction_hash.clone(),
+            signed_transaction_hex: None,
+            signed_transaction_commitment: None,
+            status: L1ChannelCloseVoucherStatus::SignatureMayExist,
+            created_unix: request.created_unix,
+            updated_unix: now,
+        };
+
+        // Claim the channel's one voucher slot before the signer is called. A
+        // crash between here and the next commit leaves a bytes-less entry that
+        // permanently refuses this channel a voucher. That is the intended
+        // outcome: an unrecoverable signature is refused, never replaced.
+        let mut next = guard.clone();
+        next.l1_channel_close_vouchers
+            .insert(reserved.channel_id.clone(), reserved.clone());
+        self.commit_channel_close_voucher_transition(
+            &mut guard,
+            next,
+            &reserved,
+            JournalPhase::L1CloseVoucherSignatureMayExist,
+        )?;
+
+        let signed = validate_and_cosign_channel_close(
+            request,
+            &expected,
+            &intent.settlement,
+            signer.account(),
+            &live_network,
+            crate::node::now_unix(),
+        )?;
+        if signed.transaction_hash != reserved.transaction_hash {
+            return Err(HubError::State(
+                "RecoveryRequired: close voucher transaction changed during signing".into(),
+            ));
+        }
+
+        let mut issued = reserved;
+        issued.signed_transaction_hex = Some(signed.signed_transaction_hex);
+        issued.signed_transaction_commitment = Some(signed.signed_transaction_commitment);
+        issued.status = L1ChannelCloseVoucherStatus::Issued;
+        issued.updated_unix = crate::node::now_unix();
+        let mut next = guard.clone();
+        next.l1_channel_close_vouchers
+            .insert(issued.channel_id.clone(), issued.clone());
+        self.commit_channel_close_voucher_transition(
+            &mut guard,
+            next,
+            &issued,
+            JournalPhase::L1CloseVoucherIssued,
+        )?;
+        // Stops at signed, on purpose. `submit_transaction_bound` is never
+        // called on this path; the owner decides if and when these bytes reach
+        // a chain.
+        Ok(channel_close_voucher_response(&issued))
+    }
+
+    /// The stored voucher for a channel, if it has one.
+    pub(crate) fn existing_close_voucher(
+        &self,
+        channel_id: &str,
+    ) -> HubResult<Option<PersistedL1ChannelCloseVoucher>> {
+        Ok(self
+            .inner
+            .read()
+            .map_err(|_| HubError::State("state lock poisoned".into()))?
+            .l1_channel_close_vouchers
+            .get(channel_id)
+            .cloned())
+    }
+
+    /// Serve the one voucher this channel already has, and only for the exact
+    /// request that produced it. Anything else is a request for a second
+    /// signed close and is refused rather than satisfied.
+    fn replay_channel_close_voucher(
+        &self,
+        existing: &PersistedL1ChannelCloseVoucher,
+        request: &L1ChannelCloseRequest,
+        request_commitment: &str,
+    ) -> HubResult<L1ChannelCloseResponse> {
+        if existing.request_commitment != request_commitment
+            || existing.operation_id != request.operation_id
+            || existing.channel_id != request.channel_id
+            || existing.partial_transaction_hex != request.partial_transaction_hex
+        {
+            return Err(HubError::Channel(
+                "this channel already has a close voucher; a second one would be a second signed close and is refused"
+                    .into(),
+            ));
+        }
+        // Re-prove the user authorised these exact bytes before handing the
+        // signature back, exactly as the cooperative-close replay path does.
+        // `created_unix` is the clock the request was written against.
+        let expected = ExpectedChannelIncarnation {
+            channel_id: existing.channel_id.clone(),
+            user_address: existing.user_address.clone(),
+            hub_address: existing.hub_address.clone(),
+            reuse_version: existing.reuse_version,
+            open_height: existing.open_height,
+        };
+        validate_channel_close(
+            request,
+            &expected,
+            &voucher_network_binding(existing),
+            existing.created_unix,
+        )?;
+        if existing.status != L1ChannelCloseVoucherStatus::Issued
+            || existing.signed_transaction_hex.is_none()
+        {
+            return Err(HubError::State(
+                "a close voucher signature may exist for this channel but its exact bytes are unavailable; this channel can never be issued another voucher"
+                    .into(),
+            ));
+        }
+        Ok(channel_close_voucher_response(existing))
+    }
+
+    fn commit_channel_close_voucher_transition(
+        &self,
+        guard: &mut HubPersistedState,
+        mut next_state: HubPersistedState,
+        voucher: &PersistedL1ChannelCloseVoucher,
+        phase: JournalPhase,
+    ) -> HubResult<()> {
+        // A voucher is a fresh signature, never a recovery step, so the plain
+        // settlement gate applies: a Hub in recovery signs nothing here.
+        self.ensure_settlement_ready()?;
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or_else(|| HubError::State("authenticated L2 journal is unavailable".into()))?;
+        let store = self
+            .state_store
+            .as_ref()
+            .ok_or_else(|| HubError::State("durable L2 state store is unavailable".into()))?;
+        let previous_state_commitment = state_commitment(guard)?;
+        next_state.schema_version = 1;
+        let new_state_commitment = state_commitment(&next_state)?;
+        let record = journal.append(JournalEvent {
+            wallet_scope: format!("hub:{}", self.hub_address.trim()),
+            hub_or_provider_identity: self.hub_address.trim().to_owned(),
+            channel_id: voucher.channel_id.clone(),
+            channel_reuse_version: voucher.reuse_version,
+            operation_id: voucher.operation_id.clone(),
+            operation_type: JournalOperationType::L1ChannelClose,
+            operation_phase: phase,
+            amount_units: 0,
+            sender: voucher.user_address.clone(),
+            recipient: self.hub_address.clone(),
+            previous_state_commitment,
+            new_state_commitment: new_state_commitment.clone(),
+            idempotency_key: voucher.idempotency_key.clone(),
+            request_commitment: voucher.request_commitment.clone(),
+            expected_bill_number: Some(voucher.original_ledger.bill_auto_number),
+            unsigned_state_commitment: Some(voucher.partial_transaction_commitment.clone()),
+            created_at: crate::node::now_unix(),
+        })?;
+        next_state.journal_sequence = record.entry_sequence;
+        next_state.journal_head = record.entry_hash.clone();
+        next_state.state_commitment = new_state_commitment.clone();
+        if let Err(error) = store.save(&next_state) {
+            self.recovery_required.store(true, Ordering::Release);
+            return Err(HubError::State(format!(
+                "RecoveryRequired: close voucher journal advanced but state was not durable: {error}"
+            )));
+        }
+        if let Err(error) = journal.write_checkpoint(&JournalHead {
+            sequence: record.entry_sequence,
+            entry_hash: record.entry_hash,
+            state_commitment: new_state_commitment,
+        }) {
+            self.recovery_required.store(true, Ordering::Release);
+            return Err(HubError::State(format!(
+                "RecoveryRequired: close voucher state persisted but checkpoint did not: {error}"
+            )));
+        }
+        *guard = next_state;
+        self.refresh_recovery_gate(guard);
+        Ok(())
     }
 
     pub fn channel_close_status(&self, operation_id: &str) -> HubResult<L1ChannelCloseResponse> {
@@ -1197,7 +1519,88 @@ fn channel_close_response(operation: &PersistedL1ChannelClose) -> L1ChannelClose
         open_height: operation.open_height,
         status: operation.status.public_name().into(),
         transaction_hash: operation.transaction_hash.clone(),
+        // The Hub owns the broadcast on the cooperative-close path, so the
+        // signed bytes stay here.
+        signed_transaction_hex: None,
+        signed_transaction_commitment: None,
     }
+}
+
+fn channel_close_voucher_response(
+    voucher: &PersistedL1ChannelCloseVoucher,
+) -> L1ChannelCloseResponse {
+    L1ChannelCloseResponse {
+        schema: L1_CHANNEL_CLOSE_SCHEMA.into(),
+        operation_id: voucher.operation_id.clone(),
+        channel_id: voucher.channel_id.clone(),
+        reuse_version: voucher.reuse_version,
+        open_height: voucher.open_height,
+        status: L1_CHANNEL_CLOSE_VOUCHER_STATUS.into(),
+        transaction_hash: Some(voucher.transaction_hash.clone()),
+        signed_transaction_hex: voucher.signed_transaction_hex.clone(),
+        signed_transaction_commitment: voucher.signed_transaction_commitment.clone(),
+    }
+}
+
+fn voucher_network_binding(
+    voucher: &PersistedL1ChannelCloseVoucher,
+) -> crate::l1_channel::L1ChannelNetworkBinding {
+    crate::l1_channel::L1ChannelNetworkBinding {
+        network_kind: voucher.network.clone(),
+        chain_id: voucher.chain_id,
+        mainnet: voucher.mainnet,
+        block_1_hash: voucher.block_1_hash.clone(),
+        node_profile_id: voucher.node_profile_id.clone(),
+        network_instance_id: voucher.network_instance_id.clone(),
+        transaction_format_version: voucher.transaction_format_version,
+    }
+}
+
+/// A voucher may only ever be the bare two-action form, which refunds the
+/// distribution recorded at open and moves nothing else.
+///
+/// An Action 14 principal transfer is refused outright rather than settled,
+/// because a voucher is signed once and lives forever: a transfer signed today
+/// would still be spendable after any number of later payments, and would then
+/// describe a settlement that no longer matches anything.
+fn require_delta_zero_voucher_settlement(settlement: &ChannelCloseSettlement) -> HubResult<()> {
+    match settlement {
+        ChannelCloseSettlement::OriginalDistribution => Ok(()),
+        ChannelCloseSettlement::PrincipalTransfer { .. } => Err(HubError::Channel(
+            "a channel-close voucher must be the delta-zero original distribution and cannot carry a principal transfer"
+                .into(),
+        )),
+    }
+}
+
+/// The proof that no payment has been made: the authoritative L2 ledger still
+/// equals the distribution L1 recorded at open, the whole deposit on the
+/// owner's side and nothing on the Hub's.
+///
+/// A voucher is only ever issued at delta zero, so this is the moment the
+/// channel is worth exactly what the voucher pays out, and the Hub's exposure
+/// is at its smallest it will ever be.
+fn require_untouched_delta_zero_ledger(
+    effective: &crate::storage::ChannelLedger,
+    original: &crate::storage::ChannelLedger,
+) -> HubResult<()> {
+    if effective != original {
+        return Err(HubError::Channel(
+            "a channel-close voucher requires the authoritative L2 ledger to still equal the distribution recorded at open"
+                .into(),
+        ));
+    }
+    if original.right_balance_mei != crate::amount::HacAmount::ZERO {
+        return Err(HubError::Channel(
+            "a channel-close voucher requires a zero Hub-side balance at open".into(),
+        ));
+    }
+    if original.left_balance_mei == crate::amount::HacAmount::ZERO {
+        return Err(HubError::Channel(
+            "a channel-close voucher requires a funded owner-side deposit".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn ledger_commitment(ledger: &crate::storage::ChannelLedger) -> HubResult<String> {
@@ -1224,6 +1627,63 @@ mod tests {
     use crate::storage::{
         ChannelLedger, L1ChannelOpenStatus, PendingSettlement, PersistedL1ChannelOpen,
     };
+
+    #[test]
+    fn a_voucher_requires_the_bare_delta_zero_form_and_an_untouched_ledger() {
+        assert!(
+            require_delta_zero_voucher_settlement(&ChannelCloseSettlement::OriginalDistribution)
+                .is_ok()
+        );
+        let transfer = ChannelCloseSettlement::PrincipalTransfer {
+            from_address: "one".into(),
+            to_address: "two".into(),
+            amount_millimeis: 1,
+        };
+        assert!(
+            require_delta_zero_voucher_settlement(&transfer)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot carry a principal transfer")
+        );
+
+        let original = ChannelLedger {
+            left_balance_mei: HacAmount::from_millimeis(10),
+            right_balance_mei: HacAmount::ZERO,
+            bill_auto_number: 0,
+        };
+        assert!(require_untouched_delta_zero_ledger(&original, &original).is_ok());
+
+        let moved = ChannelLedger {
+            left_balance_mei: HacAmount::from_millimeis(9),
+            right_balance_mei: HacAmount::from_millimeis(1),
+            bill_auto_number: 1,
+        };
+        assert!(require_untouched_delta_zero_ledger(&moved, &original).is_err());
+
+        let hub_funded = ChannelLedger {
+            left_balance_mei: HacAmount::from_millimeis(10),
+            right_balance_mei: HacAmount::from_millimeis(1),
+            bill_auto_number: 0,
+        };
+        assert!(
+            require_untouched_delta_zero_ledger(&hub_funded, &hub_funded)
+                .unwrap_err()
+                .to_string()
+                .contains("zero Hub-side balance")
+        );
+
+        let empty = ChannelLedger {
+            left_balance_mei: HacAmount::ZERO,
+            right_balance_mei: HacAmount::ZERO,
+            bill_auto_number: 0,
+        };
+        assert!(
+            require_untouched_delta_zero_ledger(&empty, &empty)
+                .unwrap_err()
+                .to_string()
+                .contains("funded owner-side deposit")
+        );
+    }
 
     #[test]
     fn submitted_retry_uses_a_bounded_grace_period() {
