@@ -185,6 +185,7 @@ export default function AgentWalletApp({
       setBusy(false);
     }
   }, []);
+  const [showCreate, setShowCreate] = useState(false);
   const uiState = agentWalletUiState(runtime, overview);
 
   if (uiState === "loading") {
@@ -274,9 +275,53 @@ export default function AgentWalletApp({
     );
   }
 
+  if ((uiState === "locked" || !overview?.unlocked) && showCreate) {
+    // An Agent Wallet pins its network at creation and can never be moved to
+    // another one: the address, the channel binding and the voucher are all
+    // validated against it. So somebody who made one for the local pilot was
+    // locked out of mainnet permanently, because the create form was only
+    // reachable at zero wallets and nothing in the app deletes or resets one.
+    // The store has always been a BTreeMap with no limit and `create_wallet`
+    // has no one-wallet rule; the whole restriction was this screen.
+    return (
+      <AgentShell onOpenPersonal={onOpenPersonal}>
+        <p className="agent-warning" role="note">
+          You already have an Agent Wallet. This makes an additional one, which
+          is what you need when the one you have is on a different network: an
+          Agent Wallet cannot be moved between networks after it is created.
+          The existing wallet is untouched and stays in the list.
+        </p>
+        <button type="button" onClick={() => setShowCreate(false)}>
+          Back to unlocking the wallet you have
+        </button>
+        <CreateAgentWallet
+          busy={busy}
+          error={error}
+          onCreate={(input) =>
+            run(async () => {
+              const created = await agentWalletApi.create(
+                input.passphrase,
+                input.networkMode,
+                input.nodeUrl,
+                input.blockOneFingerprint,
+                input.mainnetPilotAcknowledgement,
+              );
+              setInfo(`Agent Wallet ${created.address} was created and remains locked.`);
+              setShowCreate(false);
+              await refreshRuntime();
+            })
+          }
+        />
+      </AgentShell>
+    );
+  }
+
   if (uiState === "locked" || !overview?.unlocked) {
     return (
       <AgentShell onOpenPersonal={onOpenPersonal}>
+        <button type="button" onClick={() => setShowCreate(true)}>
+          Create another Agent Wallet
+        </button>
         <UnlockAgentWallet
           wallets={runtime.wallets}
           selected={selected}

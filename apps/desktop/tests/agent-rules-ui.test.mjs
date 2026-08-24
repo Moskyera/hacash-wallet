@@ -287,3 +287,21 @@ test("the payment predicate keeps every prerequisite", () => {
   assert.match(agentAppSource, /paymentBlockers\.map/);
   assert.match(agentAppSource, /paymentBlockers\.length === 0 \? "Ready"/);
 });
+
+test("an Agent Wallet on the wrong network does not lock a person out for good", () => {
+  // An Agent Wallet pins its network at creation and can never be moved:
+  // address, channel binding and voucher all validate against it. The create
+  // form was reachable only at zero wallets, and nothing in the app deletes or
+  // resets one, so somebody who made a local-pilot wallet could never reach
+  // mainnet. The store is a BTreeMap with no limit and create_wallet has no
+  // one-wallet rule; the entire restriction was this one screen. It cost a
+  // live mainnet setup a manual directory move.
+  assert.match(agentAppSource, /const \[showCreate, setShowCreate\] = useState\(false\)/);
+  assert.match(agentAppSource, /Create another Agent Wallet/);
+  assert.match(agentAppSource, /setShowCreate\(true\)/);
+  // And the reason is on screen, because "create another" without saying why
+  // reads as a footgun rather than the way out of a dead end.
+  assert.match(agentAppSource, /cannot be moved between networks after it is created/);
+  // The wallet they already have must survive it.
+  assert.match(agentAppSource, /existing wallet is untouched/);
+});
