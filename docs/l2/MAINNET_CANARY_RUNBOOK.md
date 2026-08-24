@@ -79,6 +79,60 @@ For Desktop Personal and Mobile Personal separately:
 Stop if an application offers to open a second channel, changes an identifier,
 or reports ready before six confirmations.
 
+## Phase 2b: take the close voucher, before paying anything
+
+This phase did not exist when this runbook was written, because the voucher did
+not exist. It belongs here and nowhere else: **after the open confirms and
+before the first payment.** Doing it in this order is what turns the deposit
+from a hostage into something you can recover alone.
+
+Why. Hacash has no unilateral close. `channel_close` requires both signatures
+and there is no challenge action, so a channel normally opens only if the Hub
+later agrees to close it. A voucher is one close the Hub has already signed and
+handed to you. Nothing binds it to a submitter and nothing expires it, so you
+can broadcast it yourself, at any future height, with the Hub gone.
+
+For each channel opened in Phase 2:
+
+1. Take the voucher as soon as the wallet reports six confirmations. Do not
+   make a payment first.
+2. Confirm the wallet accepted it. It verifies the bytes itself and must not be
+   trusted on the Hub's word: exactly two actions `[ChainAllow, ChannelClose]`,
+   no principal transfer present, the right chain, the right channel, you as the
+   fee payer, the bytes hashing to the claimed hash, exactly two signatures, and
+   both verified against your address and the Hub's.
+3. Record the voucher transaction hash and the SHA-256 of the exact bytes.
+4. Confirm the channel is **still open and still payable**. A voucher must not
+   freeze it. If the channel went unusable, stop: something took the
+   cooperative close path instead.
+5. Back the wallet up, restore it into a separate empty store, and confirm the
+   restored wallet holds the same hash and the same bytes. A voucher that does
+   not survive a restore is not an exit.
+
+Stop conditions for this phase, all of them final:
+
+- The Hub refuses to countersign. Do not make any payment. The deposit is only
+  recoverable with the Hub's cooperation until a voucher exists, so treat a
+  refusal or a silence here as an incident and close cooperatively while the Hub
+  is still answering.
+- The Hub offers a second voucher for the same channel. Exactly one may ever
+  exist. A Hub that issues two is not running this build and must not be funded.
+- The Hub issues a voucher that carries a transfer, or issues one after a
+  payment. Both are refused by a correct Hub and by the wallet.
+
+The trust, undressed, because this phase is where it is decided. The Hub must
+sign once and nothing in Hacash can compel it. There is a real window between
+the open confirming and the voucher arriving in which the deposit depends
+entirely on the Hub, and this runbook cannot remove that window, only keep it
+to minutes. After the voucher exists the exposure moves onto the Hub: you can
+spend the channel down and still recover the balance recorded at open. That is
+acceptable only while you run the Hub yourself. It stops being acceptable the
+moment the Hub belongs to somebody else.
+
+Evidence that this works on a real chain, with the Hub killed and the wallet
+restored from backup, is in `docs/l2/CHAIN7-CLOSE-VOUCHER-EXIT.md`. That was
+chain 7, not mainnet.
+
 ## Phase 3: Personal Fast Pay in both directions
 
 Execute exactly:
@@ -152,6 +206,13 @@ Any lease, balance, serial, contract hash, challenge deadline or network
 identity mismatch is a hard failure.
 
 ## Phase 6: cooperative L1 close
+
+If a cooperative close cannot be obtained, the Phase 2b voucher is the
+fallback and needs nothing from the Hub. Broadcast it through your own node.
+It pays you the balance recorded at open, so any amount already spent through
+the channel comes back to you and the Hub loses what it earned. Record that as
+an incident rather than a clean close.
+
 
 Close the Desktop Personal, Mobile Personal and Agent channels one at a time.
 
