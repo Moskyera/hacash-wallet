@@ -63,6 +63,102 @@ function capRow(label: string, value: string | null) {
  * again and gated again at the signing boundary, so a green card here grants
  * nothing.
  */
+/**
+ * A plain sentence for each blocker a Hub can name.
+ *
+ * The identifiers stay on screen. They are what an operator greps for and what
+ * a person quotes when they ask for help, and summarising them away is how a
+ * wrong cause sends somebody off to change providers when nothing was wrong
+ * with the provider. So this ADDS a sentence beside the identifier rather than
+ * replacing it, and an identifier this table does not know still shows raw:
+ * a Hub that grows a new blocker must never have it silently disappear here.
+ */
+const BLOCKER_SENTENCES: Array<[string, string]> = [
+  [
+    "fullnode_below_pinned_mainnet_checkpoint_",
+    "The full node behind this Hub has not caught up to the height where channel actions became valid. It needs to finish syncing.",
+  ],
+  [
+    "fullnode_missing_required_channel_open_action_2",
+    "The full node behind this Hub does not accept channel opening, so no channel can be created at all.",
+  ],
+  [
+    "fullnode_missing_required_cooperative_close_action_3",
+    "The full node behind this Hub does not accept channel closing, so a channel could be opened and then not closed.",
+  ],
+  [
+    "fullnode_does_not_report_verified_registry_unilateral_exit",
+    "The node cannot confirm a deployed exit contract, so there is no way out of a channel except this Hub co-signing.",
+  ],
+  [
+    "wallet_cannot_build_a_unilateral_exit_without_the_hub",
+    "Your wallet cannot build a way out on its own. Take a close voucher before you pay anything, and your deposit stops depending on this Hub staying reachable.",
+  ],
+  [
+    "unilateral_l1_dispute_path_is_not_ready",
+    "There is no dispute path on the chain, so a disagreement cannot be settled unless this Hub agrees to settle it.",
+  ],
+  [
+    "no_watcher_answers_for_an_offline_owner",
+    "Nobody is watching on your behalf while you are away. Nothing will act for you until you come back.",
+  ],
+  [
+    "external_monotonic_rollback_anchor_is_not_ready",
+    "No independent witness is watching this Hub, so a Hub restored from an older backup would not be caught by anything outside itself.",
+  ],
+  [
+    "rollback_anchor_channels_latched_in_refusal",
+    "This Hub has frozen channels because its own records went backwards. It needs its operator before it should be trusted again.",
+  ],
+  [
+    "hub_signer_authenticated_storage_or_recovery_gate_is_not_ready",
+    "This Hub cannot prove its signing key and its records are intact, so it should not be handed a deposit.",
+  ],
+  [
+    "mainnet_detected_but_deployment_profile_is_not_mainnet_pilot",
+    "This Hub is pointed at real Hacash while configured as a test deployment, so the limits and checks it is running are not the mainnet ones.",
+  ],
+  [
+    "official_channelpay_mainnet_profile_not_enabled",
+    "This Hub has not turned on the mainnet channel rail, so it cannot carry real value yet.",
+  ],
+  [
+    "mainnet_pilot_user_allowlist_is_not_configured",
+    "This Hub has no list of who may use it. Ask the operator to add your address, because a Hub will not publish who is on its list.",
+  ],
+  [
+    "mainnet_pilot_admission_policy_not_evaluated",
+    "This Hub has not worked out who it will serve, so it cannot say whether it would accept you.",
+  ],
+  [
+    "mainnet_pilot_aggregate_tvl_could_not_be_verified",
+    "This Hub cannot total what it already holds, so it cannot tell whether your deposit would push it past its own ceiling.",
+  ],
+];
+
+export function explainBlocker(blocker: string): string | null {
+  for (const [key, sentence] of BLOCKER_SENTENCES) {
+    if (blocker === key || blocker.startsWith(key)) return sentence;
+  }
+  return null;
+}
+
+function BlockerList({ blockers }: { blockers: string[] }) {
+  return (
+    <ul className="muted small">
+      {blockers.map((blocker) => {
+        const sentence = explainBlocker(blocker);
+        return (
+          <li key={blocker}>
+            <code>{blocker}</code>
+            {sentence ? <div>{sentence}</div> : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 export function HubDeclarationCard({
   declaration,
 }: {
@@ -162,11 +258,7 @@ export function HubDeclarationCard({
           <p className="small">
             <strong>What this Hub says is stopping it:</strong>
           </p>
-          <ul className="muted small">
-            {declaration.blockers.map((blocker) => (
-              <li key={blocker}>{blocker}</li>
-            ))}
-          </ul>
+          <BlockerList blockers={declaration.blockers} />
         </>
       )}
 
@@ -175,11 +267,7 @@ export function HubDeclarationCard({
           <p className="small">
             <strong>What this Hub discloses but does not block on:</strong>
           </p>
-          <ul className="muted small">
-            {declaration.disclosed_blockers.map((blocker) => (
-              <li key={blocker}>{blocker}</li>
-            ))}
-          </ul>
+          <BlockerList blockers={declaration.disclosed_blockers} />
         </>
       )}
 
