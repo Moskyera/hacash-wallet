@@ -45,6 +45,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+// Only the Windows funding path drives a second WalletService; the
+// non-Windows `fund_owner_address` panics on the DPAPI requirement.
+#[cfg(windows)]
 use hacash_wallet_core::WalletService;
 use hacash_wallet_core::account::WalletAccount;
 use hacash_wallet_core::l1_channel_close_safety::verify_channel_close_voucher_bytes;
@@ -60,6 +63,7 @@ use crate::service::AgentAuthorization;
 use crate::service::l2::AgentChannelCloseVoucherPhase;
 
 const OWNER_PASSPHRASE: &str = "chain7 live voucher owner passphrase";
+#[cfg(windows)]
 const FUNDER_PASSPHRASE: &str = "chain7 live voucher funder passphrase";
 
 fn optional_env(name: &str, fallback: &str) -> String {
