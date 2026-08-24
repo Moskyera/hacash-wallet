@@ -151,12 +151,34 @@ fn native_rail_preflight_against_the_live_pilot_node_and_a_live_hub() {
             serde_json::to_string_pretty(&report).unwrap()
         );
 
-        // Chain 7 is not mainnet, so this must refuse. If it ever passed here,
-        // the identity clause would be the thing that had broken.
-        assert_eq!(
-            report.verdict,
-            PreflightVerdict::NotPass,
-            "a mainnet preflight must never pass against the chain 7 pilot node"
-        );
+        // The assertion depends on what the node actually is, because this
+        // harness is pointed at a real mainnet node as readily as at the pilot.
+        //
+        // Against anything that is not mainnet, a mainnet preflight MUST
+        // refuse, and the identity clause is what refuses it. That is the
+        // safety property and it is the reason this test exists.
+        //
+        // Against real mainnet a pass is the correct answer, and asserting
+        // NotPass unconditionally turned the right result into a failure. It
+        // did exactly that the first time this was run against a synced
+        // mainnet node: every one of the nineteen fatal checks passed and the
+        // test reported FAILED.
+        let is_mainnet = observations
+            .capabilities
+            .as_ref()
+            .is_ok_and(|caps| caps.chain.mainnet && caps.chain.id == 0);
+        if is_mainnet {
+            assert_eq!(
+                report.verdict,
+                PreflightVerdict::Pass,
+                "a synced mainnet node with a healthy Hub should pass; if this                  fires, read the failed item rather than the verdict"
+            );
+        } else {
+            assert_eq!(
+                report.verdict,
+                PreflightVerdict::NotPass,
+                "a mainnet preflight must never pass against a node that is not                  mainnet"
+            );
+        }
     });
 }
