@@ -230,84 +230,102 @@ could never fund. Raise --mainnet-max-aggregate-tvl-hac-zhu to at least
 
 If you see that, the Hub is doing its job.
 
-## Step 6: point the wallet
+## Step 6: build the app with the feature that carries the exit
 
-Open the wallet. Settings, node URL:
+**Do not use a plain `yarn tauri build`.** `apps/desktop/src-tauri/Cargo.toml`
+has `default = ["custom-protocol"]`, and the exit lives behind a feature that is
+not in it. A default build registers the voucher commands and then answers
+`Agent channel close is disabled in this build`, which is a sentence you find
+out about after your deposit is already on chain.
+
+Build it the way the release workflow does:
+
+```
+cd apps/desktop
+node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis,msi -- --locked --features agent-wallet-bounded-mainnet-pilot
+```
+
+Verify the feature actually landed, rather than trusting the flag. The check is
+that the disabled-branch sentence is **absent** from the binary:
+
+```
+grep -a "Agent channel close is disabled in this build" release/hacash-wallet.exe
+```
+
+No match means the exit is compiled in. A match means it is not, whatever the
+command line said.
+
+## Step 7: THE EXIT IS IN THE AGENT WALLET, NOT THE MAIN FAST PAY SCREEN
+
+This is the correction that matters most on this page, and an earlier version of
+it got this wrong.
+
+Every voucher command is named `agent_wallet_*` and lives in
+`crates/wallet-tauri-common/src/agent_commands.rs`. The main wallet has
+`hub_declaration` and the preflight, both read only, and **no way to take or
+broadcast a voucher at all**.
+
+So a channel opened on the main wallet's Fast Pay screen has **no unilateral
+exit**. The money leaves only if the Hub co-signs a cooperative close. That is
+the exact thing this whole design exists to avoid.
+
+Use the **Agent Wallet**. It is a separate wallet with its own address, its own
+key and its own channel, and it is the only one that can hold an exit.
+
+Taking the voucher does **not** need a paired phone.
+`take_l2_channel_close_voucher` requires an active session, the right network
+and an active channel binding. The phone requirement is on *approving payments*,
+not on getting your way out.
+
+## Step 8: point the wallet, and put the Agent Wallet address on the Hub
+
+Settings, node URL:
 
 ```
 http://127.0.0.1:8080
 ```
 
-Loopback HTTP is deliberately allowed. Remote plaintext HTTP is refused, and
-that refusal is one of the few things standing between you and somebody else
-choosing your transaction bytes.
+Loopback HTTP is deliberately allowed. Remote plaintext HTTP is refused.
 
-On the Fast Pay screen, Hub API URL:
+Then create the Agent Wallet and read its address. It is **not** your main
+wallet's address, and this catches people: the Hub's `--mainnet-allowed-users`
+must contain the **Agent Wallet's** address, so restart the Hub with it before
+any money moves. A Hub does not publish its allowlist, so the wrong address here
+surfaces as a refusal at your first open and not before.
 
-```
-http://127.0.0.1:8790
-```
+Fund the Agent Wallet address with the deposit plus a little for fees.
 
-A phone cannot host the node, so a phone needs an HTTPS address for both. Set
-the desktop up first.
+## Step 9: open the channel, and take the exit
 
-## Step 7: press the check
+Open with **0.1 HAC**. Not 7. Not 1.
 
-Desktop: Fast Pay, under "Turn Fast Pay ON", the button above "Enable Fast Pay".
-Mobile: the Fast Pay channel screen, under Setup, above "Preview channel open".
+Then, in the Agent Wallet, find **Your way out** and press **Ask the hub for the
+exit**.
 
-It sends five read only requests. It signs nothing, unlocks nothing and
-broadcasts nothing.
+You cannot forget this step, and that is by design. Until you hold the voucher
+the screen says so and the wallet **refuses to make Fast Pay payments**:
 
-- **NOT READY**: stop. Fix what the item names. An item marked
-  "FATAL, NOT CHECKED" counts as failed, because a question nobody answered is
-  not a question that came back clean.
-- **READY**: go on, and re run it at the top of Step 8. The answer goes stale in
-  about five minutes.
+> You do not hold a signed exit for this channel yet. Until you do, this wallet
+> will not make Fast Pay payments, because the deposit is on chain and the only
+> way to get it back is to ask the hub to close the channel.
 
-Read the block titled "What this check cannot tell you, whatever colour it is".
-Green is a statement about infrastructure at one instant. It is not a statement
-that your money is safe.
+Between the deposit confirming and the voucher arriving there is a real gap
+where you have no leverage, because the Hub cannot countersign a channel that
+does not exist yet. Keep it short. Treat Hub silence inside it as an incident.
 
-## Step 8: open the channel, with 0.1 HAC
+The wallet verifies the voucher before storing it: it decodes the bytes,
+requires exactly the two actions, requires that no transfer is present, checks
+it names your channel and your chain, checks the hash, and verifies **both**
+signatures cryptographically. It takes the Hub's word for nothing.
 
-Not 7. Not 1. **0.1 HAC.**
+Once stored you hold a transaction that refunds your whole deposit to you and
+nothing to the Hub, never expires, can be broadcast by you alone, and pays its
+own fee out of the refund.
 
-Preview the open, read the reviewed transaction, and confirm. Wait for
-confirmations. The deposit is now on chain.
+**One voucher per channel, ever.** Both sides refuse a second.
 
-**This is the hostage window.** Between here and Step 9 you have no way out that
-does not need the Hub. It exists because the Hub cannot countersign a channel
-that does not yet exist. Keep it short and treat Hub silence here as an
-incident, not a delay.
-
-## Step 9: take the voucher, before you pay anybody
-
-**Do this before the first payment. Not after.**
-
-Take the close voucher. The wallet verifies it before storing it: it decodes the
-bytes, requires exactly the two actions, requires that no transfer is present,
-checks it names your channel and your chain, checks the hash, and verifies
-**both** signatures cryptographically. It does not take the Hub's word for any
-of it.
-
-Once it is stored you hold a transaction that:
-
-- refunds your whole deposit to you and nothing to the Hub;
-- never expires, because the chain has no lower bound on transaction age;
-- can be broadcast by you alone, because nothing binds it to a submitter;
-- pays its own fee out of the refund, so you need no other balance to escape.
-
-The Hub cannot revoke it, cannot expire it, cannot redirect it and cannot alter
-it. Those are consensus properties, not promises.
-
-**One voucher per channel, ever.** Both the Hub and the wallet refuse a second.
-That is deliberate: several valid closes for one channel would let you pick the
-one paying you most, which would be pure loss to the Hub for no gain to you.
-
-Back the wallet up now. The voucher travels in the encrypted backup and it has
-been proven to survive a close, a backup and a restore. A voucher you cannot
-restore is not a way out.
+Back the wallet up now. The voucher travels in the encrypted backup and has been
+proven to survive a close, a backup and a restore.
 
 ## Step 10: use it, and know what is true
 
