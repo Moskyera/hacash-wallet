@@ -11,6 +11,9 @@
 /// file for a string: each test either watches what reaches `invoke` or reads
 /// what actually renders.
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -292,5 +295,30 @@ describe("the bounded pilot consent ceremony", () => {
       } as unknown as FastPayProps["settings"],
     });
     expect(markup).not.toContain("Bounded mainnet pilot");
+  });
+});
+
+describe("adopting a Hub never fails silently", () => {
+  // The Hub was configured, running and healthy on mainnet, and pressing
+  // "Use this hub" did nothing at all: no save, no error, no toast. The
+  // handler returned early on three separate conditions and said nothing on
+  // any of them, so the only way to find out that l2_hub_url was still empty
+  // was to read the settings file off disk.
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "components/HubDiscoveryPanel.tsx"),
+    "utf8",
+  );
+
+  it("explains every refusal instead of returning in silence", () => {
+    // No bare `return;` may sit directly under one of the guard conditions.
+    expect(source).not.toMatch(
+      /if \(!declaration \|\| !declaration\.reachable \|\| !declaration\.hub_address\) return;/,
+    );
+    expect(source).not.toMatch(/if \(!entry\.online\) return;/);
+    // Each of the four reasons a person can hit must name itself.
+    expect(source).toMatch(/Check the provider first/);
+    expect(source).toMatch(/did not answer/);
+    expect(source).toMatch(/did not publish an on-chain address/);
+    expect(source).toMatch(/not answering, so it was not saved/);
   });
 });
