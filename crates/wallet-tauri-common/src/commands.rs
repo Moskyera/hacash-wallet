@@ -502,6 +502,47 @@ pub async fn wallet_hub_declaration(
     serde_json::to_value(declaration).map_err(|e| e.to_string())
 }
 
+/// Run the read-only mainnet preflight for the native ChannelPay rail with a
+/// close voucher, and return the whole report.
+///
+/// Read-only, and it stays that way by never calling a function that can
+/// write: five GETs and a pure judgement. It signs nothing, unlocks nothing,
+/// mutates nothing and broadcasts nothing, and it does not require an unlocked
+/// wallet.
+///
+/// Every argument is optional and falls back to what this wallet already
+/// holds. A missing one yields a red item with a reason rather than an error,
+/// because a preflight that throws tells a person less than one that reports.
+///
+/// This exists because the only preflight before it checked the HVM
+/// shared-registry rail - `features.hvm`, `contract_state_leasing`, actions
+/// 40/41/44, and a verified on-chain registry deployment - which the native
+/// rail never touches, and it was reachable only through `cargo run`. A wallet
+/// owner has an app, not a toolchain.
+#[tauri::command]
+pub async fn wallet_native_rail_preflight(
+    node_url: Option<String>,
+    hub_url: Option<String>,
+    hub_address: Option<String>,
+    owner_address: Option<String>,
+    channel_deposit_hac: String,
+    payment_hac: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let report = svc
+        .native_rail_preflight(
+            node_url,
+            hub_url,
+            hub_address,
+            owner_address,
+            channel_deposit_hac,
+            payment_hac,
+        )
+        .await;
+    serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn wallet_change_passphrase(
     old_passphrase: String,

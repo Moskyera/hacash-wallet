@@ -7,6 +7,7 @@ import {
   type FastPayInboxItem,
   type FastPayStatus,
   type HubDiscoveryEntry,
+  type NativeRailPreflight,
   type WalletSettings,
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
@@ -28,8 +29,20 @@ import {
   FAST_PAY_MAINNET_CEILINGS,
   FAST_PAY_MAINNET_CONSENT,
   MAINNET_SIGNING_TRANSPORT_NOTICE,
+  NativeRailPreflightCard,
   mainnetSigningTransportIsEligible,
+  preflightShowsPass,
 } from "@hacash/wallet-ui";
+
+/**
+ * The payment the preflight judges the Hub's per-payment cap against.
+ *
+ * 0.1 HAC, the single payment this bounded pilot is sized for. Fixed rather
+ * than a field, because the cap question is "will this Hub take the payment I
+ * am about to make", and a larger invented number would produce a red item for
+ * a payment nobody intends to send.
+ */
+const FAST_PAY_PREFLIGHT_PAYMENT_HAC = "0.1";
 
 type Props = {
   fastPay: FastPayStatus | null;
@@ -70,6 +83,8 @@ export default function FastPayChannelScreen({
   // able to ask for the passphrase. Turning it off needs nothing.
   const [mainnetPilotPassphrase, setMainnetPilotPassphrase] = useState("");
   const [preview, setPreview] = useState<ChannelSetupPreview | null>(null);
+  const [preflight, setPreflight] = useState<NativeRailPreflight | null>(null);
+  const [preflightRunning, setPreflightRunning] = useState(false);
   const [inboxProbe, setInboxProbe] = useState<AsyncProbe<FastPayInboxItem[]>>(
     () => loadingProbe([]),
   );
@@ -195,6 +210,33 @@ export default function FastPayChannelScreen({
     onToast("Channel open submitted (" + tx.slice(0, 12) + "…)", "success");
     await loadChannel();
     await onRefresh();
+  }
+
+  /**
+   * Read-only. Signs nothing, unlocks nothing, broadcasts nothing.
+   *
+   * It sends the deposit actually typed above, so the Hub's declared caps are
+   * judged against the real number rather than a placeholder.
+   */
+  async function runPreflight() {
+    setPreflightRunning(true);
+    try {
+      setPreflight(
+        await api.nativeRailPreflight({
+          nodeUrl: settings?.node_url,
+          hubUrl,
+          hubAddress,
+          ownerAddress: userAddress ?? undefined,
+          channelDepositHac: userDeposit,
+          paymentHac: FAST_PAY_PREFLIGHT_PAYMENT_HAC,
+        }),
+      );
+    } catch (error) {
+      setPreflight(null);
+      onToast(formatInvokeError(error), "error");
+    } finally {
+      setPreflightRunning(false);
+    }
   }
 
   async function handleOpenChannel() {
@@ -608,6 +650,26 @@ export default function FastPayChannelScreen({
               setPreview(null);
             }}
           />
+          <NativeRailPreflightCard
+            report={preflight}
+            running={preflightRunning}
+            disabled={busy}
+            onRun={() => void runPreflight()}
+          />
+          {/*
+            The preview and open buttons are NOT disabled on a red preflight.
+            It is a read-only opinion about the infrastructure, not a gate, and
+            every gate it previews runs again for real inside the open. Wiring
+            the button to it would swap a real refusal carrying a reason for a
+            greyed-out control carrying none.
+          */}
+          {preflight && !preflightShowsPass(preflight.checks) && (
+            <p className="small">
+              The check above is not green. You can still continue, and the same
+              gates will refuse you again with a reason when the money actually
+              moves. Fixing what it named first is the cheaper order.
+            </p>
+          )}
           <button type="button" disabled={busy || !hubAddress.trim()} onClick={() => void handlePreviewOpen()}>
             Preview channel open
           </button>

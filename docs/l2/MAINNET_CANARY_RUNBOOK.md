@@ -29,22 +29,89 @@ reviewed transaction preview remains authoritative.
 
 ## Phase 0: freeze the exact release candidate
 
-Record without secrets:
+### First, run the preflight from the app
+
+Before you record anything, and long before any deposit, open the wallet and
+run the preflight on the Fast Pay screen. Desktop: Fast Pay, under "Turn Fast
+Pay ON", the button above "Enable Fast Pay". Mobile: the Fast Pay channel
+screen, under Setup, the button above "Preview channel open".
+
+You need no Rust toolchain and no terminal for this. A wallet owner has an app,
+not a compiler. The button sends five read-only requests; it signs nothing,
+unlocks nothing and broadcasts nothing, so it is safe to press as often as you
+like.
+
+Read the result before you go any further:
+
+- if it says READY, that is the moment to start recording the values below,
+  because you now know the node and the Hub you are about to freeze are the
+  ones that answered correctly;
+- if it says NOT READY, stop here. Every FATAL item has to be green before
+  money goes in, and an item marked "FATAL, NOT CHECKED" counts as failed,
+  because a question nobody answered is not a question that came back clean.
+  Fix what the item names, or ask the Hub operator to, and run it again;
+- either way, read the block titled "What this check cannot tell you, whatever
+  colour it is". Green is a statement about infrastructure at one instant. It
+  is not a statement that your money is safe, it does not make this pilot
+  trustless, and the Hub can still refuse to countersign your voucher after
+  your deposit is already in the channel.
+
+The answer goes stale in about five minutes, so re-run it at the top of
+Phase 1 rather than relying on this one.
+
+### Then record, without secrets
 
 1. Git commit and fullnode commit.
 2. Desktop, mobile, Hub and fullnode artifact SHA-256 values.
-3. Public node and Hub HTTPS origins.
-4. Hub Hacash address.
-5. HVM contract address, deployment transaction, deployment height and bytecode
-   hash.
+3. Public node and Hub HTTPS origins, exactly as the preflight printed them.
+4. Hub Hacash address, exactly as the Hub published it in the preflight's
+   "The Hub answers, and says it can take a channel open" item. If the address
+   you expected and the address the Hub published differ, that item is red and
+   you are not frozen, you are misconfigured.
+5. Registry rail only: HVM contract address, deployment transaction, deployment
+   height and bytecode hash. On the native ChannelPay rail there is no
+   contract, so there is nothing to record here.
 6. Public addresses for Desktop Personal, Mobile Personal and Agent.
+7. The preflight verdict and the per-item results, saved with the report.
 
 Do not continue if the source or any artifact changes after this point. A
 change requires a new preflight and a new canary report.
 
 ## Phase 1: read-only infrastructure proof
 
-Run:
+Two rails, two preflights. Run the one for the rail you are actually on.
+
+### If you are on the native ChannelPay rail with a close voucher
+
+This is the rail with no HVM contract: a channel opened as
+`[ChainAllow 0x0411, ChannelOpen 2]` plus one Hub-countersigned delta-zero
+voucher `[ChainAllow 0x0411, ChannelClose 3]`, taken once and never refreshed.
+
+Run the preflight from the wallet itself, on the Fast Pay screen, before the
+deposit. It is the `wallet_native_rail_preflight` command and needs no Rust
+toolchain, because a wallet owner has an app and not a compiler.
+
+Required result:
+
+- every FATAL item shows PASS. A skipped item is not a passed item, and the
+  screen will not show READY while any fatal item failed or could not be run;
+- the Hub voucher item is green. It reads a different flag set from the open
+  (`official_channelpay_ready`, `close_enabled`, an empty `close_blockers`),
+  and a Hub can be green for the open and red for the close;
+- the close-voucher route probe is green. Nothing the Hub publishes declares
+  this route: API version is 7 with or without it. A 404 means an older Hub,
+  and funding it strands you, because the voucher can only be taken after the
+  deposit is already on chain.
+
+A green result is authority for at most 330 seconds and it never means the
+money is safe, that the pilot is trustless, or that the Hub will countersign
+when asked. The screen lists what it cannot check; do not treat any of it as
+proven.
+
+### If you are on the HVM shared-registry rail
+
+Only if the registry contract is actually deployed. It costs on the order of
+2000 HAC, and this preflight cannot pass without a verified deployment.
 
 ```text
 cargo run -p hacash-wallet-core --example hpay_mainnet_infrastructure_preflight -- --node-url https://NODE --hub-url https://HUB --hub-address HUB_HACASH_ADDRESS --payment 0.001 --channel-funding 0.1

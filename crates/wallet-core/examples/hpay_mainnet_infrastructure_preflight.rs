@@ -1,8 +1,38 @@
-//! Read-only HPAY mainnet infrastructure preflight.
+//! Read-only HPAY mainnet infrastructure preflight FOR THE HVM SHARED-REGISTRY
+//! RAIL ONLY.
 //!
-//! This deliberately performs no signing, submission, wallet unlock or state
-//! mutation. A PASS proves only that the live node, Hub and HVM deployment
-//! satisfy the same infrastructure contracts used by the wallet. It does not
+//! THIS IS THE WRONG CHECK FOR THE NATIVE CHANNELPAY RAIL. Read this before
+//! running it.
+//!
+//! It requires `features.hvm`, `features.contract_state_leasing`, actions
+//! 40/41/44 and a VERIFIED on-chain HVM shared-registry deployment. Those are
+//! the registry contract's primitives. Deploying that contract costs on the
+//! order of 2000 HAC, and an owner who has not deployed it can never pass this
+//! preflight no matter what else is green: the final gate reads
+//! `is_verified_mainnet_deployment()` and a node with no deployment reports
+//! `deployment_verified false, contract_address null, enabled false`.
+//!
+//! An owner on the native rail - a channel opened as
+//! `[ChainAllow 0x0411, ChannelOpen 2]` plus one Hub-countersigned delta-zero
+//! voucher `[ChainAllow 0x0411, ChannelClose 3]` - needs NONE of that, and the
+//! two rails otherwise require the identical set: Type 2 with actions 1, 2, 3,
+//! 14 and 0x0411. Running this against a native-rail setup tells a ready owner
+//! they are not ready, and sends them shopping for a node feature that no code
+//! on their path will ever read.
+//!
+//! For the native rail use `crate::hpay_native_rail_preflight`, which is
+//! reachable from the app itself as the `wallet_native_rail_preflight` command
+//! and needs no Rust toolchain. It also checks two things this file never did:
+//! that the Hub is ready to hand over a VOUCHER (a different flag set from the
+//! open: `official_channelpay_ready`, `close_enabled`, empty `close_blockers`),
+//! and that the Hub has a `/v1/l1/channel/close-voucher` route at all. That
+//! second one is the hostage window: the voucher can only be TAKEN after the
+//! deposit is on chain, so an owner funding against an older Hub finds out with
+//! the money already in.
+//!
+//! What it still does honestly: no signing, submission, wallet unlock or state
+//! mutation. A PASS proves only that the live node, Hub and HVM registry
+//! deployment satisfy the registry-rail infrastructure contracts. It does not
 //! replace the subsequent small-value canary lifecycle.
 
 use std::collections::BTreeMap;
@@ -16,7 +46,7 @@ use hacash_wallet_core::node_discovery::MAINNET_BLOCK_ONE_HASH;
 use hacash_wallet_core::settings::{validate_service_url, validate_signing_node_url};
 use serde_json::json;
 
-const USAGE: &str = "usage: cargo run -p hacash-wallet-core --example hpay_mainnet_infrastructure_preflight -- --node-url <https://node> --hub-url <https://hub> --hub-address <Hacash address> --payment <HAC> --channel-funding <HAC>";
+const USAGE: &str = "REGISTRY RAIL ONLY. This checks features.hvm, contract_state_leasing, actions 40/41/44 and a verified on-chain HVM shared-registry deployment (roughly 2000 HAC to deploy). If you are on the native ChannelPay rail with a close voucher, this is the wrong check and it cannot pass; run the preflight in the wallet app instead (the wallet_native_rail_preflight command).\nusage: cargo run -p hacash-wallet-core --example hpay_mainnet_infrastructure_preflight -- --node-url <https://node> --hub-url <https://hub> --hub-address <Hacash address> --payment <HAC> --channel-funding <HAC>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
@@ -142,6 +172,11 @@ async fn main() -> Result<()> {
         serde_json::to_string_pretty(&json!({
             "schema": "hpay-mainnet-infrastructure-preflight/1",
             "status": "pass",
+            // Named in the artifact itself, so a saved JSON result can never be
+            // mistaken later for a proof about the rail it did not check.
+            "rail": "hvm_shared_registry_v2",
+            "native_channelpay_rail_checked": false,
+            "native_channelpay_rail_preflight": "wallet_native_rail_preflight",
             "scope": "read_only_infrastructure_only",
             "release_ready": false,
             "next_required_gate": "small_value_mainnet_canary_open_pay_agent_pay_close",

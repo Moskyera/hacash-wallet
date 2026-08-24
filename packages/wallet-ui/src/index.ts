@@ -13,6 +13,7 @@ export * from "./OwnedHacdGallery";
 export * from "./i18n";
 export * from "./moneyNex";
 export * from "./NativeAssetSendForm";
+export * from "./NativeRailPreflightCard";
 export * from "./nodeSettings";
 export * from "./hip5";
 export * from "./paymentAssets";

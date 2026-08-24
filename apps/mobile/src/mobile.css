@@ -1727,3 +1727,20 @@ button:disabled {
 .hub-discovery > input {
   width: 100%;
 }
+
+/*
+  The read-only preflight, on the screen where somebody is about to fund a
+  channel. Failed and unrun fatal items are listed first and share the same
+  red, because a check nobody could run is not a check that came back clean.
+*/
+.badge-error {
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff453a;
+}
+
+.native-rail-preflight h4 { margin: 0 0 6px; font-size: 0.95rem; }
+.native-rail-preflight > button { margin-top: 10px; }
+.preflight-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.preflight-item { padding: 10px 0; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.preflight-item p { margin: 4px 0 0; word-break: break-word; }
+.preflight-item-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }

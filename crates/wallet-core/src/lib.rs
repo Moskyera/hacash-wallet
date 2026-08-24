@@ -16,6 +16,7 @@ pub mod hacd_send;
 pub mod hardware;
 pub mod hip23;
 pub mod history;
+pub mod hpay_native_rail_preflight;
 mod http_client;
 pub mod hvm_registry_exit;
 pub mod hvm_registry_exit_cost;

@@ -15,8 +15,8 @@ pub const HPAY_LOCAL_PILOT_CHAIN_ID: u32 = 7;
 pub const HPAY_MAINNET_NETWORK_KIND: &str = "mainnet";
 pub const HPAY_MAINNET_PROFILE_ID: &str = "hacash-mainnet";
 pub const HPAY_MAINNET_MIN_SAFE_HEIGHT: u64 = 765_432;
-const MAX_MAINNET_TIP_AGE_SECONDS: u64 = 3_600;
-const MAX_FUTURE_TIP_SKEW_SECONDS: u64 = 120;
+pub(crate) const MAX_MAINNET_TIP_AGE_SECONDS: u64 = 3_600;
+pub(crate) const MAX_FUTURE_TIP_SKEW_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

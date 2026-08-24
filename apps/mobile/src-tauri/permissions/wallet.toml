@@ -69,6 +69,7 @@ commands.allow = [
   "wallet_get_bill_hex",
   "wallet_get_settings",
   "wallet_hub_declaration",
+  "wallet_native_rail_preflight",
   "wallet_hub_health",
   "wallet_import",
   "wallet_import_backup",

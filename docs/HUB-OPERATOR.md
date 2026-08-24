@@ -295,11 +295,26 @@ Never delete, regenerate or manually edit the journal/checkpoint to make the Hub
 
 ## Read-only mainnet infrastructure preflight
 
-Before any canary funding, run the repository preflight against the exact public
-HTTPS node and Hub endpoints. It performs no unlock, signing, submission or
-state mutation. It reuses the wallet's production validators for node identity,
-block 1, freshness, bounded-pilot readiness, zero wallet fee, channel funding,
-cooperative close and verified HPAY HVM deployment.
+Before any canary funding, run a preflight against the exact public HTTPS node
+and Hub endpoints. Neither performs an unlock, signing, submission or state
+mutation. Which one you run depends on the rail.
+
+**Native ChannelPay rail with a close voucher.** Run it from the wallet, on the
+Fast Pay screen, before the deposit: the `wallet_native_rail_preflight` command.
+It reuses the wallet's production validators for node identity, block 1,
+freshness, the exact transaction and action kinds the open and the voucher
+contain, bounded-pilot readiness, zero wallet fee, this Hub's own declared caps,
+and the Hub's own fullnode. It additionally checks two things the registry
+preflight never did: that the Hub is ready to hand over a VOUCHER, which is a
+different flag set from the open, and that the Hub has a
+`POST /v1/l1/channel/close-voucher` route at all. Nothing the Hub publishes
+declares that route, so the only read-only test is an HTTP existence probe: a
+GET, which axum answers 405 with an `Allow` header without invoking the handler.
+If your Hub answers 404 there, say so to your users before they fund, because
+the voucher can only be issued after their deposit is on chain.
+
+**HVM shared-registry rail.** Only when the registry contract is deployed; the
+final gate reads a verified on-chain deployment and cannot pass without one.
 
 ```text
 cargo run -p hacash-wallet-core --example hpay_mainnet_infrastructure_preflight -- --node-url https://NODE --hub-url https://HUB --hub-address HUB_HACASH_ADDRESS --payment 0.001 --channel-funding 1

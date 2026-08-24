@@ -232,6 +232,29 @@ pub struct DeclaredHubCaps {
     pub aggregate_tvl_within_limit: Option<bool>,
 }
 
+/// What a GET against `/v1/l1/channel/close-voucher` came back as.
+///
+/// Raw evidence, not a verdict: the status the Hub returned and the `Allow`
+/// header it did or did not send. See
+/// [`L2HubClient::probe_channel_close_voucher_route`] for why this is the only
+/// read-only way to ask whether a Hub can issue a voucher at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoucherRouteProbe {
+    pub status: u16,
+    pub allow: Option<String>,
+}
+
+impl VoucherRouteProbe {
+    /// Does the `Allow` header name POST?
+    pub fn allows_post(&self) -> bool {
+        self.allow.as_deref().is_some_and(|allow| {
+            allow
+                .split(',')
+                .any(|method| method.trim().eq_ignore_ascii_case("POST"))
+        })
+    }
+}
+
 /// Zhu to a plain HAC string, trimmed. Zero prints as `0`, because a cap of
 /// zero is a declaration and not an absence; the caller decides which fields
 /// can be absent at all.
@@ -315,18 +338,18 @@ fn registry_is_bound_to_the_reported_network(capabilities: &HubFullnodeCapabilit
         .is_some_and(|evidence_instance| evidence_instance == node_instance)
 }
 
-const MAINNET_READINESS_SCHEMA: &str = "hpay-fast-pay-mainnet-readiness/1";
-const MAINNET_PILOT_PROFILE: &str = "mainnet-pilot";
-const MAINNET_BOUNDED_PILOT_PROFILE: &str = "mainnet-bounded-pilot";
-const MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU: u64 = 100_000_000;
-const MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU: u64 = 1_000_000_000;
-const ZHU_PER_MILLIMEI: u64 = 100_000;
-const MAINNET_MIN_SAFE_HEIGHT: u64 = 765_432;
-const MAX_TIP_AGE_SECONDS: u64 = 3_600;
-const MAX_FUTURE_SKEW_SECONDS: u64 = 120;
-const MAX_READINESS_VALIDITY_SECONDS: u64 = 330;
-const REQUIRED_CHANNEL_OPEN_ACTION: u16 = 2;
-const REQUIRED_COOPERATIVE_CLOSE_ACTION: u16 = 3;
+pub(crate) const MAINNET_READINESS_SCHEMA: &str = "hpay-fast-pay-mainnet-readiness/1";
+pub(crate) const MAINNET_PILOT_PROFILE: &str = "mainnet-pilot";
+pub(crate) const MAINNET_BOUNDED_PILOT_PROFILE: &str = "mainnet-bounded-pilot";
+pub(crate) const MAINNET_PILOT_HARD_MAX_PAYMENT_HAC_ZHU: u64 = 100_000_000;
+pub(crate) const MAINNET_PILOT_HARD_MAX_CHANNEL_FUNDING_HAC_ZHU: u64 = 1_000_000_000;
+pub(crate) const ZHU_PER_MILLIMEI: u64 = 100_000;
+pub(crate) const MAINNET_MIN_SAFE_HEIGHT: u64 = 765_432;
+pub(crate) const MAX_TIP_AGE_SECONDS: u64 = 3_600;
+pub(crate) const MAX_FUTURE_SKEW_SECONDS: u64 = 120;
+pub(crate) const MAX_READINESS_VALIDITY_SECONDS: u64 = 330;
+pub(crate) const REQUIRED_CHANNEL_OPEN_ACTION: u16 = 2;
+pub(crate) const REQUIRED_COOPERATIVE_CLOSE_ACTION: u16 = 3;
 const REQUIRED_CLOSE_PRINCIPAL_TRANSFER_ACTION: u16 = 14;
 
 impl HubMainnetReadiness {
@@ -808,7 +831,7 @@ fn append_named_blockers(named: Option<String>) -> String {
     named.map_or_else(String::new, |named| format!("; {named}"))
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
@@ -906,6 +929,70 @@ impl L2HubClient {
             .await
             .map_err(|error| WalletError::L2(format!("hub readiness unavailable: {error}")))?;
         Self::read_hub_json(response, "hub mainnet readiness").await
+    }
+
+    /// The readiness document typed, plus the exact JSON it arrived as.
+    ///
+    /// One fetch, decoded twice, so the two halves cannot disagree. It exists
+    /// for the fields [`HubMainnetReadiness`] deliberately does not decode -
+    /// `allowlist_configured` is the one that matters - which a read-only
+    /// preflight has to show without turning them into gates they were never
+    /// designed to be. The typed decode is the same `serde_json` decode the
+    /// gates get, so nothing here is loosened: a document that fails to decode
+    /// still fails here.
+    pub async fn mainnet_readiness_with_raw(
+        &self,
+    ) -> WalletResult<(HubMainnetReadiness, serde_json::Value)> {
+        let url = format!("{}/v1/readiness/mainnet", self.base_url);
+        let response = self
+            .http()?
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| WalletError::L2(format!("hub readiness unavailable: {error}")))?;
+        let raw: serde_json::Value = Self::read_hub_json(response, "hub mainnet readiness").await?;
+        let readiness: HubMainnetReadiness =
+            serde_json::from_value(raw.clone()).map_err(|error| {
+                WalletError::L2(format!(
+                    "hub mainnet readiness returned invalid JSON: {error}"
+                ))
+            })?;
+        Ok((readiness, raw))
+    }
+
+    /// Does this Hub have a close-voucher route at all?
+    ///
+    /// Nothing the Hub publishes answers this. `HUB_API_VERSION` is 7 for a
+    /// voucher-capable Hub and for an older one alike, and [`HubHealth`] has
+    /// no field for it, so the only read-only test is whether the path is
+    /// registered. This sends **GET**, never POST: axum's `MethodRouter`
+    /// answers a registered path with an unregistered method as 405 plus an
+    /// `Allow` header without ever invoking the handler, so no request body is
+    /// deserialised, no mutation permit is taken and no Hub state is touched.
+    /// An unregistered path falls through to the router's 404.
+    ///
+    /// This deliberately returns the raw status rather than a verdict. 405 or
+    /// an `Allow` naming POST means the route exists; 404 means an older Hub;
+    /// anything else is unproven and must never be read as a pass. The caller
+    /// judges, and the reason it judges is that "unproven" and "present" are
+    /// different answers and only one of them is safe to fund against.
+    ///
+    /// It proves the route exists. It does not prove the Hub will countersign
+    /// when asked: nothing in Hacash can compel a second signature.
+    pub async fn probe_channel_close_voucher_route(&self) -> WalletResult<VoucherRouteProbe> {
+        let url = format!("{}/v1/l1/channel/close-voucher", self.base_url);
+        let response =
+            self.http()?.get(&url).send().await.map_err(|error| {
+                WalletError::L2(format!("Hub close-voucher probe failed: {error}"))
+            })?;
+        Ok(VoucherRouteProbe {
+            status: response.status().as_u16(),
+            allow: response
+                .headers()
+                .get(reqwest::header::ALLOW)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+        })
     }
 
     /// Submit one exact Agent-signed HVM payment proposal for Hub co-signing.

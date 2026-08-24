@@ -27,6 +27,15 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::commands::wallet_hub_health,
             wallet_tauri_common::commands::wallet_discover_hubs,
             wallet_tauri_common::commands::wallet_hub_declaration,
+            // Registered for BOTH shells on purpose. The hostage window this
+            // closes is identical on a phone: the voucher can only be taken
+            // after the deposit is on chain, so a mobile owner funding against
+            // a Hub with no close-voucher route finds out at the same moment a
+            // desktop owner would, with the money already in. It is read-only
+            // and needs no unlock, so there is no privilege reason to withhold
+            // it from mobile, and `acl_inventory` holds each shell's allowlist
+            // to exactly what it registers.
+            wallet_tauri_common::commands::wallet_native_rail_preflight,
             wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_ping_node_url,
             wallet_tauri_common::commands::wallet_fetch_asset_prices,

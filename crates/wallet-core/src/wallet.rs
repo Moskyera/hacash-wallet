@@ -2102,6 +2102,55 @@ impl WalletService {
         crate::fast_pay::hub_declaration(hub_url, &self.settings.network_mode).await
     }
 
+    /// The read-only mainnet preflight for the native ChannelPay rail with a
+    /// close voucher, run before any money moves.
+    ///
+    /// Every argument may be omitted, in which case it comes from what this
+    /// wallet already holds: the saved node URL, the saved Hub URL and
+    /// address, and this wallet's own address. A missing value is not an error
+    /// here - it produces a red item with a reason, which is the whole shape
+    /// of this thing: it answers with a report, never with an exception.
+    ///
+    /// It signs nothing, unlocks nothing, mutates nothing and broadcasts
+    /// nothing. It does not require an unlocked wallet, because the question
+    /// "is the infrastructure ready" is one a person should be able to ask
+    /// before they type a passphrase.
+    ///
+    /// It judges MAINNET. Pointed at a pilot chain it refuses, for the same
+    /// clauses it would refuse a node falsely claiming to be mainnet.
+    pub async fn native_rail_preflight(
+        &self,
+        node_url: Option<String>,
+        hub_url: Option<String>,
+        hub_address: Option<String>,
+        owner_address: Option<String>,
+        channel_deposit_hac: String,
+        payment_hac: String,
+    ) -> crate::hpay_native_rail_preflight::PreflightReport {
+        fn pick(supplied: Option<String>, saved: Option<String>) -> String {
+            supplied
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .or(saved)
+                .unwrap_or_default()
+        }
+        let request = crate::hpay_native_rail_preflight::PreflightRequest {
+            node_url: pick(node_url, Some(self.settings.node_url.clone())),
+            hub_url: pick(hub_url, self.settings.l2_hub_url.clone()),
+            hub_address: pick(hub_address, self.settings.hub_right_address.clone()),
+            owner_address: pick(
+                owner_address,
+                self.unlocked
+                    .as_ref()
+                    .map(|session| session.address.clone())
+                    .or_else(|| self.settings.watch_only_address.clone()),
+            ),
+            channel_deposit_hac,
+            payment_hac,
+        };
+        crate::hpay_native_rail_preflight::run_preflight(&request).await
+    }
+
     async fn maybe_discover_hub(&mut self) -> WalletResult<()> {
         if self.settings.l2_hub_url.is_some() {
             return Ok(());

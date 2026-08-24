@@ -6,6 +6,7 @@ import {
   FastPayInboxItem,
   HubDiscoveryEntry,
   HubHealth,
+  NativeRailPreflight,
   WalletSettings,
   WalletStatus,
 } from "../api";
@@ -22,7 +23,9 @@ import {
   FAST_PAY_MAINNET_CEILINGS,
   FAST_PAY_MAINNET_CONSENT,
   MAINNET_SIGNING_TRANSPORT_NOTICE,
+  NativeRailPreflightCard,
   mainnetSigningTransportIsEligible,
+  preflightShowsPass,
 } from "@hacash/wallet-ui";
 
 /**
@@ -54,6 +57,16 @@ export function consentSubmitState(
     label: ticked ? "Confirm this choice" : "Withdraw consent",
   };
 }
+
+/**
+ * The payment the preflight judges the Hub's per-payment cap against.
+ *
+ * 0.1 HAC, which is the single payment this bounded pilot is sized for. It is
+ * a fixed number rather than a field because the cap question is "will this
+ * Hub take the payment I am about to make", and inventing a larger one here
+ * would produce a red item for a payment nobody intends to send.
+ */
+const FAST_PAY_PREFLIGHT_PAYMENT_HAC = "0.1";
 
 type Props = {
   status: WalletStatus | null;
@@ -130,6 +143,8 @@ export default function FastPayScreen({
   // able to ask for the passphrase. Turning it off needs nothing.
   const [mainnetPilotPassphrase, setMainnetPilotPassphrase] = useState("");
   const [channelPreview, setChannelPreview] = useState<ChannelSetupPreview | null>(null);
+  const [preflight, setPreflight] = useState<NativeRailPreflight | null>(null);
+  const [preflightRunning, setPreflightRunning] = useState(false);
   const [showFastPayAdvanced, setShowFastPayAdvanced] = useState(false);
   const [inbox, setInbox] = useState<FastPayInboxItem[]>([]);
   const inboxRequestRef = useRef<Promise<void> | null>(null);
@@ -232,6 +247,36 @@ export default function FastPayScreen({
     settings?.network_mode,
   );
   const providerAddressChosen = Boolean(settings?.hub_right_address?.trim());
+  /**
+   * Run the read-only preflight for the values on this screen.
+   *
+   * It sends the deposit the person has actually typed and a payment sized to
+   * the deposit, so the Hub's declared caps are judged against the real
+   * numbers rather than against a placeholder. Nothing is saved and nothing is
+   * signed.
+   */
+  const runPreflight = async () => {
+    setPreflightRunning(true);
+    clearMessages();
+    try {
+      setPreflight(
+        await api.nativeRailPreflight({
+          nodeUrl: settings?.node_url,
+          hubUrl,
+          hubAddress: settings?.hub_right_address ?? hubAddress,
+          ownerAddress: status?.address ?? undefined,
+          channelDepositHac: userDeposit,
+          paymentHac: FAST_PAY_PREFLIGHT_PAYMENT_HAC,
+        }),
+      );
+    } catch (error) {
+      setPreflight(null);
+      onNotify(String(error), "error");
+    } finally {
+      setPreflightRunning(false);
+    }
+  };
+
   const consentSubmit = consentSubmitState(
     trustedMainnetPilot,
     settings?.trusted_mainnet_fast_pay_pilot ?? false,
@@ -382,6 +427,12 @@ export default function FastPayScreen({
             hub_right_address is still required and still re-verified against
             the live Hub at funding time.
           */}
+          <NativeRailPreflightCard
+            report={preflight}
+            running={preflightRunning}
+            disabled={busy}
+            onRun={() => void runPreflight()}
+          />
           <button
             className="primary"
             disabled={busy || !providerAddressChosen || !signingTransportEligible}
@@ -389,6 +440,21 @@ export default function FastPayScreen({
           >
             Enable Fast Pay
           </button>
+          {/*
+            The button is NOT disabled on a red preflight. The preflight is a
+            read-only opinion about the infrastructure, not a gate, and every
+            gate it previews runs again for real inside enable and inside the
+            channel open. Wiring the button to it would swap a real refusal
+            with a reason for a greyed-out control with none. Saying it plainly
+            is the honest half.
+          */}
+          {preflight && !preflightShowsPass(preflight.checks) && (
+            <p className="small">
+              The check above is not green. You can still continue, and the same
+              gates will refuse you again with a reason when the money actually
+              moves. Fixing what it named first is the cheaper order.
+            </p>
+          )}
           {!providerAddressChosen && (
             <p className="muted small">
               Pick a provider first. Use "Check this hub" or "Scan for hubs"

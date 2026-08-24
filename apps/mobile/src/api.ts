@@ -4,6 +4,7 @@ import type {
   AssetPriceResponse,
   CanonicalTransaction,
   HacdDiamondInfo as SharedHacdDiamondInfo,
+  NativeRailPreflightView,
   NodeCapabilities,
   ParsedAddress,
   Type4ProbeResult,
@@ -470,6 +471,16 @@ export type HubDeclaration = {
   readiness_error: string | null;
 };
 
+/**
+ * The read-only mainnet preflight for the native ChannelPay rail with a close
+ * voucher. Shape mirrors `hpay_native_rail_preflight::PreflightReport`.
+ *
+ * Aliased from the shared UI package rather than restated here, so the type,
+ * the never-show-PASS rule and the card that renders it all read one
+ * definition.
+ */
+export type NativeRailPreflight = NativeRailPreflightView;
+
 export type AirgapUnsigned = {
   v: number;
   from: string;
@@ -669,6 +680,29 @@ export const api = {
     invoke<HubDiscoveryReport>("wallet_discover_hubs", { hubUrl: hubUrl?.trim() || null }),
   hubDeclaration: (hubUrl: string) =>
     invoke<HubDeclaration>("wallet_hub_declaration", { hubUrl }),
+  /**
+   * Read-only. Signs nothing, unlocks nothing, broadcasts nothing.
+   *
+   * Every argument may be left out, in which case the wallet uses what it
+   * already has saved. A missing value produces a red item with a reason
+   * rather than an error, because a report tells a person more than a throw.
+   */
+  nativeRailPreflight: (args: {
+    nodeUrl?: string;
+    hubUrl?: string;
+    hubAddress?: string;
+    ownerAddress?: string;
+    channelDepositHac: string;
+    paymentHac: string;
+  }) =>
+    invoke<NativeRailPreflight>("wallet_native_rail_preflight", {
+      nodeUrl: args.nodeUrl?.trim() || null,
+      hubUrl: args.hubUrl?.trim() || null,
+      hubAddress: args.hubAddress?.trim() || null,
+      ownerAddress: args.ownerAddress?.trim() || null,
+      channelDepositHac: args.channelDepositHac,
+      paymentHac: args.paymentHac,
+    }),
   previewSend: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<SendPreview>("wallet_preview_send", { to, amountMei, sendOptions }),
   prepareSendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
