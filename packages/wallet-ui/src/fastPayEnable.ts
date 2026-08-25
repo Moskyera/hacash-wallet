@@ -129,7 +129,12 @@ export function fastPayEnableRefusals(
       id: "channel_cap_unknown",
       title: "This Hub's per-channel cap has not been read yet",
       detail:
-        'Press "Run the check" in "Your node and your Hub, right now" to see the caps this Hub declares. Unknown is not the same as fine: the Hub judges the deposit again when the money moves, and it refuses anything over its own cap.',
+        // Named by the BUTTON rather than by a card heading. The heading "Your
+        // node and your Hub, right now" exists only on the desktop screen, and
+        // this sentence is now the first thing a phone reads when the cap is
+        // unread, so it pointed at something a person could not find. "Run the
+        // check" is the control's label on both platforms.
+        'Press "Run the check" further down this screen to see the caps this Hub declares. Unknown is not the same as fine: the Hub judges the deposit again when the money moves, and it refuses anything over its own cap.',
     });
   } else {
     const cap = Number(input.declaredChannelCapHac);
@@ -160,6 +165,33 @@ export function fastPayEnableHeadline(refusals: FastPayEnableRefusal[]): string 
     return "One thing is stopping Enable right now.";
   }
   return `${refusals.length} things are stopping Enable right now.`;
+}
+
+/**
+ * The label on the fold that holds the whole refusal queue.
+ *
+ * A constant because two screens print it and a third sentence points at it by
+ * name. The counter under the next step used to point at "Turn Fast Pay ON",
+ * which is a card that no longer exists as a separate thing, so it named a
+ * heading a person could not find.
+ */
+export const FAST_PAY_ENABLE_FOLD_LABEL = "Everything stopping Enable";
+
+/** The fold's summary: the label, then the count, computed from the list. */
+export function fastPayEnableFoldSummary(refusals: FastPayEnableRefusal[]): string {
+  return `${FAST_PAY_ENABLE_FOLD_LABEL}. ${fastPayEnableHeadline(refusals)}`;
+}
+
+/**
+ * "and here is how many more after this one", pointing somewhere real.
+ *
+ * The count comes from the refusal list, so it cannot claim two when there are
+ * three.
+ */
+export function fastPayRemainingLine(remaining: number): string {
+  const plural = remaining === 1 ? "" : "s";
+  const verb = remaining === 1 ? "s" : "";
+  return `${remaining} other thing${plural} still need${verb} attention after this one, listed under "${FAST_PAY_ENABLE_FOLD_LABEL}" below.`;
 }
 
 /**
@@ -219,7 +251,9 @@ export function fastPayNextStep(input: FastPayNextStepInput): FastPayNextStep {
     return {
       headline: "Your node is not answering.",
       action:
-        'Fix the node first: check the node URL in "Your node and your Hub, right now" and that the node is running. A channel open is a real transaction and it has to be submitted through a node.',
+        // Same reason as `channel_cap_unknown` above: named by the control, not
+        // by a heading only one of the two platforms has.
+        'Fix the node first: check the node URL in your settings and that the node is running, then press "Run the check" again. A channel open is a real transaction and it has to be submitted through a node.',
       canActNow: false,
       blockedBy: "node_unreachable",
       remaining: input.refusals.length,

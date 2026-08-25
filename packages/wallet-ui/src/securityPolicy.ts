@@ -111,6 +111,40 @@ export const FAST_PAY_SELF_HOSTED_HUB_NOTE =
   "If you run the Hub yourself, you are the counterparty to your own channel. That does not remove the risk above. It means the co-signature your money depends on is yours, so losing that Hub's key or its durable state strands your own funds with nobody to ask.";
 
 /**
+ * Is the Hub this wallet is pointed at almost certainly the owner's own machine?
+ *
+ * It decides ONE thing: whether FAST_PAY_SELF_HOSTED_HUB_NOTE is read without
+ * opening anything, or folded in with the rest of the hub material. It gates
+ * nothing and it is never used to permit anything.
+ *
+ * It fails towards SHOWING the note. The consent text says "if the Hub stops
+ * answering, refuses to sign, or disappears", and an owner running the Hub on
+ * their own machine reads that as somebody else's failure when it is their own
+ * key and their own durable state. Getting that wrong in the quiet direction
+ * leaves a person believing something untrue, so an empty URL, an unparseable
+ * one, a loopback address, a `.local` name and a private LAN address all count
+ * as self-hosted. Only a real public host counts as somebody else's Hub.
+ */
+export function hubIsProbablySelfHosted(hubUrl: string | null | undefined): boolean {
+  const raw = hubUrl?.trim();
+  if (!raw) return true;
+  let host: string;
+  try {
+    host = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return true;
+  }
+  if (host === "" || host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host === "::1" || host === "[::1]") return true;
+  if (host.endsWith(".local")) return true;
+  if (/^127\./.test(host)) return true;
+  if (/^10\./.test(host)) return true;
+  if (/^192\.168\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(host)) return true;
+  return false;
+}
+
+/**
  * What a bounded-pilot Hub will not tell you until it refuses.
  *
  * The Hub publishes `allowlist_configured: true` and deliberately never
@@ -123,6 +157,23 @@ export const FAST_PAY_SELF_HOSTED_HUB_NOTE =
  */
 export const FAST_PAY_PILOT_ALLOWLIST_NOTE =
   "Bounded pilot Hubs admit named addresses only. The operator has to add your address before setup will work, and a Hub will not say who is on its list. Send them the address shown on your Home screen first.";
+
+/**
+ * The one line a person reads instead of the five paragraphs about hubs.
+ *
+ * A summary is only allowed to replace a risk if it is as honest as the risk.
+ * These two sentences carry the whole of what the folded text says that matters
+ * before a decision: there is no public hub, somebody has to run one, and
+ * running your own moves the exposure rather than removing it. Nothing in here
+ * is softer than what it summarises, and every word of the long form is still
+ * in the document behind it.
+ */
+export function hubSourcesSummary(isMainnet: boolean): string {
+  const base =
+    "Where hubs come from. There is no public hub and no directory; somebody has to run one and it can be you.";
+  if (!isMainnet) return base;
+  return `${base} Pilot hubs admit named addresses only, and running your own moves this risk to you rather than removing it.`;
+}
 
 /**
  * Why a plain mainnet install cannot sign, said before the ceremony.

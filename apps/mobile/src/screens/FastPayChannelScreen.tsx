@@ -26,14 +26,23 @@ import {
   type AsyncProbe,
 } from "../asyncProbe";
 import {
+  DECLARED_CAPS_LEDE,
+  DeclaredCapsList,
+  Disclosure,
   FAST_PAY_MAINNET_CEILINGS,
   FAST_PAY_MAINNET_CONSENT,
+  FAST_PAY_SELF_HOSTED_HUB_NOTE,
   MAINNET_SIGNING_TRANSPORT_NOTICE,
   NativeRailPreflightCard,
-  fastPayEnableHeadline,
+  PREFLIGHT_NOT_GREEN_SHORT,
+  closeVoucherSentence,
+  fastPayEnableFoldSummary,
   fastPayEnableRefusals,
+  fastPayNextStep,
+  fastPayRemainingLine,
+  hubIsProbablySelfHosted,
   mainnetSigningTransportIsEligible,
-  preflightShowsPass,
+  preflightVerdict,
 } from "@hacash/wallet-ui";
 
 /**
@@ -392,6 +401,67 @@ export default function FastPayChannelScreen({
     signingTransportNotice: MAINNET_SIGNING_TRANSPORT_NOTICE,
   });
 
+  /**
+   * The amount Enable will actually deposit.
+   *
+   * Read from the same expression `handleEnableFastPay` passes to
+   * `openReviewedChannel`, so the number beside the button cannot drift from
+   * the number the button sends. The editable field in the Setup card feeds
+   * "Preview channel open", which is a different path; saying so beside the
+   * button is the honest half.
+   */
+  const enableDeposit = String(fastPay?.default_deposit_mei ?? userDeposit);
+
+  /**
+   * Did the preflight reach the node? `null` means nobody has asked yet.
+   *
+   * `node_identity` answers "did THIS wallet read the node", which is the
+   * question. `node_can_be_reached` answers "can anybody else reach it", which
+   * is `warn` for a perfectly healthy node behind a router, and reading that
+   * one here would send a person off to fix a node that is fine. Desktop
+   * learned this the hard way; the phone gets it right the first time.
+   */
+  const nodeIdentityCheck = preflight?.checks.find(
+    (check) => check.id === "node_identity",
+  );
+  const nodeReachable =
+    nodeIdentityCheck === undefined ? null : nodeIdentityCheck.status !== "skip";
+
+  /**
+   * The one thing to do next, at the top, in words.
+   *
+   * The phone has never had this. It showed a state pill, a consent block, a
+   * refusal list, a hub finder and a preflight, and left a person to read all
+   * five and work out which was their turn. It gates nothing: the button below
+   * stays pressable either way and the core and the Hub both re-check.
+   */
+  const nextStep = fastPayNextStep({
+    state: fastPay?.state,
+    refusals: enableRefusals,
+    nodeReachable,
+    preferOrder: [
+      "settings_not_loaded",
+      "watch_only_wallet",
+      "no_provider_address",
+      "signing_transport_ineligible",
+      "mainnet_consent_withheld",
+      "deposit_not_a_number",
+      "channel_cap_unknown",
+      "deposit_over_declared_cap",
+    ],
+  });
+
+  /** The read-only check's verdict as one line, for the top of the screen. */
+  const verdict = preflight ? preflightVerdict(preflight) : null;
+
+  /** The one action that changes the stranding risk. See closeVoucherSentence. */
+  const voucherSentence = closeVoucherSentence(
+    (preflight?.checks ?? []).flatMap((check) => [check.observed, check.reason]),
+  );
+
+  /** Their own machine, or somebody else's? See hubIsProbablySelfHosted. */
+  const selfHostedHub = hubIsProbablySelfHosted(settings?.l2_hub_url ?? hubUrl);
+
   if (watchOnly) {
     return (
       <div className="card">
@@ -403,9 +473,204 @@ export default function FastPayChannelScreen({
 
   return (
     <>
+      {/*
+        BAND 1. CAN I ACT RIGHT NOW.
+
+        The same block, in the same place, as the desktop screen: the one next
+        step, how many are queued behind it, the check's verdict in four words,
+        the button, and the refusal the last press produced. Nothing that is not
+        an answer to "can I act now" is allowed in here.
+
+        It gates nothing. Every rule it summarises is enforced again in
+        `prepare_channel_open`, at the signing boundary, and by the Hub.
+      */}
       <div className="card">
         <h2>Fast Pay</h2>
-        <p className="muted small">{fastPayHowItWorks()}</p>
+        <div
+          className={`fp-next-step ${nextStep.canActNow ? "fp-next-ready" : "fp-next-blocked"}`}
+          role="status"
+        >
+          <div className="fp-next-label">
+            {nextStep.canActNow ? "Your next step" : "What is stopping you"}
+          </div>
+          <h3>{nextStep.headline}</h3>
+          <p>{nextStep.action}</p>
+          {nextStep.remaining > 0 && (
+            <p className="muted small">{fastPayRemainingLine(nextStep.remaining)}</p>
+          )}
+          {nodeReachable === null && (
+            <p className="muted small">
+              Nobody has checked whether your node answers yet.
+            </p>
+          )}
+          {verdict && (
+            <p className="muted small">
+              <strong>{verdict.pill}.</strong> {verdict.headline}.
+            </p>
+          )}
+
+          {fastPay && fastPay.state !== "ready" && (
+            <>
+              <p className="muted small">
+                One-time setup. Deposit stays in your channel until you close it.
+              </p>
+              <p className="muted small">
+                Enable deposits {enableDeposit} HAC, the amount your provider
+                recommends. The field under "Setup" below is for the preview and
+                open path.
+              </p>
+              <button
+                type="button"
+                className="primary"
+                style={{ marginTop: "0.75rem", width: "100%" }}
+                disabled={busy}
+                onClick={() => void handleEnableFastPay()}
+              >
+                Enable
+              </button>
+              {lastRefusal && (
+                <div className="error-box" role="alert" style={{ marginTop: "0.5rem" }}>
+                  <strong>Enable refused, and nothing was signed</strong>
+                  <p className="small">{lastRefusal}</p>
+                </div>
+              )}
+              {/*
+                The button is NOT disabled on a red check, and this is the
+                sentence that stops it reading as broken. The longer form of it
+                is inside the check's own report.
+              */}
+              {verdict && !verdict.pass && (
+                <p className="small">{PREFLIGHT_NOT_GREEN_SHORT}</p>
+              )}
+            </>
+          )}
+        </div>
+
+        {/*
+          The rest of the queue, folded. Band 1 names the first refusal in full;
+          this holds the others with their identifiers, under the name the
+          counter above points at.
+        */}
+        {enableRefusals.length > 0 && (
+          <Disclosure summary={fastPayEnableFoldSummary(enableRefusals)}>
+            <ul className="muted small">
+              {enableRefusals.map((refusal) => (
+                <li key={refusal.id}>
+                  <strong>{refusal.title}.</strong> {refusal.detail}{" "}
+                  <code>{refusal.id}</code>
+                </li>
+              ))}
+            </ul>
+          </Disclosure>
+        )}
+
+        {fastPay && fastPay.state !== "ready" && (
+          <button
+            type="button"
+            style={{ marginTop: "0.5rem", width: "100%" }}
+            disabled={busy}
+            onClick={() => void handleFinishPendingOpen()}
+          >
+            Finish pending setup
+          </button>
+        )}
+        {fastPay?.state === "ready" && (
+          <>
+            <button
+              type="button"
+              style={{ marginTop: "0.75rem", width: "100%" }}
+              disabled={busy}
+              onClick={() => void handleDisableFastPay()}
+            >
+              Disable
+            </button>
+            {channel ? (
+              <button
+                type="button"
+                style={{ marginTop: "0.5rem", width: "100%" }}
+                disabled={busy}
+                onClick={() => void handleFinishPendingClose()}
+              >
+                Finish pending close
+              </button>
+            ) : null}
+          </>
+        )}
+      </div>
+
+      {/*
+        BAND 2. WHAT AM I ABOUT TO AGREE TO.
+
+        Who the counterparty is, what it lets me move, the one action that
+        changes the risk, and the sentence I tick. None of it folds. The consent
+        text is the checkbox label itself, verbatim.
+      */}
+      <div className="card">
+        <div className="toggle-row">
+          <strong>{fastPay ? fastPayStatusTitle(fastPay.state) : "Loading…"}</strong>
+          <span
+            className={
+              fastPay?.state === "ready" ? "badge badge-ok" : "badge badge-warn"
+            }
+          >
+            {fastPay ? fastPayMenuBadge(fastPay.state) : "…"}
+          </span>
+        </div>
+        {/*
+          The Hub's own words first, the generic line only as a fallback.
+
+          `FastPayStatus.message` is the field that carries the reason a
+          provider was refused, and `provider_incompatible_because`
+          (crates/wallet-core/src/fast_pay.rs:152) exists purely to put the
+          Hub's own sentence in it. The comment above that function says why it
+          matters: when a mainnet readiness gate is what refused, the generic
+          line is "simply false", because the same Hub is publishing
+          settlement_ready true, cross_channel_ready true and a zero fee at that
+          exact moment. What it lacks is the mainnet guarantees.
+        */}
+        {fastPay && (
+          <p className="muted" style={{ marginTop: "0.5rem" }}>
+            {fastPay.message?.trim()
+              ? fastPay.message
+              : fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
+          </p>
+        )}
+        <div className="fp-route-hint">
+          <strong>When you tap Send:</strong>{" "}
+          {fastPay?.state === "ready"
+            ? "payments go via Fast Pay (instant)."
+            : fastPay
+              ? "payments go on-chain (standard, few minutes)."
+              : "not known yet. This screen is still reading your provider."}
+        </div>
+        {hubUrl && <p className="muted small">Hub: {hubUrl}</p>}
+        {hubAddress.trim() && (
+          <p className="muted small">Provider address: {hubAddress}</p>
+        )}
+
+        {/*
+          What this Hub lets you move, from the same declared caps
+          `fastPayEnableRefusals` judges the deposit against.
+        */}
+        {preflight && (
+          <div className="preview-box" role="note">
+            <p className="small">
+              <strong>Caps this Hub declares.</strong> {DECLARED_CAPS_LEDE}
+            </p>
+            <DeclaredCapsList caps={preflight.declared_caps} />
+            {voucherSentence && <p className="small">{voucherSentence}</p>}
+          </div>
+        )}
+
+        {/*
+          Whose failure the consent text describes. An owner running the Hub on
+          their own machine reads "if the Hub stops answering" as a third
+          party's failure, and it is their own key and their own durable state.
+        */}
+        {settings?.network_mode === "mainnet" && selfHostedHub ? (
+          <p className="muted small">{FAST_PAY_SELF_HOSTED_HUB_NOTE}</p>
+        ) : null}
+
         {settings?.network_mode === "mainnet" ? (
           <div className="warning-box" role="note">
             <strong>Bounded mainnet pilot</strong>
@@ -448,123 +713,17 @@ export default function FastPayChannelScreen({
             </button>
           </div>
         ) : null}
-        <div className="toggle-row" style={{ marginTop: "0.75rem" }}>
-          <strong>{fastPay ? fastPayStatusTitle(fastPay.state) : "Loading…"}</strong>
-          <span
-            className={
-              fastPay?.state === "ready" ? "badge badge-ok" : "badge badge-warn"
-            }
-          >
-            {fastPay ? fastPayMenuBadge(fastPay.state) : "…"}
-          </span>
-        </div>
-        {fastPay && (
-          <>
-            {/*
-              The Hub's own words first, the generic line only as a fallback.
+      </div>
 
-              `FastPayStatus.message` is the field that carries the reason a
-              provider was refused, and `provider_incompatible_because`
-              (crates/wallet-core/src/fast_pay.rs:152) exists purely to put the
-              Hub's own sentence in it. The comment above that function says why
-              it matters: when a mainnet readiness gate is what refused, the
-              generic line is "simply false", because the same Hub is publishing
-              settlement_ready true, cross_channel_ready true and a zero fee at
-              that exact moment. What it lacks is the mainnet guarantees.
-
-              This screen rendered only `fastPayStatusLine(fastPay.state, ...)`,
-              a hardcoded sentence switched off the state enum, and for
-              `provider_incompatible` that sentence is the false one: "Provider
-              cannot create safe, fee-free routed settlements." So a person was
-              told to go and replace a working Hub. Desktop has always rendered
-              `message`; the phone did not.
-            */}
-            <p className="muted" style={{ marginTop: "0.5rem" }}>
-              {fastPay.message?.trim()
-                ? fastPay.message
-                : fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
-            </p>
-            {/*
-              Offered whenever Fast Pay is not already on.
-
-              It used to require `can_enable`, so a person whose Hub was refusing
-              for a nameable reason had no control left to press, and it used to
-              grey itself out on withheld mainnet consent, which said nothing at
-              all. Now it renders, it is pressable, and the reasons are listed
-              directly under it. No gate moved: the core refuses on its own
-              account and the Hub judges its readiness document again at funding.
-            */}
-            {fastPay.state !== "ready" && (
-              <>
-                <div
-                  className={enableRefusals.length === 0 ? "preview-box" : "warning-box"}
-                  role="note"
-                  style={{ marginTop: "0.75rem" }}
-                >
-                  <strong>{fastPayEnableHeadline(enableRefusals)}</strong>
-                  {enableRefusals.length > 0 && (
-                    <ul className="muted small">
-                      {enableRefusals.map((refusal) => (
-                        <li key={refusal.id}>
-                          <strong>{refusal.title}.</strong> {refusal.detail}{" "}
-                          <code>{refusal.id}</code>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  className="primary"
-                  style={{ marginTop: "0.75rem", width: "100%" }}
-                  disabled={busy}
-                  onClick={() => void handleEnableFastPay()}
-                >
-                  Enable
-                </button>
-                {lastRefusal && (
-                  <div className="error-box" role="alert" style={{ marginTop: "0.5rem" }}>
-                    <strong>Enable refused, and nothing was signed</strong>
-                    <p className="small">{lastRefusal}</p>
-                  </div>
-                )}
-              </>
-            )}
-            {fastPay.state !== "ready" && (
-              <button
-                type="button"
-                style={{ marginTop: "0.5rem", width: "100%" }}
-                disabled={busy}
-                onClick={() => void handleFinishPendingOpen()}
-              >
-                Finish pending setup
-              </button>
-            )}
-            {fastPay.state === "ready" && (
-              <>
-                <button
-                  type="button"
-                  style={{ marginTop: "0.75rem", width: "100%" }}
-                  disabled={busy}
-                  onClick={() => void handleDisableFastPay()}
-                >
-                  Disable
-                </button>
-                {channel ? (
-                  <button
-                    type="button"
-                    style={{ marginTop: "0.5rem", width: "100%" }}
-                    disabled={busy}
-                    onClick={() => void handleFinishPendingClose()}
-                  >
-                    Finish pending close
-                  </button>
-                ) : null}
-              </>
-            )}
-          </>
-        )}
-        {hubUrl && <p className="muted small">Hub: {hubUrl}</p>}
+      {/*
+        BAND 3 begins. Everything below is evidence, and the screen's own
+        explanation of itself is the first thing to fold: the route hint in
+        band 2 already answers, in one line, what this paragraph explains.
+      */}
+      <div className="card">
+        <Disclosure summary="How it works">
+          <p className="muted small">{fastPayHowItWorks()}</p>
+        </Disclosure>
       </div>
 
       {fastPay?.state === "ready" && (
@@ -791,14 +950,13 @@ export default function FastPayChannelScreen({
             It is a read-only opinion about the infrastructure, not a gate, and
             every gate it previews runs again for real inside the open. Wiring
             the button to it would swap a real refusal carrying a reason for a
-            greyed-out control carrying none.
+            greyed-out control carrying none. The short form of this sentence is
+            beside the Enable button at the top of the screen and the long form
+            is inside the check's own report; this is the copy for the two
+            controls directly below it.
           */}
-          {preflight && !preflightShowsPass(preflight.checks) && (
-            <p className="small">
-              The check above is not green. You can still continue, and the same
-              gates will refuse you again with a reason when the money actually
-              moves. Fixing what it named first is the cheaper order.
-            </p>
+          {verdict && !verdict.pass && (
+            <p className="small">{PREFLIGHT_NOT_GREEN_SHORT}</p>
           )}
           <button type="button" disabled={busy || !hubAddress.trim()} onClick={() => void handlePreviewOpen()}>
             Preview channel open

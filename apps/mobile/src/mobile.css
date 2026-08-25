@@ -1789,3 +1789,97 @@ button:disabled {
 .bottom-nav-agent-confirm-row button {
   flex: 1;
 }
+
+/*
+ * BAND 1 ON A PHONE: "can I act right now", first, above everything.
+ *
+ * These rules exist only on this stylesheet's side of a shape the desktop
+ * screen already had. The phone had no next-step block at all, so a person who
+ * learned the screen on a laptop had to learn it again in their hand. Same
+ * markup, same class names, same order.
+ */
+.fp-next-step {
+  margin: 12px 0 4px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.fp-next-step h3 {
+  margin: 4px 0 6px;
+  font-size: 1rem;
+}
+
+.fp-next-step p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.fp-next-step p.muted {
+  color: var(--muted);
+}
+
+.fp-next-label {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fp-route-hint {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: 13px;
+}
+
+/*
+ * One folded section, the same control the desktop app uses.
+ *
+ * `<details>` hides the body from the eye and from nothing else: it stays in
+ * the document for find-in-page and for a screen reader, and it opens from the
+ * keyboard. Nothing here may be turned into a rule that removes content.
+ */
+.wallet-disclosure {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+}
+
+.wallet-disclosure > summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+  list-style: none;
+}
+
+.wallet-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.wallet-disclosure > summary::before {
+  content: "▸ ";
+  color: var(--accent);
+}
+
+.wallet-disclosure[open] > summary::before {
+  content: "▾ ";
+}
+
+.wallet-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wallet-disclosure-body {
+  padding: 0 14px 12px;
+}

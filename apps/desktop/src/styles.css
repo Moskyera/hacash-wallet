@@ -328,6 +328,74 @@ nav button.active, button.primary {
   border-left-color: var(--accent);
 }
 
+/*
+ * The Enable control, inside the block that says whether it can be pressed.
+ *
+ * It used to be a card of its own about a thousand words further down, so the
+ * answer to "can I act now" was given in two places a screen apart. The rule
+ * here is only spacing: the button is never greyed by this stylesheet and never
+ * hidden by it.
+ */
+.fp-enable {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.fp-enable h4 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+}
+
+.fp-enable input[type="number"] {
+  max-width: 220px;
+}
+
+/*
+ * One folded section, the same on both platforms.
+ *
+ * The content inside stays in the document: `<details>` hides it from the eye
+ * and from nothing else. Do not replace this with a class that sets
+ * `display: none` on the body, and do not let anything here remove content.
+ */
+.wallet-disclosure {
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+}
+
+.wallet-disclosure > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+  list-style: none;
+}
+
+.wallet-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.wallet-disclosure > summary::before {
+  content: "▸ ";
+  color: var(--accent);
+}
+
+.wallet-disclosure[open] > summary::before {
+  content: "▾ ";
+}
+
+.wallet-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wallet-disclosure-body {
+  padding: 0 14px 12px;
+}
+
 .fp-route-hint {
   padding: 12px 14px;
   border-radius: 12px;

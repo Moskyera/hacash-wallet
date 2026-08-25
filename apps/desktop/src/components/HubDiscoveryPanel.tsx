@@ -8,11 +8,13 @@ import {
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import {
+  Disclosure,
   FAST_PAY_NO_HUB_EXPLANATION,
   FAST_PAY_PILOT_ALLOWLIST_NOTE,
   FAST_PAY_SELF_HOSTED_HUB_NOTE,
   HUB_OPERATOR_URL,
   HubDeclarationCard,
+  hubSourcesSummary,
 } from "@hacash/wallet-ui";
 
 type Props = {
@@ -251,8 +253,6 @@ export default function HubDiscoveryPanel({
 
   return (
     <div className="hub-discovery">
-      <p className="muted small">{FAST_PAY_NO_HUB_EXPLANATION}</p>
-
       <label htmlFor="hub-discovery-url">Hub address</label>
       <input
         id="hub-discovery-url"
@@ -263,9 +263,56 @@ export default function HubDiscoveryPanel({
         autoComplete="off"
         spellCheck={false}
       />
-      <p className="muted small">
-        HTTPS, or http://127.0.0.1:PORT for a hub on this machine.
-      </p>
+
+      {/*
+        Five paragraphs about where hubs come from, behind one summary that
+        carries their content rather than hiding it. The summary says the two
+        things a person would otherwise have to read 160 words to learn: that
+        there is no public hub, and that running your own moves the risk rather
+        than removing it. Everything else stays in the document, one click away.
+      */}
+      <Disclosure summary={hubSourcesSummary(isMainnet)}>
+        <p className="muted small">{FAST_PAY_NO_HUB_EXPLANATION}</p>
+        <p className="muted small">
+          HTTPS, or http://127.0.0.1:PORT for a hub on this machine.
+        </p>
+        {isMainnet && (
+          <>
+            <p className="muted small">{FAST_PAY_PILOT_ALLOWLIST_NOTE}</p>
+            <p className="muted small">{FAST_PAY_SELF_HOSTED_HUB_NOTE}</p>
+          </>
+        )}
+        <p className="muted small">
+          Somebody has to run a hub, and it can be you.{" "}
+          {/*
+            * `.catch(() => undefined)` was on the button below, and it is the
+            * reason it could do nothing and say nothing. It is also the only
+            * route out of the empty state, because FAST_PAY_NO_HUB_EXPLANATION
+            * tells the person their only option is to run a Hub themselves. If
+            * the browser does not open they need to be told, and handed the URL
+            * so they can open it by hand. The correct form was already in this
+            * tree at SettingsScreen.tsx:95.
+            */}
+          {openExternal ? (
+            <button
+              type="button"
+              className="linkish"
+              onClick={() =>
+                void Promise.resolve(openExternal(HUB_OPERATOR_URL)).catch((error) =>
+                  onToast(
+                    `The browser did not open: ${formatInvokeError(error)}. The guide is at ${HUB_OPERATOR_URL}`,
+                    "error",
+                  ),
+                )
+              }
+            >
+              Read the hub operator guide
+            </button>
+          ) : (
+            <span className="hub-discovery-url">{HUB_OPERATOR_URL}</span>
+          )}
+        </p>
+      </Disclosure>
 
       <div className="actions-row">
         {/*
@@ -343,42 +390,6 @@ export default function HubDiscoveryPanel({
         </div>
       )}
 
-      {isMainnet && (
-        <>
-          <p className="muted small">{FAST_PAY_PILOT_ALLOWLIST_NOTE}</p>
-          <p className="muted small">{FAST_PAY_SELF_HOSTED_HUB_NOTE}</p>
-        </>
-      )}
-      <p className="muted small">
-        Somebody has to run a hub, and it can be you.{" "}
-        {/*
-          * `.catch(() => undefined)` was on the button below, and it is the
-          * reason it could do nothing and say nothing. It is also the only route
-          * out of the empty state, because FAST_PAY_NO_HUB_EXPLANATION tells the
-          * person their only option is to run a Hub themselves. If the browser
-          * does not open they need to be told, and handed the URL so they can
-          * open it by hand. The correct form was already in this tree at
-          * SettingsScreen.tsx:95.
-          */}
-        {openExternal ? (
-          <button
-            type="button"
-            className="linkish"
-            onClick={() =>
-              void Promise.resolve(openExternal(HUB_OPERATOR_URL)).catch((error) =>
-                onToast(
-                  `The browser did not open: ${formatInvokeError(error)}. The guide is at ${HUB_OPERATOR_URL}`,
-                  "error",
-                ),
-              )
-            }
-          >
-            Read the hub operator guide
-          </button>
-        ) : (
-          <span className="hub-discovery-url">{HUB_OPERATOR_URL}</span>
-        )}
-      </p>
     </div>
   );
 }

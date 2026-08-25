@@ -8,11 +8,13 @@ import {
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import {
+  Disclosure,
   FAST_PAY_NO_HUB_EXPLANATION,
   FAST_PAY_PILOT_ALLOWLIST_NOTE,
   FAST_PAY_SELF_HOSTED_HUB_NOTE,
   HUB_OPERATOR_URL,
   HubDeclarationCard,
+  hubSourcesSummary,
 } from "@hacash/wallet-ui";
 
 type Props = {
@@ -212,8 +214,6 @@ export default function HubDiscoveryPanel({
 
   return (
     <div className="hub-discovery">
-      <p className="muted small">{FAST_PAY_NO_HUB_EXPLANATION}</p>
-
       <label htmlFor="hub-discovery-url">Hub address</label>
       <input
         id="hub-discovery-url"
@@ -224,9 +224,38 @@ export default function HubDiscoveryPanel({
         autoComplete="off"
         spellCheck={false}
       />
-      <p className="muted small">
-        HTTPS, or http://127.0.0.1:PORT for a hub on this machine.
-      </p>
+
+      {/*
+        The same fold, the same words and the same summary as the desktop
+        panel. A person who learns this screen on one device should not have to
+        learn it again on the other.
+      */}
+      <Disclosure summary={hubSourcesSummary(isMainnet)}>
+        <p className="muted small">{FAST_PAY_NO_HUB_EXPLANATION}</p>
+        <p className="muted small">
+          HTTPS, or http://127.0.0.1:PORT for a hub on this machine.
+        </p>
+        {isMainnet && (
+          <>
+            <p className="muted small">{FAST_PAY_PILOT_ALLOWLIST_NOTE}</p>
+            <p className="muted small">{FAST_PAY_SELF_HOSTED_HUB_NOTE}</p>
+          </>
+        )}
+        <p className="muted small">
+          Somebody has to run a hub, and it can be you.{" "}
+          {openExternal ? (
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => void Promise.resolve(openExternal(HUB_OPERATOR_URL)).catch(() => undefined)}
+            >
+              Read the hub operator guide
+            </button>
+          ) : (
+            <span className="hub-discovery-url">{HUB_OPERATOR_URL}</span>
+          )}
+        </p>
+      </Disclosure>
 
       <div className="actions-row">
         <button
@@ -297,26 +326,6 @@ export default function HubDiscoveryPanel({
         </div>
       )}
 
-      {isMainnet && (
-        <>
-          <p className="muted small">{FAST_PAY_PILOT_ALLOWLIST_NOTE}</p>
-          <p className="muted small">{FAST_PAY_SELF_HOSTED_HUB_NOTE}</p>
-        </>
-      )}
-      <p className="muted small">
-        Somebody has to run a hub, and it can be you.{" "}
-        {openExternal ? (
-          <button
-            type="button"
-            className="linkish"
-            onClick={() => void Promise.resolve(openExternal(HUB_OPERATOR_URL)).catch(() => undefined)}
-          >
-            Read the hub operator guide
-          </button>
-        ) : (
-          <span className="hub-discovery-url">{HUB_OPERATOR_URL}</span>
-        )}
-      </p>
     </div>
   );
 }

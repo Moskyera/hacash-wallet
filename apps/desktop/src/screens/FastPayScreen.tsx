@@ -20,15 +20,23 @@ import {
 import type { Screen } from "./types";
 import { open } from "@tauri-apps/plugin-shell";
 import {
+  DECLARED_CAPS_LEDE,
+  DeclaredCapsList,
+  Disclosure,
   FAST_PAY_MAINNET_CEILINGS,
   FAST_PAY_MAINNET_CONSENT,
+  FAST_PAY_SELF_HOSTED_HUB_NOTE,
   MAINNET_SIGNING_TRANSPORT_NOTICE,
   NativeRailPreflightCard,
-  fastPayEnableHeadline,
+  PREFLIGHT_NOT_GREEN_SHORT,
+  closeVoucherSentence,
+  fastPayEnableFoldSummary,
   fastPayEnableRefusals,
   fastPayNextStep,
+  fastPayRemainingLine,
+  hubIsProbablySelfHosted,
   mainnetSigningTransportIsEligible,
-  preflightShowsPass,
+  preflightVerdict,
 } from "@hacash/wallet-ui";
 
 /**
@@ -421,13 +429,197 @@ export default function FastPayScreen({
     ],
   });
 
+  /**
+   * The verdict of the read-only check, as one line for the top of the screen.
+   *
+   * "NOT READY. Do not put money in yet." used to sit about 1500 words down the
+   * page, under the whole report. It answers "can I act now", so it belongs in
+   * the first block a person reads. The report keeps its own banner.
+   */
+  const verdict = preflight ? preflightVerdict(preflight) : null;
+
+  /**
+   * The close-voucher sentence, when this Hub discloses that gap.
+   *
+   * The identifier travels in the preflight's `hub_disclosed_gaps` item, in its
+   * observed text and its reason, which is the only place this screen can see
+   * it without a Hub declaration of its own. It is the single action anywhere
+   * on this screen that changes the stranding risk rather than describing it,
+   * so it is read without opening anything.
+   */
+  const voucherSentence = closeVoucherSentence(
+    (preflight?.checks ?? []).flatMap((check) => [check.observed, check.reason]),
+  );
+
+  /** Their own machine, or somebody else's? See hubIsProbablySelfHosted. */
+  const selfHostedHub = hubIsProbablySelfHosted(settings?.l2_hub_url ?? hubUrl);
+
   return (
     <section className="panel">
       <h2>Fast Pay</h2>
-      <p className="muted">
-        Instant fee-free payments on the Hacash payment network. Check this tab to see whether
-        your sends will be Fast Pay or on-chain.
-      </p>
+
+      {/*
+        BAND 1. CAN I ACT RIGHT NOW.
+
+        One block, first on the screen, and it carries the control. The owner's
+        complaint was that the answer to "can I act now" was at the bottom, under
+        every disclosure and every limitation. Everything in this block is an
+        answer to that question and nothing else is allowed in: the one next
+        step, how many are queued behind it, the check's verdict in four words,
+        the deposit field and the button, and the refusal the last press
+        produced.
+
+        It gates nothing. `canActNow` is a summary of what this screen can see,
+        the button below is pressable either way, and the core and the Hub both
+        re-check everything when it is pressed.
+      */}
+      <div
+        className={`fp-next-step ${nextStep.canActNow ? "fp-next-ready" : "fp-next-blocked"}`}
+        role="status"
+      >
+        <div className="fp-next-label">
+          {nextStep.canActNow ? "Your next step" : "What is stopping you"}
+        </div>
+        <h3>{nextStep.headline}</h3>
+        <p>{nextStep.action}</p>
+        {nextStep.remaining > 0 && (
+          <p className="muted small">{fastPayRemainingLine(nextStep.remaining)}</p>
+        )}
+        {nodeReachable === null && (
+          <p className="muted small">
+            Nobody has checked whether your node answers yet.
+          </p>
+        )}
+        {/*
+          The verdict, lifted out of the report. The report still shows it; this
+          is the copy a person reads before they have scrolled anywhere.
+        */}
+        {verdict && (
+          <p className="muted small">
+            <strong>{verdict.pill}.</strong> {verdict.headline}.
+          </p>
+        )}
+
+        {/*
+          The Enable control, in the block that says whether you can press it.
+
+          This used to be a separate card roughly a thousand words further down,
+          so "yes, and here is the button" was answered in two places a screen
+          apart. The card is dissolved into this block rather than duplicated:
+          there is exactly one Enable button on this screen.
+
+          It renders whenever Fast Pay is not already on. It used to be
+          conditional on `fastPayNeedsSetup || can_enable`, so a person whose Hub
+          was refusing for a nameable reason lost the deposit field, the check
+          and the button altogether. Making the control vanish is worse than
+          greying it out, and greying it out is already the thing this repository
+          has shipped before. It renders, it is pressable, and it says why.
+        */}
+        {!fastPayReady && !status?.watch_only && (
+          <div className="fp-enable">
+            <h4>Turn Fast Pay ON</h4>
+            <p className="muted small">
+              One-time setup. Deposit stays in your channel until you close it.
+            </p>
+            <label htmlFor="fp-channel-deposit">Your channel deposit (HAC)</label>
+            <input
+              id="fp-channel-deposit"
+              value={userDeposit}
+              onChange={(e) => setUserDeposit(e.target.value)}
+              type="number"
+              min="0.001"
+              step="0.001"
+            />
+            {fastPayDetail && fastPayDetail.default_deposit_mei > 0 && (
+              <p className="muted small">
+                Your provider's own recommendation is{" "}
+                {fastPayDetail.default_deposit_mei} HAC, the smaller of its
+                declared per-channel cap and this wallet's default.
+              </p>
+            )}
+
+            <button className="primary" disabled={busy} onClick={() => void pressEnable()}>
+              Enable Fast Pay
+            </button>
+
+            {/*
+              The refusal the last press produced, kept where the press happened.
+              The toast that carried it clears after four seconds and the banner
+              that carried it sits at the top of a page this button is below.
+            */}
+            {lastRefusal && (
+              <div className="alert" role="alert">
+                <strong>Enable refused, and nothing was signed</strong>
+                <p className="small">{lastRefusal}</p>
+                <p className="muted small">
+                  Nothing left your wallet. This is the wallet or your Hub
+                  answering, in its own words.
+                </p>
+              </div>
+            )}
+
+            {/*
+              The button is NOT disabled on a red preflight. The preflight is a
+              read-only opinion about the infrastructure, not a gate, and every
+              gate it previews runs again for real inside enable and inside the
+              channel open. Wiring the button to it would swap a real refusal
+              with a reason for a greyed-out control with none. Saying it plainly
+              is the honest half, and it is the sentence that stops the live
+              button reading as broken, so it never folds. The longer form of it
+              is inside the check's own report.
+            */}
+            {verdict && !verdict.pass && (
+              <p className="small">{PREFLIGHT_NOT_GREEN_SHORT}</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/*
+        The rest of the queue, folded. BAND 1 already names the first refusal in
+        full; this holds the others, with their identifiers, in one place the
+        counter above can point at by name.
+      */}
+      {enableRefusals.length > 0 && (
+        <Disclosure summary={fastPayEnableFoldSummary(enableRefusals)}>
+          <ul className="small">
+            {enableRefusals.map((refusal) => (
+              <li key={refusal.id}>
+                <strong>{refusal.title}.</strong> {refusal.detail}{" "}
+                <code>{refusal.id}</code>
+              </li>
+            ))}
+          </ul>
+        </Disclosure>
+      )}
+
+      {fastPayReady && (
+        <div className="success-box">
+          <p>
+            Provider: <strong>{fastPayDetail?.provider_name ?? "connected"}</strong>
+            {status?.channel_id && (
+              <>
+                {" "}
+                · Channel active · {billsCount} bill{billsCount === 1 ? "" : "s"} backed up
+              </>
+            )}
+          </p>
+          <button className="primary" onClick={() => onNavigate("send")}>
+            Go to Send
+          </button>
+        </div>
+      )}
+
+      {/*
+        BAND 2. WHAT AM I ABOUT TO AGREE TO.
+
+        The counterparty by name, URL and on-chain address; what it lets me
+        move; the one action that changes the risk; and the sentence I tick.
+        None of this is evidence and none of it folds. The consent text in
+        particular is the checkbox label itself, verbatim: a person who ticks a
+        box whose words are behind a disclosure has agreed to something they did
+        not read.
+      */}
 
       {/*
         The headline reads the measured state, not `status.fast_pay_state`.
@@ -460,41 +652,6 @@ export default function FastPayScreen({
         </div>
       </div>
 
-      {/*
-        The next step, before anything else on the page.
-
-        Deliberately the first thing under the status, and deliberately one
-        thing. The rest of this screen is reference material: the consent block,
-        the hub finder, the preflight and the refusal list are all here and all
-        useful, but a person arriving at a wallet that will not turn Fast Pay on
-        needs to be told which of them is their turn, not handed all four.
-        `remaining` is shown so nobody thinks they are one step from done when
-        they are three.
-      */}
-      <div
-        className={`fp-next-step ${nextStep.canActNow ? "fp-next-ready" : "fp-next-blocked"}`}
-        role="status"
-      >
-        <div className="fp-next-label">
-          {nextStep.canActNow ? "Your next step" : "What is stopping you"}
-        </div>
-        <h3>{nextStep.headline}</h3>
-        <p>{nextStep.action}</p>
-        {nextStep.remaining > 0 && (
-          <p className="muted small">
-            {nextStep.remaining} other thing{nextStep.remaining === 1 ? "" : "s"} still
-            need{nextStep.remaining === 1 ? "s" : ""} attention after this one. All of
-            them are listed under "Turn Fast Pay ON" below.
-          </p>
-        )}
-        {nodeReachable === null && (
-          <p className="muted small">
-            Nobody has checked whether your node answers yet. "Run the check" under
-            "Your node and your Hub, right now" will say.
-          </p>
-        )}
-      </div>
-
       <div className="fp-route-hint">
         <strong>When you tap Send:</strong>{" "}
         {fastPayReady
@@ -503,6 +660,35 @@ export default function FastPayScreen({
             ? "payments go on-chain (standard, few minutes)."
             : "not known yet. This screen is still reading your provider."}
       </div>
+
+      {/*
+        What this Hub lets you move, beside the box you tick rather than inside
+        the hub finder, where it appeared only after somebody pressed "Check this
+        hub". These are the same numbers `fastPayEnableRefusals` judges the
+        deposit against.
+      */}
+      {preflight && (
+        <div className="preview-card" role="note">
+          <p className="small">
+            <strong>Caps this Hub declares.</strong> {DECLARED_CAPS_LEDE}
+          </p>
+          <DeclaredCapsList caps={preflight.declared_caps} />
+          {voucherSentence && <p className="small">{voucherSentence}</p>}
+        </div>
+      )}
+
+      {/*
+        Whose failure the consent text is describing.
+
+        It says "if the Hub stops answering, refuses to sign, or disappears",
+        and an owner whose Hub is their own machine reads that as a third
+        party's failure. It is their own key and their own durable state. Shown
+        without opening anything in that case; folded with the rest of the hub
+        material otherwise.
+      */}
+      {settings?.network_mode === "mainnet" && selfHostedHub && (
+        <p className="small">{FAST_PAY_SELF_HOSTED_HUB_NOTE}</p>
+      )}
 
       {settings?.network_mode === "mainnet" && (
         <div className="alert" role="note">
@@ -620,128 +806,25 @@ export default function FastPayScreen({
       </div>
 
       {/*
-        The Enable card renders whenever Fast Pay is not already on.
-
-        It used to be conditional on `fastPayNeedsSetup || can_enable`, so a
-        person whose Hub was refusing for a nameable reason lost the deposit
-        field, the check and the button altogether, and had nothing left to
-        press and no cause on screen. Making the control vanish is worse than
-        greying it out, and greying it out is already the thing this repository
-        has shipped before. It renders, it is pressable, and it says why.
+        The screen's own explanation, folded. The route hint in band 2 already
+        answers what these three bullets explain, in one line, before this.
       */}
-      {!fastPayReady && !status?.watch_only && (
-        <div className="fast-pay-card">
-          <h3>Turn Fast Pay ON</h3>
-          <p className="muted">One-time setup. Deposit stays in your channel until you close it.</p>
-          <label>Your channel deposit (HAC)</label>
-          <input
-            value={userDeposit}
-            onChange={(e) => setUserDeposit(e.target.value)}
-            type="number"
-            min="0.001"
-            step="0.001"
-          />
-          {fastPayDetail && fastPayDetail.default_deposit_mei > 0 && (
-            <p className="muted small">
-              Your provider's own recommendation is{" "}
-              {fastPayDetail.default_deposit_mei} HAC, which is the smaller of
-              its declared per-channel cap and this wallet's default.
-            </p>
-          )}
-
-          {/*
-            What is stopping this button, before it is pressed.
-
-            Two of these conditions used to disable the button instead. A greyed
-            control carries no reason, a person cannot tell it from a broken one,
-            and they press it again. Nothing here decides anything: the button
-            below is pressable in every case, `prepare_channel_open` re-checks
-            each rule for real, and the Hub re-judges its own readiness document
-            at the moment of funding.
-          */}
-          <div
-            className={enableRefusals.length === 0 ? "preview-card" : "alert"}
-            role="note"
-          >
-            <strong>{fastPayEnableHeadline(enableRefusals)}</strong>
-            {enableRefusals.length > 0 && (
-              <ul className="small">
-                {enableRefusals.map((refusal) => (
-                  <li key={refusal.id}>
-                    <strong>{refusal.title}.</strong> {refusal.detail}{" "}
-                    <code>{refusal.id}</code>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <button className="primary" disabled={busy} onClick={() => void pressEnable()}>
-            Enable Fast Pay
-          </button>
-
-          {/*
-            The refusal the last press produced, kept where the press happened.
-            The toast that carried it clears after four seconds and the banner
-            that carried it sits at the top of a page this button is below.
-          */}
-          {lastRefusal && (
-            <div className="alert" role="alert">
-              <strong>Enable refused, and nothing was signed</strong>
-              <p className="small">{lastRefusal}</p>
-              <p className="muted small">
-                Nothing left your wallet. This is the wallet or your Hub
-                answering, in its own words.
-              </p>
-            </div>
-          )}
-
-          {/*
-            The button is NOT disabled on a red preflight. The preflight is a
-            read-only opinion about the infrastructure, not a gate, and every
-            gate it previews runs again for real inside enable and inside the
-            channel open. Wiring the button to it would swap a real refusal
-            with a reason for a greyed-out control with none. Saying it plainly
-            is the honest half.
-          */}
-          {preflight && !preflightShowsPass(preflight.checks) && (
-            <p className="small">
-              The check above is not green. You can still continue, and the same
-              gates will refuse you again with a reason when the money actually
-              moves. Fixing what it named first is the cheaper order.
-            </p>
-          )}
-        </div>
-      )}
-
-      {fastPayReady && (
-        <div className="success-box">
-          <p>
-            Provider: <strong>{fastPayDetail?.provider_name ?? "connected"}</strong>
-            {status?.channel_id && (
-              <>
-                {" "}
-                · Channel active · {billsCount} bill{billsCount === 1 ? "" : "s"} backed up
-              </>
-            )}
-          </p>
-          <button className="primary" onClick={() => onNavigate("send")}>
-            Go to Send
-          </button>
-        </div>
-      )}
-
       <div className="fp-how-it-works">
-        <h3>How it works</h3>
-        <ul>
-          <li>
-            <strong>Fast Pay ON:</strong> Send tab uses instant routing with no Fast Pay fee.
-          </li>
-          <li>
-            <strong>Fast Pay OFF:</strong> Send tab uses on-chain (dynamic L1 fee from node).
-          </li>
-          <li>You always see which route is used before you confirm a payment.</li>
-        </ul>
+        <Disclosure summary="How it works">
+          <p className="muted">
+            Instant fee-free payments on the Hacash payment network. Check this tab to see
+            whether your sends will be Fast Pay or on-chain.
+          </p>
+          <ul>
+            <li>
+              <strong>Fast Pay ON:</strong> Send tab uses instant routing with no Fast Pay fee.
+            </li>
+            <li>
+              <strong>Fast Pay OFF:</strong> Send tab uses on-chain (dynamic L1 fee from node).
+            </li>
+            <li>You always see which route is used before you confirm a payment.</li>
+          </ul>
+        </Disclosure>
       </div>
 
       {fastPayReady && (

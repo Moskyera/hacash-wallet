@@ -26,6 +26,8 @@
  *    comment.
  */
 
+import { Disclosure } from "./HubDeclarationCard";
+
 export type PreflightCheckStatus = "pass" | "fail" | "skip";
 export type PreflightCheckSeverity = "fatal" | "warning";
 
@@ -145,6 +147,74 @@ export const PREFLIGHT_WHAT_IT_DOES =
   "reads it. It also asks your node how many other nodes have reached it, which " +
   "you used to have to work out yourself by counting connections in a terminal.";
 
+/**
+ * The verdict as one line, for the top of a screen rather than the middle of a
+ * report.
+ *
+ * "NOT READY. Do not put money in yet." is a "can I act now" answer, and it was
+ * sitting roughly 1500 words down the page, under everything the check had to
+ * say. The screens render this above everything; the report below keeps the
+ * same banner and folds only its body.
+ *
+ * Recomputed from the items, never from `report.verdict`. See preflightShowsPass.
+ */
+export type PreflightVerdictLine = {
+  pass: boolean;
+  pill: string;
+  headline: string;
+};
+
+export function preflightVerdict(report: NativeRailPreflightView): PreflightVerdictLine {
+  const pass = preflightShowsPass(report.checks);
+  return {
+    pass,
+    pill: pass ? "READY" : "NOT READY",
+    headline: pass
+      ? "The infrastructure answered correctly, right now"
+      : "Do not put money in yet",
+  };
+}
+
+/**
+ * What is behind the fold, counted from the items that are behind the fold.
+ *
+ * Every number here is recomputed from `report.checks` and
+ * `report.cannot_be_checked` on each render. Hardcoding any of them, or reading
+ * `report.fatal_failed` instead, would let this line drift from the list it
+ * describes, and a wrong count in a summary reads as authority. A skipped check
+ * gets its own number and is never added to the green one: a question nobody
+ * answered is not a question that came back clean.
+ */
+export function preflightItemSummary(report: NativeRailPreflightView): string {
+  const total = report.checks.length;
+  const green = report.checks.filter((check) => check.status === "pass").length;
+  const failed = report.checks.filter((check) => check.status === "fail").length;
+  const notRun = report.checks.filter((check) => check.status === "skip").length;
+  const cannot = report.cannot_be_checked.length;
+  const tail =
+    cannot === 0
+      ? ""
+      : `, plus ${cannot} thing${cannot === 1 ? "" : "s"} no check can tell you, starting with "${report.cannot_be_checked[0].title}"`;
+  return `Every item this check ran. ${total} item${total === 1 ? "" : "s"}: ${green} green, ${failed} failed, ${notRun} not run${tail}.`;
+}
+
+/** The summary before anything has been run, so the fold still has an honest label. */
+export const PREFLIGHT_WHAT_IT_DOES_SUMMARY =
+  "What this check does. It signs nothing, unlocks nothing and moves no money.";
+
+/**
+ * The sentence that stops the Enable button reading as broken on a red check.
+ *
+ * The short form goes beside the button and never folds: without it, a person
+ * looking at a red report and a live button cannot tell which of the two is
+ * wrong. The long form keeps the reasoning and folds into the report.
+ */
+export const PREFLIGHT_NOT_GREEN_SHORT =
+  "The check below is not green. You can still press Enable, and the same gates will refuse again with a reason.";
+
+export const PREFLIGHT_NOT_GREEN_FULL =
+  "The check above is not green. You can still continue, and the same gates will refuse you again with a reason when the money actually moves. Fixing what it named first is the cheaper order.";
+
 function statusLabel(check: PreflightCheckView): string {
   if (check.status === "pass") return check.severity === "fatal" ? "PASS" : "OK";
   if (check.severity === "warning") {
@@ -188,7 +258,6 @@ export function NativeRailPreflightCard({
   return (
     <div className="preview-card native-rail-preflight">
       <h4>Check the infrastructure before you put money in</h4>
-      <p className="muted small">{PREFLIGHT_WHAT_IT_DOES}</p>
       <button
         type="button"
         className="primary"
@@ -198,7 +267,18 @@ export function NativeRailPreflightCard({
         {running ? "Checking…" : "Run the check"}
       </button>
 
-      {report && <PreflightResult report={report} />}
+      {report ? (
+        <PreflightResult report={report} />
+      ) : (
+        /*
+          With no report there is no item summary to compute, and
+          PREFLIGHT_WHAT_IT_DOES must not simply disappear: it is what tells a
+          person that pressing the button costs them nothing.
+        */
+        <Disclosure summary={PREFLIGHT_WHAT_IT_DOES_SUMMARY}>
+          <p className="muted small">{PREFLIGHT_WHAT_IT_DOES}</p>
+        </Disclosure>
+      )}
     </div>
   );
 }
@@ -219,27 +299,34 @@ export function PreflightResult({ report }: { report: NativeRailPreflightView })
       !(reachUnproven && check.id === NODE_REACH_CHECK_ID),
   );
 
+  const verdict = preflightVerdict(report);
+
   return (
     <>
+      {/*
+        The verdict keeps its banner and loses its paragraph. The pill and the
+        headline answer "can I act now" in four words; the reasoning underneath
+        them is evidence and moves into the fold below, where it is still read
+        in full by anyone who opens it.
+      */}
       <div
         className={pass ? "fp-status-banner fp-status-on" : "fp-status-banner fp-status-off"}
         role="status"
       >
-        <div className="fp-status-pill">{pass ? "READY" : "NOT READY"}</div>
+        <div className="fp-status-pill">{verdict.pill}</div>
         <div>
-          <h3>
-            {pass
-              ? "The infrastructure answered correctly, right now"
-              : "Do not put money in yet"}
-          </h3>
-          <p>
-            {pass
-              ? PREFLIGHT_GREEN_MEANS
-              : `${failed.length} check(s) failed and ${skipped.length} could not be run. ${PREFLIGHT_RED_MEANS}`}
-          </p>
+          <h3>{verdict.headline}</h3>
         </div>
       </div>
 
+      {/*
+        The node-reach warning stays visible, headline only.
+        NODE_REACH_CHECK_ID was already promoted out of the list once, on the
+        finding that a warning under a green banner is a warning people scroll
+        past. Re-folding the headline would undo that. Its three explanatory
+        paragraphs, which are the ones the owner counted as a 200-word section,
+        fold under it.
+      */}
       {reachUnproven && reach && (
         <div className="alert" role="note">
           <strong>
@@ -247,63 +334,81 @@ export function PreflightResult({ report }: { report: NativeRailPreflightView })
               ? PREFLIGHT_LEAF_HEADLINE
               : PREFLIGHT_REACH_UNKNOWN_HEADLINE}
           </strong>
-          <p className="small">{reach.observed}</p>
-          {reach.reason && <p className="small">{reach.reason}</p>}
-          <p className="muted small">{PREFLIGHT_REACH_DOES_NOT_BLOCK}</p>
-          <p className="muted small">
-            <code>{reach.id}</code>
-          </p>
+          <Disclosure summary="Why this does not stop you">
+            <p className="small">{reach.observed}</p>
+            {reach.reason && <p className="small">{reach.reason}</p>}
+            <p className="muted small">{PREFLIGHT_REACH_DOES_NOT_BLOCK}</p>
+            <p className="muted small">
+              <code>{reach.id}</code>
+            </p>
+          </Disclosure>
         </div>
       )}
 
-      {pass && (
-        <p className="small">
-          <strong>This answer goes stale in about {minutes} minutes.</strong> The
-          Hub's readiness document is good for {report.validity_seconds} seconds
-          at most, and your wallet fetches and judges it again at the moment you
-          sign. Nothing here grants any later permission.
-        </p>
-      )}
+      {/*
+        The report itself: one fold, and the single biggest saving on the screen.
+        It is a diagnostic listing, every word of it still in the document.
+      */}
+      <Disclosure summary={preflightItemSummary(report)}>
+        <p className="muted small">{PREFLIGHT_WHAT_IT_DOES}</p>
 
-      {!pass && (skipped.length > 0) && (
         <p className="small">
-          A check that could not be run is shown as failed, not as passed. If the
-          Hub or the node was unreachable, the honest answer is that nobody knows.
+          {pass
+            ? PREFLIGHT_GREEN_MEANS
+            : `${failed.length} check(s) failed and ${skipped.length} could not be run. ${PREFLIGHT_RED_MEANS}`}
         </p>
-      )}
 
-      <ul className="preflight-list">
-        {report.checks
-          .filter((check) => check.severity === "fatal" && check.status !== "pass")
-          .map((check) => (
+        {!pass && <p className="small">{PREFLIGHT_NOT_GREEN_FULL}</p>}
+
+        {pass && (
+          <p className="small">
+            <strong>This answer goes stale in about {minutes} minutes.</strong> The
+            Hub's readiness document is good for {report.validity_seconds} seconds
+            at most, and your wallet fetches and judges it again at the moment you
+            sign. Nothing here grants any later permission.
+          </p>
+        )}
+
+        {!pass && (skipped.length > 0) && (
+          <p className="small">
+            A check that could not be run is shown as failed, not as passed. If the
+            Hub or the node was unreachable, the honest answer is that nobody knows.
+          </p>
+        )}
+
+        <ul className="preflight-list">
+          {report.checks
+            .filter((check) => check.severity === "fatal" && check.status !== "pass")
+            .map((check) => (
+              <CheckRow key={check.id} check={check} />
+            ))}
+          {warnings.map((check) => (
             <CheckRow key={check.id} check={check} />
           ))}
-        {warnings.map((check) => (
-          <CheckRow key={check.id} check={check} />
-        ))}
-        {report.checks
-          .filter((check) => check.status === "pass")
-          .map((check) => (
-            <CheckRow key={check.id} check={check} />
-          ))}
-      </ul>
-
-      <div className="alert" role="note">
-        <strong>What this check cannot tell you, whatever colour it is</strong>
-        <ul className="muted small">
-          {report.cannot_be_checked.map((fact) => (
-            <li key={fact.id}>
-              <strong>{fact.title}.</strong> {fact.detail}
-            </li>
-          ))}
+          {report.checks
+            .filter((check) => check.status === "pass")
+            .map((check) => (
+              <CheckRow key={check.id} check={check} />
+            ))}
         </ul>
-      </div>
 
-      <p className="muted small">
-        Checked node <code>{report.node_url}</code> and Hub{" "}
-        <code>{report.hub_url}</code> for a {report.channel_deposit_hac} HAC
-        deposit and a {report.payment_hac} HAC payment.
-      </p>
+        <div className="alert" role="note">
+          <strong>What this check cannot tell you, whatever colour it is</strong>
+          <ul className="muted small">
+            {report.cannot_be_checked.map((fact) => (
+              <li key={fact.id}>
+                <strong>{fact.title}.</strong> {fact.detail}
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <p className="muted small">
+          Checked node <code>{report.node_url}</code> and Hub{" "}
+          <code>{report.hub_url}</code> for a {report.channel_deposit_hac} HAC
+          deposit and a {report.payment_hac} HAC payment.
+        </p>
+      </Disclosure>
     </>
   );
 }
