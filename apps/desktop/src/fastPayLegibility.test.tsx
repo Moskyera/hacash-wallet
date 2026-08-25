@@ -299,11 +299,11 @@ describe("4. is my node actually reachable", () => {
     const unreachable = preflight({
       checks: [
         {
-          id: "node_can_be_reached",
+          id: "node_identity",
           title: "Your node answers",
           severity: "fatal",
-          status: "fail",
-          observed: "connection refused",
+          status: "skip",
+          observed: "not reached",
           reason: "connection refused",
         },
       ],
@@ -323,20 +323,48 @@ describe("4. is my node actually reachable", () => {
   });
 
   it("does not call a node broken when the check was skipped", async () => {
-    const skipped = preflight({
+    const skipped = preflight({ checks: [] });
+    const view = await screen({}, skipped);
+    expect(words(view)).not.toContain("Your node is not answering");
+    view.unmount();
+  });
+
+  /**
+   * The bug this pins. A node behind a router answers this wallet perfectly and
+   * is simply unreachable from outside, so `node_can_be_reached` is `warn`. The
+   * screen read that item as its "did we reach the node" flag, saw it was not
+   * `pass`, and announced "Your node is not answering" underneath a paragraph
+   * quoting that same node's own peer counts. It sent an owner to fix a node
+   * that was fine, which is the wrong-cause failure this screen warns about
+   * elsewhere. The two questions are different and only `node_identity`
+   * answers this one.
+   */
+  it("a node nobody can reach from outside is still answering this wallet", async () => {
+    const leaf = preflight({
       checks: [
         {
-          id: "node_can_be_reached",
+          id: "node_identity",
           title: "Your node answers",
           severity: "fatal",
-          status: "skip",
-          observed: "not attempted",
-          reason: "not attempted",
+          status: "pass",
+          observed: "chain 0, mainnet, height 776466",
+          reason: null,
+        },
+        {
+          id: "node_can_be_reached",
+          title: "Nothing can reach your node",
+          severity: "warning",
+          status: "warn",
+          observed: "total 10, inbound 0, outbound 10, role leaf",
+          reason: "no other node has reached this one",
         },
       ],
     });
-    const view = await screen({}, skipped);
-    expect(words(view)).not.toContain("Your node is not answering");
+    const view = await screen({}, leaf);
+    const text = words(view);
+    expect(text).not.toContain("Your node is not answering");
+    // The real limitation is still said, just not as the wrong cause.
+    expect(text).toContain("reach your node");
     view.unmount();
   });
 });

@@ -366,13 +366,29 @@ export default function FastPayScreen({
    * false, so it gets promoted. `skip` counts as unknown, not as broken:
    * reporting unmeasured as failed sends somebody to fix a node that is fine.
    */
-  const nodeReachableCheck = preflight?.checks.find(
-    (check) => check.id === "node_can_be_reached",
+  /**
+   * Two different questions were being answered by one flag, and the wrong one
+   * won.
+   *
+   * `node_can_be_reached` asks whether anybody ELSE can reach this node. On a
+   * node behind a router that is `warn`, not `pass`, so `status === "pass"`
+   * made `nodeReachable` false and the screen announced "Your node is not
+   * answering" for a node that had just told it its own peer counts. That sent
+   * a person to fix a node that was fine, which is the exact wrong-cause
+   * failure the comment on `fastPayNextStep` warns about.
+   *
+   * The question this flag exists to answer is whether THIS WALLET reached the
+   * node, and `node_identity` is what answers it: `fatal_skip` when the node
+   * could not be read at all, otherwise it was read. Being unreachable from
+   * outside is surfaced by its own item and does not block funding.
+   */
+  const nodeIdentityCheck = preflight?.checks.find(
+    (check) => check.id === "node_identity",
   );
   const nodeReachable =
-    nodeReachableCheck === undefined || nodeReachableCheck.status === "skip"
+    nodeIdentityCheck === undefined
       ? null
-      : nodeReachableCheck.status === "pass";
+      : nodeIdentityCheck.status !== "skip";
 
   /**
    * The one thing to do next, at the top, in words.
