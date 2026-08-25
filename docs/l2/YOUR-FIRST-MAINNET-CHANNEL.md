@@ -53,8 +53,7 @@ Copy the binary to where it will live, because the data directory is resolved
 relative to the **executable**, not the working directory:
 
 ```
-copy C:\hpay
-odetargeteleaseullnode.exe C:\hpayullnode.exe
+copy C:\hpay\nodetarget\release\fullnode.exe C:\hpay\fullnode.exe
 ```
 
 ## Step 2: the config, and the trap that silently costs you days
@@ -81,6 +80,33 @@ enable = false
 [diamondminer]
 enable = false
 ```
+
+### The setting that decides whether your transactions ever leave
+
+`backbone_peers` defaults to **4**, and on a node nobody can dial that is the
+whole of your connection to Hacash. It is the single most important line in this
+file after the boot nodes.
+
+Four signed mainnet transactions were sent from a node running that default.
+Every one left the socket, measured, `4 peers considered, 4 selected, 4 sent,
+0 failed`. Not one reached a miner, and the official public node answered
+"transaction not found" for all of them, for two days. The identical bytes,
+posted by hand to a well connected node, were mined in two minutes. Nothing was
+wrong with the transactions. They had nowhere to go.
+
+Raising it fixed that on the next send, with no other change:
+
+```
+backbone_peers = 32
+offshoot_peers = 200
+```
+
+The network gave 10 peers rather than 4, and the next transaction propagated on
+its own: the public node had it in its pool within seconds, without anybody
+carrying it there.
+
+You still cannot force people to dial you. What you can do is dial more of them,
+and if your router will not forward a port this is the only lever you have.
 
 **The trap.** Without the `[node]` section carrying boot nodes and
 `not_find_nodes = false`, hacash does not fail. It starts an **isolated local
@@ -188,6 +214,58 @@ leaves your money where it is. What it cannot do is be reached, so nothing
 proves it can carry your signed channel open or your close voucher out to the
 miners. You are told before the deposit rather than after, and the decision
 stays yours.
+
+### What the wallet now does about it when you send
+
+Being warned was the first half. The second half is that a leaf's transactions
+now have somewhere to go.
+
+On **mainnet**, when your own node accepted a signed transaction and that node
+is a leaf, the wallet posts the **identical signed bytes** to the official
+Hacash node as well. Your own node is still asked first and its answer is still
+the answer. This adds a second door, it does not replace the first.
+
+This was measured, not guessed. Four signed transactions sat in a leaf's own
+pool for two days while every relay counter said the bytes had been sent. The
+same bytes, taken out of that pool by hand and posted to the official node,
+were mined into block 776333 in under two minutes. Nothing was wrong with the
+transactions. They had no way out.
+
+**Signing is a separate question and the rule there has not moved.** The wallet
+still refuses to do mainnet *signing* against a remote node over plaintext
+HTTP, because the node you sign against is the node that tells you the
+balances, fees and chain state you are signing over. Submitting bytes that are
+already signed is a different act: the transaction is fixed, its hash is
+computed on your machine before anything is sent, and an endpoint that edits it
+breaks the signature it carries. The worst a submit endpoint can do is drop it,
+which is what is already happening to a leaf.
+
+**It tells you, in the send result and in the history row**, that the
+transaction went out through somebody else's node, and that the connection was
+made directly from your device, so that node saw your network address next to
+your transaction. That last part is the real cost, and it is the thing running
+your own node was hiding. Whether the transaction was actually mined is still
+something only your own node reading its own chain can tell you: the official
+node echoing your transaction's hash proves it saw the bytes, nothing more.
+
+**Three things it deliberately will not do:**
+
+- **Not on testnet or a pilot chain.** There is no official node for those, and
+  pointing a chain 7 transaction at mainnet infrastructure would be wrong.
+- **Not when your own node refused the transaction.** A refusal is a failed
+  send and stays one. Forwarding it would push bytes your own node judged
+  invalid at public infrastructure from your address, and would turn a failure
+  you can retry into a success you cannot take back.
+- **Not when DUST Whisper is switched on.** Whisper exists to keep a full node
+  from learning where your wallet is, and this door is a direct connection from
+  your device, which is precisely what you asked it to prevent. In that case
+  the wallet says the door was there and that it did not use it, so the choice
+  stays yours: turn Whisper off if you would rather the official node carried
+  your transactions.
+
+None of this is a substitute for opening the port. A reachable node carries its
+own transactions and does not need anybody's help, which is why the rest of
+this step is still worth doing.
 
 **Zero is the failure, and it used to be silent.** A node with outbound peers
 syncs blocks perfectly, reports a fresh tip, answers every readiness clause, and
