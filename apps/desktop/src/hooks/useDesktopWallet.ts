@@ -1,4 +1,4 @@
-import { MIN_NEW_WALLET_PASSPHRASE_LENGTH } from "@hacash/wallet-ui";
+import { MIN_NEW_WALLET_PASSPHRASE_LENGTH, handOffTextFile } from "@hacash/wallet-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
@@ -182,14 +182,26 @@ export function useDesktopWallet(
     }
   }, []);
 
+  /**
+   * `refreshFastPay` belongs here, not only on the Fast Pay tab.
+   *
+   * The sidebar chip and the nav badge are rendered on every screen and they now
+   * read the measured Fast Pay state rather than `status.fast_pay_state`, which
+   * can only ever say "checking". Without this the measured state was fetched
+   * exactly once, when somebody opened the Fast Pay tab, so the chip stayed
+   * "Fast Pay check" for a wallet that was ready until they went and looked.
+   * It runs in the same `Promise.all` as the rest, so it costs no extra wall
+   * clock, and it fails closed to `null` on its own.
+   */
   const refreshUnlockedData = useCallback(async () => {
     await Promise.all([
       refreshBalance(),
       refreshSettings(),
       refreshBills(),
       refreshHistory(),
+      refreshFastPay(),
     ]);
-  }, [refreshBalance, refreshSettings, refreshBills, refreshHistory]);
+  }, [refreshBalance, refreshSettings, refreshBills, refreshHistory, refreshFastPay]);
 
   const refreshRelayHealth = useCallback(async () => {
     if (!dustWhisper.enabled || dustWhisper.relay_urls.length === 0) {
@@ -311,12 +323,42 @@ export function useDesktopWallet(
     return () => window.clearTimeout(id);
   }, [screen, status?.locked, refreshHistory]);
 
+  /**
+   * Keep the Fast Pay reading fresh while somebody is looking at it.
+   *
+   * This used to fire once, on entering the tab, and never again. `fastPayDetail`
+   * is the ONLY measured Fast Pay state in the app - `status.fast_pay_state` and
+   * `status.fast_pay_message` both come from `fast_pay_status_sync`, which
+   * contacts nothing and can only answer "checking" or "no_provider" - so a
+   * single fetch meant the ON/OFF pill, the headline, the Hub's own refusal
+   * message and the "next step" block all quoted the instant the tab opened.
+   * Somebody starting their Hub, or fixing it, or granting consent in another
+   * window, watched a screen that had stopped listening. Running the preflight
+   * or the hub health check did not refresh it either; only "Use this hub" did.
+   *
+   * Ten seconds rather than the five the status poll uses: this one asks the Hub
+   * over the network and queries the channel, so it is the more expensive call,
+   * and it skips while a fetch is in flight and while the window is hidden.
+   */
   useEffect(() => {
     if (screen !== "fastpay" || !status || status.locked) return;
     const id = window.setTimeout(() => {
       void Promise.all([refreshFastPay(), refreshChannel(), refreshBills()]);
     }, 0);
-    return () => window.clearTimeout(id);
+    let inFlight = false;
+    const poll = window.setInterval(() => {
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      refreshFastPay()
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
+    }, 10000);
+    return () => {
+      window.clearTimeout(id);
+      window.clearInterval(poll);
+    };
   }, [screen, status?.locked, refreshFastPay, refreshChannel, refreshBills]);
 
   const handleCreate = useCallback(
@@ -455,27 +497,55 @@ export function useDesktopWallet(
     await refreshStatus();
   }, [clearMessages, refreshStatus]);
 
+  /**
+   * Turn Fast Pay on, and RETURN the refusal instead of only broadcasting it.
+   *
+   * This is the "Enable Fast Pay" button. It deliberately does not call
+   * `wallet_enable_fast_pay`: that command configures a provider and then stops
+   * at `needs_channel` on purpose, because opening a funded channel is
+   * irreversible L1 work and the core only allows it through the exact prepared
+   * ceremony below. So the whole path is prepare, review, authorise, execute.
+   *
+   * The return value is the change. Every refusal on this path already reached
+   * `onError`, which shows a toast for four seconds and writes a banner at the
+   * top of the page. Somebody standing at the button, which sits well below the
+   * fold, saw neither, and reported the button as dead. It still notifies, and
+   * it now also hands the exact text back to the caller so the screen can keep
+   * it beside the control. `null` means the open was submitted.
+   */
   const handleEnableFastPay = useCallback(
-    async (userDeposit: string) => {
+    async (userDeposit: string): Promise<string | null> => {
       setBusy(true);
       clearMessages();
       try {
         const hubAddress = settings?.hub_right_address?.trim();
         if (!hubAddress) {
-          throw new Error("Choose an online Fast Pay provider first.");
+          throw new Error(
+            'No provider address is saved, so there is no counterparty to open a channel with. Use "Check this hub" then "Use this hub" above.',
+          );
         }
         const deposit = Number(userDeposit);
         if (!Number.isFinite(deposit) || deposit <= 0) {
-          throw new Error("Enter a valid channel deposit.");
+          throw new Error(
+            `The channel deposit must be a positive number of HAC. The field holds "${userDeposit}".`,
+          );
         }
         const prepared = await api.prepareChannelOpen(hubAddress, userDeposit, "0");
         await authorizePreparedOperation(prepared, nativeBioAvailable);
         const tx = await api.executePreparedChannelOpen(prepared.id);
         await refreshStatus();
-        await Promise.all([refreshBalance(), refreshChannel(), refreshBills()]);
+        await Promise.all([
+          refreshBalance(),
+          refreshChannel(),
+          refreshBills(),
+          refreshFastPay(),
+        ]);
         onInfo("Channel open submitted (" + tx.slice(0, 12) + "…).");
+        return null;
       } catch (e) {
-        onError(formatInvokeError(e));
+        const message = formatInvokeError(e);
+        onError(message);
+        return message;
       } finally {
         setBusy(false);
       }
@@ -488,13 +558,38 @@ export function useDesktopWallet(
       refreshBalance,
       refreshBills,
       refreshChannel,
+      refreshFastPay,
       refreshStatus,
       settings?.hub_right_address,
     ],
   );
   const handleApplyHub = useCallback(
     async (entry: HubDiscoveryEntry) => {
-      if (!settings || !entry.online) return;
+      /*
+       * This opened with a bare `if (!settings || !entry.online) return;`, placed
+       * before `setBusy`, so absolutely nothing moved on screen: no toast, no
+       * spinner, no error. The declaration button that reaches it is gated only
+       * on `busy || declaredIsActive`, not on settings, so the press really was
+       * reachable in that state. `handleUseDeclared` in the panel was rewritten
+       * so every branch speaks its reason, and this last branch sits one call
+       * deeper and was missed.
+       *
+       * The panel now refuses both of these by name before it gets here, so this
+       * is the backstop rather than the only guard. It still says something,
+       * because a silent return is what caused the report in the first place.
+       */
+      if (!settings) {
+        onError(
+          "The wallet settings are not loaded yet, so there is nothing to save the provider into. Try again in a moment.",
+        );
+        return;
+      }
+      if (!entry.online) {
+        onError(
+          `${entry.name} is not answering, so it was not saved. Check it again first.`,
+        );
+        return;
+      }
       setBusy(true);
       clearMessages();
       try {
@@ -755,14 +850,27 @@ export function useDesktopWallet(
       clearMessages();
       try {
         const json = await api.exportBackup(exportPassphrase);
-        const blob = new Blob([json], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "hacash-full-backup-v1.json";
-        a.click();
-        URL.revokeObjectURL(url);
-        onInfo("Authenticated full-wallet backup exported. Store it offline.");
+        /*
+         * This used to click a detached anchor, revoke the object URL in the
+         * same synchronous task before the WebView had a turn to read it, and
+         * then say "Authenticated full-wallet backup exported. Store it offline."
+         * unconditionally. `a.click()` returns void, so no failure could reach
+         * the catch: the success sentence was printed whether or not a byte was
+         * written. For a wallet backup that is the most expensive lie the app
+         * can tell.
+         *
+         * `handOffTextFile` revokes on a later task and reports what it actually
+         * did. The JSON is still returned either way, so the caller keeps the
+         * bytes even when no file was written.
+         */
+        const handoff = await handOffTextFile("hacash-full-backup-v1.json", json);
+        if (handoff.ok) {
+          onInfo(`${handoff.message} Store it offline.`);
+        } else {
+          onError(
+            `${handoff.message} Your backup was NOT saved to a file. The contents are still on screen and can be copied.`,
+          );
+        }
         return json;
       } catch (e) {
         onError(String(e));

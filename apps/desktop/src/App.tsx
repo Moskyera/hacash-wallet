@@ -72,8 +72,31 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
 
   const hideBalances = wallet.privacy.hide_balances;
   const hideAddresses = wallet.privacy.hide_addresses;
-  const fastPayReady = wallet.status?.fast_pay_state === "ready";
-  const fastPayNeedsSetup = wallet.status?.fast_pay_state === "needs_channel";
+  /**
+   * Fast Pay state, from the only call that actually measures it.
+   *
+   * `wallet.status.fast_pay_state` cannot answer this. `WalletStatus` is built
+   * synchronously and `fast_pay_status_sync` is two lines: a Hub URL is
+   * configured, so "checking"; otherwise "no_provider". It never asks the Hub or
+   * the node anything, so it can never return "ready" and never return
+   * "needs_channel". Both of these were comparing it against exactly those two
+   * values, so `fastPayReady` was false on a wallet with an open, funded, working
+   * channel and `fastPayNeedsSetup` was false on a wallet that needed setup. The
+   * ON/OFF pill, the "when you tap Send" line, the nav badge, the incoming
+   * payments list and the "Go to Send" box were all wired to a predicate that
+   * could not become true. `owner_enable_fast_pay_repro.rs` holds the core to
+   * that: it asserts the same wallet reports "needs_channel" from
+   * `fast_pay_status()` and "checking" from `status()` at the same instant.
+   *
+   * `wallet.fastPayDetail` is `wallet_fast_pay_status`, which is
+   * `evaluate_fast_pay`: it reads the Hub, judges the mainnet readiness document
+   * under this wallet's own consent policy, and queries the channel. That is the
+   * authority. Until it answers we fall back to the status field, which can still
+   * say "checking" or "no_provider" honestly.
+   */
+  const fastPayState = wallet.fastPayDetail?.state ?? wallet.status?.fast_pay_state;
+  const fastPayReady = fastPayState === "ready";
+  const fastPayNeedsSetup = fastPayState === "needs_channel";
 
   const whisperRelayOnline =
     wallet.relayHealth.length > 0 && wallet.relayHealth.some((row) => row.online);
@@ -219,7 +242,7 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
       onLock: handleLock,
       onOpenAgent: () => void handleOpenAgent(),
       onOpenQrPay: hacSend.openQrPay,
-      onEnableFastPay: (d: string) => void wallet.handleEnableFastPay(d),
+      onEnableFastPay: (d: string) => wallet.handleEnableFastPay(d),
       onApplyHub: wallet.handleApplyHub,
       onSaveL2Settings: (
         n: string,
@@ -361,7 +384,7 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
                     </span>
                     {item.id === "fastpay" && (
                       <span className={`nav-fp-badge ${fastPayReady ? "nav-fp-on" : "nav-fp-off"}`}>
-                        {fastPayNavHint(wallet.status?.fast_pay_state ?? "no_provider")}
+                        {fastPayNavHint(fastPayState ?? "no_provider")}
                       </span>
                     )}
                   </button>
@@ -385,9 +408,9 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
             <div className="status-chips">
               <span
                 className={`chip ${fastPayReady ? "chip-accent" : fastPayNeedsSetup ? "chip-ok" : ""}`}
-                title={wallet.status.fast_pay_message}
+                title={wallet.fastPayDetail?.message ?? wallet.status.fast_pay_message}
               >
-                {fastPayChipLabel(wallet.status.fast_pay_state)}
+                {fastPayChipLabel(fastPayState ?? "no_provider")}
               </span>
               {wallet.status.webauthn_enabled && (
                 <span className="chip chip-accent">WebAuthn</span>
@@ -484,7 +507,34 @@ function PersonalWalletApp({ onOpenAgent }: { onOpenAgent: () => void }) {
             </div>
           </header>
         )}
-        {wallet.error && <div className="alert">{wallet.error}</div>}
+        {/*
+          * Pinned, because a refusal has to reach the person who pressed the button.
+          *
+          * This banner and the toast below it render here, at the top of <main>
+          * above the router, in normal document flow. Nothing here is sticky, so
+          * both used to scroll away, and the "Enable Fast Pay" button is roughly
+          * two thousand pixels below this point. The toast additionally had no CSS
+          * on desktop at all and removed itself after four seconds. So the wallet
+          * was producing the correct refusal, in the core's own words, and putting
+          * it somewhere nobody standing at the control could see. `.alert-floating`
+          * and `.toast` in dashboard.css now pin both to the viewport.
+          *
+          * role="alert" rather than role="status": this is an interruption, and it
+          * should be announced when it appears rather than waiting for a pause.
+          */}
+        {wallet.error && (
+          <div className="alert alert-floating" role="alert">
+            <span className="alert-floating-text">{wallet.error}</span>
+            <button
+              type="button"
+              className="alert-floating-dismiss"
+              onClick={wallet.clearMessages}
+              aria-label="Dismiss this message"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {wallet.info && <div className="info-box">{wallet.info}</div>}
         {toast && (
           <div className={`toast toast-${toast.kind}`} role="status">

@@ -670,8 +670,18 @@ export const api = {
   fastPayInbox: () => invoke<FastPayInboxItem[]>("wallet_fast_pay_inbox"),
   acceptFastPay: (paymentId: string) =>
     invoke<FastPayExecution>("wallet_accept_fast_pay", { paymentId }),
-  enableFastPay: (depositMei?: number) =>
-    invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei }),
+  // `wallet_enable_fast_pay` is deliberately NOT bound here.
+  //
+  // It was, and nothing called it, and that cost real time: the owner audited
+  // every gate inside `WalletService::enable_fast_pay` against their live Hub
+  // looking for why "Enable Fast Pay" would not start, and that function is not
+  // on the button's path at all. `enable_fast_pay` configures a provider and
+  // stops at `needs_channel` on purpose, because opening a funded channel is
+  // irreversible L1 work that the core only permits through the exact prepared
+  // ceremony. The button uses `prepareChannelOpen` plus
+  // `executePreparedChannelOpen` below, which is that ceremony. The command
+  // still exists and is still in the ACL; it is what the read-only mainnet
+  // observation harness calls.
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
   // hubUrl is what the person has typed but not yet saved. Discovery used to
   // read only the saved setting, so the field the panel told them to paste

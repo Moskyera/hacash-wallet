@@ -4152,9 +4152,23 @@ mod hub_discovery_typed_url_tests {
             .await
             .unwrap();
 
-        assert_eq!(report.online_count, 1, "{:?}", report.hubs);
-        let found = report.hubs.iter().find(|h| h.online).unwrap();
-        assert_eq!(found.hub_url, hub);
+        // Assert on the hub this test started, not on how many hubs happen to
+        // be answering. `discover_hubs` also probes the built-in presets, one
+        // of which is the loopback dev hub, so an operator running their own
+        // Hub on this machine made `online_count == 1` fail every time. A test
+        // that asserts on ambient state fails for the people most likely to be
+        // running the thing it tests.
+        let found = report
+            .hubs
+            .iter()
+            .find(|h| h.hub_url == hub)
+            .unwrap_or_else(|| panic!("the typed hub was not probed at all: {:?}", report.hubs));
+        assert!(found.online, "{:?}", found);
+        assert!(
+            report.online_count >= 1,
+            "the typed hub answered, so at least one is online: {:?}",
+            report.hubs
+        );
         assert_eq!(
             found.hub_address.as_deref(),
             Some("1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW")

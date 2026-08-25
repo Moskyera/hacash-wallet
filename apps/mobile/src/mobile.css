@@ -1744,3 +1744,48 @@ button:disabled {
 .preflight-item { padding: 10px 0; border-top: 1px solid rgba(255, 255, 255, 0.08); }
 .preflight-item p { margin: 4px 0 0; word-break: break-word; }
 .preflight-item-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+
+/*
+ * The warning before "Agent" locks the wallet.
+ *
+ * Sits directly above the navigation bar, so it is attached to the control that
+ * raised it. "Agent" is drawn as the fourth of five equal tabs and is not a tab:
+ * it unmounts the personal UI and calls api.lock() before opening the companion.
+ * A person tapping what looks like a view switch was locked out of their wallet
+ * with no warning anywhere on the control.
+ */
+.bottom-nav-agent-confirm {
+  position: fixed;
+  z-index: 120;
+  bottom: calc(var(--nav-h) + var(--safe-bottom));
+  left: 50%;
+  width: 100%;
+  max-width: 480px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.97);
+  transform: translateX(-50%);
+}
+
+.bottom-nav-agent-confirm strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--accent, #f5a623);
+  font-size: 0.95rem;
+}
+
+.bottom-nav-agent-confirm p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.bottom-nav-agent-confirm-row {
+  display: flex;
+  gap: 10px;
+}
+
+.bottom-nav-agent-confirm-row button {
+  flex: 1;
+}

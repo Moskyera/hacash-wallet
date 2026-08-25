@@ -28,7 +28,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { HowItWorksPrompt } from "@hacash/wallet-ui";
 import { useLocale } from "./locale";
 import { encodePaymentUri } from "./paymentQr";
-import { clearSensitiveClipboard, copyWithPrivacyClear, maskAddress } from "./privacy";
+import { clearSensitiveClipboard, copyAndReport, copyWithPrivacyClear, maskAddress } from "./privacy";
 import { clearAllWalletNames, saveWalletName, walletDisplayName } from "./walletName";
 import { MIN_WALLET_PASS } from "./quantumMeta";
 import { clearDeepLink, parseDeepLinkPay, stashDeepLinkUrl } from "./utils/deepLink";
@@ -393,9 +393,15 @@ export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void })
   };
 
   const handleCopyAddress = async () => {
-    if (!session.status?.address) return;
-    await copyWithPrivacyClear(session.status.address, clipboardSecs);
-    showToast("Address copied.", "success");
+    if (!session.status?.address) {
+      // Was a bare return. The button is drawn whenever the tab is, so a person
+      // pressing it before the address loads got nothing and no reason.
+      showToast("No address to copy yet: the wallet has not finished opening.", "error");
+      return;
+    }
+    // Was: await + unconditional success toast, with no catch anywhere on the
+    // path, and every button firing it as `void onCopyAddress()`.
+    await copyAndReport(session.status.address, clipboardSecs, showToast, "Address copied.");
   };
 
   const handleResetWallet = async (
@@ -456,13 +462,51 @@ export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void })
   };
 
   const handleApplyHub = async (entry: import("./api").HubDiscoveryEntry) => {
-    if (!session.settings || !entry.online) return;
+    /*
+     * The phone half of the same three defects the desktop handler had.
+     *
+     * Two bare returns before `setBusy`, so nothing moved on screen at all, and
+     * one worse case underneath them: `hub_right_address: entry.hub_address ??
+     * session.settings.hub_right_address`. A healthy zero-fee Hub that publishes
+     * no address probes `online: true` with `hub_address: None`, so it could be
+     * adopted, the toast said "Using <name>", and the wallet was left pointing
+     * at the new provider's URL while still bound to the PREVIOUS provider's
+     * on-chain address. A channel binds to an exact counterparty, so that pair
+     * is not merely incomplete, it is wrong, and nothing on screen said so.
+     *
+     * No gate is relaxed. Each of these was already a refusal; each one now
+     * says which.
+     */
+    if (!session.settings) {
+      showToast(
+        "The wallet settings are not loaded yet, so there is nothing to save the provider into. Try again in a moment.",
+        "error",
+      );
+      return;
+    }
+    if (!entry.online) {
+      showToast(
+        `${entry.name} is not answering, so it was not saved. Check it again first.`,
+        "error",
+      );
+      return;
+    }
+    if (!entry.hub_address) {
+      showToast(
+        `${entry.name} answered, but it publishes no on-chain address, so a channel has no counterparty to bind to and it was not saved. Ask its operator to publish hub_address on /v1/health.`,
+        "error",
+      );
+      return;
+    }
     session.setBusy(true);
     try {
       const next = {
         ...session.settings,
         l2_hub_url: entry.hub_url,
-        hub_right_address: entry.hub_address ?? session.settings.hub_right_address,
+        // Never `?? session.settings.hub_right_address`. The refusal above makes
+        // this unreachable with an empty address, and keeping the fallback would
+        // quietly restore the mismatched pair it exists to prevent.
+        hub_right_address: entry.hub_address,
       };
       await api.updateSettings(next);
       session.setSettings(next);
@@ -643,7 +687,17 @@ export default function MobileApp({ onOpenAgent }: { onOpenAgent?: () => void })
             hideBalances={session.privacy.hide_balances}
             refreshing={session.refreshing}
             watchOnly={session.watchOnly}
-            fastPayReady={session.status?.fast_pay_state === "ready"}
+            /*
+              The measured state, not the placeholder.
+
+              `status.fast_pay_state` comes from `fast_pay_status_sync`, which
+              answers "checking" for any wallet with a Hub URL and "no_provider"
+              for one without. It contacts nothing, so it can never say "ready",
+              and this banner was therefore off on every wallet that had Fast Pay
+              working. `session.fastPay` is `wallet_fast_pay_status`, which reads
+              the Hub and the channel and is the authority.
+            */
+            fastPayReady={session.fastPay?.state === "ready"}
             onOpenHistory={() => {
               setMorePage("history");
               setTab("more");

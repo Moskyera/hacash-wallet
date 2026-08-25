@@ -1000,3 +1000,107 @@
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
+
+/*
+ * Refusals that reach the eye from the control that produced them.
+ *
+ * `onError` sets `wallet.error` and raises a toast. Both render at the top of
+ * <main>, above <DesktopRouter>, in normal document flow. Only .desktop-topbar
+ * is sticky, so neither followed the scroll, and the "Enable Fast Pay" button
+ * sits roughly two thousand pixels below that point. On top of that, no desktop
+ * stylesheet defined .toast at all - mobile.css:935 has the rule and the desktop
+ * app never got it - so the toast was an unstyled block that then deleted itself
+ * after four seconds. A press that was refused for a real, correct, well worded
+ * reason looked exactly like a press that did nothing. That is the owner's
+ * "Enable Fast Pay does nothing".
+ *
+ * Both are now pinned to the viewport and stacked above the sticky header
+ * (z-index 20), so the sentence appears where the person is looking.
+ */
+.toast {
+  position: fixed;
+  z-index: 200;
+  top: 16px;
+  left: 50%;
+  max-width: 560px;
+  width: calc(100% - 64px);
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 55%);
+  color: #f2f2f2;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  transform: translateX(-50%);
+}
+
+.toast-success {
+  border-color: rgb(245 166 35 / 55%);
+  color: var(--accent-2);
+}
+
+.toast-info {
+  border-color: var(--border);
+  color: #f2f2f2;
+}
+
+/*
+ * The error toast is deliberately not the success toast in another colour. A
+ * refusal has to be legible as a refusal at a glance, before the words are read.
+ */
+.toast-error {
+  border-color: rgb(245 166 35 / 85%);
+  border-left: 4px solid var(--accent);
+  background: #1a1206;
+  color: #ffd18a;
+}
+
+/*
+ * The persistent half of a refusal.
+ *
+ * The toast expires after 4000ms. This banner does not, so it is the copy still
+ * on screen when somebody walks back to the wallet and asks what happened. It
+ * gets the same pinning, sits under the toast, and carries a dismiss control -
+ * a pinned element that cannot be closed is an obstruction.
+ */
+.alert-floating {
+  position: fixed;
+  z-index: 199;
+  top: 68px;
+  left: 50%;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 560px;
+  width: calc(100% - 64px);
+  margin-top: 0;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 55%);
+  font-size: 13px;
+  line-height: 1.45;
+  transform: translateX(-50%);
+}
+
+.alert-floating-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.alert-floating-dismiss {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.alert-floating-dismiss:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

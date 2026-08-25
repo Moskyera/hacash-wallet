@@ -213,7 +213,7 @@ function renderFastPay(overrides: Partial<FastPayProps> = {}) {
     busy: false,
     setBusy: () => undefined,
     onNavigate: () => undefined,
-    onEnableFastPay: () => undefined,
+    onEnableFastPay: async () => null,
     onApplyHub: async () => undefined,
     onSaveL2Settings: () => undefined,
     onHubHealth: () => undefined,

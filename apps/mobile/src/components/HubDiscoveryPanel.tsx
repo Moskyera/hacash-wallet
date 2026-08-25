@@ -119,7 +119,27 @@ export default function HubDiscoveryPanel({
   }
 
   async function handleUse(entry: HubDiscoveryEntry) {
-    if (!entry.online) return;
+    // Was a bare `return`. The desktop copy of this panel was fixed to say the
+    // reason and this one was not, so the same press that explains itself on a
+    // desktop was silent on a phone.
+    if (!entry.online) {
+      onToast(
+        "That provider is not answering, so it was not saved. Check it again first.",
+        "error",
+      );
+      return;
+    }
+    // The scan path could adopt a Hub with no published address. The declaration
+    // path below already refuses that by name; the list button did not, and the
+    // handler it reaches would then have written the new provider's URL beside
+    // the old provider's address.
+    if (!entry.hub_address) {
+      onToast(
+        `${entry.name} answered, but it publishes no on-chain address, so a channel has no counterparty to bind to and it was not saved. Ask its operator to publish hub_address on /v1/health.`,
+        "error",
+      );
+      return;
+    }
     setBusy(true);
     try {
       await onApplyHub(entry);
@@ -146,7 +166,33 @@ export default function HubDiscoveryPanel({
    * nothing here is taken on trust.
    */
   async function handleUseDeclared() {
-    if (!declaration || !declaration.reachable || !declaration.hub_address) return;
+    // Three silent dead ends in one line, matching what the desktop panel used
+    // to do. A control that does nothing and says nothing is worse than one
+    // that refuses: a person cannot tell it from a broken button, so they press
+    // it again.
+    if (!declaration) {
+      onToast(
+        'Check the provider first: type its address above and press "Check this hub".',
+        "error",
+      );
+      return;
+    }
+    if (!declaration.reachable) {
+      onToast(
+        declaration.error
+          ? `That provider did not answer: ${declaration.error}`
+          : "That provider did not answer, so it was not saved.",
+        "error",
+      );
+      return;
+    }
+    if (!declaration.hub_address) {
+      onToast(
+        "That provider did not publish an on-chain address, so a channel cannot bind to it. Ask its operator to publish one on /v1/health.",
+        "error",
+      );
+      return;
+    }
     await handleUse({
       id: "custom",
       name: declaration.name ?? "Your provider",

@@ -65,14 +65,33 @@ export default function HubDiscoveryPanel({
 }: Props) {
   const [report, setReport] = useState<HubDiscoveryReport | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [draftUrl, setDraftUrl] = useState(activeHubUrl ?? "");
+  /**
+   * What the person has typed, or `null` while they have typed nothing.
+   *
+   * This used to be `useState(activeHubUrl ?? "")`, and that is why "Check this
+   * hub" was greyed out on arrival every single time, with a hub saved. A
+   * `useState` initializer runs once, at mount, and at mount `activeHubUrl` is
+   * empty: the parent holds `useState("")` and fills it from settings inside a
+   * `useEffect`, which by definition runs after this child has already mounted
+   * and taken its snapshot. Nothing resynced it. So the field rendered empty
+   * whatever was saved, the button's `!draftUrl.trim()` clause held forever, and
+   * "Scan for hubs" passed that same empty string to `discoverHubs`, skipping
+   * the one hub the person had actually configured.
+   *
+   * Deriving it instead of snapshotting it means the saved URL appears the
+   * moment it arrives, on this render or any later one. `null` rather than `""`
+   * as the untouched value is what lets somebody deliberately clear the field
+   * and have it stay cleared, instead of the saved URL springing back.
+   */
+  const [typedUrl, setTypedUrl] = useState<string | null>(null);
+  const draftUrl = typedUrl ?? activeHubUrl ?? "";
   const [declaration, setDeclaration] = useState<HubDeclaration | null>(null);
   const [checking, setChecking] = useState(false);
 
   const isMainnet = settings?.network_mode === "mainnet";
 
   function updateDraft(value: string) {
-    setDraftUrl(value);
+    setTypedUrl(value);
     setDeclaration(null);
     onHubUrlChange?.(value);
   }
@@ -102,6 +121,10 @@ export default function HubDiscoveryPanel({
   }
 
   async function handleCheck() {
+    if (!settings) {
+      onToast("Unlock wallet first.", "error");
+      return;
+    }
     const url = draftUrl.trim();
     if (!url) {
       onToast("Enter the hub address your provider gave you.", "error");
@@ -119,9 +142,39 @@ export default function HubDiscoveryPanel({
   }
 
   async function handleUse(entry: HubDiscoveryEntry) {
+    if (!settings) {
+      // `onApplyHub` opens with `if (!settings || !entry.online) return;` - a
+      // bare return, before `setBusy`, so absolutely nothing moved on screen.
+      // The reason is said here, where the press happened.
+      onToast(
+        "The wallet settings are not loaded yet, so there is nothing to save the provider into. Try again in a moment.",
+        "error",
+      );
+      return;
+    }
     if (!entry.online) {
       onToast(
         "That provider is not answering, so it was not saved. Check it again first.",
+        "error",
+      );
+      return;
+    }
+    /**
+     * A scanned result could be adopted with no address, and report success.
+     *
+     * `probe_hub_entry` returns `online: true` with `hub_address: None` whenever
+     * a healthy zero-fee Hub publishes no address and no preset supplies one.
+     * The list button was gated on `entry.online` alone, so it was offered;
+     * `handleApplyHub` then writes `entry.hub_address ?? settings.hub_right_address`,
+     * leaving the address unset; the toast said "Using <name>" and the button
+     * flipped to "In use". Enable Fast Pay then stayed greyed on
+     * `!providerAddressChosen` and told the person to do the step they had just
+     * done. The declaration path already refused this by name; the scan path did
+     * not, and this is that refusal.
+     */
+    if (!entry.hub_address) {
+      onToast(
+        `${entry.name} answered, but it publishes no on-chain address, so a channel has no counterparty to bind to and it was not saved. Ask its operator to publish hub_address on /v1/health.`,
         "error",
       );
       return;
@@ -130,7 +183,7 @@ export default function HubDiscoveryPanel({
     try {
       await onApplyHub(entry);
       onHubUrlChange?.(entry.hub_url);
-      setDraftUrl(entry.hub_url);
+      setTypedUrl(entry.hub_url);
     } catch (e) {
       onToast(formatInvokeError(e), "error");
     } finally {
@@ -215,10 +268,17 @@ export default function HubDiscoveryPanel({
       </p>
 
       <div className="actions-row">
+        {/*
+          * Not greyed on an empty field. `handleCheck` already refuses an empty
+          * URL by name, and a refusal that names its cause beats a grey button
+          * that carries none. The `!settings` clause is gone for the same
+          * reason: `handleDiscover` says "Unlock wallet first" and this one now
+          * does too, which is a sentence, where the grey was silence.
+          */}
         <button
           type="button"
           className="primary"
-          disabled={busy || checking || !settings || !draftUrl.trim()}
+          disabled={busy || checking}
           onClick={() => void handleCheck()}
         >
           {checking ? "Checking…" : "Check this hub"}
@@ -291,11 +351,27 @@ export default function HubDiscoveryPanel({
       )}
       <p className="muted small">
         Somebody has to run a hub, and it can be you.{" "}
+        {/*
+          * `.catch(() => undefined)` was on the button below, and it is the
+          * reason it could do nothing and say nothing. It is also the only route
+          * out of the empty state, because FAST_PAY_NO_HUB_EXPLANATION tells the
+          * person their only option is to run a Hub themselves. If the browser
+          * does not open they need to be told, and handed the URL so they can
+          * open it by hand. The correct form was already in this tree at
+          * SettingsScreen.tsx:95.
+          */}
         {openExternal ? (
           <button
             type="button"
             className="linkish"
-            onClick={() => void Promise.resolve(openExternal(HUB_OPERATOR_URL)).catch(() => undefined)}
+            onClick={() =>
+              void Promise.resolve(openExternal(HUB_OPERATOR_URL)).catch((error) =>
+                onToast(
+                  `The browser did not open: ${formatInvokeError(error)}. The guide is at ${HUB_OPERATOR_URL}`,
+                  "error",
+                ),
+              )
+            }
           >
             Read the hub operator guide
           </button>

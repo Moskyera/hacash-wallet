@@ -825,6 +825,101 @@ pub fn hub_fee_label(health: &HubHealth) -> Option<String> {
     })
 }
 
+/// The protocol version a provider must publish before this wallet will bind a
+/// funded channel to it, or close one.
+///
+/// Worth stating as a name because the wallet does NOT agree with itself about
+/// it. Discovery, `evaluate_fast_pay` and `enable_fast_pay` accept `version >= 3`
+/// (fast_pay.rs:234, :456, :501, wallet.rs:1802); these two gates require 7. A
+/// Hub publishing 3 through 6 is therefore shown as online, moves the wallet to
+/// `needs_channel`, un-greys "Enable Fast Pay", and is then refused here. That
+/// disagreement is deliberate - 3 is enough to be discovered and described, 7 is
+/// what the channel-binding guarantees need - but it means this refusal is the
+/// FIRST place a person hears about the version at all, so it has to say so.
+pub const MIN_CHANNEL_BINDING_HUB_VERSION: u32 = 7;
+
+/// Which parts of the provider contract this Hub does not meet, each in words.
+///
+/// Both channel gates below used to collapse five `||` conditions into one
+/// sentence - "Fast Pay provider is not ready for safe, fee-free routed
+/// settlement" - which named none of the five and quoted nothing the Hub
+/// published. Somebody reading it could not tell whether to upgrade their Hub,
+/// turn a flag on, or drop a fee, and the version case could not be guessed at
+/// all because every other surface in the wallet had just told them the same Hub
+/// was online.
+///
+/// This returns every unmet condition rather than the first, because fixing one
+/// cause at a time and being handed a fresh single-cause refusal on each attempt
+/// is its own bad afternoon.
+///
+/// It changes no verdict. The caller still refuses whenever this is non-empty.
+fn unmet_provider_contract_reasons(
+    health: &HubHealth,
+    require_cross_channel: bool,
+    require_official_channelpay: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if !health.ok {
+        reasons.push("it reports itself not healthy (\"ok\": false in /v1/health)".to_owned());
+    }
+    if health.version < MIN_CHANNEL_BINDING_HUB_VERSION {
+        reasons.push(format!(
+            "it publishes protocol version {} and this wallet requires version {} or later \
+             to bind a channel (earlier versions are still discoverable and can be described, \
+             which is why it appeared online)",
+            health.version, MIN_CHANNEL_BINDING_HUB_VERSION
+        ));
+    }
+    if !health.settlement_ready {
+        reasons.push(
+            "it publishes settlement_ready: false, so it cannot sign settlement bills".to_owned(),
+        );
+    }
+    if require_cross_channel && !health.cross_channel_ready {
+        reasons.push(
+            "it publishes cross_channel_ready: false, so it cannot complete the recipient \
+             signature exchange that routed payments need"
+                .to_owned(),
+        );
+    }
+    if require_official_channelpay && !health.official_channelpay_ready {
+        reasons.push(
+            "it publishes official_channelpay_ready: false, so it cannot hold an authenticated \
+             Official ChannelPay session"
+                .to_owned(),
+        );
+    }
+    if !hub_fee_is_zero(health) {
+        reasons.push(match hub_fee_label(health) {
+            Some(fee) => format!(
+                "it charges a per-payment hub fee of \"{fee}\" and this wallet only opens \
+                 fee-free channels"
+            ),
+            None => "it publishes no hub_fee_mei at all, and this wallet only opens channels \
+                     with a provider that states a zero fee"
+                .to_owned(),
+        });
+    }
+    reasons
+}
+
+/// Join the unmet conditions onto a headline, as one readable sentence.
+fn describe_unmet_contract(headline: &str, reasons: &[String]) -> String {
+    if reasons.len() == 1 {
+        return format!("{headline}: {}.", reasons[0]);
+    }
+    let numbered: Vec<String> = reasons
+        .iter()
+        .enumerate()
+        .map(|(index, reason)| format!("({}) {reason}", index + 1))
+        .collect();
+    format!(
+        "{headline}, for {} reasons: {}.",
+        reasons.len(),
+        numbered.join("; ")
+    )
+}
+
 /// Tack the Hub's own blocker identifiers onto a refusal, or nothing when the
 /// Hub published none.
 fn append_named_blockers(named: Option<String>) -> String {
@@ -1564,15 +1659,15 @@ impl L2HubClient {
         user_deposit_mei: &str,
     ) -> WalletResult<HubHealth> {
         let health = self.health().await?;
-        if !health.ok
-            || health.version < 7
-            || !health.settlement_ready
-            || !health.cross_channel_ready
-            || !hub_fee_is_zero(&health)
-        {
-            return Err(WalletError::L2(
-                "Fast Pay provider is not ready for safe, fee-free routed settlement".into(),
-            ));
+        // Identical verdict to the five `||` conditions this replaces - the gate
+        // refuses whenever any one of them is unmet. The difference is that the
+        // refusal now says which, and for the version says both numbers.
+        let unmet = unmet_provider_contract_reasons(&health, true, false);
+        if !unmet.is_empty() {
+            return Err(WalletError::L2(describe_unmet_contract(
+                "Fast Pay provider is not ready for safe, fee-free routed settlement",
+                &unmet,
+            )));
         }
         let published_address = health
             .hub_address
@@ -1677,16 +1772,27 @@ impl L2HubClient {
         requires_principal_transfer: bool,
     ) -> WalletResult<HubHealth> {
         let health = self.health().await?;
-        if !health.ok
-            || health.version < 7
-            || !health.settlement_ready
-            || !health.official_channelpay_ready
-            || !hub_fee_is_zero(&health)
-            || health.hub_address.as_deref() != Some(expected_hub_address)
-        {
-            return Err(WalletError::L2(
-                "Fast Pay Hub is not ready for an authenticated fee-free channel close".into(),
+        // Same treatment as the open gate, and for a sharper reason: this one
+        // refuses a person trying to get their money OUT of a channel. A close
+        // that will not start and will not say why is the worst sentence in the
+        // wallet. The address mismatch is kept separate because it is the one
+        // cause here that is about identity rather than capability.
+        let mut unmet = unmet_provider_contract_reasons(&health, false, true);
+        if health.hub_address.as_deref() != Some(expected_hub_address) {
+            unmet.push(format!(
+                "it publishes address {} and this channel is bound to {expected_hub_address}",
+                health
+                    .hub_address
+                    .as_deref()
+                    .filter(|address| !address.is_empty())
+                    .unwrap_or("nothing")
             ));
+        }
+        if !unmet.is_empty() {
+            return Err(WalletError::L2(describe_unmet_contract(
+                "Fast Pay Hub is not ready for an authenticated fee-free channel close",
+                &unmet,
+            )));
         }
         if self.mainnet {
             self.mainnet_readiness()

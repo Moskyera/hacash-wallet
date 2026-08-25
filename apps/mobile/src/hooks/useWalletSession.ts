@@ -272,12 +272,48 @@ export function useWalletSession(showToast: (msg: string, kind: "success" | "inf
     showToast("Wallet name saved.", "success");
   }, [status?.address, walletNameDraft, showToast]);
 
+  /**
+   * Save a privacy toggle, and say so when it cannot be saved.
+   *
+   * This had no try/catch, and every call site is a bare `void` call
+   * (`onPersistPrivacy: (p) => void session.persistPrivacy(p)`, and each
+   * checkbox is `onChange={(e) => void onPersistPrivacy({...})}`). So a rejected
+   * `wallet_update_privacy_settings` became an unhandled rejection: no toast, no
+   * error, nothing. And because the checked state is derived from
+   * `settings?.privacy ?? status?.privacy ?? DEFAULT_PRIVACY`, the box snapped
+   * straight back with no reason on screen. Six controls behaved that way,
+   * including whether transaction history is stored at all.
+   *
+   * There was a second path too: when `settings` was null the command succeeded
+   * but `setSettings` was skipped, so the toggle reverted AFTER "Privacy settings
+   * saved." had been shown. That case is now named rather than celebrated.
+   *
+   * `persistDustWhisper`, twenty lines below, already did this, so the omission
+   * was local rather than a house style.
+   */
   const persistPrivacy = useCallback(
     async (patch: Partial<typeof privacy>) => {
       const next = { ...privacy, ...patch };
-      await api.updatePrivacy(next);
-      if (settings) setSettings({ ...settings, privacy: next });
-      showToast("Privacy settings saved.", "success");
+      try {
+        await api.updatePrivacy(next);
+      } catch (error) {
+        showToast(
+          `That privacy setting was not saved: ${formatInvokeError(error)}`,
+          "error",
+        );
+        return;
+      }
+      if (settings) {
+        setSettings({ ...settings, privacy: next });
+        showToast("Privacy settings saved.", "success");
+        return;
+      }
+      // Stored by the wallet, but this screen has nothing to reflect it in yet,
+      // so the control is about to spring back. Say that, rather than "saved".
+      showToast(
+        "Saved in the wallet, but this screen has not loaded your settings yet, so the switch may spring back. Reopen this screen to see the stored value.",
+        "info",
+      );
     },
     [privacy, settings, showToast],
   );

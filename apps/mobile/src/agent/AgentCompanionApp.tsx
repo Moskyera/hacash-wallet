@@ -1,5 +1,4 @@
 import { Fragment, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import WalletLogo from "../components/WalletLogo";
 import {
   AGENT_WALLET_HOW_IT_WORKS_URL,
@@ -869,20 +868,42 @@ export default function AgentCompanionApp() {
         {/* The old notice was a three-line warning card repeated above all
             five tabs. The fact it carried is worth one short line, and the
             full explanation is one tap away where it always was. */}
-        <p className="agent-boundary-line">
-          No wallet key on this phone.
-          <button
-            type="button"
-            className="agent-inline-link"
-            onClick={() =>
-              void openUrl(AGENT_WALLET_HOW_IT_WORKS_URL).catch((reason) =>
-                companion.setError(readableError(reason)),
-              )
-            }
-          >
-            What is an AI Agent Wallet?
-          </button>
-        </p>
+        {/*
+          This used to be a button calling the opener plugin, and it could never
+          work. That call invokes `plugin:opener|open_url`, which needs
+          `opener:allow-open-url`, and this code runs only in the agent-companion
+          webview, whose capability grants exactly ["allow-agent-companion"] -
+          no opener, no core:default. Every press was refused, and the refusal
+          was not even quiet: the raw Tauri permission string appeared under the
+          heading "That step did not go through".
+
+          The narrow grant is right and is not being widened to rescue a button;
+          acl_inventory asserts that list verbatim on purpose. Instead the wallet
+          answers the question itself, which needs no permission, and prints the
+          URL for anyone who wants the full document.
+        */}
+        <details className="agent-boundary-explainer">
+          <summary className="agent-boundary-line">
+            No wallet key on this phone. What is an AI Agent Wallet?
+          </summary>
+          <p>
+            An AI Agent Wallet is a separate wallet an agent can spend from under
+            rules you set, so it never touches your personal wallet. The agent
+            holds its own key on the desktop that created it. This phone holds no
+            key at all: it is a companion that shows you what the agent is asking
+            to do and carries your yes or no back. Nothing here can sign, and
+            nothing here can move money on its own.
+          </p>
+          <p>
+            Every payment above your limit stops and waits for you. What you
+            approve is one exact transaction, with the recipient, the fee and the
+            total debit shown before you decide, and approval does not carry over
+            to the next one.
+          </p>
+          <p className="agent-boundary-url">
+            The full write-up: {AGENT_WALLET_HOW_IT_WORKS_URL}
+          </p>
+        </details>
       </section>
 
       {companion.error ? (

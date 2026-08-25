@@ -71,7 +71,24 @@ export function usePaymentFlow(opts: {
       l1FeeSpeed: L1FeeSpeed = sendL1FeeSpeed,
       _serviceFeeEnabled: boolean = sendServiceFeeEnabled,
     ) => {
-      if (!settings) return;
+      /*
+       * Both silent exits are gone.
+       *
+       * This is the control somebody reaches for when Fast Pay will not turn on:
+       * "Force on-chain (L1)", and the L1 fee-speed picker beside it. PayTab
+       * flips its own local state first and then fires this away as
+       * `void onPersistSendPrefs(...)`, so on failure the checkbox stayed visibly
+       * ticked while the wallet kept the old setting, and the divergence only
+       * showed up on the next launch. The bare `if (!settings) return;` did the
+       * same thing without even attempting the write.
+       */
+      if (!settings) {
+        showToast(
+          "That send preference was not saved: this screen has not loaded your settings yet. Try again in a moment.",
+          "error",
+        );
+        return;
+      }
       const next: WalletSettings = {
         ...settings,
         send: {
@@ -82,10 +99,18 @@ export function usePaymentFlow(opts: {
           service_fee_rate: DEFAULT_SERVICE_FEE_RATE,
         },
       };
-      await api.updateSettings(next);
+      try {
+        await api.updateSettings(next);
+      } catch (error) {
+        showToast(
+          `That send preference was not saved, and the wallet still holds the previous one: ${formatInvokeError(error)}`,
+          "error",
+        );
+        return;
+      }
       setSettings(next);
     },
-    [sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate, settings, setSettings],
+    [sendL1FeeSpeed, sendServiceFeeEnabled, serviceFeeRate, settings, setSettings, showToast],
   );
 
   const loadPaymentPayload = useCallback(

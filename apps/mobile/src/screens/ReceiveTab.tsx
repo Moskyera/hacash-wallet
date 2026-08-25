@@ -3,7 +3,7 @@ import AssetSelector from "../components/AssetSelector";
 import BtcNetworkNotice from "../components/BtcNetworkNotice";
 import HacdDiamondVisual from "../components/HacdDiamondVisual";
 import PaymentQrDisplay from "../components/PaymentQrDisplay";
-import { copyWithPrivacyClear, maskAddress } from "../privacy";
+import { copyAndReport, maskAddress } from "../privacy";
 import {
   isValidHacdName,
   normalizeHacdName,
@@ -49,8 +49,14 @@ export default function ReceiveTab({
       onToast("Enter a valid HACD name (4 to 6 letters).", "error");
       return;
     }
-    await copyWithPrivacyClear(`hacd:${hacdNorm}`, clipboardSecs);
-    onToast("HACD receive code copied.", "success");
+    // Was: await + unconditional success toast, fired as `void copyHacd()`.
+    // A rejected clipboard write went nowhere at all.
+    await copyAndReport(
+      `hacd:${hacdNorm}`,
+      clipboardSecs,
+      onToast,
+      "HACD receive code copied.",
+    );
   };
 
   const copyBtc = async () => {
@@ -58,8 +64,7 @@ export default function ReceiveTab({
       onToast("Hacash receive address is unavailable.", "error");
       return;
     }
-    await copyWithPrivacyClear(address, clipboardSecs);
-    onToast("Hacash address for BTC copied.", "success");
+    await copyAndReport(address, clipboardSecs, onToast, "Hacash address for BTC copied.");
   };
 
   return (

@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { quantumApi, QuantumAccountInfo, QuantumAccountSummary } from "../api";
+import { handOffTextFile } from "@hacash/wallet-ui";
 import { formatInvokeError } from "../formatInvokeError";
 import { kindLabel, summaryFromAccountInfo } from "../quantumMeta";
 import AddressBadge from "./AddressBadge";
@@ -99,13 +100,22 @@ export default function KeystoreV3Modal({
     try {
       const json = await quantumApi.exportKeystore(pass);
       const meta = JSON.parse(json) as { kind?: string; address?: string };
-      const blob = new Blob([json], { type: "application/json" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = exportFilename(meta.kind);
-      a.click();
-      URL.revokeObjectURL(a.href);
-      setInfo(`Exported ${meta.address ?? "keystore"}`);
+      /*
+       * This is the encrypted post-quantum keystore: the backup of a key that
+       * holds real value. It used to click a detached anchor, revoke the object
+       * URL in the same task, and then print "Exported <address>" no matter what
+       * happened, because `a.click()` returns void and nothing could reach the
+       * catch. `handOffTextFile` revokes later and says only what it did.
+       */
+      const handoff = await handOffTextFile(exportFilename(meta.kind), json);
+      if (handoff.ok) {
+        setInfo(handoff.message);
+      } else {
+        setErr(
+          `${handoff.message} The keystore for ${meta.address ?? "this key"} was NOT saved to a file.`,
+        );
+        setInfo("");
+      }
     } catch (e) {
       setErr(formatInvokeError(e));
       setInfo("");

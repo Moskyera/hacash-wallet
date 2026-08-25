@@ -30,6 +30,17 @@ export default function SecurityInfoScreen({
   const [currentPassphrase, setCurrentPassphrase] = useState("");
   const [coldVaultConfirmation, setColdVaultConfirmation] = useState("");
   const [thresholdDraft, setThresholdDraft] = useState("");
+  /**
+   * Why the second-factor amount was not applied, said on the screen.
+   *
+   * The Apply button is enabled as soon as the field is non-empty, and the
+   * handler then dropped anything that was not a whole number of at least 1 with
+   * a bare `return`. Typing 0, or 0.5, produced a press that cleared nothing,
+   * changed nothing and said nothing. The rule is right and stays; only the
+   * silence is fixed. The core still enforces the same floor on the
+   * authenticated command.
+   */
+  const [thresholdRefusal, setThresholdRefusal] = useState("");
   const coldVault = status?.hardware_signing_mode === "airgap_only";
   const legacyKey = status?.legacy_key_derivation != null;
   const webauthnConfigured = status?.webauthn_enabled === true;
@@ -157,7 +168,13 @@ export default function SecurityInfoScreen({
               disabled={busy || !currentPassphrase || !thresholdDraft}
               onClick={() => {
                 const amount = Number(thresholdDraft);
-                if (!Number.isInteger(amount) || amount < 1) return;
+                if (!Number.isInteger(amount) || amount < 1) {
+                  setThresholdRefusal(
+                    `The amount has to be a whole number of HAC, one or more. "${thresholdDraft}" is not, so nothing was changed and your threshold is still ${enforcedThreshold} HAC.`,
+                  );
+                  return;
+                }
+                setThresholdRefusal("");
                 setThresholdDraft("");
                 runAuthenticated((passphrase) =>
                   onSetSecondFactorThreshold(amount, passphrase),
@@ -169,6 +186,7 @@ export default function SecurityInfoScreen({
             <button
               disabled={busy || !currentPassphrase}
               onClick={() => {
+                setThresholdRefusal("");
                 setThresholdDraft("");
                 runAuthenticated((passphrase) => onSetSecondFactorThreshold(null, passphrase));
               }}
@@ -176,6 +194,11 @@ export default function SecurityInfoScreen({
               {t("security.secondFactorAmountReset")}
             </button>
           </div>
+          {thresholdRefusal ? (
+            <div className="alert" role="alert">
+              {thresholdRefusal}
+            </div>
+          ) : null}
         </>
       ) : null}
 

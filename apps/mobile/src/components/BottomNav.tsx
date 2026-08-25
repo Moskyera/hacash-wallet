@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useLocale } from "../locale";
 
 export type TabId = "home" | "pay" | "receive" | "hacd" | "more";
@@ -14,6 +15,22 @@ const ITEMS: NavItemId[] = ["home", "pay", "receive", "agent", "more"];
 
 export default function BottomNav({ active, onChange, onOpenAgent, watchOnly }: Props) {
   const { t } = useLocale();
+  /**
+   * "Agent" is drawn as a tab and is not one.
+   *
+   * The other four items call `onChange` and swap a view. This one calls
+   * `openAgentCompanion`, which unmounts the Personal UI and then does
+   * `await api.lock()` before creating the companion webview. So tapping what
+   * looks like a tab locked the wallet and forced a passphrase re-entry to get
+   * back, with no confirmation and no warning anywhere on the control - and the
+   * destination is not the Agent Wallet either. Mobile has no
+   * agent-wallet-admin feature (agent_feature_boundary.rs asserts it), so it is
+   * an approval companion that does nothing without an already-paired desktop.
+   *
+   * The control is not removed and not greyed. It asks, in words, and the second
+   * press is the one that acts.
+   */
+  const [agentConfirm, setAgentConfirm] = useState(false);
   const label = (item: NavItemId): string => {
     if (item === "pay") return t("nav.send");
     if (item === "agent") return "Agent";
@@ -21,6 +38,34 @@ export default function BottomNav({ active, onChange, onOpenAgent, watchOnly }: 
     return t(`nav.${item}`);
   };
   return (
+    <>
+      {agentConfirm && (
+        <div className="bottom-nav-agent-confirm" role="alertdialog" aria-label="Open the Agent companion">
+          <strong>This locks My Wallet.</strong>
+          <p>
+            The Agent companion runs on its own and your personal wallet is
+            locked while it does, so you will need your passphrase to come back.
+            The companion only approves what an Agent Wallet on a paired desktop
+            asks for; on its own, with no desktop paired, there is nothing for it
+            to show you.
+          </p>
+          <div className="bottom-nav-agent-confirm-row">
+            <button type="button" onClick={() => setAgentConfirm(false)}>
+              Stay in My Wallet
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => {
+                setAgentConfirm(false);
+                onOpenAgent?.();
+              }}
+            >
+              Lock and open Agent
+            </button>
+          </div>
+        </div>
+      )}
     <nav className="bottom-nav" aria-label={t("nav.mainLabel")}>
       {ITEMS.filter((item) => !(watchOnly && item === "pay")).map((item) => {
         const selected = item !== "agent" && active === item;
@@ -30,7 +75,9 @@ export default function BottomNav({ active, onChange, onOpenAgent, watchOnly }: 
             type="button"
             className={`bottom-nav-item ${selected ? "active" : ""}`}
             aria-current={selected ? "page" : undefined}
-            onClick={() => item === "agent" ? onOpenAgent?.() : onChange(item)}
+            onClick={() =>
+              item === "agent" ? setAgentConfirm(true) : onChange(item)
+            }
           >
             <NavIcon kind={item} />
             <span>{label(item)}</span>
@@ -38,6 +85,7 @@ export default function BottomNav({ active, onChange, onOpenAgent, watchOnly }: 
         );
       })}
     </nav>
+    </>
   );
 }
 

@@ -82,7 +82,8 @@ export type DesktopActions = {
   /** Switches to the Agent Wallet space. Locks My Wallet on the way there. */
   onOpenAgent: () => void;
   onOpenQrPay: () => void;
-  onEnableFastPay: (userDeposit: string) => void;
+  /** Resolves to the refusal text, or `null` when the open was submitted. */
+  onEnableFastPay: (userDeposit: string) => Promise<string | null>;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
   onSaveL2Settings: (
     nodeUrl: string,

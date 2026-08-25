@@ -9,6 +9,8 @@ export * from "./HubDeclarationCard";
 export * from "./hacdArt";
 export * from "./DappAppSelector";
 export * from "./dappApps";
+export * from "./fastPayEnable";
+export * from "./fileHandoff";
 export * from "./OwnedHacdGallery";
 export * from "./i18n";
 export * from "./moneyNex";

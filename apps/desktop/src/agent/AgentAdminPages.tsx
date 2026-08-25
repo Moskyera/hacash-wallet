@@ -1090,6 +1090,15 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
             <p className="agent-exact-address">{approval.recipient}</p>
           </div>
           <dl className="agent-detail-grid"><Detail label="Recipient" value={approval.recipient} wide /><Detail label="Network fee" value={formatUnits(approval.fee_units)} /><Detail label="HPAY wallet fee" value={approval.wallet_fee_units === "0" ? "None" : "Blocked: invalid fee"} /><Detail label="Total debit" value={formatUnits(approval.total_debit_units)} /><Detail label="Expires" value={formatDate(approval.expires_at)} /><Detail label="Agent" value={approval.agent_id} wide /><Detail label="Transaction commitment" value={approval.transaction_commitment} wide /></dl><div className="agent-warning">{APPROVE_TRANSACTION_WARNING}</div>{!approvalIsExactAndFeeFree(approval) && <div className="alert" role="alert">This approval is malformed or contains a wallet fee. Signing is blocked.</div>}
+          {/* The other half of the same disable, which used to say nothing at all.
+              `disabled={busy || approvalIsExpired(approval) || !approvalIsExactAndFeeFree(approval)}`
+              had a named reason for the malformed branch, above, and none for
+              expiry. An owner who read the whole review and pressed Approve got a
+              grey rectangle; the "Expires" value was one cell in a seven-cell
+              grid and did not say it had passed. The gate is unchanged - an
+              approval whose window has closed is still refused, here and in the
+              core. It now has a cause, and a next step. */}
+          {approvalIsExpired(approval) && <div className="alert" role="alert">This approval expired at {formatDate(approval.expires_at)}, so it can no longer be signed. Nothing was signed and nothing was sent. Ask the agent to request a new approval, and it will appear in this list.</div>}
           {/* An owner who has just read the exact amount and decided no had to
               close this review and hunt for the row's Reject. Same call, same
               two-press confirmation. */}

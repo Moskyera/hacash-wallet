@@ -81,10 +81,11 @@ export default function LaunchpadScreen({ watchOnly = false, onNotify }: Props) 
           app={openedApp}
           closeLabel={t("dapp.close")}
           openingLabel={t("dapp.opening")}
+          connectionErrorLabel={copy.connectionError}
           onClose={() => setOpenedApp(null)}
-          onError={() => {
+          onError={(reason) => {
             setOpenedApp(null);
-            onNotify?.(copy.connectionError, "error");
+            onNotify?.(reason, "error");
           }}
         />
       ) : null}
@@ -92,21 +93,55 @@ export default function LaunchpadScreen({ watchOnly = false, onNotify }: Props) 
   );
 }
 
-function EmbeddedDappWebview({ app, closeLabel, openingLabel, onClose, onError }: {
+/**
+ * Does this platform have the command an embedded dApp panel is built on?
+ *
+ * `new Webview(...)` invokes `plugin:webview|create_webview`, and tauri 2.11.3
+ * registers that command as `#[cfg(desktop)] desktop_commands::create_webview`
+ * inside a `#[cfg(desktop)] mod desktop_commands`. On Android it is not compiled
+ * in at all, so the call rejects with a command-not-found error no matter what
+ * the ACL says - and the mobile default capability does grant
+ * `core:webview:allow-create-webview`, so the ACL genuinely is not the obstacle.
+ *
+ * Detected from the error rather than from a user-agent string, because the
+ * error is what actually happened. A user-agent test would be a guess about the
+ * platform; this is the platform answering.
+ */
+function embeddedDappSupportRefusal(reason: unknown): string | null {
+  const text = reason instanceof Error ? reason.message : String(reason ?? "");
+  const notFound =
+    /not found|not allowed|unknown command|create_webview|UnstableFeatureNotSupported/i.test(
+      text,
+    );
+  if (!notFound) return null;
+  return (
+    "This phone cannot open a dApp inside the wallet. The embedded panel is built " +
+    "on a webview command that only exists in the desktop build, so there is " +
+    "nothing to fix in your connection or your network. Open this dApp on the " +
+    "HPAY desktop wallet, or in your phone's browser."
+  );
+}
+
+function EmbeddedDappWebview({ app, closeLabel, openingLabel, connectionErrorLabel, onClose, onError }: {
   app: WalletDapp;
   closeLabel: string;
   openingLabel: string;
+  connectionErrorLabel: string;
   onClose: () => void;
-  onError: () => void;
+  onError: (reason: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  const connectionErrorRef = useRef(connectionErrorLabel);
+  connectionErrorRef.current = connectionErrorLabel;
 
   useEffect(() => {
     if (!isTauri()) {
-      onErrorRef.current();
+      onErrorRef.current(
+        "This page is not running inside the wallet app, so it cannot open a dApp panel.",
+      );
       return;
     }
     const host = hostRef.current;
@@ -179,7 +214,9 @@ function EmbeddedDappWebview({ app, closeLabel, openingLabel, onClose, onError }
           const failedWebview = webview;
           webview = null;
           const closePromise = failedWebview?.close().catch(() => undefined);
-          onErrorRef.current();
+          // The dApp mounted and then its bridge failed. That IS a connection
+          // problem, unlike the mount failure below, so the wording stays.
+          onErrorRef.current(connectionErrorRef.current);
           await closePromise;
         };
         const inject = async () => {
@@ -204,12 +241,23 @@ function EmbeddedDappWebview({ app, closeLabel, openingLabel, onClose, onError }
           () => void inject(),
           MONEYNEX_REINJECT_INTERVAL_MS,
         );
-      } catch {
+      } catch (reason) {
+        // Was `catch {` with no binding, which discarded the only evidence of
+        // what went wrong and then reported a fixed "connection error". That
+        // sent a person to check their Wi-Fi for a command that does not exist
+        // on their platform.
         if (webview) {
           await webview.close().catch(() => undefined);
           webview = null;
         }
-        if (!cancelled) onErrorRef.current();
+        if (!cancelled) {
+          onErrorRef.current(
+            embeddedDappSupportRefusal(reason) ??
+              `${connectionErrorRef.current} ${
+                reason instanceof Error ? reason.message : String(reason)
+              }`,
+          );
+        }
       }
     };
 

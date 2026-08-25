@@ -30,6 +30,8 @@ import {
   FAST_PAY_MAINNET_CONSENT,
   MAINNET_SIGNING_TRANSPORT_NOTICE,
   NativeRailPreflightCard,
+  fastPayEnableHeadline,
+  fastPayEnableRefusals,
   mainnetSigningTransportIsEligible,
   preflightShowsPass,
 } from "@hacash/wallet-ui";
@@ -90,6 +92,14 @@ export default function FastPayChannelScreen({
   );
   const inboxRequestRef = useRef<Promise<void> | null>(null);
   const channelRequestRef = useRef<Promise<void> | null>(null);
+  /**
+   * The refusal the last Enable press produced, kept beside the button.
+   *
+   * `onToast` shows it for a few seconds at the edge of a phone screen and then
+   * removes it. A person who looked away, or who was reading the deposit field,
+   * sees a control that did nothing. The text stays here until the next press.
+   */
+  const [lastRefusal, setLastRefusal] = useState<string | null>(null);
   const channel = channelProbe.value;
   const inbox = inboxProbe.value;
 
@@ -252,10 +262,15 @@ export default function FastPayChannelScreen({
 
   async function handleEnableFastPay() {
     setBusy(true);
+    setLastRefusal(null);
     try {
       await openReviewedChannel(String(fastPay?.default_deposit_mei ?? userDeposit));
     } catch (e) {
-      onToast(formatInvokeError(e), "error");
+      const message = formatInvokeError(e);
+      // Both, deliberately. The toast is how a phone announces something; the
+      // panel below the button is how the reason survives long enough to read.
+      onToast(message, "error");
+      setLastRefusal(message);
     } finally {
       setBusy(false);
     }
@@ -354,6 +369,29 @@ export default function FastPayChannelScreen({
     settings?.network_mode,
   );
 
+  /**
+   * Everything this screen can see that would stop Enable, all at once.
+   *
+   * It gates nothing: the button below is pressable in every case, and
+   * `prepare_channel_open`, the signing boundary and the Hub each check these
+   * rules again for real. Withheld mainnet consent used to grey the button out
+   * with no sentence attached to it, and a greyed control cannot be told from a
+   * broken one.
+   */
+  const enableRefusals = fastPayEnableRefusals({
+    settingsLoaded: settings !== null,
+    watchOnly,
+    locked: false,
+    networkMode: settings?.network_mode,
+    nodeUrl: settings?.node_url,
+    hubAddress,
+    consentGranted: Boolean(settings?.trusted_mainnet_fast_pay_pilot),
+    depositHac: String(fastPay?.default_deposit_mei ?? userDeposit),
+    declaredChannelCapHac: preflight?.declared_caps.max_channel_funding_hac ?? null,
+    signingTransportEligible,
+    signingTransportNotice: MAINNET_SIGNING_TRANSPORT_NOTICE,
+  });
+
   if (watchOnly) {
     return (
       <div className="card">
@@ -422,23 +460,75 @@ export default function FastPayChannelScreen({
         </div>
         {fastPay && (
           <>
+            {/*
+              The Hub's own words first, the generic line only as a fallback.
+
+              `FastPayStatus.message` is the field that carries the reason a
+              provider was refused, and `provider_incompatible_because`
+              (crates/wallet-core/src/fast_pay.rs:152) exists purely to put the
+              Hub's own sentence in it. The comment above that function says why
+              it matters: when a mainnet readiness gate is what refused, the
+              generic line is "simply false", because the same Hub is publishing
+              settlement_ready true, cross_channel_ready true and a zero fee at
+              that exact moment. What it lacks is the mainnet guarantees.
+
+              This screen rendered only `fastPayStatusLine(fastPay.state, ...)`,
+              a hardcoded sentence switched off the state enum, and for
+              `provider_incompatible` that sentence is the false one: "Provider
+              cannot create safe, fee-free routed settlements." So a person was
+              told to go and replace a working Hub. Desktop has always rendered
+              `message`; the phone did not.
+            */}
             <p className="muted" style={{ marginTop: "0.5rem" }}>
-              {fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
+              {fastPay.message?.trim()
+                ? fastPay.message
+                : fastPayStatusLine(fastPay.state, fastPay.default_deposit_mei ?? 10)}
             </p>
-            {fastPay.state !== "ready" && fastPay.can_enable && (
-              <button
-                type="button"
-                className="primary"
-                style={{ marginTop: "0.75rem", width: "100%" }}
-                disabled={
-                  busy
-                  || (settings?.network_mode === "mainnet"
-                    && !settings.trusted_mainnet_fast_pay_pilot)
-                }
-                onClick={() => void handleEnableFastPay()}
-              >
-                Enable
-              </button>
+            {/*
+              Offered whenever Fast Pay is not already on.
+
+              It used to require `can_enable`, so a person whose Hub was refusing
+              for a nameable reason had no control left to press, and it used to
+              grey itself out on withheld mainnet consent, which said nothing at
+              all. Now it renders, it is pressable, and the reasons are listed
+              directly under it. No gate moved: the core refuses on its own
+              account and the Hub judges its readiness document again at funding.
+            */}
+            {fastPay.state !== "ready" && (
+              <>
+                <div
+                  className={enableRefusals.length === 0 ? "preview-box" : "warning-box"}
+                  role="note"
+                  style={{ marginTop: "0.75rem" }}
+                >
+                  <strong>{fastPayEnableHeadline(enableRefusals)}</strong>
+                  {enableRefusals.length > 0 && (
+                    <ul className="muted small">
+                      {enableRefusals.map((refusal) => (
+                        <li key={refusal.id}>
+                          <strong>{refusal.title}.</strong> {refusal.detail}{" "}
+                          <code>{refusal.id}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="primary"
+                  style={{ marginTop: "0.75rem", width: "100%" }}
+                  disabled={busy}
+                  onClick={() => void handleEnableFastPay()}
+                >
+                  Enable
+                </button>
+                {lastRefusal && (
+                  <div className="error-box" role="alert" style={{ marginTop: "0.5rem" }}>
+                    <strong>Enable refused, and nothing was signed</strong>
+                    <p className="small">{lastRefusal}</p>
+                  </div>
+                )}
+              </>
             )}
             {fastPay.state !== "ready" && (
               <button
@@ -622,9 +712,49 @@ export default function FastPayChannelScreen({
         </div>
       )}
 
-      {channelProbe.status === "ready" && !channel && (
+      {/*
+        Rendered whenever there is no channel, not only when the probe succeeded.
+
+        This card holds the deposit fields, the read-only preflight that names
+        what is wrong with the node and the Hub, and the two buttons that open
+        the channel. It used to sit behind `channelProbe.status === "ready"`, and
+        `loadChannel` sets that to `failed` when `api.channelInfo()` rejects and
+        leaves it `loading` if the call never returns. So at the exact moment the
+        wallet could not read the channel, the whole surface disappeared - while
+        the "Enable" button above, driven only by `fastPay`, stayed. A person was
+        offered the control that commits money and denied every surface that
+        could explain a refusal.
+
+        When the probe has not succeeded, the card says the channel state is
+        unknown. "There is no channel" and "nobody could find out whether there
+        is a channel" are different facts, and only one of them means opening a
+        new one is the right move.
+      */}
+      {!channel && (
         <div className="card">
           <h2>Setup</h2>
+          {/*
+            "Still reading" and "could not read" are different facts and only one
+            of them is a problem. `channelProbe.status !== "ready"` covers both,
+            so saying "could not be read" for the loading case would print a
+            failure during a perfectly normal first render, which is the same
+            wrong-cause reporting this card exists to stop.
+          */}
+          {channelProbe.status === "loading" && (
+            <p className="muted small" role="note" aria-live="polite">
+              Your existing channel state is still being read, so this wallet does
+              not know yet whether you already have one. The fields below work
+              now; wait for the check above before you deposit.
+            </p>
+          )}
+          {channelProbe.status === "failed" && (
+            <p className="warning-box small" role="note">
+              Your existing channel state could not be read, so this wallet does
+              not know whether you already have one. The fields below still work
+              and the check below still runs, but confirm the channel state with
+              "Retry channel check" above before you deposit.
+            </p>
+          )}
           <p className="muted small">
             Deposit HAC once to turn on instant sends. You can change the amount below.
           </p>
