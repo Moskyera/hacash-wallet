@@ -1883,3 +1883,153 @@ button:disabled {
 .wallet-disclosure-body {
   padding: 0 14px 12px;
 }
+
+/*
+ * THE NODE SYNC SURFACE, AND WHY IT IS NOT A SPINNER.
+ * ===================================================
+ *
+ * Same block, same class names and same rules as the desktop copy in
+ * apps/desktop/src/dashboard.css. It is written out here rather than shared
+ * because a stylesheet cannot be imported across the two apps, and because the
+ * failure this guards against is precisely a class that exists on one platform
+ * and not the other: `.toast` sat in desktop markup with its only definition in
+ * this file, so every desktop refusal rendered as an unstyled block off screen.
+ *
+ * The phone does not run a node, it reads one, and a remote node can be behind
+ * or on a chain that is not Hacash mainnet. Both look like a slow wallet. So
+ * the chain answer is the loud part here too, and there is no indeterminate
+ * bar and no looping animation anywhere in this block: `.node-sync-fill` is
+ * drawn only when a real percentage exists and moves only by transitioning to
+ * a width that actually changed. Motion always means a number moved.
+ */
+.node-sync {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+/*
+ * The first-second answer. Heavier than the lines under it on purpose: it is
+ * the one that decides whether the other two are worth reading.
+ */
+.node-sync-chain {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.node-sync-live {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-sync-distance {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+/*
+ * The track is never drawn empty and never drawn without a number. There is
+ * no `.node-sync-track--indeterminate`, and there must never be one.
+ */
+.node-sync-track {
+  overflow: hidden;
+  width: 100%;
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #0a0a0a;
+}
+
+.node-sync-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width 600ms ease;
+}
+
+.node-sync-eta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+/*
+ * "Working out how long", and everything else not yet known. Held apart from
+ * the measured line so an estimate and an admission never look the same.
+ */
+.node-sync-unknown {
+  font-style: italic;
+  opacity: 0.9;
+}
+
+/* Before the node has answered at all. A sentence, not a spinner. */
+.node-sync-waiting {
+  border-style: dashed;
+}
+
+.node-sync-chain.tone-ok {
+  border-left-color: rgba(245, 166, 35, 0.55);
+  background: #10130a;
+  color: #d9e7b0;
+}
+
+.node-sync-chain.tone-warn {
+  border-left-color: rgba(245, 166, 35, 0.75);
+  background: #1a1206;
+  color: #ffd18a;
+}
+
+/*
+ * A WRONG CHAIN IS NOT A SLOW CHAIN.
+ * This is the state a spinner would have hidden for seven minutes, so it is
+ * the loudest thing in the block and it carries no progress element at all.
+ */
+.node-sync-chain.tone-bad {
+  border-left: 4px solid var(--accent);
+  background: #200f04;
+  color: #ffc46b;
+  font-weight: 700;
+}
+
+.node-sync-chain.tone-idle {
+  border-left-color: var(--border);
+  background: var(--panel-hover);
+  color: var(--muted);
+}
+
+.node-sync-chain.tone-busy {
+  border-left-color: rgba(245, 166, 35, 0.45);
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+/*
+ * AN ANIMATION NOBODY ASKED FOR IS NOT INFORMATION.
+ *
+ * The only motion in this block is the fill sliding to a width that changed,
+ * so removing it costs nothing: the bar still lands on the correct percentage,
+ * and every fact stays in the text beside it.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .node-sync-fill {
+    transition: none;
+  }
+}
+

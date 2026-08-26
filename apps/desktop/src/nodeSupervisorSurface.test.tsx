@@ -45,6 +45,10 @@ const BASE: NodeSupervisorReport = {
   height: null,
   tip_age_seconds: null,
   max_tip_age_seconds: null,
+  // No readings at all. Every state below that shows a height still shows one;
+  // none of them get a percentage, because a percentage needs two of these.
+  tip_timestamp_unix: null,
+  observed_unix: null,
   fresh: null,
   anchor: "unknown",
   watching: "Nothing has been read from this node yet.",

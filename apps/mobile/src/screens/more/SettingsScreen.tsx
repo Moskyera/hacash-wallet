@@ -17,6 +17,7 @@ import {
 } from "../../api";
 import AppUpdateSection from "../../components/AppUpdateSection";
 import HubDiscoveryPanel from "../../components/HubDiscoveryPanel";
+import NodeSyncSection from "../../components/NodeSyncSection";
 import { formatInvokeError } from "../../formatInvokeError";
 import { useLocale } from "../../locale";
 
@@ -172,6 +173,18 @@ export default function SettingsScreen({
             </>
           )}
         </p>
+
+        {/*
+          WHICH CHAIN, HOW FAR ALONG, HOW MUCH LONGER, in that order.
+
+          It sits directly under the node this wallet is pointed at because the
+          first of those three questions is the one that decides whether the
+          other two are worth waiting on, and a person who is reading a node URL
+          is exactly the person who needs it. There is no spinner here on
+          purpose: a node catching up and a node on a private chain of its own
+          both climb, and a spinner turns the same way for both.
+        */}
+        <NodeSyncSection />
 
         {/*
           Said to the person sitting on the default, not only to the person who

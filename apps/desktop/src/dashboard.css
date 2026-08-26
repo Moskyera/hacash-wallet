@@ -1104,3 +1104,244 @@
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/*
+ * THE NODE SYNC SURFACE, AND WHY IT IS NOT A SPINNER.
+ * ===================================================
+ *
+ * The owner asked for something on screen during a long wait, and they were
+ * right that silence loses people. A plain spinner would have made the worst
+ * case worse. A Hacash sync took about seven minutes on this machine, and for
+ * that whole time a real mainnet catch-up and a node that has quietly started
+ * a private chain of its own look identical: both show a climbing height. A
+ * spinner turns the same way for both. It would have covered the one moment
+ * that mistake was still cheap to fix.
+ *
+ * So the rules this stylesheet enforces:
+ *
+ *   - There is no indeterminate bar and no looping animation anywhere in here.
+ *     `.node-sync-fill` is drawn only when a real percentage exists, and it
+ *     moves only by transitioning to a width that actually changed. Motion
+ *     here always means a number moved.
+ *   - The chain verdict is the loudest thing in the block, and a wrong chain
+ *     does not look like a slow one. `.tone-bad` gets the heavy left rule and
+ *     the lit background that a refusal gets everywhere else in this app.
+ *   - `prefers-reduced-motion` removes the transition entirely. The width still
+ *     lands on the right value; it just gets there without sliding.
+ *
+ * Every class below is defined in apps/mobile/src/mobile.css as well. This is
+ * the lesson from `.toast`, which lived in the markup and in no desktop
+ * stylesheet at all, so every refusal on the Fast Pay screen rendered as an
+ * unstyled block off screen and deleted itself four seconds later.
+ * `nodeSyncCssIsBuilt.test.ts` greps the BUILT asset in dist, not this file,
+ * because a rule that does not survive the bundler is a rule that does not
+ * exist.
+ */
+.node-sync {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+}
+
+/*
+ * The first-second answer. Bigger than the lines under it on purpose: it is
+ * the one that decides whether the other two are worth reading.
+ */
+.node-sync-chain {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.node-sync-live {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-sync-distance {
+  margin: 0;
+  color: #f2f2f2;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+/*
+ * The track is never drawn empty and never drawn without a number. There is
+ * no `.node-sync-track--indeterminate`, and there must never be one.
+ */
+.node-sync-track {
+  overflow: hidden;
+  width: 100%;
+  height: 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #0a0a0a;
+}
+
+.node-sync-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width 600ms ease;
+}
+
+.node-sync-eta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/*
+ * "Working out how long", and everything else not yet known. Held apart from
+ * the measured line so an estimate and an admission never look the same.
+ */
+.node-sync-unknown {
+  font-style: italic;
+  opacity: 0.9;
+}
+
+/* Before the node has answered at all. A sentence, not a spinner. */
+.node-sync-waiting {
+  border-style: dashed;
+}
+
+.node-sync-chain.tone-ok,
+.node-watching.tone-ok,
+.node-headline.tone-ok {
+  border-left-color: rgb(245 166 35 / 55%);
+  background: #10130a;
+  color: #d9e7b0;
+}
+
+.node-sync-chain.tone-warn,
+.node-watching.tone-warn,
+.node-headline.tone-warn {
+  border-left-color: rgb(245 166 35 / 75%);
+  background: #1a1206;
+  color: #ffd18a;
+}
+
+/*
+ * A WRONG CHAIN IS NOT A SLOW CHAIN.
+ * This is the state a spinner would have hidden for seven minutes, so it is
+ * the loudest block on the panel and it carries no progress element at all.
+ */
+.node-sync-chain.tone-bad,
+.node-watching.tone-bad,
+.node-headline.tone-bad {
+  border-left: 4px solid var(--accent);
+  background: #200f04;
+  color: #ffc46b;
+  font-weight: 700;
+}
+
+.node-sync-chain.tone-idle,
+.node-watching.tone-idle,
+.node-headline.tone-idle {
+  border-left-color: var(--border);
+  background: var(--bg-card);
+  color: var(--muted);
+}
+
+.node-sync-chain.tone-busy,
+.node-watching.tone-busy,
+.node-headline.tone-busy {
+  border-left-color: rgb(245 166 35 / 45%);
+  background: var(--bg-card);
+  color: #f2f2f2;
+}
+
+/*
+ * The panel these lines sit inside. Every one of these classes was in the
+ * markup and in no stylesheet, exactly like `.toast` before it.
+ */
+.node-supervisor {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 16px);
+  background: var(--bg-card);
+}
+
+.node-headline {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.node-progress,
+.node-watching {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.node-warn {
+  margin: 8px 0;
+  color: #ffd18a;
+  font-size: 13px;
+}
+
+.node-log {
+  overflow-x: auto;
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #070707;
+  color: #d8d8d8;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.node-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/*
+ * AN ANIMATION NOBODY ASKED FOR IS NOT INFORMATION.
+ *
+ * The only motion in this block is the fill sliding to a width that changed,
+ * so removing it costs nothing: the bar still lands on the correct percentage,
+ * and every fact stays in the text beside it.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .node-sync-fill {
+    transition: none;
+  }
+}
+

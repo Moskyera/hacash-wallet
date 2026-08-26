@@ -185,6 +185,15 @@ export type NodeSupervisorReport = {
   height: number | null;
   tip_age_seconds: number | null;
   max_tip_age_seconds: number | null;
+  /**
+   * The node's own timestamp on its newest block, and its own clock when it
+   * answered. Two readings of these are the only honest way to a percentage:
+   * they give the seconds per block across exactly the blocks this node just
+   * took in, which turns a tip age into a number of blocks still to go. No
+   * block interval is assumed anywhere on the way.
+   */
+  tip_timestamp_unix: number | null;
+  observed_unix: number | null;
   fresh: boolean | null;
   anchor: ChainAnchor;
   /** Which chain is being watched, named by its block one hash. */

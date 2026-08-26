@@ -14,10 +14,17 @@
  * written as an offer, and it says plainly that the wallet still works against
  * the node it is already pointed at.
  */
+import {
+  nodeSyncView,
+  recordSyncSample,
+  syncVerdictFromAnchor,
+  type SyncSample,
+} from "@hacash/wallet-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type NodeSupervisorReport } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
-import { binaryProvenance, nodeSupervisorView } from "../nodeSupervisor";
+import { binaryProvenance, nodeSupervisorView, syncSampleOf } from "../nodeSupervisor";
+import NodeSyncProgress from "./NodeSyncProgress";
 
 type Props = {
   onInfo: (message: string) => void;
@@ -37,12 +44,28 @@ export default function NodeSupervisorPanel({ onInfo, onError }: Props) {
   const [report, setReport] = useState<NodeSupervisorReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [pickedPath, setPickedPath] = useState("");
+  /**
+   * The readings a finishing time is measured over.
+   *
+   * Kept here rather than computed from one report because there is no honest
+   * way to a percentage from a single reading: a height on its own has no
+   * denominator, and inventing one out of an assumed block interval is exactly
+   * the sort of number the owner would be right to distrust. Two readings of
+   * the node's own tip timestamp give the real spacing of the blocks it just
+   * took in, and that is what turns a tip age into blocks still to go.
+   */
+  const [samples, setSamples] = useState<SyncSample[]>([]);
   const alive = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
       const next = await api.nodeSupervisorStatus();
-      if (alive.current) setReport(next);
+      if (!alive.current) return;
+      setReport(next);
+      const sample = syncSampleOf(next);
+      // A report with no numbers in it clears the run rather than leaving a
+      // stale one to be averaged against whatever comes back next.
+      setSamples((history) => (sample ? recordSyncSample(history, sample) : []));
     } catch (error) {
       if (alive.current) onError(formatInvokeError(error));
     }
@@ -69,6 +92,30 @@ export default function NodeSupervisorPanel({ onInfo, onError }: Props) {
 
   const view = nodeSupervisorView(report);
   const provenance = binaryProvenance(report);
+
+  /**
+   * WHEN THE SYNC BLOCK TAKES OVER FROM THE TWO LOOSE PARAGRAPHS.
+   *
+   * While a sync is running, or while the chain is the wrong one, the height
+   * and the chain answer stop being two separate footnotes and become one
+   * ordered block with the chain answer first. Everywhere else the panel keeps
+   * its existing lines: a node that is already up to date is not syncing, and
+   * a percentage of a finished thing is noise.
+   */
+  const showsSync = report.state === "catching_up" || report.anchor === "wrong";
+  const sync = showsSync
+    ? nodeSyncView(
+        {
+          // The supervisor already compared the node's block one against the
+          // hash this wallet pins. Its verdict is translated here rather than
+          // taken again, so the screen cannot hold two opinions of the chain.
+          verdict: syncVerdictFromAnchor(report.anchor),
+          chainSentence: report.watching,
+          height: report.height,
+        },
+        samples,
+      )
+    : null;
 
   /**
    * A TOAST THAT DESCRIBES WHAT HAPPENED, NOT WHAT WAS ASKED FOR.
@@ -102,11 +149,22 @@ export default function NodeSupervisorPanel({ onInfo, onError }: Props) {
       <p data-testid="node-headline" className={`node-headline tone-${view.tone}`}>
         {view.headline}
       </p>
+      {/*
+        THE SYNC, WHEN THERE IS ONE. Chain answer first, then the distance,
+        then the time, and no element that fills unless both heights are real.
+      */}
+      {sync ? <NodeSyncProgress view={sync} /> : null}
+
       <p data-testid="node-detail" className="muted">
         {view.detail}
       </p>
 
-      {view.progress ? (
+      {/*
+        The loose height line, for the states the sync block does not cover.
+        Suppressed while it does, so a person is never reading two different
+        sentences about the same height.
+      */}
+      {!sync && view.progress ? (
         <p data-testid="node-progress" className="node-progress">
           {view.progress}
         </p>
@@ -115,8 +173,9 @@ export default function NodeSupervisorPanel({ onInfo, onError }: Props) {
       {/*
         THE ANCHOR. Never omitted while a height is on screen, because a height
         is exactly the thing that cannot be told apart from a private chain.
+        The sync block carries it when one is running.
       */}
-      {view.watching ? (
+      {!sync && view.watching ? (
         <p data-testid="node-watching" className={`node-watching tone-${view.tone}`}>
           {view.watching}
         </p>

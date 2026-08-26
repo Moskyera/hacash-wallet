@@ -23,6 +23,7 @@
  *    hash, and says so while the height is still climbing rather than after.
  * 4. Nothing here says the wallet ships a node, because it does not yet.
  */
+import type { SyncSample } from "@hacash/wallet-ui";
 import type { NodeSupervisorReport, NodeSupervisorState } from "./api";
 
 export type Tone = "ok" | "warn" | "bad" | "idle" | "busy";
@@ -110,6 +111,31 @@ export function progressLine(report: NodeSupervisorReport): string | null {
     return `At block ${report.height.toLocaleString()}, which arrived ${describeAge(report.tip_age_seconds ?? 0)} ago.`;
   }
   return null;
+}
+
+/**
+ * One reading of the node, for the run a finishing time is measured over.
+ *
+ * All four numbers or none. A partial reading is not a cheaper reading, it is
+ * a reading that would put a wrong denominator under a percentage, so it is
+ * refused here rather than defaulted to zero somewhere further down.
+ */
+export function syncSampleOf(report: NodeSupervisorReport): SyncSample | null {
+  const { height, tip_timestamp_unix, observed_unix, tip_age_seconds } = report;
+  if (
+    typeof height !== "number" ||
+    typeof tip_timestamp_unix !== "number" ||
+    typeof observed_unix !== "number" ||
+    typeof tip_age_seconds !== "number"
+  ) {
+    return null;
+  }
+  return {
+    height,
+    tipTimestampUnix: tip_timestamp_unix,
+    observedUnix: observed_unix,
+    tipAgeSeconds: tip_age_seconds,
+  };
 }
 
 export function describeAge(seconds: number): string {
