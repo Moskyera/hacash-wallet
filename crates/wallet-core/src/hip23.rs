@@ -94,8 +94,17 @@ pub fn validate_simple_l1_send(
         errors.push("Node returned an invalid balance".into());
     }
     if amount_mei + fee_mei > balance_mei {
+        // Whose number this is has to be in the sentence.
+        //
+        // The wallet does not hold a balance; it asks the node for one. On a
+        // plaintext connection a node that under-reports it produces exactly
+        // this refusal, and the old wording ("have 0.200") stated the lie as
+        // the wallet's own finding. A person who knows they have the money
+        // then concludes the wallet is broken, not that the node is wrong.
+        // Saying where the figure came from costs one clause and points at
+        // the thing that is actually checkable.
         errors.push(format!(
-            "Insufficient balance: need {:.3} HAC (amount + fee), have {:.3}",
+            "Insufficient balance: need {:.3} HAC (amount + fee), and the node reports {:.3}. If that is not what you hold, the node is wrong, not your key: check it in a block explorer, or point the wallet at a node you run.",
             amount_mei + fee_mei,
             balance_mei
         ));

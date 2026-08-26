@@ -1,4 +1,9 @@
-import { HOW_IT_WORKS_URL, OFFICIAL_NODE_URL, isOfficialNodeUrl } from "@hacash/wallet-ui";
+import {
+  HOW_IT_WORKS_URL,
+  OFFICIAL_NODE_URL,
+  isOfficialNodeUrl,
+  mainnetSigningTransportIsEligible,
+} from "@hacash/wallet-ui";
 import { open } from "@tauri-apps/plugin-shell";
 import { useEffect, useMemo, useState } from "react";
 import { api, type NodeDiscoveryReport, type WalletSettings } from "../api";
@@ -32,6 +37,20 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
   }, [settings]);
 
   const activeIsOfficial = useMemo(() => isOfficialNodeUrl(nodeUrl), [nodeUrl]);
+  /**
+   * Whether the node in this field can sign, judged the way the core judges it.
+   *
+   * `settings.officialHttpNotice` already existed and already said the truth.
+   * On desktop it rendered nowhere at all, and on mobile only inside the
+   * "Change node" branch, so it appeared only to somebody who had already
+   * worked out that the node was the problem. The one person who needed it was
+   * the one sitting on the default, reading "Using the official public node
+   * API" next to a primary button offering "Use official node".
+   */
+  const nodeCanSign = useMemo(
+    () => mainnetSigningTransportIsEligible(nodeUrl, settings?.network_mode ?? "mainnet"),
+    [nodeUrl, settings?.network_mode],
+  );
 
   const fallbackUrls = fallbackText
     .split(/\r?\n/)
@@ -119,6 +138,12 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
           </>
         )}
       </p>
+
+      {!nodeCanSign ? (
+        <p className="alert" role="note">
+          {t("settings.officialHttpNotice")}
+        </p>
+      ) : null}
 
       {!showCustomNode ? (
         <div className="actions-row">

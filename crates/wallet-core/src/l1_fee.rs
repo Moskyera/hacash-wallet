@@ -27,6 +27,56 @@ pub const L1_PROBE_FEE_WIRE: &str = "1:244";
 /// Minimum spread between L1 tiers when multipliers collapse after rounding.
 pub const L1_TIER_MIN_DELTA_MEI: f64 = 0.000001;
 
+/// Above this multiple of the wallet's own per-byte rate for the same size,
+/// the fee stops being presented as the node's reliable answer.
+///
+/// Measured rather than picked. Against `minimum_l1_fee_estimate`, a quote of
+/// 0.0033132 mei (the value nodeapi.hacash.org returns, recorded in
+/// `type4_fee.rs`) works out at 30 times the floor on a 166-byte transaction,
+/// 19 on a 263-byte one and 0.9 on a 5500-byte one: the node's answer does not
+/// track size the way the wallet's floor does, so the honest observed band is
+/// wide, roughly 1 to 30. A hundred is well outside it and still far below the
+/// 274 to 9091 that a thousandfold inflation produces.
+pub const NODE_FEE_QUOTE_DOUBTED_MULTIPLE: u64 = 100;
+
+/// The base fee, in HAC, above which the wallet refuses the quote outright
+/// instead of displaying it.
+///
+/// This one is absolute rather than size-relative, because size-relative is
+/// the wrong shape for the outer limit: the same forged quote is 274 times the
+/// floor on a large transaction and 9091 on a small one, so a ratio ceiling
+/// that catches it everywhere has to be set absurdly low. What does not vary
+/// is the money. A real Hacash L1 base fee is about 0.003 HAC. Half a HAC,
+/// before any speed multiplier, is not a fee; it is somebody on the connection
+/// making a number up, and in testing exactly that number was signed and
+/// broadcast with nothing on the review screen calling it strange.
+///
+/// A person who genuinely wants to pay more than this is not blocked from the
+/// chain, only from having a stranger's number chosen for them: the refusal
+/// names the node and says to run one of their own.
+pub const NODE_FEE_QUOTE_REFUSED_MEI: f64 = 0.5;
+
+/// How many times the wallet's own rate for this size the node is asking for.
+///
+/// Size-relative, so it stays meaningful as transactions grow: the wallet's
+/// floor is priced per byte, and comparing against it asks "is this node
+/// charging like a node" rather than "is this a big number".
+fn node_quote_multiple_of_floor(base_mei: f64, wire_bytes: usize) -> u64 {
+    let floor = minimum_l1_fee_estimate(wire_bytes).fee_mei;
+    // Zero means "no opinion", which is the honest answer when either number
+    // is not a usable positive quantity. Never a division that could produce a
+    // NaN and compare false against every threshold.
+    let usable = floor.is_finite() && floor > 0.0 && base_mei.is_finite() && base_mei > 0.0;
+    if !usable {
+        return 0;
+    }
+    let multiple = base_mei / floor;
+    if multiple >= u64::MAX as f64 {
+        return u64::MAX;
+    }
+    multiple as u64
+}
+
 pub const L1_SPEED_MULT_NORMAL: f64 = 1.20;
 pub const L1_SPEED_MULT_FAST: f64 = 5.0;
 pub const L1_SPEED_MULT_ULTRA: f64 = 15.0;
@@ -188,7 +238,21 @@ async fn base_fee_mei(
         // the question, so it takes the same audible fallback rather than
         // failing the whole quote.
         Ok(resp) => match parse_fee_mei_decimal(&resp.feasible) {
-            Ok(base) => return Ok((base, resp.purity, FeeEstimateProvenance::measured())),
+            Ok(base) => {
+                let multiple = node_quote_multiple_of_floor(base, wire_bytes);
+                if base >= NODE_FEE_QUOTE_REFUSED_MEI {
+                    return Err(WalletError::Policy(format!(
+                        "node_fee_quote_implausible: the node asked for a network fee of {base} HAC on a {wire_bytes} byte transaction, about {multiple} times this wallet's own rate for that size. The wallet will not sign a fee it cannot believe. If your node is right about this, run Hacash on your own computer and point the wallet at it."
+                    )));
+                }
+                let provenance = if multiple >= NODE_FEE_QUOTE_DOUBTED_MULTIPLE {
+                    FeeEstimateProvenance::measured()
+                        .with(FeeGuess::NodeQuoteFarAboveFloor { multiple })
+                } else {
+                    FeeEstimateProvenance::measured()
+                };
+                return Ok((base, resp.purity, provenance));
+            }
             Err(err) => err.to_string(),
         },
         Err(err) => err.to_string(),

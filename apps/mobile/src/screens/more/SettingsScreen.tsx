@@ -3,6 +3,7 @@ import {
   IstanbulSafetyPanel,
   OFFICIAL_NODE_URL,
   isOfficialNodeUrl,
+  mainnetSigningTransportIsEligible,
 } from "@hacash/wallet-ui";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
@@ -97,6 +98,23 @@ export default function SettingsScreen({
     [status?.node_url, nodeUrl],
   );
 
+  /**
+   * Whether this node can carry everything, judged the way the core judges it.
+   *
+   * Deliberately the STRICT rule and not the payment rule. An ordinary payment
+   * goes through the official node now, but Fast Pay setup and channel closes
+   * do not, and the notice this gates says both halves. Keying it off the
+   * payment rule would hide the sentence that explains the next refusal.
+   */
+  const nodeCanSign = useMemo(
+    () =>
+      mainnetSigningTransportIsEligible(
+        status?.node_url ?? nodeUrl,
+        settings?.network_mode ?? "mainnet",
+      ),
+    [status?.node_url, nodeUrl, settings?.network_mode],
+  );
+
   const applyOfficial = () => {
     setNodeUrl(OFFICIAL_NODE_URL);
     setShowCustomNode(false);
@@ -155,6 +173,21 @@ export default function SettingsScreen({
           )}
         </p>
 
+        {/*
+          Said to the person sitting on the default, not only to the person who
+          already worked out that the node was the thing to look at.
+
+          This notice used to render only inside the "Change node" branch
+          below, which is the branch somebody reaches after diagnosing the
+          problem. The one reader who needed it was the one who had pressed
+          nothing.
+        */}
+        {!nodeCanSign ? (
+          <p className="muted small" role="note">
+            {t("settings.officialHttpNotice")}
+          </p>
+        ) : null}
+
         {!showCustomNode ? (
           <div className="row-btns">
             <button type="button" className="small" disabled={busy} onClick={() => setShowCustomNode(true)}>
@@ -178,9 +211,6 @@ export default function SettingsScreen({
               autoCorrect="off"
               spellCheck={false}
             />
-            <p className="muted">
-              {t("settings.officialHttpNotice")}
-            </p>
             <button type="button" className="small" disabled={busy} onClick={applyOfficial}>
               {t("node.useOfficial")}
             </button>

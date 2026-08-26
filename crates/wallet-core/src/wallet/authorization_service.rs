@@ -233,9 +233,10 @@ impl WalletService {
         self.clear_prepared_operation();
         // Refuse an ineligible signing transport HERE, not at execution.
         //
-        // The rule is unchanged and is not relaxed by an inch: mainnet signing
-        // still requires HTTPS or a node on this same machine, still enforced
-        // at the signing boundary in `sign_submit_prepared` and in
+        // The rule for an ordinary payment: mainnet signing requires HTTPS, a
+        // node on this same machine, or the one named official endpoint, and
+        // nothing else. It is still enforced at the signing boundary in
+        // `sign_submit_prepared` and in
         // `execute_prepared_*`. What changed is only WHEN a person is told. The
         // check used to run first inside execute, which is after the full
         // review screen and after the fingerprint or passphrase prompt - so a
@@ -243,7 +244,10 @@ impl WalletService {
         // never been eligible. Checking at prepare is strictly more
         // fail-closed: it refuses everything it refused before, earlier, and
         // the execution-time check remains as the authority.
-        self.require_online_signing_transport()?;
+        self.require_l1_payment_transport()?;
+        // Captured before the awaits below so the line on the review screen
+        // describes the connection this payment is actually prepared over.
+        let plaintext_transport = self.l1_payment_is_official_plaintext();
         let from = self.require_address()?;
         let preview = self.preview_send(to, amount_mei, &options).await?;
         if preview.plan.rail != PaymentRail::L1OnChain {
@@ -289,7 +293,10 @@ impl WalletService {
                 // warning an owner can walk past. Three fields here, so
                 // `NATIVE_PROMPT_MAX_FIELDS` truncation is not in play.
                 degraded_fee_field(&preview.plan.fee_estimate_degraded),
-            ],
+            ]
+            .into_iter()
+            .chain(transport_disclosure_field(plaintext_transport))
+            .collect(),
         );
         self.store_prepared(
             OperationKind::HacL1,
@@ -350,9 +357,10 @@ impl WalletService {
         self.clear_prepared_operation();
         // Refuse an ineligible signing transport HERE, not at execution.
         //
-        // The rule is unchanged and is not relaxed by an inch: mainnet signing
-        // still requires HTTPS or a node on this same machine, still enforced
-        // at the signing boundary in `sign_submit_prepared` and in
+        // The rule for an ordinary payment: mainnet signing requires HTTPS, a
+        // node on this same machine, or the one named official endpoint, and
+        // nothing else. It is still enforced at the signing boundary in
+        // `sign_submit_prepared` and in
         // `execute_prepared_*`. What changed is only WHEN a person is told. The
         // check used to run first inside execute, which is after the full
         // review screen and after the fingerprint or passphrase prompt - so a
@@ -360,7 +368,10 @@ impl WalletService {
         // never been eligible. Checking at prepare is strictly more
         // fail-closed: it refuses everything it refused before, earlier, and
         // the execution-time check remains as the authority.
-        self.require_online_signing_transport()?;
+        self.require_l1_payment_transport()?;
+        // Captured before the awaits below so the line on the review screen
+        // describes the connection this payment is actually prepared over.
+        let plaintext_transport = self.l1_payment_is_official_plaintext();
         let from = self.require_address()?;
         let preview = self.preview_send_hacd(to, diamond_names).await?;
         if !preview.hip23.ok {
@@ -400,7 +411,10 @@ impl WalletService {
                 field("HACD", &preview.diamond_names.join(", ")),
                 field("Network fee", &preview.fee_wire),
                 degraded_fee_field(&preview.fee_estimate_degraded),
-            ],
+            ]
+            .into_iter()
+            .chain(transport_disclosure_field(plaintext_transport))
+            .collect(),
         );
         self.store_prepared(
             OperationKind::Hacd,
@@ -467,9 +481,10 @@ impl WalletService {
         self.clear_prepared_operation();
         // Refuse an ineligible signing transport HERE, not at execution.
         //
-        // The rule is unchanged and is not relaxed by an inch: mainnet signing
-        // still requires HTTPS or a node on this same machine, still enforced
-        // at the signing boundary in `sign_submit_prepared` and in
+        // The rule for an ordinary payment: mainnet signing requires HTTPS, a
+        // node on this same machine, or the one named official endpoint, and
+        // nothing else. It is still enforced at the signing boundary in
+        // `sign_submit_prepared` and in
         // `execute_prepared_*`. What changed is only WHEN a person is told. The
         // check used to run first inside execute, which is after the full
         // review screen and after the fingerprint or passphrase prompt - so a
@@ -477,7 +492,10 @@ impl WalletService {
         // never been eligible. Checking at prepare is strictly more
         // fail-closed: it refuses everything it refused before, earlier, and
         // the execution-time check remains as the authority.
-        self.require_online_signing_transport()?;
+        self.require_l1_payment_transport()?;
+        // Captured before the awaits below so the line on the review screen
+        // describes the connection this payment is actually prepared over.
+        let plaintext_transport = self.l1_payment_is_official_plaintext();
         let from = self.require_address()?;
         let preview = self
             .preview_send_native_asset(to, serial_raw, amount_raw)
@@ -515,7 +533,10 @@ impl WalletService {
                 field("Asset serial", &preview.serial),
                 field("Amount", &preview.amount),
                 field("Network fee", &preview.fee_wire),
-            ],
+            ]
+            .into_iter()
+            .chain(transport_disclosure_field(plaintext_transport))
+            .collect(),
         );
         self.store_prepared(
             OperationKind::NativeAsset,
@@ -588,9 +609,10 @@ impl WalletService {
         self.clear_prepared_operation();
         // Refuse an ineligible signing transport HERE, not at execution.
         //
-        // The rule is unchanged and is not relaxed by an inch: mainnet signing
-        // still requires HTTPS or a node on this same machine, still enforced
-        // at the signing boundary in `sign_submit_prepared` and in
+        // The rule for an ordinary payment: mainnet signing requires HTTPS, a
+        // node on this same machine, or the one named official endpoint, and
+        // nothing else. It is still enforced at the signing boundary in
+        // `sign_submit_prepared` and in
         // `execute_prepared_*`. What changed is only WHEN a person is told. The
         // check used to run first inside execute, which is after the full
         // review screen and after the fingerprint or passphrase prompt - so a
@@ -598,7 +620,10 @@ impl WalletService {
         // never been eligible. Checking at prepare is strictly more
         // fail-closed: it refuses everything it refused before, earlier, and
         // the execution-time check remains as the authority.
-        self.require_online_signing_transport()?;
+        self.require_l1_payment_transport()?;
+        // Captured before the awaits below so the line on the review screen
+        // describes the connection this payment is actually prepared over.
+        let plaintext_transport = self.l1_payment_is_official_plaintext();
         let from = self.require_address()?;
         let preview = self.preview_send_btc(to, satoshi).await?;
         if !preview.hip23.ok {
@@ -634,7 +659,10 @@ impl WalletService {
                 field("Recipient", to),
                 field("Amount", &format!("{} satoshi", preview.satoshi)),
                 field("Network fee", &preview.fee_wire),
-            ],
+            ]
+            .into_iter()
+            .chain(transport_disclosure_field(plaintext_transport))
+            .collect(),
         );
         self.store_prepared(
             OperationKind::BridgedBtc,
@@ -2144,12 +2172,16 @@ impl WalletService {
         Ok(())
     }
 
+    /// The signing boundary for the four on-chain payment kinds, and only
+    /// those four: HAC, HACD, HIP-20 native assets and bridged BTC. Every
+    /// caller is an `execute_prepared_send_*`. Channel opens and closes have
+    /// their own boundary and stay on the strict rule.
     async fn sign_submit_prepared(
         &mut self,
         body_hex: &str,
         assurance: Option<AssuranceMethod>,
     ) -> WalletResult<crate::node::SubmitTxResponse> {
-        self.require_online_signing_transport()?;
+        self.require_l1_payment_transport()?;
         let webauthn = assurance == Some(AssuranceMethod::WebAuthn);
         let biometric = assurance == Some(AssuranceMethod::NativeBiometric);
         {
@@ -2460,6 +2492,17 @@ fn degraded_fee_field(warning: &Option<String>) -> TrustedDisplayField {
         Some(reason) => field("Fee estimate", reason),
         None => field("Fee estimate", "Quoted by the node"),
     }
+}
+
+/// The line that names the connection this payment will cross.
+///
+/// Present only when the named official-node exception is what permits the
+/// signature, so it never appears for a node on this machine or an HTTPS node,
+/// where there is nothing to disclose. It goes on the approval display rather
+/// than only on the screen before it, because the approval display is what is
+/// bound to the signature and re-read at the signing boundary.
+fn transport_disclosure_field(plaintext: bool) -> Option<TrustedDisplayField> {
+    plaintext.then(|| field("Connection", crate::settings::OFFICIAL_NODE_PLAINTEXT_SHORT))
 }
 
 fn field(label: &str, value: &str) -> TrustedDisplayField {

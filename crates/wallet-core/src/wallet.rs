@@ -476,7 +476,44 @@ impl WalletService {
             .iter()
             .find(|candidate| candidate.url == snapshot.active_node)
             .is_some_and(|candidate| candidate.online && candidate.network_match);
-        if current_ok || !snapshot.settings.auto_node_failover {
+        // "Online" was the wrong question to stop on, and stopping on it is
+        // what stranded every fresh install.
+        //
+        // The wallet ships pointed at the official node. That node is up, is
+        // on the right chain, and answers every balance query correctly, so
+        // `current_ok` is true and discovery used to return here having done
+        // nothing. But on mainnet it cannot sign, so the person could read
+        // their balance forever and never send a single payment - and if they
+        // had already gone and built a fullnode on this machine, discovery
+        // still would not move them onto it.
+        //
+        // A node that cannot sign on this network is not a node this scan is
+        // finished with. Nothing below lowers a bar: `failover_may_adopt` is
+        // still `validate_signing_node_url`, so the only move this unlocks is
+        // read-only to signing-capable. The reverse move stays refused.
+        let current_signable = crate::node_discovery::failover_may_adopt(
+            &snapshot.active_node,
+            &snapshot.network_mode,
+        );
+        if current_ok && current_signable {
+            return Ok(report);
+        }
+        if !snapshot.settings.auto_node_failover {
+            // Off still means off. Nothing below this line runs, nothing is
+            // switched, and the person's choice stands.
+            //
+            // What does not stand is the silence. Settings' last branch prints
+            // "The active node is healthy." whenever the active node is online
+            // and on the right chain, so this return handed a reassuring
+            // sentence to a wallet that cannot send. A refusal that looks like
+            // approval is the worst of the three outcomes here.
+            if current_ok && !current_signable {
+                report.failover_declined =
+                    Some(crate::node_discovery::signing_node_not_adopted_message(
+                        &snapshot.active_node,
+                        &snapshot.network_mode,
+                    ));
+            }
             return Ok(report);
         }
 
@@ -506,14 +543,26 @@ impl WalletService {
             .find(|candidate| working(candidate) && signing_capable(candidate))
             .map(|candidate| candidate.url.clone())
         else {
-            // Say so when a working node was found and refused, rather than
-            // reporting an indistinguishable "nothing to switch to".
-            if let Some(read_only) = report.candidates.iter().find(working) {
-                report.failover_declined = Some(format!(
-                    "{} is online, but this wallet cannot sign {} transactions against it, so it was not adopted automatically. On {}, signing needs HTTPS or a node on this same machine. Your node stays as it is: bring it back, or set the node by hand in Settings if you only need to read balances.",
-                    read_only.url, snapshot.network_mode, snapshot.network_mode
-                ));
-            }
+            report.failover_declined = if current_ok {
+                // Nothing is broken and nothing is offline. The node this
+                // wallet is on works for reading and can never sign, and no
+                // node on this machine answered. That is the whole of a fresh
+                // install's situation, and saying it here is the only place
+                // the sentence has ever been said outside Fast Pay.
+                Some(crate::node_discovery::no_local_signing_node_message(
+                    &snapshot.active_node,
+                    &snapshot.network_mode,
+                ))
+            } else {
+                // Say so when a working node was found and refused, rather than
+                // reporting an indistinguishable "nothing to switch to".
+                report.candidates.iter().find(working).map(|read_only| {
+                    format!(
+                        "{} is online, but this wallet cannot sign {} transactions against it, so it was not adopted automatically. On {}, signing needs HTTPS or a node on this same machine. Your node stays as it is: bring it back, or set the node by hand in Settings if you only need to read balances.",
+                        read_only.url, snapshot.network_mode, snapshot.network_mode
+                    )
+                })
+            };
             return Ok(report);
         };
         if next == snapshot.active_node {
@@ -1639,7 +1688,7 @@ impl WalletService {
                 &preview.fee_wire,
                 &transfers,
             )?;
-            let signed_hex = self.sign_tx_for_network(&body_hex).await?;
+            let signed_hex = self.sign_l1_payment_for_network(&body_hex).await?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
             let hash = submitted
@@ -1721,7 +1770,7 @@ impl WalletService {
                 &preview.diamond_names,
                 &service_fee,
             )?;
-            let signed_hex = self.sign_tx_for_network(&body_hex).await?;
+            let signed_hex = self.sign_l1_payment_for_network(&body_hex).await?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
             let hash = submitted
@@ -2955,7 +3004,7 @@ impl WalletService {
                     &preview.fee,
                     &transfers,
                 )?;
-                let signed_hex = self.sign_tx_for_network(&body_hex).await?;
+                let signed_hex = self.sign_l1_payment_for_network(&body_hex).await?;
                 let submitted = self.submit_signed_tx(&signed_hex).await?;
                 let summary = self.summary_with_whisper_notice(preview.plan.summary, &submitted);
                 let hash = submitted
@@ -4309,6 +4358,278 @@ mod node_discovery_commit_tests {
         assert_eq!(committed.active_node, other_local);
         assert_eq!(wallet.node.base_url(), other_local);
         assert!(committed.failover_declined.is_none());
+    }
+
+    /// The fresh install, and the step where most people leave.
+    ///
+    /// The wallet ships on the official node. That node is up and on the right
+    /// chain, so discovery used to declare the active node healthy and stop -
+    /// even with the person's own fullnode answering on this machine. The
+    /// wallet stayed on an endpoint it can never sign against, and the person
+    /// found out at the Send button.
+    #[test]
+    fn a_read_only_node_is_upgraded_to_the_one_running_on_this_machine() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        assert_eq!(wallet.network_mode, "mainnet");
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            // The official node is online and on the right chain. Under the
+            // old rule that alone ended the scan.
+            candidates: vec![candidate(official, true), candidate(local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(
+            committed.switched,
+            "a node that can never sign is not a node this scan is finished with"
+        );
+        assert_eq!(committed.active_node, local);
+        assert_eq!(wallet.node.base_url(), local);
+        assert_eq!(wallet.settings.node_url, local);
+        assert!(committed.failover_declined.is_none());
+    }
+
+    /// The upgrade is one-way. This is the same shape as the test above with
+    /// the two nodes swapped, and it must come out the other way round.
+    #[test]
+    fn a_signing_capable_node_is_never_downgraded_to_a_read_only_one() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(local.into()), None).unwrap();
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: local.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(local, true), candidate(official, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert_eq!(wallet.node.base_url(), local);
+    }
+
+    /// Nothing is offline, nothing is misconfigured, and the person still
+    /// cannot send. That case used to produce no message at all, because the
+    /// old code only spoke when the active node had failed.
+    #[test]
+    fn no_node_on_this_machine_is_said_out_loud_rather_than_reported_as_healthy() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(official, true), candidate(local, false)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert_eq!(wallet.node.base_url(), official);
+        let declined = committed
+            .failover_declined
+            .expect("a plaintext hop the payment will cross must be named, not called healthy");
+        assert!(
+            !declined.contains("cannot send"),
+            "the official node carries an ordinary payment; do not call it blocked: {declined}"
+        );
+        assert!(declined.contains("read which address you"), "{declined}");
+        assert!(declined.contains(local), "{declined}");
+        assert!(
+            declined.contains("Start a Hacash node on this computer"),
+            "{declined}"
+        );
+        // One probed port is not the machine. The message may not conclude
+        // that nothing is running here, because a node on another port is.
+        assert!(
+            declined.contains("different port"),
+            "the person whose node is on another port must not be sent to install a second one: {declined}"
+        );
+    }
+
+    /// The same upgrade, over real HTTP, against a server that has to satisfy
+    /// the block-one anchor check to be adopted.
+    ///
+    /// The tests above hand `commit_node_discovery` a report they wrote
+    /// themselves, which proves the decision but not the path. Here the
+    /// loopback candidate is a real HTTP probe against a real anchor check,
+    /// so the part that has to work over the wire does.
+    ///
+    /// The official endpoint's entry is still constructed rather than probed,
+    /// deliberately: a unit test must not reach out to the public mainnet node
+    /// to prove something about local behaviour. It is entered as online and
+    /// on the right chain, which is the case that used to end the scan.
+    #[tokio::test]
+    async fn the_upgrade_happens_over_the_wire_against_a_real_anchor_check() {
+        use axum::{Json, Router, routing::get};
+        use serde_json::json;
+
+        let _wallet_data = IsolatedWalletData::new();
+        let app = Router::new()
+            .route(
+                "/query/latest",
+                get(|| async { Json(json!({ "ret": 0, "height": 776333, "diamond": 5 })) }),
+            )
+            .route(
+                "/query/block/intro",
+                get(|| async {
+                    Json(json!({
+                        "ret": 0,
+                        "height": 1,
+                        "hash": crate::node_discovery::MAINNET_BLOCK_ONE_HASH
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Quote the port the kernel gave us, never the one we asked for.
+        let local = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        wallet.settings.node_fallback_urls = vec![local.clone()];
+        let snapshot = wallet.node_discovery_snapshot();
+
+        // The one probe that actually goes over a socket.
+        let local_status = crate::node_discovery::probe_node(&local, "mainnet").await;
+        assert!(local_status.online, "{:?}", local_status.error);
+        assert!(
+            local_status.network_match,
+            "the anchor check is what makes adoption safe: {:?}",
+            local_status.error
+        );
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(official, true), local_status],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+        assert!(committed.switched, "{committed:?}");
+        assert_eq!(wallet.node.base_url(), local);
+        // The gate is unchanged and still the one that decides.
+        crate::settings::validate_signing_node_url(wallet.node.base_url(), "mainnet")
+            .expect("the adopted node must be one this wallet may sign against");
+
+        server.abort();
+    }
+
+    /// Turning automatic failover off still means off. The upgrade is a
+    /// failover, not an exception to one.
+    #[test]
+    fn the_upgrade_respects_auto_failover_being_turned_off() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        wallet.settings.auto_node_failover = false;
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(official, true), candidate(local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert_eq!(wallet.node.base_url(), official);
+    }
+
+    /// The branch where the false reassurance survived.
+    ///
+    /// With automatic switching off, discovery returned before it could say
+    /// anything, so `failover_declined` was empty and `switched` was false -
+    /// and the Settings screen's last branch checks only online and
+    /// network_match, so it printed "The active node is healthy." to a wallet
+    /// that cannot send a single payment. Silence read as approval.
+    ///
+    /// The person's choice not to auto-switch is untouched. Only the silence
+    /// goes.
+    #[test]
+    fn failover_being_off_does_not_make_a_read_only_node_sound_healthy() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        wallet.settings.auto_node_failover = false;
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            // The local node is up and adoptable. Automatic switching is off,
+            // so it is correctly not adopted - but the wallet must not then
+            // report the endpoint it is stuck on as healthy.
+            candidates: vec![candidate(official, true), candidate(local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched, "off still means off");
+        assert_eq!(wallet.node.base_url(), official, "nothing was switched");
+        let declined = committed
+            .failover_declined
+            .expect("this branch must speak too, rather than report a healthy node");
+        assert!(
+            !declined.contains("cannot send"),
+            "the official node carries an ordinary payment; do not call it blocked: {declined}"
+        );
+        assert!(declined.contains("read which address you"), "{declined}");
+        assert!(
+            declined.contains("Automatic node switching is turned off"),
+            "{declined}"
+        );
+    }
+
+    /// The same branch on testnet, where the transport rule does not exist.
+    /// Turning failover off there must stay exactly as silent as it was.
+    #[test]
+    fn failover_being_off_says_nothing_new_where_the_rule_does_not_apply() {
+        let _wallet_data = IsolatedWalletData::new();
+        let node = "http://127.0.0.1:9999";
+        let mut wallet = WalletService::new(Some(node.into()), None).unwrap();
+        wallet.network_mode = "testnet".into();
+        wallet.settings.network_mode = "testnet".into();
+        wallet.settings.auto_node_failover = false;
+        let snapshot = wallet.node_discovery_snapshot();
+        assert_eq!(snapshot.network_mode, "testnet");
+
+        let report = NodeDiscoveryReport {
+            active_node: node.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(node, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert!(
+            committed.failover_declined.is_none(),
+            "testnet has no transport rule to explain: {committed:?}"
+        );
     }
 }
 

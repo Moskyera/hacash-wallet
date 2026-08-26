@@ -36,6 +36,19 @@ pub enum FeeGuess {
         node_error: String,
         assumed_bytes: usize,
     },
+    /// The node answered the fee query with a rate far above the wallet's own
+    /// floor rate for a transaction this size.
+    ///
+    /// The fee is still the node's number and is still bound to the signature,
+    /// so nothing here changes what gets signed. What changes is that the
+    /// wallet stops vouching for it. The review screen used to print "Fee
+    /// estimate: Quoted by the node" beside a fee a hostile node had inflated,
+    /// which reads as the wallet's endorsement of the number rather than a
+    /// note about where it came from.
+    NodeQuoteFarAboveFloor {
+        /// Rounded, because it is read by a person and not compared.
+        multiple: u64,
+    },
 }
 
 impl FeeGuess {
@@ -51,7 +64,20 @@ impl FeeGuess {
             } => format!(
                 "the node did not build the transaction body, so this fee is priced from an assumed {assumed_bytes} bytes rather than the real size ({node_error})"
             ),
+            Self::NodeQuoteFarAboveFloor { multiple } => format!(
+                "the node asked for about {multiple} times the wallet's own rate for a transaction this size, which is not what an ordinary fee looks like; check this fee against the amount before approving, and if it looks wrong then the node is wrong"
+            ),
         }
+    }
+
+    /// True when this guess is the wallet inventing a number because the node
+    /// would not give one, as opposed to the node giving a number the wallet
+    /// does not believe. The two need different sentences in front of a person.
+    fn is_wallet_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::PurityFromLocalFloor { .. } | Self::SizeFromDefault { .. }
+        )
     }
 }
 
@@ -102,14 +128,24 @@ impl FeeEstimateProvenance {
 
     /// The line to put in front of a person before they pay, or `None` when
     /// there is nothing to warn about.
+    ///
+    /// Two different situations end up here and they must not share a
+    /// sentence. "The wallet made this up because the node was silent" ends
+    /// with a fee that may be too low to confirm. "The node named a number the
+    /// wallet does not believe" ends with a fee that may be far too high, and
+    /// telling that person their fee may be too low is worse than saying
+    /// nothing.
     pub fn warning(&self) -> Option<String> {
         if self.guesses.is_empty() {
             return None;
         }
-        Some(format!(
-            "This fee is an estimate the wallet made without the node: {}. It may be too low to confirm.",
-            self.reasons().join("; ")
-        ))
+        let reasons = self.reasons().join("; ");
+        if self.guesses.iter().all(FeeGuess::is_wallet_fallback) {
+            return Some(format!(
+                "This fee is an estimate the wallet made without the node: {reasons}. It may be too low to confirm."
+            ));
+        }
+        Some(format!("Check this fee before you approve: {reasons}."))
     }
 }
 

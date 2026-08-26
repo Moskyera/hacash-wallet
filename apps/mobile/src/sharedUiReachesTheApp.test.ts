@@ -24,27 +24,78 @@ const SHARED = join(HERE, "../../../packages/wallet-ui/src");
  * Fix when it fails: reinstall, or copy the named file into the resolved
  * package directory.
  */
-function resolvedSharedDir(app: "mobile" | "desktop"): string | null {
+/**
+ * EVERY directory this package resolves to, not just the tidy one.
+ *
+ * This used to look only under `node_modules/.pnpm`, and that is the copy the
+ * app does not read. On this machine `apps/<app>/node_modules/@hacash/wallet-ui`
+ * is a real directory holding its own copies, not a link to the .pnpm store,
+ * and node's own resolver names it:
+ *
+ * ```
+ * $ node -e "require.resolve('@hacash/wallet-ui/package.json')"
+ * ERR_PACKAGE_PATH_NOT_EXPORTED ... apps\mobile\node_modules\@hacash\wallet-ui\package.json
+ * ```
+ *
+ * So the check was watching one shelf while the app read from another. A file
+ * could be stale in the copy that renders on screen and this test would pass.
+ * Proven by corrupting `securityPolicy.ts` in the top-level directory: three
+ * tests passed, and the corrupted string was the one the app would have shown.
+ *
+ * Both are compared now. Duplicates cost a few file reads and nothing else,
+ * and if one path is ever a link to the other the bytes simply agree twice.
+ */
+function resolvedSharedDirs(app: "mobile" | "desktop"): string[] {
+  const found: string[] = [];
+  const direct = join(HERE, `../../${app}/node_modules/@hacash/wallet-ui/src`);
+  try {
+    if (statSync(direct).isDirectory()) found.push(direct);
+  } catch {
+    // not installed for this app
+  }
   const pnpm = join(HERE, `../../${app}/node_modules/.pnpm`);
   let entries: string[];
   try {
     entries = readdirSync(pnpm);
   } catch {
-    return null;
+    return found;
   }
   for (const entry of entries) {
     if (!entry.startsWith("@hacash+wallet-ui@")) continue;
     const candidate = join(pnpm, entry, "node_modules/@hacash/wallet-ui/src");
     try {
-      if (statSync(candidate).isDirectory()) return candidate;
+      if (statSync(candidate).isDirectory()) found.push(candidate);
     } catch {
       // keep looking
     }
   }
-  return null;
+  return found;
 }
 
-const SOURCES = readdirSync(SHARED).filter((name) => /\.tsx?$/.test(name));
+/**
+ * Every shared source, including the ones in subdirectories.
+ *
+ * This used to read the top level only, and the gap had teeth: `locales/` is
+ * where the product's copy lives, so the one directory whose whole purpose is
+ * words a person reads was the one directory the drift check could not see. A
+ * stale `locales/en.ts` shows the old sentence on screen while the repository
+ * shows the new one, which is precisely the hour-of-confusion this file exists
+ * to prevent.
+ */
+function sharedSources(dir = SHARED, prefix = ""): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      found.push(...sharedSources(join(dir, entry.name), name));
+    } else if (/\.tsx?$/.test(entry.name)) {
+      found.push(name);
+    }
+  }
+  return found;
+}
+
+const SOURCES = sharedSources();
 
 describe("shared wallet-ui reaches both apps", () => {
   it("has sources to check", () => {
@@ -53,22 +104,24 @@ describe("shared wallet-ui reaches both apps", () => {
 
   for (const app of ["mobile", "desktop"] as const) {
     it(`${app} resolves the same bytes this repo has`, () => {
-      const resolved = resolvedSharedDir(app);
-      if (!resolved) {
+      const resolved = resolvedSharedDirs(app);
+      if (resolved.length === 0) {
         // Dependencies are not installed for this app; nothing to compare.
         return;
       }
       const stale: string[] = [];
-      for (const name of SOURCES) {
-        let installed: string;
-        try {
-          installed = readFileSync(join(resolved, name), "utf8");
-        } catch {
-          stale.push(`${name} (missing from the installed package)`);
-          continue;
-        }
-        if (installed !== readFileSync(join(SHARED, name), "utf8")) {
-          stale.push(name);
+      for (const dir of resolved) {
+        for (const name of SOURCES) {
+          let installed: string;
+          try {
+            installed = readFileSync(join(dir, name), "utf8");
+          } catch {
+            stale.push(`${dir}: ${name} (missing from the installed package)`);
+            continue;
+          }
+          if (installed !== readFileSync(join(SHARED, name), "utf8")) {
+            stale.push(`${dir}: ${name}`);
+          }
         }
       }
       expect(stale).toEqual([]);

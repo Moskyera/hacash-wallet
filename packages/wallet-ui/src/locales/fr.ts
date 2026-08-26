@@ -127,7 +127,8 @@ export const fr = {
   "node.change": "Changer de nœud",
   "node.useOfficial": "Utiliser le nœud officiel",
   "node.customTitle": "Nœud personnalisé",
-  "node.customHint": "Modifiez ceci uniquement si vous exploitez votre propre nœud Hacash ou utilisez un endpoint privé.",
+  "node.customHint":
+    "Sur le mainnet, ce portefeuille envoie via le nœud officiel en HTTP simple, parce que ce nœud ne propose rien d'autre. Qui transporte votre trafic peut lire quelle adresse vous consultez et annoncer de mauvais frais de réseau: lisez les frais avant d'approuver. Personne sur le trajet ne peut changer qui est payé, ni signer à votre place. Faire tourner Hacash sur cet ordinateur et utiliser http://127.0.0.1:8080 supprime tout cela, et c'est le seul moyen de configurer Fast Pay ou de fermer un canal.",
   "node.grapheneTitle": "GrapheneOS / téléphones sans services Google",
   "node.grapheneHelp": "Utilisez le même APK que sur les autres appareils Android. Activez l'autorisation réseau dans les informations de l'application. Installez-le depuis Fichiers si le navigateur bloque l'APK. Le nœud officiel utilise HTTP sans chiffrement, un VPN ou un filtre peut donc le bloquer. Aucune version Graphene séparée n'est nécessaire.",
   "quantum.funding.title": "Financer le compte quantum",

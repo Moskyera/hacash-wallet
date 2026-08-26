@@ -127,7 +127,8 @@ export const tr = {
   "node.change": "Node değiştir",
   "node.useOfficial": "Resmî node'u kullan",
   "node.customTitle": "Özel node",
-  "node.customHint": "Bunu yalnızca kendi Hacash node'unuzu çalıştırıyorsanız veya özel bir endpoint gerekiyorsa değiştirin.",
+  "node.customHint":
+    "Ana ağda bu cüzdan resmî düğüm üzerinden düz HTTP ile gönderir, çünkü o düğüm başka bir şey sunmuyor. Trafiğinizi taşıyan kişi hangi adresi sorduğunuzu okuyabilir ve yanlış bir ağ ücreti bildirebilir, bu yüzden onaylamadan önce ücreti okuyun. Yol üzerindeki hiç kimse kimin ödeme aldığını değiştiremez veya sizin adınıza imzalayamaz. Bu bilgisayarda Hacash çalıştırıp http://127.0.0.1:8080 kullanmak bunların hepsini ortadan kaldırır ve Fast Pay kurmanın ya da bir kanalı kapatmanın tek yoludur.",
   "node.grapheneTitle": "GrapheneOS / Google hizmetleri olmayan telefonlar",
   "node.grapheneHelp": "Diğer Android cihazlarla aynı APK'yı kullanın. Uygulama bilgilerinde ağ iznini etkinleştirin. Tarayıcı APK'yı engellerse Dosyalar uygulamasından yükleyin. Resmî node düz HTTP kullanır; VPN veya filtreler bağlantıyı engelleyebilir. Ayrı bir Graphene derlemesi gerekmez.",
   "quantum.funding.title": "Quantum hesabını fonla",

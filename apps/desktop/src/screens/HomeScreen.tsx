@@ -1,4 +1,8 @@
-import { HowItWorksPrompt } from "@hacash/wallet-ui";
+import {
+  HowItWorksPrompt,
+  officialNodePlaintextDisclosure,
+  plainSendBlockedNotice,
+} from "@hacash/wallet-ui";
 import { open } from "@tauri-apps/plugin-shell";
 
 import type { AssetSummary, PrivacySettings, TxRecord, WalletStatus } from "../api";
@@ -42,6 +46,17 @@ export default function HomeScreen({
   clearMessages,
 }: Props) {
   const { t } = useLocale();
+  /**
+   * Said on the first screen, not discovered at the Send button.
+   *
+   * A person who installs this, creates a wallet and sees a balance has every
+   * reason to believe the wallet works. Nothing on Home contradicted that, and
+   * the contradiction arrived several screens later as a toast. This is the
+   * same fact placed where it is still cheap to act on.
+   */
+  const sendBlocked = plainSendBlockedNotice(status?.node_url, status?.network_mode);
+  /** The cost of the shipped default, said on the first screen rather than never. */
+  const plaintextCost = officialNodePlaintextDisclosure(status?.node_url, status?.network_mode);
 
   return (
     <section className="dashboard-page">
@@ -56,6 +71,24 @@ export default function HomeScreen({
         openExternal={open}
         onError={(error) => onNotify(formatInvokeError(error), "error")}
       />
+
+      {sendBlocked ? (
+        <div className="alert dashboard-send-blocked" role="note">
+          <p>{sendBlocked}</p>
+          <button type="button" onClick={() => onNavigate("settings")}>
+            Open Settings
+          </button>
+        </div>
+      ) : null}
+
+      {plaintextCost ? (
+        <div className="alert dashboard-send-blocked" role="note">
+          <p>{plaintextCost}</p>
+          <button type="button" onClick={() => onNavigate("settings")}>
+            Open Settings
+          </button>
+        </div>
+      ) : null}
 
       <div className="dashboard-grid">
         <article className="dashboard-card dashboard-portfolio-card">

@@ -98,7 +98,7 @@ export const primaryUiEn = {
   "settings.network": "Network",
   "settings.networkValue": "Network: {network}",
   "settings.activeNode": "Active node",
-  "settings.officialHttpNotice": "The official Hacash node is plain HTTP and remote. On mainnet it can show balances but cannot be used to sign, so sends, Fast Pay setup and channel closes will all be refused. Signing needs HTTPS, or a node on this same machine.",
+  "settings.officialHttpNotice": "The official Hacash node is plain HTTP and remote. Ordinary payments go through it, and that is what this wallet ships pointed at. What it costs: whoever carries your traffic can read which address you ask about and see a payment go out, and can quote a wrong network fee, so read the fee before you approve. They cannot change who gets paid or how much, and they cannot sign for you. Fast Pay setup and channel closes still need HTTPS or a node on this same machine, usually http://127.0.0.1:8080, which also removes the rest of it.",
   "settings.fallbackNodes": "Fallback nodes (one per line)",
   "settings.autoFailover": "Automatically switch to a verified fallback node",
   "settings.l2HubUrl": "Fast Pay provider address",

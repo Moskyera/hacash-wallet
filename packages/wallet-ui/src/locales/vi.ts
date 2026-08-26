@@ -127,7 +127,8 @@ export const vi = {
   "node.change": "Đổi node",
   "node.useOfficial": "Dùng node chính thức",
   "node.customTitle": "Node tùy chỉnh",
-  "node.customHint": "Chỉ thay đổi nếu bạn chạy node Hacash riêng hoặc cần endpoint riêng tư.",
+  "node.customHint":
+    "Trên mainnet, ví gửi qua node chính thức bằng HTTP thường, vì node đó không cung cấp gì khác. Ai vận chuyển lưu lượng của bạn đều có thể đọc bạn đang hỏi địa chỉ nào và có thể báo phí mạng sai, nên hãy đọc phí trước khi phê duyệt. Không ai trên đường truyền có thể đổi người nhận hay ký thay bạn. Chạy Hacash trên máy này và dùng http://127.0.0.1:8080 sẽ loại bỏ tất cả, và đó cũng là cách duy nhất để thiết lập Fast Pay hoặc đóng kênh.",
   "node.grapheneTitle": "GrapheneOS / điện thoại không dùng Google",
   "node.grapheneHelp": "Dùng cùng APK như các thiết bị Android khác. Bật quyền Mạng trong thông tin ứng dụng. Cài từ ứng dụng Tệp nếu trình duyệt chặn APK. Node chính thức dùng HTTP thường nên VPN hoặc bộ lọc có thể chặn. Không cần bản dựng Graphene riêng.",
   "quantum.funding.title": "Nạp tài khoản quantum",

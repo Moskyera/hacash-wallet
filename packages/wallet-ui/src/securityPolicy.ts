@@ -1,3 +1,50 @@
+import { isOfficialNodeUrl } from "./nodeSettings";
+import { mainnetSigningTransportIsEligible } from "./signingTransport";
+
+/**
+ * Can this node carry an ordinary on-chain payment?
+ *
+ * Mirrors `validate_l1_payment_node_url` in crates/wallet-core/src/settings.rs:
+ * the strict signing rule, plus exactly one named exception for the official
+ * endpoint on mainnet. `isOfficialNodeUrl` is what decides the exception, so a
+ * lookalike host and a port variant of the official name are both refused.
+ *
+ * SEPARATE from `mainnetSigningTransportIsEligible` on purpose, and the two
+ * must not be collapsed. Fast Pay channel opens and closes, dapp signing and
+ * the L2 rail all still gate on the strict rule, and that rule does not move.
+ * Only the plain L1 payment path gets the exception, and it pays for it with
+ * the disclosure below.
+ *
+ * Deliberately module-private: `signingTransport.ts` is being given its own
+ * copy of this predicate by concurrent work, and two exported names of the
+ * same shape in one package is a collision. Whoever lands that work should
+ * delete these two and import theirs.
+ */
+function l1PaymentTransportIsEligible(
+  nodeUrl: string | null | undefined,
+  networkMode: string | null | undefined,
+): boolean {
+  if (mainnetSigningTransportIsEligible(nodeUrl, networkMode)) return true;
+  return l1PaymentUsesOfficialPlaintext(nodeUrl, networkMode);
+}
+
+/**
+ * True when that named exception, and nothing else, is what permits the send.
+ *
+ * False for loopback, false for HTTPS and false off mainnet, so the disclosure
+ * appears only where the cost is actually being paid.
+ */
+function l1PaymentUsesOfficialPlaintext(
+  nodeUrl: string | null | undefined,
+  networkMode: string | null | undefined,
+): boolean {
+  if (networkMode !== "mainnet") return false;
+  const raw = nodeUrl?.trim();
+  if (!raw) return false;
+  if (mainnetSigningTransportIsEligible(raw, networkMode)) return false;
+  return isOfficialNodeUrl(raw);
+}
+
 /** Minimum length enforced for passphrases that create or re-encrypt a wallet. */
 export const MIN_NEW_WALLET_PASSPHRASE_LENGTH = 15;
 
@@ -185,7 +232,97 @@ export function hubSourcesSummary(isMainnet: boolean): string {
  * fingerprint prompt. This is the same rule stated as a visible condition.
  */
 export const MAINNET_SIGNING_TRANSPORT_NOTICE =
-  "This node can show balances but cannot be used to sign on mainnet. Signing needs HTTPS, or a node running on this same machine. The official node is plain HTTP and remote, so it is readable and not signable. Point the wallet at your own node, usually http://127.0.0.1:8080, in Settings.";
+  "Fast Pay cannot be set up or closed through this node on mainnet. That needs HTTPS, or a node running on this same machine, and the official node is plain HTTP and remote. Ordinary on-chain payments do go through the official node, as a stated exception with a stated cost; a channel open or close does not, because it puts money behind a countdown that only a node you trust should be timing. Point the wallet at your own node, usually http://127.0.0.1:8080, in Settings.";
+
+/**
+ * The one address `candidate_urls` looks at on this machine.
+ *
+ * Mirrors `LOCAL_NODE_URL` in crates/wallet-core/src/node_discovery.rs. It is
+ * named here because the sentence below promises that "Find active node" will
+ * pick the node up, and that promise is only true at this address. Telling
+ * somebody to start a node and then silently not finding it is the same dead
+ * end one step further along.
+ */
+export const LOCAL_NODE_ADDRESS = "http://127.0.0.1:8080";
+
+/**
+ * What this payment costs, or null when it costs nothing.
+ *
+ * The core permits an ordinary L1 payment through the official endpoint as one
+ * named exception, so a screen must not call that node blocked. Permitted is
+ * not the same as free, though, and the difference is the whole point of this
+ * function: the disclosure is what the exception is paid for with.
+ *
+ * Both the predicate and the words come from `signingTransport.ts`, which
+ * mirrors the core. Nothing is restated here, because a second copy of a
+ * disclosure is a second chance for one of them to stop being true.
+ */
+export function officialNodePlaintextDisclosure(
+  nodeUrl: string | null | undefined,
+  networkMode: string | null | undefined,
+): string | null {
+  if (!l1PaymentUsesOfficialPlaintext(nodeUrl, networkMode)) return null;
+  return (
+    `This wallet is talking to the official Hacash node over plain HTTP, because that node offers ` +
+    `nothing else. Whoever carries your traffic (your wifi, your ISP, a VPN) can read which address ` +
+    `you are asking about and see the payment go out, so it links your address to your connection. ` +
+    `They can also quote a wrong network fee, which is why the fee below is worth reading. They ` +
+    `cannot change who gets paid or how much, they cannot sign anything for you, and they cannot ` +
+    `swap in a different chain. Running Hacash on your own computer and pointing this wallet at ` +
+    `${LOCAL_NODE_ADDRESS} removes all of it.`
+  );
+}
+
+/**
+ * The refusal, for a node that genuinely cannot carry a payment.
+ *
+ * `MAINNET_SIGNING_TRANSPORT_NOTICE` renders in exactly one place in the whole
+ * product, on the Fast Pay screen, which is a feature a plain sender never
+ * turns on. So the person who installed a wallet to send HAC to a friend met
+ * this rule for the first time as a raw core string in a toast, after typing
+ * an address and an amount: "mainnet signing requires HTTPS, except for a node
+ * on this same device". No next step, and the Settings screen was at that
+ * moment telling them the node they were on was the official one and advising
+ * them not to change it.
+ *
+ * This now keys off the L1 payment rule rather than the strict signing rule,
+ * because keying it off the strict rule blocked the shipped default, which the
+ * core permits. A disabled button in front of a send the core would have
+ * accepted is a worse dead end than the toast it replaced.
+ *
+ * Returns null when the wallet CAN carry the payment, so a screen can render
+ * this unconditionally and it simply disappears once the condition is met.
+ */
+export function plainSendBlockedNotice(
+  nodeUrl: string | null | undefined,
+  networkMode: string | null | undefined,
+): string | null {
+  if (l1PaymentTransportIsEligible(nodeUrl, networkMode)) return null;
+  const node = nodeUrl?.trim() ? nodeUrl.trim() : "the node this wallet is set to";
+  return (
+    `You can see your balance, but this wallet cannot send yet. Sending means signing a payment, ` +
+    `and it will only sign through a Hacash node running on this same computer, or one reached over HTTPS. ` +
+    `It is currently reading from ${node}, which is plain HTTP on somebody else's server, so anyone ` +
+    `between you and it could change what you sign. Start a Hacash node on this computer with its ` +
+    `HTTP API on ${LOCAL_NODE_ADDRESS}, then use "Find active node" in Settings and this wallet will ` +
+    `pick it up. If you already run one on a different port, type that address into the node field ` +
+    `in Settings instead.`
+  );
+}
+
+/**
+ * The reason, short enough to sit on the button it disables.
+ *
+ * A disabled control with no label is its own dead end. The person pressed
+ * Send, nothing happened, and there was nothing to read.
+ */
+export function plainSendBlockedButtonLabel(
+  nodeUrl: string | null | undefined,
+  networkMode: string | null | undefined,
+): string | null {
+  if (l1PaymentTransportIsEligible(nodeUrl, networkMode)) return null;
+  return "Cannot send: no Hacash node on this computer";
+}
 
 /**
  * The requirement that stops every Agent Wallet payment, said before funding

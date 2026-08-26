@@ -13,7 +13,12 @@ import {
   l1FeeSpeedLabel,
   railBadgeClass,
 } from "../fastPayUi";
-import type { PaymentAsset } from "@hacash/wallet-ui";
+import {
+  officialNodePlaintextDisclosure,
+  plainSendBlockedButtonLabel,
+  plainSendBlockedNotice,
+  type PaymentAsset,
+} from "@hacash/wallet-ui";
 import type { Screen } from "./types";
 
 type Props = {
@@ -95,6 +100,30 @@ export default function SendScreen({
   onSent,
 }: Props) {
   const [sendAsset, setSendAsset] = useState<PaymentAsset>("HAC");
+  /**
+   * The condition that stops this screen, known before anything is typed.
+   *
+   * `wallet_prepare_send_hac` reaches `require_online_signing_transport` and
+   * fails, and `formatInvokeError` hands the raw core string to a toast. That
+   * happened AFTER an address and an amount, and the toast said only "mainnet
+   * signing requires HTTPS, except for a node on this same device".
+   *
+   * Nothing here decides whether the send is allowed. The core still enforces
+   * the rule at prepare time and again at the signing boundary, and this is a
+   * deliberate mirror of `validate_signing_node_url` used only to say so first.
+   * Nobody is refused after the fact for something the app already knew.
+   */
+  const sendBlocked = plainSendBlockedNotice(status?.node_url, status?.network_mode);
+  const sendBlockedLabel = plainSendBlockedButtonLabel(status?.node_url, status?.network_mode);
+  /**
+   * The cost of the one node this send IS allowed through.
+   *
+   * `validate_l1_payment_node_url` permits an ordinary payment via the official
+   * endpoint as a single named exception, so this screen must not block it. It
+   * must not go quiet about it either: the connection is readable and the fee
+   * is the node's own number, and both are stated here rather than discovered.
+   */
+  const plaintextCost = officialNodePlaintextDisclosure(status?.node_url, status?.network_mode);
   const showL1FeeSpeed =
     sendForceL1 || !fastPayReady || preview?.plan.rail === "L1OnChain";
 
@@ -111,6 +140,22 @@ export default function SendScreen({
   return (
     <section className="panel">
       <h2>Send</h2>
+      {sendBlocked ? (
+        <div className="alert" role="note">
+          <p>{sendBlocked}</p>
+          <button type="button" onClick={() => onNavigate("settings")}>
+            Open Settings
+          </button>
+        </div>
+      ) : null}
+      {plaintextCost ? (
+        <div className="alert" role="note">
+          <p>{plaintextCost}</p>
+          <button type="button" onClick={() => onNavigate("settings")}>
+            Open Settings
+          </button>
+        </div>
+      ) : null}
       <div className="display-toggle send-asset-toggle">
         <button
           type="button"
@@ -327,10 +372,10 @@ export default function SendScreen({
 
           <button
             className="primary"
-            disabled={busy || !sendTo || !sendAmount}
+            disabled={busy || !sendTo || !sendAmount || sendBlockedLabel != null}
             onClick={() => onPreviewSend()}
           >
-            Continue
+            {sendBlockedLabel ?? "Continue"}
           </button>
           {preview && (
             <div className="preview-card">
