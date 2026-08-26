@@ -752,6 +752,18 @@ pub struct NodeSupervisorReport {
     pub height: Option<u64>,
     pub tip_age_seconds: Option<u64>,
     pub max_tip_age_seconds: Option<u64>,
+    /// The node's own timestamp on the newest block it holds, and its own
+    /// clock reading at the moment it answered.
+    ///
+    /// Carried because a percentage needs a denominator, and the only honest
+    /// denominator available is one the node itself supplies. Two readings of
+    /// these give the average seconds per block across exactly the blocks this
+    /// node just took in, and that divided into `tip_age_seconds` is how far
+    /// behind it is in blocks. Nothing about the chain is assumed: no block
+    /// interval is compiled in here, because a compiled-in one would be an
+    /// invented number wearing a measurement's clothes.
+    pub tip_timestamp_unix: Option<u64>,
+    pub observed_unix: Option<u64>,
     pub fresh: Option<bool>,
     pub anchor: ChainAnchor,
     /// Which chain is being watched, in words.
@@ -885,6 +897,8 @@ pub fn decide(observed: &NodeObservations, config_path: &str) -> NodeSupervisorR
         height: capabilities.map(|c| c.chain.height),
         tip_age_seconds: capabilities.map(|c| c.sync.tip_age_seconds),
         max_tip_age_seconds: capabilities.map(|c| c.sync.max_tip_age_seconds),
+        tip_timestamp_unix: capabilities.map(|c| c.sync.tip_timestamp_unix),
+        observed_unix: capabilities.map(|c| c.sync.observed_unix),
         fresh: capabilities.map(|c| c.sync.fresh),
         anchor,
         watching: watching_sentence(anchor, observed.boot_nodes_connected),
@@ -1045,6 +1059,8 @@ now is its own node, so it is reading nothing from it.",
             report.height = None;
             report.tip_age_seconds = None;
             report.max_tip_age_seconds = None;
+            report.tip_timestamp_unix = None;
+            report.observed_unix = None;
             report.fresh = None;
             report.anchor = ChainAnchor::Unknown;
             report.watching =
@@ -2189,10 +2205,28 @@ pub async fn node_supervisor_status(process: &NodeProcess) -> Result<NodeSupervi
 mod tests {
     use super::*;
 
+    /// A chain folder that is absolute on the platform the test runs on.
+    ///
+    /// `render_node_config` refuses a relative `data_dir`, and correctly: the
+    /// node resolves a relative one next to its own executable, which is the
+    /// barrier this work exists to remove. But `C:/chain` is absolute only on
+    /// Windows. On Linux it is a relative path named `C:`, so the guard fired
+    /// on CI and the test panicked on its own `unwrap`, while passing on the
+    /// machine it was written on.
+    fn absolute_chain_dir() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from("C:/chain")
+        } else {
+            PathBuf::from("/chain")
+        }
+    }
+
     #[test]
     fn the_config_the_wallet_writes_carries_the_peer_count_that_was_measured() {
+        let data_dir = absolute_chain_dir();
+        let expected = format!("data_dir = {}", data_dir.display());
         let plan = NodeConfigPlan {
-            data_dir: PathBuf::from("C:/chain"),
+            data_dir,
             api_port: 18080,
             p2p_port: 13337,
         };
@@ -2200,7 +2234,7 @@ mod tests {
         assert!(text.contains("backbone_peers = 32"), "{text}");
         assert!(text.contains("not_find_nodes = false"));
         assert!(text.contains("fast_sync = false"));
-        assert!(text.contains("data_dir = C:/chain"));
+        assert!(text.contains(&expected), "{text}");
         assert!(text.contains("listen = 13337"));
         assert!(text.contains("listen = 18080"));
         assert!(text.contains("bind = 127.0.0.1"));
@@ -2222,14 +2256,18 @@ mod tests {
         assert!(ini_value_survives_the_parser("C:/a#b/chain").is_ok());
         let refused = ini_value_survives_the_parser("C:/Users/Ana ;dev/chain").unwrap_err();
         assert!(refused.contains("comment"), "{refused}");
-        assert!(
-            render_node_config(&NodeConfigPlan {
-                data_dir: PathBuf::from("C:/Users/Ana #dev/chain"),
-                api_port: 1,
-                p2p_port: 2,
-            })
-            .is_err()
-        );
+        // Absolute on this platform on purpose, and the error is read rather
+        // than merely counted. `C:/Users/Ana #dev/chain` is relative on Linux,
+        // so this refusal would have fired for being relative and the test
+        // would have passed without ever exercising the `#` it is named for.
+        let hashed = absolute_chain_dir().join("Ana #dev").join("chain");
+        let error = render_node_config(&NodeConfigPlan {
+            data_dir: hashed,
+            api_port: 1,
+            p2p_port: 2,
+        })
+        .unwrap_err();
+        assert!(error.contains("comment"), "{error}");
     }
 
     #[test]
