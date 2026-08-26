@@ -51,6 +51,8 @@ pub mod dapp_approval;
 #[cfg(feature = "desktop")]
 pub mod desktop_commands;
 #[cfg(feature = "desktop")]
+pub mod desktop_node;
+#[cfg(feature = "desktop")]
 pub mod desktop_relay;
 
 #[cfg(all(

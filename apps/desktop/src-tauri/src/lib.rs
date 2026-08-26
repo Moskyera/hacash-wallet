@@ -90,6 +90,10 @@ pub fn run() {
             wallet_tauri_common::security_commands::wallet_webauthn_replacement_finish,
             wallet_tauri_common::desktop_commands::wallet_update_dust_whisper_settings_desktop,
             wallet_tauri_common::desktop_commands::wallet_relay_endpoint,
+            wallet_tauri_common::desktop_commands::wallet_node_supervisor_status,
+            wallet_tauri_common::desktop_commands::wallet_node_supervisor_start,
+            wallet_tauri_common::desktop_commands::wallet_node_supervisor_stop,
+            wallet_tauri_common::desktop_commands::wallet_node_supervisor_set_binary,
             wallet_list_bills,
             wallet_validate_hip23,
             wallet_platform_security_status,
@@ -193,6 +197,27 @@ pub fn run() {
                 }
                 if let Some(state) = app.try_state::<AppState>() {
                     let _ = wallet_tauri_common::desktop_relay::stop_managed_relay(&state);
+                    // THE NODE DIES WITH THE WALLET, THIS PASS.
+                    //
+                    // A surviving node is a process the person did not know
+                    // they were running: gigabytes of writes, a listening
+                    // socket, no window, no tray icon and no way to stop it
+                    // except Task Manager. They cannot see it, so they cannot
+                    // consent to it. The cost of dying is bounded and visible:
+                    // Hacash blocks are about five minutes, so a day closed is
+                    // a couple of hundred blocks to catch up, and the screen
+                    // shows that catch-up with a number. Survival can be added
+                    // later as one setting; taking away a background process
+                    // people came to rely on would be a regression.
+                    //
+                    // Graceful first, time-boxed, then killed. This hook never
+                    // runs on a crash or a force quit, which is why the claim
+                    // file beside the store is self-validating rather than
+                    // trusted just for existing.
+                    let _ = wallet_tauri_common::desktop_node::stop_managed_node(
+                        &state.node,
+                        wallet_tauri_common::desktop_node::GRACEFUL_STOP_BUDGET,
+                    );
                 }
             }
         });

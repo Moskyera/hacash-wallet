@@ -5,6 +5,8 @@ use tokio::sync::Mutex;
 
 use crate::dapp_approval::DappApprovalQueue;
 #[cfg(feature = "desktop")]
+use crate::desktop_node::NodeProcess;
+#[cfg(feature = "desktop")]
 use crate::desktop_relay::RelayProcess;
 use crate::update::UpdateOfferStore;
 
@@ -98,6 +100,10 @@ pub struct AppState {
     pub inner: Arc<Mutex<WalletService>>,
     #[cfg(feature = "desktop")]
     pub relay: RelayProcess,
+    /// The supervised Hacash fullnode. Holding the `Child` here is the only
+    /// thing that ever authorises the word "ours" about a node.
+    #[cfg(feature = "desktop")]
+    pub node: Arc<NodeProcess>,
     pub dapp_approval: Arc<DappApprovalQueue>,
     pub updates: UpdateOfferStore,
 }
@@ -108,6 +114,8 @@ impl AppState {
             inner: Arc::new(Mutex::new(service)),
             #[cfg(feature = "desktop")]
             relay: RelayProcess::new(),
+            #[cfg(feature = "desktop")]
+            node: Arc::new(NodeProcess::new()),
             dapp_approval: Arc::new(DappApprovalQueue::new()),
             updates: UpdateOfferStore::new(),
         }

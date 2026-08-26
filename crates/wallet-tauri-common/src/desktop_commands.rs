@@ -43,3 +43,78 @@ pub async fn wallet_relay_endpoint<R: Runtime>(
 ) -> Result<crate::desktop_relay::RelayEndpointReport, String> {
     crate::desktop_relay::relay_endpoint(&app).await
 }
+
+/// What the supervised Hacash node is doing, and whose it is.
+///
+/// Read-only, and polled rather than returned once: a cold sync took about
+/// seven minutes on the machine this was built against, so the interesting
+/// state lasts minutes and a converge function's return value cannot carry it.
+/// This starts nothing, stops nothing and writes no config.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn wallet_node_supervisor_status(
+    state: State<'_, AppState>,
+) -> Result<crate::desktop_node::NodeSupervisorReport, String> {
+    crate::desktop_node::node_supervisor_status(&state.node).await
+}
+
+/// Bring the world into line with "this wallet should be running a node".
+///
+/// A converge function, not a command, in the shape of `sync_managed_relay`:
+/// a live child of ours means there is nothing to do, so a second press changes
+/// nothing. Every refusal is recorded rather than returned as an error, so the
+/// next status poll still says why instead of falling back to silence.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn wallet_node_supervisor_start(
+    state: State<'_, AppState>,
+) -> Result<crate::desktop_node::NodeSupervisorReport, String> {
+    crate::desktop_node::sync_managed_node(&state.node).await?;
+    crate::desktop_node::node_supervisor_status(&state.node).await
+}
+
+/// Stop the node this wallet started, and nothing else.
+///
+/// A node the wallet did not start has no stop button on the screen and no
+/// path to one here: `stop_managed_node` can only reach a `Child` this process
+/// is holding.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn wallet_node_supervisor_stop(
+    state: State<'_, AppState>,
+) -> Result<crate::desktop_node::NodeSupervisorReport, String> {
+    // The stop blocks for up to the graceful budget while the child flushes a
+    // multi-gigabyte store, so it must not run on a thread the window is also
+    // waiting on. The supervisor is behind an `Arc` precisely so this hand-off
+    // needs no unsafety.
+    let node = state.node.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::desktop_node::stop_managed_node(&node, crate::desktop_node::GRACEFUL_STOP_BUDGET)
+    })
+    .await
+    .map_err(|error| format!("stop task failed: {error}"))??;
+    crate::desktop_node::node_supervisor_status(&state.node).await
+}
+
+/// Point the wallet at a fullnode that is already on this computer.
+///
+/// The path is confirmed by running the binary against a config path that does
+/// not exist, which errors before anything binds a port, resolves a folder or
+/// opens a database. A filename is never taken as evidence of anything.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn wallet_node_supervisor_set_binary(
+    path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::desktop_node::NodeSupervisorReport, String> {
+    match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        None => state.node.set_picked_binary(None),
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            crate::desktop_node::probe_node_binary(&path)
+                .map_err(|reason| format!("{}: {reason}", path.display()))?;
+            state.node.set_picked_binary(Some(path));
+        }
+    }
+    crate::desktop_node::node_supervisor_status(&state.node).await
+}

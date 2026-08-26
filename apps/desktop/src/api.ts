@@ -95,6 +95,119 @@ export type RelayEndpoint = {
   relay_urls: string[];
 };
 
+/**
+ * WHAT THE SUPERVISED HACASH NODE IS DOING, from
+ * `wallet_node_supervisor_status`.
+ *
+ * Every field is something the backend read rather than something it assumed.
+ * `ours` is set by exactly one thing: a live child this wallet is holding
+ * whose own stdout said it took the API port. The node binds its own socket,
+ * and when the port is taken it prints an error and carries on without an API,
+ * so "our child is alive and the port answers" would be a claim on somebody
+ * else's node.
+ */
+export type NodeSupervisorState =
+  | "not_present"
+  | "blocked"
+  | "starting"
+  | "catching_up"
+  | "ready"
+  | "foreign"
+  | "failed"
+  | "stopping"
+  | "stopped";
+
+/**
+ * Which chain the node being watched is actually on.
+ *
+ * This is the field that tells a real mainnet sync apart from a node that has
+ * quietly started a private chain of its own. Both show a climbing height, so
+ * the height is not the evidence: the pinned block one hash is.
+ */
+export type ChainAnchor = "confirmed" | "not_yet_available" | "wrong" | "unknown";
+
+export type NodeBinarySource = "bundled" | "picked" | "found" | "legacy";
+
+export type NodeBinaryReport = {
+  path: string | null;
+  source: NodeBinarySource | null;
+  version: string | null;
+  database_type: number | null;
+  /** Every path looked at and what was found there, so a dead end is fixable. */
+  searched: { path: string; source: NodeBinarySource; verdict: string }[];
+  /** The path a person pointed the wallet at, whether or not it still works. */
+  picked_path: string | null;
+  /**
+   * Set when that path no longer answers as a fullnode. When it is set nothing
+   * else is chosen: running a different node than the one somebody picked,
+   * without saying so, is the substitution that does not crash and lies about
+   * money.
+   */
+  picked_problem: string | null;
+};
+
+/**
+ * Who the kernel says holds the API port at this poll.
+ *
+ * The node prints `[Api Server] listening on ...` exactly once. That line is an
+ * announcement, not a binding, and the process keeps its chain and p2p threads
+ * running whether or not the API thread survives. So ownership of the port is
+ * asked of the operating system every time rather than remembered from that
+ * one line.
+ */
+export type ApiPortHolder =
+  | { holder: "not_checked" }
+  | { holder: "nobody" }
+  | { holder: "our_child"; pid: number }
+  | { holder: "stranger"; pid: number }
+  | { holder: "bound_by_unknown" };
+
+export type ConfigWriteOutcome =
+  | { outcome: "written" }
+  | { outcome: "unchanged" }
+  | { outcome: "rewritten" }
+  | { outcome: "left_alone"; reason: string };
+
+export type NodeSupervisorReport = {
+  state: NodeSupervisorState;
+  /** The only field that authorises the word "ours". */
+  ours: boolean;
+  headline: string;
+  /** Why this state, built from something that was read. */
+  detail: string;
+  binary: NodeBinaryReport;
+  api_url: string;
+  api_port: number;
+  p2p_port: number;
+  data_dir: string;
+  config_path: string;
+  config: ConfigWriteOutcome | null;
+  height: number | null;
+  tip_age_seconds: number | null;
+  max_tip_age_seconds: number | null;
+  fresh: boolean | null;
+  anchor: ChainAnchor;
+  /** Which chain is being watched, named by its block one hash. */
+  watching: string;
+  peer_role: string | null;
+  peers_inbound: number | null;
+  peers_outbound: number | null;
+  /**
+   * Ready means the wallet can trust this node about the chain. It does not
+   * mean anybody can reach it. This quotes the same peers block the native
+   * rail preflight reads rather than inventing a second opinion.
+   */
+  reach: string | null;
+  exit_code: number | null;
+  last_error_lines: string[];
+  stopped_hard: boolean;
+  can_start: boolean;
+  can_stop: boolean;
+  offers: string[];
+  /** Checked, not remembered. See ApiPortHolder. */
+  api_port_holder: ApiPortHolder;
+};
+
 export type RelayHealthStatus = {
   url: string;
   online: boolean;
@@ -843,6 +956,26 @@ export const api = {
     invoke<RelayHealthStatus[]>("wallet_whisper_relay_health"),
   /** Read-only. Starts nothing and moves no socket. */
   relayEndpoint: () => invoke<RelayEndpoint>("wallet_relay_endpoint"),
+  /**
+   * Read-only, and polled: a cold sync is minutes, so the interesting state
+   * cannot be carried by a converge function's return value. Starts nothing,
+   * stops nothing, writes no config.
+   */
+  nodeSupervisorStatus: () =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_status"),
+  /**
+   * Converge, not command. A live node of ours means nothing happens, so a
+   * second press changes nothing. Refusals come back inside the report rather
+   * than as an error, so the screen keeps saying why.
+   */
+  nodeSupervisorStart: () =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_start"),
+  /** Only ever reaches a child this wallet is holding. */
+  nodeSupervisorStop: () =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_stop"),
+  /** The path is confirmed by running the binary, never by its filename. */
+  nodeSupervisorSetBinary: (path: string | null) =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_set_binary", { path }),
   clearTxHistory: () => invoke<void>("wallet_clear_tx_history"),
   airgapPrepareSend: (to: string, amountMei: number) =>
     invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),

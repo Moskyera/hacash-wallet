@@ -18,6 +18,11 @@ uuid = { workspace = true }
 dust-whisper = { path = "../dust-whisper", optional = true }
 
 sha2.workspace = true
+dirs.workspace = true
+# The supervised node's own lock file. Holding it is the one thing only a live
+# process can do, which is what makes the claim file beside it mean anything: a
+# pid on its own is worthless because pids are recycled.
+fs2.workspace = true
 aes-gcm.workspace = true
 argon2.workspace = true
 base64.workspace = true
@@ -37,6 +42,29 @@ agent-wallet-runtime = { path = "../agent-wallet-runtime", optional = true, feat
 hpay-agent-connector = { path = "../agent-connector", optional = true, default-features = false }
 hpay-companion-protocol = { path = "../companion-protocol", optional = true }
 hpay-companion-lan-runtime = { path = "../companion-lan-runtime", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# The graceful half of stopping the supervised node.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Windows has no SIGTERM, and the node's only clean exit is its Ctrl+C handler.
+# The wallet is a `windows_subsystem = "windows"` binary with no console of its
+# own, so a clean stop needs the AttachConsole / GenerateConsoleCtrlEvent /
+# FreeConsole dance against the child's own process group.
+#
+# Win32_NetworkManagement_IpHelper is the answer to "who actually holds the API
+# port right now". The node announcing `[Api Server] listening on ...` is not
+# proof it is still bound: server.rs can lose that thread while the chain and
+# p2p threads carry on, and a stranger can then take the port. Asking the
+# kernel for the owning pid of the listening socket and comparing it to the
+# child's own pid is the only thing that turns "something answers" into "our
+# node answers".
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Console",
+  "Win32_NetworkManagement_IpHelper",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -8,6 +8,7 @@ import { open } from "@tauri-apps/plugin-shell";
 import { useEffect, useMemo, useState } from "react";
 import { api, type NodeDiscoveryReport, type WalletSettings } from "../api";
 import AppUpdateSection from "../components/AppUpdateSection";
+import NodeSupervisorPanel from "../components/NodeSupervisorPanel";
 import { formatInvokeError } from "../formatInvokeError";
 import { LanguageSwitcher, useLocale } from "../locale";
 
@@ -116,6 +117,15 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
       >
         {t("docs.howItWorks")}
       </button>
+
+      <hr className="divider" />
+
+      {/*
+        Above the node URL box on purpose. The question "which node should I
+        type in here" only exists because the wallet does not run one, so the
+        offer to run one belongs before the box, not after it.
+      */}
+      <NodeSupervisorPanel onInfo={onInfo} onError={onError} />
 
       <hr className="divider" />
 
