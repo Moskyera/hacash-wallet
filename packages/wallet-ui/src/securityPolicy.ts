@@ -118,6 +118,60 @@ export const FAST_PAY_MAINNET_CONSENT =
   "I understand that this channel can only be closed if the Hub co-signs it. There is no way for me to get this money out on my own: the chain requires both signatures, and no unilateral exit exists on this rail. If the Hub stops answering, refuses to sign, or disappears, what is in this channel stays locked and nobody can release it for me. I will not put in more than I can afford to lose.";
 
 /**
+ * Why pressing Enable on mainnet will not open a channel, said before it is
+ * pressed rather than as the refusal that comes back.
+ *
+ * The checkbox above is exactly true and always was. What it never did was
+ * stop anyone: ticking it opened a funded channel with no way out of it, which
+ * is the stranding the whole close-voucher effort was meant to prevent, on the
+ * one rail an ordinary person actually meets. The voucher was only ever built
+ * for the Agent Wallet, so wallet-core now refuses the open instead.
+ *
+ * This does NOT replace the blocker sentence beside the declared caps. That
+ * one appears only when the preflight reaches a Hub that discloses the gap.
+ * This one does not depend on reaching anything, because the fact does not.
+ *
+ * It names the Agent Wallet rail because a refusal with no destination reads
+ * as a broken build, and it says what that rail is: a Hub that countersigns
+ * once because it chose to. Do not shorten that into a guarantee, and never
+ * write "trustless" near it.
+ *
+ * THIS STRING RENDERS ON BOTH PLATFORMS, desktop at FastPayScreen and phone at
+ * FastPayChannelScreen, so every word has to be true on both. It briefly said
+ * the voucher sits "behind its own consent and its own build flag", and that
+ * was wrong in the direction that costs a person a day. On the desktop the
+ * build flag is already ON: the release workflow builds with
+ * agent-wallet-bounded-mainnet-pilot and the shipped binary carries the
+ * commands, so naming the flag makes the one gate the reader has already
+ * passed sound like the expensive one, and points them away from the four that
+ * actually stop them. On the phone it is worse than misleading: there is no
+ * agent-wallet-core in the mobile graph at all and no voucher command in the
+ * mobile ACL, so the sentence invited a person to go looking on their device
+ * for something that is not on it.
+ *
+ * So it now names what really stands in the way, which is the same on both
+ * platforms: a separate wallet holding separate money, and a person running
+ * both the node and the Hub themselves. Do not reintroduce a phone-only or
+ * desktop-only clause here. One of the two screens would be lied to.
+ *
+ * Kept deliberately shorter than the wallet-core refusal it previews. The
+ * always-visible band on this screen is measured, and every word added to it
+ * pushes something else towards the fold. The full sentence, with the reasons,
+ * arrives from core the moment Enable is pressed.
+ *
+ * That budget is not theoretical and there is almost no headroom in it. The
+ * honest but wordier draft of this sentence, naming the Hacash full node and
+ * the Fast Pay Hub in full and adding "it is not something you can switch on
+ * here", pushed the always-visible share of the Fast Pay screen from 0.4485 to
+ * 0.4592 against a ceiling of 0.45 and failed the volume test the owner's
+ * complaint about clutter is pinned by. The right response was to say the same
+ * thing in fewer words, not to raise the ceiling. If you need to add a clause
+ * here, take one out.
+ */
+export const FAST_PAY_MAINNET_CHANNEL_REFUSED =
+  "This wallet will not open a mainnet Fast Pay channel, because it has no way out of one: every close it can build has to be countersigned by the Hub, and it cannot take a close voucher. A close voucher exists only for the separate Agent Wallet, and only if you run your own node and Hub. An already open channel still closes through the Hub, and testnet is untouched.";
+
+/**
  * The operator instructions, linked rather than named.
  *
  * Both hub panels used to print the bare repository path

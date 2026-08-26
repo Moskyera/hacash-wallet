@@ -139,7 +139,22 @@ const BLOCKER_SENTENCES: Array<[string, string]> = [
   ],
   [
     "wallet_cannot_build_a_unilateral_exit_without_the_hub",
-    "Your wallet cannot build a way out on its own. Take a close voucher before you pay anything, and your deposit stops depending on this Hub staying reachable.",
+    // This sentence used to end "Take a close voucher before you pay anything,
+    // and your deposit stops depending on this Hub staying reachable." That
+    // instruction was never true of this wallet. The three close paths it owns
+    // all end at the Hub countersigning; the close voucher was only ever built
+    // for the Agent Wallet. So a person read it a few hundred pixels from the
+    // consent box that says the opposite, and the false one had a button.
+    //
+    // The true half stays word for word. What replaces the instruction is what
+    // this wallet now does about it, and where the exit actually lives.
+    // "behind its own consent and its own build flag" was removed here for the
+    // same reason it was removed from FAST_PAY_MAINNET_CHANNEL_REFUSED. The
+    // build flag is already on in every official desktop release, so naming it
+    // made the one gate the reader has already passed sound like the hard one.
+    // The gates that actually stop them are a separate wallet holding separate
+    // money, and running both the node and the Hub themselves.
+    "Your wallet cannot build a way out on its own. Closing needs the Hub to co-sign, and this wallet cannot take a close voucher, so on mainnet it refuses to open a channel at all rather than fund one it could not leave. A close voucher exists only for the Agent Wallet, a separate wallet holding its own separate money, and only for someone running their own Hacash full node and their own Fast Pay Hub, where that Hub countersigns once because it chose to and nothing compels it.",
   ],
   [
     "unilateral_l1_dispute_path_is_not_ready",
@@ -207,25 +222,35 @@ function BlockerList({ blockers }: { blockers: string[] }) {
 }
 
 /**
- * The identifier for the one disclosure that has an action attached to it.
+ * The identifier for the one disclosure that decides whether funding happens.
  *
- * Every other blocker on the list is something to know. This one is something
- * to DO: take a close voucher, and the deposit stops depending on the Hub
- * staying reachable. That is why its sentence is lifted out of the folded list
- * and shown beside the caps, while also staying inside the list. Duplicating a
+ * It used to be described here as the one disclosure with an action attached:
+ * take a close voucher. That action does not exist in this wallet and never
+ * did, so the description was wrong about the most consequential sentence on
+ * the screen. What is true is that this blocker is the one the mainnet enable
+ * path now turns on: wallet-core refuses to open a channel it cannot leave, so
+ * this sentence is the explanation of a refusal rather than a risk to weigh.
+ *
+ * That is a stronger reason to lift it out of the folded list than the old one
+ * was, so it stays lifted, and it stays inside the list too. Duplicating a
  * risk sentence is safe. Folding this one is not.
  */
 export const NO_UNILATERAL_EXIT_BLOCKER =
   "wallet_cannot_build_a_unilateral_exit_without_the_hub";
 
 /**
- * The close-voucher sentence, when anything on screen discloses that gap.
+ * The no-way-out sentence, when anything on screen discloses that gap.
  *
  * `texts` may be blocker identifiers or whole sentences: the preflight carries
  * the same identifiers inside `hub_disclosed_gaps`, in its observed text and
  * its reason, so the Fast Pay screen can find this without a Hub declaration
  * of its own. Matching on substring rather than equality is deliberate, and it
  * fails towards SHOWING the sentence rather than towards hiding it.
+ *
+ * The name is kept because every caller and every test spells it this way, and
+ * because a voucher is still what the sentence is about. What changed is that
+ * it now says where the voucher is instead of telling a person to go and take
+ * one from a wallet that cannot.
  */
 export function closeVoucherSentence(texts: Array<string | null | undefined>): string | null {
   const found = texts.some(
@@ -313,9 +338,9 @@ export function HubDeclarationCard({
     <div className="preview-card hub-declaration">
       {/*
         Band 2, "what am I about to agree to", in the order a person asks it:
-        who this counterparty is, what it lets me move, and the one thing I can
-        do about the risk. You cannot agree to a counterparty you cannot see,
-        so the name, the URL and the on-chain address never fold.
+        who this counterparty is, what it lets me move, and whether there is a
+        way back out. You cannot agree to a counterparty you cannot see, so the
+        name, the URL and the on-chain address never fold.
       */}
       <h4>{declaration.name ?? "This Hub"} says</h4>
       <p className="muted small hub-discovery-url">{declaration.hub_url}</p>

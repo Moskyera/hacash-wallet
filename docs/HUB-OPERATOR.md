@@ -313,6 +313,20 @@ GET, which axum answers 405 with an `Allow` header without invoking the handler.
 If your Hub answers 404 there, say so to your users before they fund, because
 the voucher can only be issued after their deposit is on chain.
 
+**Which wallet can actually take that voucher.** Only the Agent Wallet, and
+only in a build with its feature flag on. The three voucher commands are
+`agent_wallet_take_fast_pay_channel_voucher`,
+`agent_wallet_fast_pay_channel_voucher` and
+`agent_wallet_broadcast_fast_pay_channel_voucher`; the main wallet has none of
+them, on desktop or on the phone. So the main wallet runs the preflight above,
+including its fatal close-voucher route check, for a capability it does not
+have. Because a channel it cannot leave is a channel it should not fund,
+`prepare_channel_open` and `execute_prepared_channel_open` now refuse a MAINNET
+open outright from the main wallet, and the Fast Pay screen says so before the
+deposit field rather than after. Testnet is unaffected and every existing
+channel still closes through the Hub exactly as before. Do not tell a main
+wallet user to take a close voucher: there is no command for them to run.
+
 **HVM shared-registry rail.** Only when the registry contract is deployed; the
 final gate reads a verified on-chain deployment and cannot pass without one.
 

@@ -386,13 +386,33 @@ mod tests {
         wallet.network_mode = "mainnet".into();
         assert!(wallet.unlocked.is_none(), "the wallet must still be locked");
 
+        // CHANNEL OPEN NO LONGER REACHES THE TRANSPORT CHECK ON MAINNET, and
+        // this test's property is stronger for it, not weaker.
+        //
+        // A mainnet channel open is now refused outright, ahead of everything
+        // else on the path, because this wallet has no way to leave a channel:
+        // its three close paths all end at the Hub countersigning, and the
+        // close voucher was only ever built for the Agent Wallet. So the
+        // transport refusal is shadowed here by a stricter one.
+        //
+        // The ordering that matters is unchanged and is asserted below: the
+        // wallet is LOCKED, so a refusal arriving at all proves it precedes
+        // `require_address` and therefore the review screen and the
+        // fingerprint prompt. What a person is told first is the fact they
+        // cannot fix. Sending them off to configure HTTPS and only then
+        // telling them the channel has no exit would be work that changes
+        // nothing.
+        //
+        // The transport check itself is untouched and still first for every
+        // other operation, which the close and send cases below still pin.
         let open = wallet
             .prepare_channel_open("1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW", "7", "0")
             .await
             .unwrap_err();
         assert!(
-            open.to_string().contains("mainnet signing requires HTTPS"),
-            "channel open must refuse at prepare, got: {open}"
+            open.to_string().contains("no way out of one"),
+            "channel open must refuse at prepare, before the ceremony, with the \
+             fact a person cannot fix, got: {open}"
         );
 
         let close = wallet.prepare_channel_close().await.unwrap_err();

@@ -388,11 +388,43 @@ describe("2. what you are agreeing to is never folded", () => {
     view.unmount();
   });
 
-  it("shows the close-voucher action, the one thing that changes the risk", async () => {
+  it("says the channel will be refused, before the box that used to open it", async () => {
+    // The rule this enforces: a person meets the plain fact about their way
+    // out BEFORE the money moves. wallet-core is the authority and refuses at
+    // prepare; this only has to get there first, and it must not depend on the
+    // preflight having reached a Hub, because the fact does not.
+    const view = await screen();
+    const met = metText(view.container);
+    expect(met).toContain("This wallet will not open a mainnet Fast Pay channel");
+    expect(met).toContain("Agent Wallet");
+    // Above the consent box, not below it. The box says there is no way out
+    // and is true; what it never did was stop anyone.
+    expect(met.indexOf("will not open a mainnet Fast Pay channel")).toBeLessThan(
+      met.indexOf("I will not put in more than I can afford to lose"),
+    );
+    view.unmount();
+  });
+
+  it("shows the no-way-out sentence without opening anything", async () => {
     const view = await screen();
     // Disclosed through the preflight's own hub_disclosed_gaps item, which is
     // the only place this screen can see it without a Hub declaration.
-    expect(metText(view.container)).toContain("Take a close voucher before you pay anything");
+    const met = metText(view.container);
+    expect(met).toContain("Your wallet cannot build a way out on its own.");
+    // And it names the rail where the exit does exist, so a refusal reads as a
+    // limit of this wallet rather than as a broken build.
+    expect(met).toContain("Agent Wallet");
+    view.unmount();
+  });
+
+  it("does not tell a person to take a voucher this wallet cannot take", async () => {
+    // The screen used to carry, unfolded and beside the caps, "Take a close
+    // voucher before you pay anything" - a few hundred pixels from a consent
+    // box saying there is no way out. Both cannot be true, and the one with a
+    // button attached was the false one: no close-voucher command exists in
+    // this wallet, on either app.
+    const view = await screen();
+    expect(metText(view.container)).not.toMatch(/take a close voucher before you pay/i);
     view.unmount();
   });
 

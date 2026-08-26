@@ -24,6 +24,7 @@ import {
   DeclaredCapsList,
   Disclosure,
   FAST_PAY_MAINNET_CEILINGS,
+  FAST_PAY_MAINNET_CHANNEL_REFUSED,
   FAST_PAY_MAINNET_CONSENT,
   FAST_PAY_SELF_HOSTED_HUB_NOTE,
   MAINNET_SIGNING_TRANSPORT_NOTICE,
@@ -439,13 +440,19 @@ export default function FastPayScreen({
   const verdict = preflight ? preflightVerdict(preflight) : null;
 
   /**
-   * The close-voucher sentence, when this Hub discloses that gap.
+   * The no-way-out sentence, when this Hub discloses that gap.
    *
    * The identifier travels in the preflight's `hub_disclosed_gaps` item, in its
    * observed text and its reason, which is the only place this screen can see
-   * it without a Hub declaration of its own. It is the single action anywhere
-   * on this screen that changes the stranding risk rather than describing it,
-   * so it is read without opening anything.
+   * it without a Hub declaration of its own.
+   *
+   * It used to be introduced here as the single action on the screen that
+   * changed the stranding risk. It was not an action: this wallet has no
+   * close-voucher command, so the screen was instructing a person to do
+   * something it could not do, beside a consent box saying the opposite. The
+   * sentence now explains why wallet-core refuses to open a mainnet channel at
+   * all, and names the rail where the voucher does exist. Still read without
+   * opening anything, for a better reason than before.
    */
   const voucherSentence = closeVoucherSentence(
     (preflight?.checks ?? []).flatMap((check) => [check.observed, check.reason]),
@@ -693,6 +700,16 @@ export default function FastPayScreen({
       {settings?.network_mode === "mainnet" && (
         <div className="alert" role="note">
           <strong>Bounded mainnet pilot</strong>
+          {/*
+            ABOVE the ceilings and above the box, because it is the answer to
+            "will I be able to get this out", and that outranks "how much may
+            I put in". It does not depend on the preflight having reached a
+            Hub, because the fact does not depend on any Hub. wallet-core is
+            the authority; this is only the sentence that gets there first.
+          */}
+          <p>
+            <strong>{FAST_PAY_MAINNET_CHANNEL_REFUSED}</strong>
+          </p>
           <p>{FAST_PAY_MAINNET_CEILINGS}</p>
           <label>
             <input

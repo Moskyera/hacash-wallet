@@ -19,7 +19,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mountComponent } from "./domHarness";
 import FastPayChannelScreen from "./screens/FastPayChannelScreen";
-import { FAST_PAY_MAINNET_CEILINGS, FAST_PAY_MAINNET_CONSENT } from "@hacash/wallet-ui";
+import {
+  FAST_PAY_MAINNET_CEILINGS,
+  FAST_PAY_MAINNET_CHANNEL_REFUSED,
+  FAST_PAY_MAINNET_CONSENT,
+} from "@hacash/wallet-ui";
 
 const channelInfo = vi.fn();
 const nativeRailPreflight = vi.fn();
@@ -150,6 +154,30 @@ describe("the phone never folds what you are agreeing to", () => {
     expect(met).toContain(FAST_PAY_MAINNET_CONSENT);
     expect(met).toContain(FAST_PAY_MAINNET_CEILINGS);
     expect(met).toContain("can only be closed if the Hub co-signs");
+    view.unmount();
+  });
+
+  it("says the channel will be refused, above the box that used to open it", () => {
+    // Same rule as the desktop screen: the plain fact about the way out is met
+    // BEFORE the money moves. wallet-core refuses at prepare and is the
+    // authority; this sentence only has to arrive first, and it must not wait
+    // on the preflight having reached a Hub, because the fact does not.
+    const view = mountComponent(<FastPayChannelScreen {...props()} />);
+    const met = metText(view.container);
+    expect(met).toContain(FAST_PAY_MAINNET_CHANNEL_REFUSED);
+    expect(met).toContain("Agent Wallet");
+    expect(met.indexOf("will not open a mainnet Fast Pay channel")).toBeLessThan(
+      met.indexOf("I will not put in more than I can afford to lose"),
+    );
+    view.unmount();
+  });
+
+  it("never tells a phone to take a voucher no build on it can take", () => {
+    // The Agent Wallet is absent from the phone by target gate, so this
+    // instruction was doubly wrong here. It came from the shared blocker
+    // sentence and is gone from both apps at once.
+    const view = mountComponent(<FastPayChannelScreen {...props()} />);
+    expect(metText(view.container)).not.toMatch(/take a close voucher before you pay/i);
     view.unmount();
   });
 

@@ -30,6 +30,7 @@ import {
   DeclaredCapsList,
   Disclosure,
   FAST_PAY_MAINNET_CEILINGS,
+  FAST_PAY_MAINNET_CHANNEL_REFUSED,
   FAST_PAY_MAINNET_CONSENT,
   FAST_PAY_SELF_HOSTED_HUB_NOTE,
   MAINNET_SIGNING_TRANSPORT_NOTICE,
@@ -454,7 +455,7 @@ export default function FastPayChannelScreen({
   /** The read-only check's verdict as one line, for the top of the screen. */
   const verdict = preflight ? preflightVerdict(preflight) : null;
 
-  /** The one action that changes the stranding risk. See closeVoucherSentence. */
+  /** Why a mainnet channel is refused here. See closeVoucherSentence. */
   const voucherSentence = closeVoucherSentence(
     (preflight?.checks ?? []).flatMap((check) => [check.observed, check.reason]),
   );
@@ -674,6 +675,16 @@ export default function FastPayChannelScreen({
         {settings?.network_mode === "mainnet" ? (
           <div className="warning-box" role="note">
             <strong>Bounded mainnet pilot</strong>
+            {/*
+              ABOVE the ceilings and above the box. "Will I be able to get this
+              out" outranks "how much may I put in", and unlike the blocker
+              sentence beside the caps it does not wait on the preflight having
+              reached a Hub. wallet-core is the authority; this only gets there
+              first.
+            */}
+            <p className="small">
+              <strong>{FAST_PAY_MAINNET_CHANNEL_REFUSED}</strong>
+            </p>
             <p className="muted small">{FAST_PAY_MAINNET_CEILINGS}</p>
             <label>
               <input

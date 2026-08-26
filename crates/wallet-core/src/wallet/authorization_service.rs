@@ -767,6 +767,27 @@ impl WalletService {
     ) -> WalletResult<PreparedOperationView> {
         self.touch_auto_lock();
         self.clear_prepared_operation();
+        // FIRST, ahead of every other check on this path: does this wallet
+        // have a way out of the channel it is about to fund?
+        //
+        // It does not, on mainnet, and it never has. The three close paths
+        // (`prepare_channel_close`, `execute_prepared_channel_close`,
+        // `recover_channel_close`) all end at `client.close_channel`, so the
+        // Hub countersigns and broadcasts or nothing does. The close voucher
+        // that would let an owner leave alone is not wired to this wallet.
+        //
+        // It runs first because it is the only refusal here a person could not
+        // have discovered by trying. A bad transport, an unreachable Hub or a
+        // cap they exceeded are all things the screen already talks about.
+        // "There is no way out" is the fact the money turns on, and the rule
+        // is that they meet it before the money moves, not after.
+        //
+        // In core rather than on the button, deliberately: the Enable control
+        // is not disabled on a red preflight, so a UI-only refusal would be
+        // bypassable by design.
+        crate::l1_channel_close_safety::refuse_mainnet_channel_open_without_an_exit(
+            &self.settings.network_mode,
+        )?;
         // Refuse an ineligible signing transport HERE, not at execution.
         //
         // The rule is unchanged and is not relaxed by an inch: mainnet signing
@@ -898,6 +919,17 @@ impl WalletService {
         &mut self,
         operation_id: &str,
     ) -> WalletResult<String> {
+        // The same refusal again, at the signing boundary.
+        //
+        // `prepare_channel_open` already refuses, so on a fresh install this
+        // is unreachable. It is here for the prepared operation that was
+        // stored by an earlier build and is still sitting in the durable store
+        // when this one starts: without it, that operation would execute, sign
+        // and broadcast a channel this wallet cannot leave. Execution is where
+        // the key is used, so execution gets the authority.
+        crate::l1_channel_close_safety::refuse_mainnet_channel_open_without_an_exit(
+            &self.settings.network_mode,
+        )?;
         self.require_online_signing_transport()?;
         let (payload, assurance) = self.take_prepared(operation_id, OperationKind::ChannelOpen)?;
         let PreparedExecution::ChannelOpen {

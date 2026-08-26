@@ -29,6 +29,94 @@ use crate::paths::{secure_write, wallet_data_root};
 
 const KEY_DOMAIN: &[u8] = b"HPAY/L1/CHANNEL-CLOSE/JOURNAL/AUTH/V1";
 
+/// What a person is told when this wallet declines to open a mainnet Fast Pay
+/// channel, because it has no way to leave one.
+///
+/// The three close paths this wallet owns all hand the transaction to the Hub
+/// to countersign and broadcast. There is no fourth. The close voucher, the
+/// one thing that produces bytes an owner can broadcast alone, has never been
+/// wired to this wallet: `ChannelCloseStatus::VoucherHeld` above would accept
+/// and store one for the personal scope today, and nothing calls it with one.
+///
+/// So this refusal is not a new limitation. It is the existing limitation,
+/// enforced at the moment it can still be acted on. The consent checkbox
+/// already told a person that a channel here can only be closed if the Hub
+/// co-signs; what it did not do was stop them.
+///
+/// The sentence names where the exit does exist, because "no" without a
+/// destination reads as a broken build. It also says plainly what that rail
+/// is: a pilot in which the Hub countersigns once because it chose to, and
+/// nothing compels it. The word for that is not "trustless" and must never be.
+/// A note on what this sentence used to say, so it is not written back.
+///
+/// It located the exit "behind its own consent and its own build flag". Both
+/// halves were true and together they were misleading in the direction that
+/// costs a person a day of work. The build flag is ON in every official
+/// desktop release: the release workflow passes
+/// `agent-wallet-bounded-mainnet-pilot`, the commands are compiled, registered
+/// and in the desktop ACL, and a real button on the Agent screen presses them.
+/// So the flag is the one gate the reader has already passed, and naming it
+/// made the cheapest gate sound like the expensive one while saying nothing
+/// about the four that actually stop them:
+///
+///   1. it is a DIFFERENT WALLET holding DIFFERENT money, so the voucher does
+///      nothing for the channel this wallet was just refused,
+///   2. its mainnet consent can only be given at the instant that wallet is
+///      created and never afterwards,
+///   3. it signs only against a Hacash full node the person runs themselves,
+///      because no public node satisfies the binding, and
+///   4. it opens a channel only against a Fast Pay Hub in the bounded pilot
+///      profile with that new address on the Hub's own allowed list, which in
+///      practice means running the Hub too.
+///
+/// The rewrite names those instead. It also keeps saying that the voucher is
+/// asked for only AFTER the deposit confirms, because that is the one thing
+/// the destination does not fix, and a person deciding whether the trip is
+/// worth it deserves to know the destination has a smaller version of the same
+/// hole.
+pub const MAINNET_CHANNEL_OPEN_WITHOUT_EXIT_REFUSAL: &str = concat!(
+    "This wallet will not open a mainnet Fast Pay channel, because it has no way out of one. ",
+    "Every close it can build has to be countersigned and broadcast by the Hub, and this wallet ",
+    "cannot take a close voucher, which is the only thing that would let you leave on your own. ",
+    "If the Hub stopped answering, refused to sign, or disappeared, the deposit would stay locked ",
+    "and nobody could release it for you. ",
+    "A close voucher does exist in this build, but not for this wallet and not for money you hold ",
+    "here. It belongs to the Agent Wallet, which is a separate wallet with its own address, its ",
+    "own passphrase and its own funds, and it is a trusted pilot: the Hub countersigns once ",
+    "because it chose to, and nothing compels it. ",
+    "Reaching it is not a setting you turn on. You would have to create that separate wallet and ",
+    "accept its mainnet terms at the moment you create it, because that consent cannot be given ",
+    "afterwards; send money to its new address on chain; and run both a Hacash full node and a ",
+    "Fast Pay Hub yourself, because no public node satisfies what it signs against and a Hub run ",
+    "by anyone else is refused before a deposit is built. Even there, the voucher is only asked ",
+    "for after your deposit has already confirmed on chain, so that rail carries a shorter ",
+    "version of the same gap this refusal is protecting you from. ",
+    "It is not part of this wallet and it is not on the phone build. ",
+    "Nothing about an existing channel changes. If you already have one open, closing it through ",
+    "the Hub still works exactly as before, and Fast Pay on testnet is untouched."
+);
+
+/// Refuse to open a Fast Pay channel this wallet could not leave.
+///
+/// Scoped to mainnet, which is the same scope the consent checkbox is scoped
+/// to, and evaluated before anything is previewed, quoted, prompted for or
+/// signed. Returning `Ok(())` on testnet is deliberate: the stranding this
+/// guards against costs real money only on mainnet, and the pilot rail this
+/// mechanism was proven on is a test chain.
+///
+/// This is a gate, not a preference. There is no override and no consent that
+/// opens it: the consent checkbox is already the "I accept there is no exit"
+/// toggle, and its existence is why a funded unleavable channel was reachable.
+/// Adding a second one would put the hole back.
+pub fn refuse_mainnet_channel_open_without_an_exit(network_mode: &str) -> WalletResult<()> {
+    if network_mode == "mainnet" {
+        return Err(WalletError::Policy(
+            MAINNET_CHANNEL_OPEN_WITHOUT_EXIT_REFUSAL.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Narrow authority used only to derive an authenticated channel-close journal
 /// key. Implementations must not expose the wallet secret or generic signing.
 pub trait ChannelCloseJournalKeyProvider {
