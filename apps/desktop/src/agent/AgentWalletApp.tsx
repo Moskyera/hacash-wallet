@@ -633,8 +633,23 @@ function CreateAgentWallet({
   const localError = useMemo(() => {
     if (passphrase && passphrase.length < 15) return "Use at least 15 characters.";
     if (confirmation && passphrase !== confirmation) return "Passphrases do not match.";
-    if (isMainnet && mainnetNodeUrl && !mainnetNodeUrl.startsWith("https://")) {
-      return "Agent mainnet requires an HTTPS HPAY-compatible full node.";
+    // This said `!mainnetNodeUrl.startsWith("https://")`, which is STRICTER
+    // than the rule it was reporting on, and it contradicted the control right
+    // below it.
+    //
+    // The core rule (`validate_signing_node_url`, crates/wallet-core/src/
+    // settings.rs) accepts HTTPS *or* plain HTTP to a loopback host, because a
+    // node on this same machine has no network hop to intercept. The submit
+    // button already asks `mainnetSigningTransportIsEligible`, which mirrors
+    // the core exactly. So with `http://127.0.0.1:8080`, the node an owner
+    // actually runs, the button was enabled and this line printed a red error
+    // saying HTTPS was required. A person reads the error, believes they are
+    // blocked, and stops, with nothing wrong.
+    //
+    // One predicate, used in both places. If the transport rule ever changes,
+    // it changes once.
+    if (isMainnet && mainnetNodeUrl && !mainnetSigningTransportIsEligible(mainnetNodeUrl, "mainnet")) {
+      return "Agent mainnet needs an HTTPS node, or a node on this same computer reached over http://127.0.0.1 or http://localhost.";
     }
     return "";
   }, [passphrase, confirmation, isMainnet, mainnetNodeUrl]);
