@@ -644,6 +644,14 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+        // The mirror of the mainnet case below, and the reason the
+        // `!node.funding_confirmed` term in `require_exact_node_binding` is
+        // redundant on this rail: `supports_agent_local_pilot_payment` already
+        // demands the flag, so a pilot node that reaches the close gate always
+        // reports true, and one that reports false never gets a snapshot at
+        // all. `same_chain_id_with_missing_or_unready_network_identity_is_rejected`
+        // executes the false half.
+        assert!(verified.snapshot().funding_confirmed);
         task.abort();
     }
 
@@ -659,6 +667,31 @@ mod tests {
         assert_eq!(verified.network_kind(), "mainnet");
         assert_eq!(verified.transaction_format_version(), 2);
         assert!(verified.snapshot().mainnet);
+        // The node that opens a mainnet channel is accepted while reporting
+        // `funding_confirmed: false`, which is what mainnet always reports.
+        // `require_exact_node_binding` in `service/l2/verification.rs` refuses
+        // exactly that node, so the open is reachable and the close is not.
+        assert!(!verified.snapshot().funding_confirmed);
+        task.abort();
+    }
+
+    /// The second hard equality on the mainnet path, and the one with a date on
+    /// it: `validate_agent_capabilities` pins `node.version` to the literal
+    /// "1.0.10". A real mainnet node that is upgraded stops matching, and every
+    /// Agent Wallet path behind `verified_agent_node` closes at once - open,
+    /// close, voucher and payment alike. This is not a defect today, because the
+    /// owner's live node reports 1.0.10; it is asserted here so the pin is a
+    /// stated decision with a known blast radius rather than an accident.
+    #[cfg(feature = "agent-wallet-bounded-mainnet-pilot")]
+    #[tokio::test]
+    async fn a_mainnet_node_that_is_upgraded_past_the_pinned_version_is_refused() {
+        let mut capabilities = mainnet_capabilities();
+        capabilities["node"]["version"] = json!("1.0.11");
+        let (node_url, task) = spawn_capability_node(MAINNET_BLOCK_ONE_HASH, capabilities).await;
+        assert!(matches!(
+            verified_agent_node(&node_url, "mainnet", MAINNET_BLOCK_ONE_HASH).await,
+            Err(AgentWalletError::NodeCapabilityMismatch)
+        ));
         task.abort();
     }
 

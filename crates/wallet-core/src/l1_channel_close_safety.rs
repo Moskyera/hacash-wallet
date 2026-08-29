@@ -74,6 +74,36 @@ const KEY_DOMAIN: &[u8] = b"HPAY/L1/CHANNEL-CLOSE/JOURNAL/AUTH/V1";
 /// the destination does not fix, and a person deciding whether the trip is
 /// worth it deserves to know the destination has a smaller version of the same
 /// hole.
+///
+/// A second note, on the clause added when the Agent rail's mainnet gate was
+/// scoped. Until then this sentence pointed at a destination that did not
+/// actually work: `require_exact_node_binding` in agent-wallet-core demanded
+/// `funding_confirmed`, which is a local pilot signal a real mainnet node
+/// always reports false, so on mainnet the Agent Wallet could not take the
+/// voucher either. That term is now scoped to the pilot rail and the take and
+/// the self-broadcast really do work on mainnet.
+///
+/// A third note, correcting the second before it shipped. The second note
+/// claimed the Agent Wallet's COOPERATIVE close stays refused on mainnet
+/// because `require_mainnet_hard_guarantees` denies when no Hub can show
+/// trustless finality. That is false, and it is worth recording why so it is
+/// not reasoned back into place.
+///
+/// `require_channel_binding_guarantees` in `l2_hub.rs` branches on the policy
+/// the OWNER chose, not on the document. Under `TrustlessOnly` it does demand
+/// `trustless_finality` and `unilateral_l1_enforceable`. Under
+/// `TrustedBoundedPilot` it demands only that the Hub publishes the
+/// `mainnet-bounded-pilot` profile with `trusted_bounded_pilot` set. And
+/// `new_for_wallet_policy` selects `TrustedBoundedPilot` exactly when the mode
+/// is mainnet and the owner accepted the pilot consent, which is the only way
+/// to be on this rail at all. So against a bounded pilot Hub that answers, the
+/// co-signed close is not refused.
+///
+/// Which makes the voucher's value narrower and easier to say honestly: it is
+/// what protects the deposit when the Hub STOPS answering. The sentence now
+/// says only that, and says nothing about whether a co-signed close succeeds,
+/// because that depends on a Hub this refusal has never contacted. Nobody may
+/// compress any of it into "the mainnet exit works now".
 pub const MAINNET_CHANNEL_OPEN_WITHOUT_EXIT_REFUSAL: &str = concat!(
     "This wallet will not open a mainnet Fast Pay channel, because it has no way out of one. ",
     "Every close it can build has to be countersigned and broadcast by the Hub, and this wallet ",
@@ -91,6 +121,10 @@ pub const MAINNET_CHANNEL_OPEN_WITHOUT_EXIT_REFUSAL: &str = concat!(
     "by anyone else is refused before a deposit is built. Even there, the voucher is only asked ",
     "for after your deposit has already confirmed on chain, so that rail carries a shorter ",
     "version of the same gap this refusal is protecting you from. ",
+    "And be exact about what that voucher is. Once you hold one, you can broadcast it yourself, ",
+    "and a Hub that later goes quiet cannot keep your deposit. That is the whole of what it buys. ",
+    "It has to be taken while the Hub is still answering, so it is something you arrange before ",
+    "you need it rather than something you can fall back on afterwards. ",
     "It is not part of this wallet and it is not on the phone build. ",
     "Nothing about an existing channel changes. If you already have one open, closing it through ",
     "the Hub still works exactly as before, and Fast Pay on testnet is untouched."

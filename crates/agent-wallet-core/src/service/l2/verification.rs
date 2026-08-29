@@ -1337,8 +1337,56 @@ pub(super) fn require_exact_node_binding(
         network_instance_id: node.network_instance_id.clone(),
         transaction_format_version: node.transaction_format_version,
     };
+    // `funding_confirmed` is now SCOPED to the pilot rail, on the owner's
+    // explicit decision, and the scope is keyed on the WALLET'S OWN STORED
+    // MODE.
+    //
+    // The fact this answers, pinned by the tests below: a healthy, fully synced,
+    // real mainnet node reports `funding_confirmed: false`. The flag is a LOCAL
+    // PILOT signal that mainnet has no equivalent of. `valid_local_pilot`
+    // requires it and `valid_mainnet` deliberately omits it;
+    // `supports_agent_local_pilot_payment` reads it and
+    // `supports_agent_mainnet_payment` does not; both crates' mainnet fixtures
+    // hardcode it false. So on mainnet the term could never be satisfied, and it
+    // sat on the close voucher path and all three cooperative close paths but
+    // NOT on the channel open path. A mainnet agent channel could be funded and
+    // never left. On mainnet this term protected nothing and only locked the
+    // exit, so there it no longer applies.
+    //
+    // On testnet and the local pilot the flag means something real and is
+    // still required, so the pilot arm keeps failing closed.
+    //
+    // WHY IT IS KEYED ON `binding.network_mode()` AND NOT ON `node.mainnet`:
+    // `node.mainnet` is written by the remote node being judged. Keying the
+    // pilot arm on it would let a node choose which arm judges it, by claiming
+    // to be mainnet. `binding.network_mode()` is stored by this wallet when the
+    // channel was bound and the node cannot move it. The term is scoped rather
+    // than deleted because deleting it would drop the pilot check entirely.
+    //
+    // WHAT MUST NOT BE RELAXED. This is one term and the authorisation covered
+    // exactly one term. The remaining three here carry the safety now:
+    // `node.mainnet` must still agree with the stored mode, the node must still
+    // be `transaction_ready`, and the whole live network binding (chain id,
+    // genesis fingerprint, node profile commitment, network instance,
+    // transaction format version) must still equal the stored one byte for
+    // byte. Do not weaken any of them, and do not make the mainnet capability
+    // contract report `funding_confirmed: true` to get past this: that would
+    // put a false value in the field and break the open path that reads it
+    // honestly.
+    //
+    // On the fee: this deliberately does NOT check that the agent address can
+    // pay the close transaction's L1 fee. The chain subtracts the fee AFTER the
+    // actions execute, and ChannelClose credits the principal to the party's
+    // ordinary balance inside that same loop, so a delta-zero voucher close
+    // funds its own fee out of the money it releases. A balance precondition
+    // here would read the balance before the close changes it and could only
+    // ever produce a false refusal, on the exit path, against the person whose
+    // ordinary balance is empty because everything went into the channel. The
+    // main wallet's close paths check no balance either; the one balance check
+    // in this codebase is on the channel OPEN path, where the money must come
+    // from outside.
     if node.mainnet != (binding.network_mode() == "mainnet")
-        || !node.funding_confirmed
+        || (binding.network_mode() != "mainnet" && !node.funding_confirmed)
         || !node.transaction_ready
         || &live != binding.network_binding()
     {
@@ -1578,5 +1626,238 @@ mod tests {
         // amount of health drift can open the mainnet money path on its own.
         health.deployment_profile = Some("mainnet-bounded-pilot".to_owned());
         assert!(require_exact_hub_health(&health, &binding, false).is_err());
+    }
+
+    /// The owner's real mainnet node, read from its own `/query/capabilities`
+    /// on 2026-08-25 while it was serving at height 776330. Every field here is
+    /// what that node reported, including `funding_confirmed: false`, which is
+    /// what mainnet always reports: `mainnet_agent_capabilities` in
+    /// `crates/wallet-core/src/node_capabilities.rs` sets it false, and
+    /// `valid_mainnet` there never reads it.
+    fn real_mainnet_fixture() -> (AgentL2Binding, AgentNodeSnapshot, ChannelInfo) {
+        const MAINNET_BLOCK_ONE: &str =
+            "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+        const MAINNET_INSTANCE: &str =
+            "5a310ec0f487a37156a182c67778495f66e5c7502f9871829edc790023b123cf";
+        let agent = WalletAccount::create_random().unwrap();
+        let hub = WalletAccount::create_random().unwrap();
+        let channel = ChannelInfo {
+            ret: 0,
+            id: derive_channel_id(&agent.address(), &hub.address(), 1),
+            status: CHANNEL_STATUS_OPENING,
+            open_height: 776_300,
+            close_height: 0,
+            reuse_version: 1,
+            arbitration_lock: 5_000,
+            left: ChannelPartyBalance {
+                address: agent.address(),
+                hacash: "1".to_owned(),
+                satoshi: 0,
+            },
+            right: ChannelPartyBalance {
+                address: hub.address(),
+                hacash: "0".to_owned(),
+                satoshi: 0,
+            },
+            challenging: None,
+        };
+        let node = AgentNodeSnapshot {
+            node_name: "hacash-fullnode".to_owned(),
+            node_version: "1.0.10".to_owned(),
+            network_kind: "mainnet".to_owned(),
+            node_profile_id: "hacash-mainnet".to_owned(),
+            node_profile_commitment: "5c".repeat(32),
+            chain_id: 0,
+            mainnet: true,
+            current_height: 776_330,
+            block_one_fingerprint: MAINNET_BLOCK_ONE.to_owned(),
+            network_instance_id: MAINNET_INSTANCE.to_owned(),
+            // The real node reports this false on mainnet.
+            funding_confirmed: false,
+            transaction_ready: true,
+            transaction_format_version: 2,
+        };
+        // A binding that agrees with that node in every respect.
+        let network = AgentFastPayNetworkBinding {
+            network_mode: "mainnet".to_owned(),
+            chain_id: node.chain_id,
+            genesis_identifier: node.block_one_fingerprint.clone(),
+            node_profile_id: node.node_profile_commitment.clone(),
+            network_instance_id: node.network_instance_id.clone(),
+            transaction_format_version: node.transaction_format_version,
+        };
+        let binding = AgentL2Binding::from_verified_channel(
+            AgentWalletId::new(),
+            "mainnet",
+            network,
+            &agent.address(),
+            "https://hub.example",
+            &hub.address(),
+            &channel,
+            node.current_height,
+            1_000,
+        )
+        .unwrap();
+        (binding, node, channel)
+    }
+
+    /// The one term this change moved, asserted from both sides in one place.
+    ///
+    /// This test used to be called `..._is_refused_by_...` and asserted
+    /// `Err`. It was written to pin the BUG: a healthy, fully synced, real
+    /// mainnet node was refused by the gate that stands on the close voucher
+    /// path, so a mainnet agent channel could be funded and never left. The
+    /// owner decided to scope the term to the pilot rail where it means
+    /// something, so the assertion inverts on the mainnet side and the pilot
+    /// side is asserted here rather than left to another file, because a
+    /// scoped term with only one arm under test is half untested.
+    #[test]
+    fn real_mainnet_node_is_accepted_and_the_pilot_arm_still_demands_funding_confirmed() {
+        let (binding, node, _channel) = real_mainnet_fixture();
+        let outcome = require_exact_node_binding(&node, &binding);
+        assert!(
+            outcome.is_ok(),
+            "a healthy real mainnet node reporting funding_confirmed: false must pass, \
+             got {outcome:?}"
+        );
+        // Not vacuously: the node really does report the pilot flag false, so
+        // the Ok above is the scoped arm doing its job and not a fixture that
+        // quietly satisfies the old term.
+        assert!(!node.funding_confirmed);
+
+        // THE PILOT ARM. On a binding this wallet stored as testnet the flag
+        // still means something and is still required. Without this half the
+        // scoping would be indistinguishable from deleting the term.
+        let (pilot_binding, pilot_node, _channel, _health) = fixture();
+        assert_eq!(pilot_binding.network_mode(), "testnet");
+        require_exact_node_binding(&pilot_node, &pilot_binding)
+            .expect("a healthy pilot node with funding_confirmed: true still passes");
+        let mut unfunded = pilot_node;
+        unfunded.funding_confirmed = false;
+        let pilot_outcome = require_exact_node_binding(&unfunded, &pilot_binding);
+        assert!(
+            matches!(pilot_outcome, Err(AgentWalletError::NodeNetworkMismatch)),
+            "on the pilot rail funding_confirmed: false must still fail closed, \
+             got {pilot_outcome:?}"
+        );
+
+        // The scope is keyed on the WALLET'S stored mode, not on the node's own
+        // `mainnet` claim, so a node cannot talk its way into the lenient arm.
+        // A node that claims mainnet against a testnet binding is refused by
+        // the first term before the flag is ever weighed.
+        let mut liar = unfunded;
+        liar.mainnet = true;
+        assert!(require_exact_node_binding(&liar, &pilot_binding).is_err());
+
+        // And nothing else about the real mainnet node is wrong: each remaining
+        // readiness and identity term is satisfied on its own.
+        assert!(node.mainnet && binding.network_mode() == "mainnet");
+        assert!(node.transaction_ready);
+        assert_eq!(node.chain_id, binding.network_binding().chain_id);
+        assert_eq!(
+            node.block_one_fingerprint,
+            binding.network_binding().genesis_identifier
+        );
+        assert_eq!(
+            node.node_profile_commitment,
+            binding.network_binding().node_profile_id
+        );
+        assert_eq!(
+            node.network_instance_id,
+            binding.network_binding().network_instance_id
+        );
+        assert_eq!(
+            node.transaction_format_version,
+            binding.network_binding().transaction_format_version
+        );
+    }
+
+    /// The gate immediately after `require_exact_node_binding` on every one of
+    /// the five paths that carry a close.
+    ///
+    /// This decided whether the `funding_confirmed` term was the whole wall or
+    /// only the first course of it: if `require_exact_live_channel` also
+    /// refused a real mainnet node, scoping `funding_confirmed` would have
+    /// moved the refusal rather than lifted it. It does not refuse. The same
+    /// real node and the same real channel pass here, which is why scoping the
+    /// one term actually opens the exit.
+    ///
+    /// The `expect_err` precondition this test used to open with is gone,
+    /// because the binding gate no longer refuses that node. What the test
+    /// proves is unchanged and is still worth proving: the next gate along is
+    /// not a second copy of the same refusal.
+    #[test]
+    fn the_live_channel_gate_accepts_the_real_mainnet_node_and_its_channel() {
+        let (binding, node, channel) = real_mainnet_fixture();
+        require_exact_live_channel(&binding, &node, &channel, 1_000)
+            .expect("the live channel gate accepts the real mainnet node and its channel");
+
+        // Negative control on that acceptance, so the Ok is known to be a
+        // judgement and not an unconditional Ok: drift the channel and it
+        // refuses.
+        let mut reopened = channel.clone();
+        reopened.reuse_version += 1;
+        require_exact_live_channel(&binding, &node, &reopened, 1_000)
+            .expect_err("channel drift must still fail closed");
+    }
+
+    /// The terms that carry the safety now that `funding_confirmed` is scoped
+    /// off mainnet, exercised on the REAL mainnet fixture.
+    ///
+    /// `any_node_identity_or_readiness_drift_fails_closed` runs on the testnet
+    /// fixture, and it never touched these two fields at all. So before this
+    /// test the identity commitments that decide whether the node in front of a
+    /// mainnet close is the node the channel was bound to had no executed test
+    /// pointing at them on mainnet. They are the wall now, and a wall nobody
+    /// pushes on is a wall nobody knows is standing.
+    ///
+    /// Both are substituted through the LIVE snapshot only, leaving the stored
+    /// binding untouched, which is the real shape of the attack: a different
+    /// node answering the same URL.
+    #[test]
+    fn mainnet_node_identity_commitment_drift_fails_closed() {
+        let (binding, node, _channel) = real_mainnet_fixture();
+        // Precondition, so an Err below is known to come from the drift and not
+        // from a fixture that never passed.
+        require_exact_node_binding(&node, &binding)
+            .expect("precondition: the undrifted real mainnet node passes");
+
+        // A different node profile commitment. This is the whole capability
+        // profile the wallet agreed to, reduced to one hash.
+        let mut other_profile = node.clone();
+        other_profile.node_profile_commitment = "5d".repeat(32);
+        assert_ne!(
+            other_profile.node_profile_commitment,
+            node.node_profile_commitment
+        );
+        let outcome = require_exact_node_binding(&other_profile, &binding);
+        assert!(
+            matches!(outcome, Err(AgentWalletError::NodeNetworkMismatch)),
+            "node_profile_commitment drift must fail closed on mainnet, got {outcome:?}"
+        );
+
+        // A different genesis fingerprint. A node serving a different chain
+        // from block one is the one substitution that could make a close land
+        // somewhere the money is not.
+        let mut other_genesis = node.clone();
+        other_genesis.block_one_fingerprint = "00".repeat(32);
+        assert_ne!(
+            other_genesis.block_one_fingerprint,
+            node.block_one_fingerprint
+        );
+        let outcome = require_exact_node_binding(&other_genesis, &binding);
+        assert!(
+            matches!(outcome, Err(AgentWalletError::NodeNetworkMismatch)),
+            "block_one_fingerprint drift must fail closed on mainnet, got {outcome:?}"
+        );
+
+        // And an empty value is drift too, not a hole that reads as "not
+        // reported yet" and passes.
+        let mut blank_profile = node.clone();
+        blank_profile.node_profile_commitment = String::new();
+        assert!(require_exact_node_binding(&blank_profile, &binding).is_err());
+        let mut blank_genesis = node;
+        blank_genesis.block_one_fingerprint = String::new();
+        assert!(require_exact_node_binding(&blank_genesis, &binding).is_err());
     }
 }

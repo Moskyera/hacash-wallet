@@ -102,6 +102,77 @@ fn the_refusal_names_where_the_exit_does_exist() {
 }
 
 #[test]
+fn the_refusal_describes_the_other_rail_as_exactly_as_true_as_the_code_is() {
+    // The destination this refusal names used to be shut on mainnet as well.
+    // `require_exact_node_binding` in agent-wallet-core demanded
+    // `funding_confirmed`, a local pilot signal that a real mainnet node always
+    // reports false, so the Agent Wallet could not take the voucher there
+    // either. That term is now scoped to the pilot rail, so the take and the
+    // self-broadcast really work on mainnet.
+    //
+    // What the refusal must NOT do is claim to know more than it can. It has
+    // contacted no Hub, so it cannot say whether a Hub-countersigned close
+    // would succeed, and the assertion below pins that silence. The one thing
+    // it can state is what the voucher buys: it has to be taken while the Hub
+    // still answers, and it is what keeps a deposit from being stranded if that
+    // Hub later goes quiet.
+    //
+    // The failure mode being guarded is the build-flag one in a new costume:
+    // true words assembled into a false picture. An earlier draft of this very
+    // test demanded the sentence say the co-signed close "is still refused on
+    // mainnet", which read the wrong branch of
+    // `require_channel_binding_guarantees` and would have shipped a falsehood
+    // with a test holding it in place.
+    let text = refusal_text();
+    assert!(
+        text.contains("you can broadcast it yourself"),
+        "it must say what the voucher really buys, or the refusal understates a \
+         rail that now works, got {text}"
+    );
+    // This assertion used to demand the OPPOSITE, that the sentence say the
+    // Hub-countersigned close "is still refused on mainnet". That was false and
+    // the test was pinning the falsehood in place.
+    //
+    // `require_channel_binding_guarantees` branches on the policy the OWNER
+    // chose, not on the readiness document. `TrustlessOnly` demands
+    // `trustless_finality` and `unilateral_l1_enforceable`;
+    // `TrustedBoundedPilot` demands only the `mainnet-bounded-pilot` profile
+    // and the `trusted_bounded_pilot` flag. `new_for_wallet_policy` picks
+    // `TrustedBoundedPilot` whenever the mode is mainnet and the owner accepted
+    // the pilot consent, which is the only route onto this rail. So against a
+    // bounded pilot Hub that answers, the co-signed close is not refused, and
+    // the earlier reasoning had simply read the wrong branch.
+    //
+    // The refusal must therefore make NO claim about whether a co-signed close
+    // succeeds. It has contacted no Hub and cannot know. What it can say is
+    // what the voucher buys, which is protection for the case where the Hub
+    // stops answering.
+    let lowered_for_close_claim = text.to_lowercase();
+    assert!(
+        !lowered_for_close_claim.contains("still refused on mainnet"),
+        "the co-signed close is NOT categorically refused on the pilot policy, \
+         so the refusal may not say it is, got {text}"
+    );
+    assert!(
+        text.contains("a Hub that later goes quiet cannot keep your deposit"),
+        "it must say what the voucher actually protects against, which is a Hub \
+         that stops answering, got {text}"
+    );
+    assert!(
+        text.contains("arrange before you need it"),
+        "it must say the voucher has to be taken in advance, which is the whole \
+         practical difference between the two halves, got {text}"
+    );
+    // And it must not compress the two halves into the claim the owner was
+    // warned against.
+    let lowered = text.to_lowercase();
+    assert!(
+        !lowered.contains("the mainnet exit works"),
+        "half of it works and the sentence may never round that up, got {text}"
+    );
+}
+
+#[test]
 fn the_refusal_never_promises_a_guarantee() {
     let text = refusal_text().to_lowercase();
     // The Agent Wallet rail is a TRUSTED pilot. The Hub countersigns once

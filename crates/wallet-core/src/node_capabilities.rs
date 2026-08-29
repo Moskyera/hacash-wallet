@@ -917,6 +917,46 @@ mod tests {
         assert!(!wrong_anchor.supports_agent_mainnet_payment(BLOCK_ONE));
     }
 
+    /// The owner's real Hacash mainnet node, captured verbatim from
+    /// `/query/capabilities` on 127.0.0.1:8080 on 2026-08-25 while it served
+    /// height 776330. This is ground truth, not a fixture written to agree
+    /// with the code, so every mainnet predicate can be asked the only
+    /// question that matters: does a real, healthy, fully synced mainnet node
+    /// actually satisfy it?
+    const REAL_MAINNET_CAPABILITY_DOCUMENT: &str = r#"{"actions":{"enabled":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"registered":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795]},"api":{"balance_query":true,"contract_sandbox_query":true,"hpay_channel_registry_query":true,"reconciliation_by_tx_hash":true,"transaction_query":true,"transaction_submit":true,"transaction_submit_bound":true},"api_version":1,"chain":{"height":776330,"id":0,"mainnet":true,"next_height":776331},"features":{"account_abstraction":true,"action_guard":true,"ast":true,"channel_registry_unilateral_exit":false,"channel_registry_unilateral_exit_evidence":{"bytecode_sha3":"2fa7429d9e686dd2457eeb1b4476f972c7ddd9be6a0371c9765eff2910209b04","channel_key_count":12,"channel_model":{"first_reuse":0,"left_deposit":"positive","maximum_active_channels_per_left_address":1,"right_hub_deposit":"exactly_zero"},"contract_name":"HPAYChannelRegistryV2","deployment":{"contract_address":null,"deployment_height":null,"deployment_tx_hash":null,"enabled":false,"external_audit_complete":false,"independently_verified":false},"deployment_verified":false,"manifest_valid":true,"maximum_renewal_step_periods":150,"must_renew_every_channel_key":true,"must_renew_every_registry_key":true,"on_chain_verification":{"confirmed_tx_height":null,"constructor_network_instance_id":null,"contract_code_matches":false,"contract_code_sha3":null,"deployment_action_verified":false,"deployment_tx_confirmed":false,"hub_address":null,"network_binding_matches":false,"node_network_instance_id":null,"observed_height":null},"protocol_domain":"HPAY/HVM-CHANNEL-REGISTRY/V2","registry_key_count":6,"required_action_kinds":[40,41,44],"schema":"hpay-hvm-channel-registry-exit-evidence/2","settlement_profile":"hpay-hvm-shared-registry-v2","source_sha256":"37fabe6b8ab54431864715530c0f16c89fed3b609c23c227e592cec24e2ab8b5"},"channel_unilateral_exit":false,"channel_unilateral_exit_evidence":{"bytecode_sha3":"11a2efc27a0c951bbc6977186eb58bd076dd331a785f3c57242cf54a72238349","contract_name":"HPAYChannelExitV1","deployment":{"contract_address":null,"deployment_height":null,"deployment_tx_hash":null,"enabled":false,"independently_verified":false},"deployment_verified":false,"funding_model":{"left_deposit":"positive","right_hub_deposit":"exactly_zero"},"manifest_valid":true,"must_renew_every_storage_key":true,"on_chain_verification":{"confirmed_tx_height":null,"contract_code_matches":false,"contract_code_sha3":null,"deployment_tx_confirmed":false,"observed_height":null},"protocol_domain":"HPAY/HVM-CHANNEL/V1","required_action_kinds":[40,41,44],"schema":"hpay-hvm-channel-exit-evidence/1","settlement_profile":"hpay-hvm-channel-v1","source_sha256":"c0a430eb9769d1d506641c379bb8aaf708c7bac7d03694b60a4be03fd001dd06","storage_key_count":18},"contract_state_leasing":true,"exact_unsigned_simulation":false,"hip20":false,"hip20_primitives":true,"hvm":true,"intent":true,"ir_decompilation":false,"native_assets":true,"p2sh":true,"req_sign_list":true,"tex":true,"tx_blob":true,"type4_mainnet":false},"istanbul":{"activation_height":765432,"active":true,"evaluation_height":776331},"limits":{"ast_depth":6,"gas_max":111911,"gas_max_byte":99,"max_tx_actions":200,"max_tx_size":16384,"max_type3_signers":200},"network":{"block_1_available":true,"block_1_hash":"001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56","current_height":776330,"funding_confirmed":false,"instance_id":"5a310ec0f487a37156a182c67778495f66e5c7502f9871829edc790023b123cf","kind":"mainnet","node_profile_id":"hacash-mainnet","transaction_format_version":2,"transaction_ready":true},"node":{"build_time":"2026/7/10 #1","name":"hacash-fullnode","version":"1.0.10"},"peers":{"inbound_established":0,"inbound_proven":false,"measured":true,"note":"inbound_established counts remote peers that dialed this node and completed the p2p handshake. A listening socket is not a reached socket: a bound port and a green sync can both be true while inbound_established is 0, which means no peer has reached this node and it relays for nobody. Only a non zero inbound_established proves the p2p port is reachable from outside. outbound_established counts connections this node opened itself, and public counts peers we hold a dialable address for, which says nothing about us.","outbound_established":4,"public":4,"role":"leaf","total":4},"ret":0,"sync":{"fresh":true,"max_tip_age_seconds":3600,"observed_unix":1787651668,"tip_age_seconds":551,"tip_timestamp_unix":1787651117},"transactions":{"enabled":[0,1,2,3],"registered":[0,1,2,3,4]}}"#;
+
+    #[test]
+    fn the_real_mainnet_node_document_parses_validates_and_is_agent_mainnet_ready() {
+        const BLOCK_ONE: &str = "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+        let mut capabilities: NodeCapabilities =
+            serde_json::from_str(REAL_MAINNET_CAPABILITY_DOCUMENT).expect("real document parses");
+        capabilities.source = CapabilitySource::Reported;
+        let capabilities = capabilities
+            .validate()
+            .expect("the owner real mainnet node satisfies the capability contract");
+
+        // The field this whole sweep turns on. A real mainnet node reports it
+        // false, and `validate_network_contract` accepts that: `valid_mainnet`
+        // deliberately omits it while `valid_local_pilot` requires it.
+        assert!(!capabilities.network.funding_confirmed);
+        assert!(capabilities.network.transaction_ready);
+
+        // Every other mainnet predicate in wallet-core does hold for it.
+        assert!(capabilities.supports_agent_mainnet_payment(BLOCK_ONE));
+        assert!(capabilities.api.supports_agent_payment());
+        assert!(capabilities.supports_transaction(2));
+        for kind in [1u16, 2, 3, 14, 0x0411] {
+            assert!(capabilities.supports_action(kind), "action {kind}");
+        }
+        assert!(capabilities.sync.fresh);
+        assert!(capabilities.chain.height >= HPAY_MAINNET_MIN_SAFE_HEIGHT);
+
+        // And the local pilot predicate that reads `funding_confirmed` is the
+        // one shape it cannot satisfy, which is correct: it is not that node.
+        assert!(!capabilities.matches_agent_local_pilot_identity(BLOCK_ONE));
+        assert!(!capabilities.supports_agent_local_pilot_payment(BLOCK_ONE));
+    }
+
     #[test]
     fn local_pilot_requires_the_complete_stable_network_identity() {
         let capabilities = local_pilot_capabilities().validate().unwrap();

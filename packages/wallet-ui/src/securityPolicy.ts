@@ -159,6 +159,30 @@ export const FAST_PAY_MAINNET_CONSENT =
  * pushes something else towards the fold. The full sentence, with the reasons,
  * arrives from core the moment Enable is pressed.
  *
+ * WHY THIS DID NOT GROW WHEN THE AGENT RAIL'S MAINNET GATE WAS SCOPED. The
+ * core refusal now says something this preview deliberately does not: on the
+ * Agent rail a close voucher can be taken and broadcast by its owner on
+ * mainnet, which is what protects a deposit when the Hub stops answering. That
+ * detail lives in MAINNET_CHANNEL_OPEN_WITHOUT_EXIT_REFUSAL, which arrives the
+ * instant Enable is pressed.
+ *
+ * An earlier draft of this note also said the Hub-countersigned close "is still
+ * refused there". It is not, and the claim is recorded here only so it is not
+ * written back: `require_channel_binding_guarantees` demands trustless finality
+ * under `TrustlessOnly`, while the policy every consented mainnet Agent user
+ * gets is `TrustedBoundedPilot`, which asks only for the bounded pilot profile
+ * and its flag. Neither this string nor the core one may claim to know whether
+ * a co-signed close succeeds, because neither has contacted a Hub.
+ *
+ * They are not here because this string makes no claim they contradict. It says
+ * a voucher exists only for the separate Agent Wallet and only for someone
+ * running their own node and Hub, which was true before the scoping and is true
+ * after it. Adding the distinction would cost roughly forty words in the one
+ * band that is measured, to qualify a destination the reader has not chosen
+ * yet. If a future change makes this preview claim that rail HAS a working
+ * exit, the qualification stops being optional and something else on this
+ * screen has to go to pay for it.
+ *
  * That budget is not theoretical and there is almost no headroom in it. The
  * honest but wordier draft of this sentence, naming the Hacash full node and
  * the Fast Pay Hub in full and adding "it is not something you can switch on
