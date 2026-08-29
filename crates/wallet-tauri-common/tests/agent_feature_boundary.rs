@@ -72,7 +72,14 @@ fn agent_core_is_optional_and_the_admin_surface_is_feature_gated() {
     // optional dependency, so the module named a crate that was never linked.
     // The count is asserted here precisely so adding a guard has to be a
     // deliberate edit rather than a number that drifts.
-    assert_eq!(library.matches(target_guard).count(), 7);
+    //
+    // Eight, not seven: the eighth is `agent_command_stack_budget`, a
+    // `#[cfg(test)]` module that measures the byte size of every spawned agent
+    // command future and fails if one grows large enough to overflow the 1 MiB
+    // thread that dispatches IPC. It carries the same target guard as the
+    // module it measures, because it names `agent_commands`, which a phone
+    // does not compile. It adds no code to any shipped binary.
+    assert_eq!(library.matches(target_guard).count(), 8);
     assert!(library.contains("pub mod agent_commands;"));
     assert!(library.contains("pub mod agent_registry_exit;"));
     assert!(library.contains("pub mod agent_registry_open;"));

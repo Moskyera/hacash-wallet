@@ -654,52 +654,60 @@ pub async fn agent_wallet_unlock(
     state: tauri::State<'_, AgentAppState>,
 ) -> Result<Value, String> {
     require_wallet_shell(&webview)?;
-    let wallet_id = parse_wallet_id(wallet_id)?;
-    let _transition = state.transition.lock().await;
-    let manager = require_manager(&state)?;
-    let mut guard = manager.lock().await;
-    let status = guard
-        .unlock(&wallet_id, &passphrase, unix_now()?)
-        .map_err(public_error)?;
-    // Finish a witness the last run was interrupted in the middle of.
-    //
-    // `AgentWalletManager::unlock` already completed every interrupted witness
-    // whose remaining step is pure state. The one residue it cannot reach is a
-    // payment the phone witnessed and the process died before broadcasting,
-    // because finishing that needs the node. This is the first place after an
-    // unlock that can await, so it runs here.
-    //
-    // A failure is not an unlock failure: the owner is already in, the residue
-    // is untouched, and the next unlock tries again. It broadcasts nothing that
-    // was not already approved by the owner and witnessed by the paired phone.
-    #[cfg(feature = "agent-wallet-testnet-pilot")]
-    {
+    // Boxed so this state machine is on the heap rather than on the thread
+    // that dispatches the IPC message. Unboxed it was 23,856 bytes, which the
+    // release binary reserves about 836,000 bytes of stack for once the 24.1x
+    // spawn plumbing and the dispatch frame are counted, out of 1,048,576.
+    // Nothing below changed. See `agent_command_stack_budget.rs`.
+    Box::pin(async move {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let manager = require_manager(&state)?;
+        let mut guard = manager.lock().await;
+        let status = guard
+            .unlock(&wallet_id, &passphrase, unix_now()?)
+            .map_err(public_error)?;
+        // Finish a witness the last run was interrupted in the middle of.
+        //
+        // `AgentWalletManager::unlock` already completed every interrupted witness
+        // whose remaining step is pure state. The one residue it cannot reach is a
+        // payment the phone witnessed and the process died before broadcasting,
+        // because finishing that needs the node. This is the first place after an
+        // unlock that can await, so it runs here.
+        //
+        // A failure is not an unlock failure: the owner is already in, the residue
+        // is untouched, and the next unlock tries again. It broadcasts nothing that
+        // was not already approved by the owner and witnessed by the paired phone.
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        {
+            let _ = guard
+                .resume_interrupted_witness(&wallet_id, unix_now()?)
+                .await;
+        }
+        // And finish an approval the last run was interrupted in the middle of.
+        //
+        // Both approval paths journal the decision and only then sign, so a process
+        // that dies in that gap leaves a payment durably `Approved` with nothing
+        // pointed at it. On the phone path the owner cannot even repeat the press:
+        // the decision's replay token went out with the same durable write.
+        //
+        // It needs the node for the same reason the witness resume does - the
+        // approved transaction has to be built against the bound node before it is
+        // signed - so it runs here rather than inside `unlock`. It signs only an
+        // approval that is already on disk, refuses an expired one, and a failure
+        // is not an unlock failure.
         let _ = guard
-            .resume_interrupted_witness(&wallet_id, unix_now()?)
+            .resume_interrupted_approval(&wallet_id, unix_now()?)
             .await;
-    }
-    // And finish an approval the last run was interrupted in the middle of.
-    //
-    // Both approval paths journal the decision and only then sign, so a process
-    // that dies in that gap leaves a payment durably `Approved` with nothing
-    // pointed at it. On the phone path the owner cannot even repeat the press:
-    // the decision's replay token went out with the same durable write.
-    //
-    // It needs the node for the same reason the witness resume does - the
-    // approved transaction has to be built against the bound node before it is
-    // signed - so it runs here rather than inside `unlock`. It signs only an
-    // approval that is already on disk, refuses an expired one, and a failure
-    // is not an unlock failure.
-    let _ = guard
-        .resume_interrupted_approval(&wallet_id, unix_now()?)
-        .await;
-    let controller = guard
-        .emergency_controller(&wallet_id)
-        .map_err(public_error)?;
-    state
-        .runtime
-        .cache_emergency_controller(&wallet_id, controller);
-    serde_json::to_value(status).map_err(|_| "Agent Wallet response encoding failed".into())
+        let controller = guard
+            .emergency_controller(&wallet_id)
+            .map_err(public_error)?;
+        state
+            .runtime
+            .cache_emergency_controller(&wallet_id, controller);
+        serde_json::to_value(status).map_err(|_| "Agent Wallet response encoding failed".into())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1161,28 +1169,38 @@ pub async fn agent_wallet_execute_approved_fast_pay(
     state: tauri::State<'_, AgentAppState>,
 ) -> Result<Value, String> {
     require_wallet_shell(&webview)?;
-    #[cfg(feature = "agent-wallet-testnet-pilot")]
-    {
-        let wallet_id = parse_wallet_id(wallet_id)?;
-        let operation_id = OperationId::parse(operation_id).map_err(|error| error.to_string())?;
-        let manager = require_manager(&state)?;
-        let mut manager = manager.lock().await;
-        manager
-            .sign_prepared_approved_fast_pay_bill(&wallet_id, &operation_id, unix_now()?)
-            .await
-            .map_err(public_error)?;
-        let operation = manager
-            .submit_signed_approved_fast_pay_bill(&wallet_id, &operation_id, unix_now()?)
-            .await
-            .map_err(public_error)?;
-        serde_json::to_value(operation)
-            .map_err(|_| "Agent Fast Pay result encoding failed".to_owned())
-    }
-    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
-    {
-        let _ = (wallet_id, operation_id, state);
-        Err("Agent Fast Pay is disabled in this build".to_owned())
-    }
+    // Boxed so this state machine is on the heap rather than on the thread
+    // that dispatches the IPC message. Unboxed it was 29,496 bytes, which the
+    // release binary reserves about 972,000 bytes of stack for once the 24.1x
+    // spawn plumbing and the dispatch frame are counted, out of 1,048,576:
+    // 93% of the thread, on a path that signs a bill and then submits it.
+    // Nothing below changed. See `agent_command_stack_budget.rs`.
+    Box::pin(async move {
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        {
+            let wallet_id = parse_wallet_id(wallet_id)?;
+            let operation_id =
+                OperationId::parse(operation_id).map_err(|error| error.to_string())?;
+            let manager = require_manager(&state)?;
+            let mut manager = manager.lock().await;
+            manager
+                .sign_prepared_approved_fast_pay_bill(&wallet_id, &operation_id, unix_now()?)
+                .await
+                .map_err(public_error)?;
+            let operation = manager
+                .submit_signed_approved_fast_pay_bill(&wallet_id, &operation_id, unix_now()?)
+                .await
+                .map_err(public_error)?;
+            serde_json::to_value(operation)
+                .map_err(|_| "Agent Fast Pay result encoding failed".to_owned())
+        }
+        #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+        {
+            let _ = (wallet_id, operation_id, state);
+            Err("Agent Fast Pay is disabled in this build".to_owned())
+        }
+    })
+    .await
 }
 
 /// Read-only Hub reconciliation across the pre-sign/post-sign uncertainty

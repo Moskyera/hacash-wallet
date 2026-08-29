@@ -203,7 +203,32 @@ impl AgentWalletManager {
         Ok(operation.review)
     }
 
+    /// The body lives in `confirm_l2_channel_close_inner` and is reached
+    /// through a `Box::pin`, so this state machine is on the heap. It was
+    /// 28,264 bytes, and `recover_l2_channel_close` awaits it, which is what
+    /// carried that recovery path to 39,408 bytes: about 1,211,000 bytes of
+    /// release stack once the 24.1x spawn plumbing and the 261,832-byte
+    /// dispatch frame are counted, against a 1 MiB thread. That is the same
+    /// overflow that killed the wallet on channel setup, sitting on the exit's
+    /// recovery button. Nothing below changed; only where the state machine
+    /// lives did. See `service/l2/stack_budget.rs`.
     pub async fn confirm_l2_channel_close(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &str,
+        expected_review_commitment: &str,
+        now: u64,
+    ) -> AgentWalletResult<AgentChannelCloseReview> {
+        Box::pin(self.confirm_l2_channel_close_inner(
+            wallet_id,
+            operation_id,
+            expected_review_commitment,
+            now,
+        ))
+        .await
+    }
+
+    async fn confirm_l2_channel_close_inner(
         &mut self,
         wallet_id: &AgentWalletId,
         operation_id: &str,

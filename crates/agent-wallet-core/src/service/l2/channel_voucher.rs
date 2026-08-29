@@ -87,7 +87,27 @@ impl AgentWalletManager {
     /// [`super::AgentWalletManager::request_fast_pay_intent`], which requires a
     /// held voucher for the active binding. The sequencing rule is code here,
     /// not a note in a document.
+    ///
+    /// The body lives in `take_l2_channel_close_voucher_inner` and is reached
+    /// through a `Box::pin`, so this state machine is on the heap. This future
+    /// was 37,552 bytes, mostly whole `AgentWalletState` copies held live
+    /// across awaits, and the release binary reserves a spawned command future
+    /// roughly twenty-four times over on a 1 MiB thread. The sibling
+    /// `confirm_l2_channel_setup` overflowed that stack and killed the wallet;
+    /// this path is worse to lose, because it runs inside the 300 second
+    /// envelope immediately after the deposit is committed, and a dead process
+    /// there leaves a funded channel with no unilateral exit. Nothing below
+    /// changed; only where the state machine lives did. See
+    /// `service/l2/stack_budget.rs`.
     pub async fn take_l2_channel_close_voucher(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<AgentChannelCloseVoucherView> {
+        Box::pin(self.take_l2_channel_close_voucher_inner(wallet_id, now)).await
+    }
+
+    async fn take_l2_channel_close_voucher_inner(
         &mut self,
         wallet_id: &AgentWalletId,
         now: u64,

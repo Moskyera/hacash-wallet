@@ -222,7 +222,34 @@ impl AgentWalletManager {
     /// Confirm only the exact owner-reviewed setup. Every network fact is
     /// re-fetched before the signature, and an emergency generation change
     /// after signing leaves the exact bytes in RecoveryRequired state.
+    ///
+    /// The body lives in `confirm_l2_channel_setup_inner` and is reached
+    /// through a `Box::pin`, so this state machine is on the heap and not on
+    /// the caller's stack. That is not a style choice. This future was 74,696
+    /// bytes, and the release binary reserves a command future roughly
+    /// twenty-four times over across `respond_async_serialized`,
+    /// `tauri::async_runtime::spawn` and `tokio::task::spawn`, all of which run
+    /// synchronously on the 1 MiB WebView2 UI thread before the runtime ever
+    /// sees it. Pressing this button overflowed that stack at `_alloca_probe`
+    /// and killed the wallet with `0xC00000FD`. Nothing below changed; only
+    /// where the state machine lives did. See `service/l2/stack_budget.rs`.
     pub async fn confirm_l2_channel_setup(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &str,
+        expected_review_commitment: &str,
+        now: u64,
+    ) -> AgentWalletResult<AgentChannelSetupReview> {
+        Box::pin(self.confirm_l2_channel_setup_inner(
+            wallet_id,
+            operation_id,
+            expected_review_commitment,
+            now,
+        ))
+        .await
+    }
+
+    async fn confirm_l2_channel_setup_inner(
         &mut self,
         wallet_id: &AgentWalletId,
         operation_id: &str,

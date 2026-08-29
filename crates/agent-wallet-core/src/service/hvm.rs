@@ -763,7 +763,24 @@ impl AgentWalletManager {
     /// The signature is durably stored before submission, Submitted is durably
     /// stored before the Hub call, and every unknown outcome retains the
     /// reservation in RecoveryRequired. There is no L1 fallback and no re-sign.
+    ///
+    /// The body lives in `execute_approved_hvm_payment_inner` and is reached
+    /// through a `Box::pin`, so this state machine is on the heap. At 21,144
+    /// bytes it is the only other signing path over the stack budget, and this
+    /// one also stores a signature durably before submitting, so losing the
+    /// process mid-flight is expensive here for the same reason it is on
+    /// channel setup. Nothing below changed; only where the state machine
+    /// lives did. See `service/l2/stack_budget.rs`.
     pub async fn execute_approved_hvm_payment(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &crate::types::OperationId,
+        now: u64,
+    ) -> AgentWalletResult<AgentHvmPaymentOperationView> {
+        Box::pin(self.execute_approved_hvm_payment_inner(wallet_id, operation_id, now)).await
+    }
+
+    async fn execute_approved_hvm_payment_inner(
         &mut self,
         wallet_id: &AgentWalletId,
         operation_id: &crate::types::OperationId,

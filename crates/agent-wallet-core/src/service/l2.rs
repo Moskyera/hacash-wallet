@@ -10,6 +10,8 @@ mod channel_close;
 mod channel_setup;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod channel_voucher;
+#[cfg(test)]
+mod stack_budget;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod verification;
 

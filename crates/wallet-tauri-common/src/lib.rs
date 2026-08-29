@@ -1,4 +1,10 @@
 #[cfg(all(
+    test,
+    feature = "agent-wallet-admin",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+mod agent_command_stack_budget;
+#[cfg(all(
     feature = "agent-wallet-admin",
     not(any(target_os = "android", target_os = "ios"))
 ))]
