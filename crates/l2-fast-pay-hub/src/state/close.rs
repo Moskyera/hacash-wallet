@@ -14,6 +14,12 @@ use crate::storage::{
 const SUBMITTED_EXACT_RETRY_GRACE_SECONDS: u64 = 30;
 const L1_CLOSE_MIN_CONFIRMATIONS: u64 = 6;
 
+/// What a person is told when their close freeze is released, written to be
+/// read by the person and not by a grep.
+pub(crate) const EXPIRED_UNSIGNED_CLOSE_REASON: &str = "the channel-close authorization expired before the Hub ever signed it. The durable record \
+     carries no signed bytes, so nothing was broadcast and nothing can land on chain. The channel \
+     has been unfrozen and is ready for a fresh close attempt.";
+
 pub(super) fn retired_close_has_finality_evidence(operation: &PersistedL1ChannelClose) -> bool {
     operation.status == L1ChannelCloseStatus::Retired
         && operation
@@ -33,6 +39,14 @@ impl HubState {
         &self,
         request: &L1ChannelCloseRequest,
     ) -> HubResult<L1ChannelCloseResponse> {
+        // Before anything else, including the settlement-ready gate: a
+        // never-signed freeze that has lapsed is released here. It has to run
+        // ahead of `ensure_settlement_ready` because one such record left in
+        // `RecoveryRequired` by an older build latches that very gate, and it
+        // has to run ahead of `existing_channel_close` because a second attempt
+        // on the same channel is otherwise turned away by the commitment index
+        // and never reaches the state machine at all.
+        self.cancel_expired_unsigned_channel_closes()?;
         let request_commitment = close_request_commitment(request)?;
         let live_network = self
             .node
@@ -530,6 +544,15 @@ impl HubState {
     async fn resume_channel_close(&self, operation_id: &str) -> HubResult<L1ChannelCloseResponse> {
         let _single_flight = self.close_recovery_lock.lock().await;
         let mut operation = self.load_channel_close(operation_id)?;
+        // Terminal, and terminal early: everything below this line is the
+        // signing and broadcast machinery, and driving a released freeze into
+        // it would reach "a close signature may exist but its exact bytes are
+        // unavailable" and try to mark a terminal record `RecoveryRequired`.
+        // Replaying the cancelled request answers with the cancelled record and
+        // the reason it was cancelled, which is what the person asked for.
+        if operation.status == L1ChannelCloseStatus::CancelledBeforeSigning {
+            return Ok(channel_close_response(&operation));
+        }
         let expected_network = persisted_close_network_binding(&operation);
         let live_network = self
             .node
@@ -612,9 +635,19 @@ impl HubState {
             L1ChannelCloseStatus::FreezeIntentPersisted | L1ChannelCloseStatus::FrozenBeforeSigning
         ) {
             if crate::node::now_unix() > operation.expires_unix {
-                self.mark_close_recovery_required(
+                // Was `mark_close_recovery_required`, which was the single
+                // worst state in this file: an operation that had never been
+                // signed was pushed into a status whose own recovery gate
+                // demands `signed_transaction_hex`, so it could never satisfy
+                // its own way out, and `persisted_state_requires_recovery`
+                // latched every payment, open and close on the Hub behind it.
+                //
+                // The chain has already been consulted above (the channel is
+                // not closed) and the durable record carries no signature, so
+                // it is provable that nothing happened. Release it.
+                self.cancel_close_before_signing(
                     operation,
-                    "channel-close authorization expired before signing".into(),
+                    EXPIRED_UNSIGNED_CLOSE_REASON.to_string(),
                 )?;
                 return self.channel_close_status(operation_id);
             }
@@ -875,14 +908,25 @@ impl HubState {
                 .inner
                 .read()
                 .map_err(|_| HubError::State("state lock poisoned".into()))?;
-            if guard.l1_channel_closes.values().any(|other| {
+            if let Some(other) = guard.l1_channel_closes.values().find(|other| {
                 other.operation_id != operation.operation_id
                     && signature_may_exist(other)
                     && other.status != L1ChannelCloseStatus::Retired
             }) {
-                return Err(HubError::Channel(
-                    "another signed channel close is still reserving Hub liquidity".into(),
-                ));
+                // Name it. This is a Hub-wide mutex over cooperative closes,
+                // and the old sentence told a person whose own channel was
+                // fine that something unnamed was in the way, with no hint of
+                // what would clear it or when. The same reservation is now also
+                // published in the readiness document, so it is visible before
+                // anyone presses Close.
+                return Err(HubError::Channel(format!(
+                    "another signed channel close is still reserving Hub liquidity: operation {} \
+                     on channel {} is {} and holds the reservation until it confirms on chain and \
+                     is retired",
+                    other.operation_id,
+                    other.channel_id,
+                    other.status.public_name()
+                )));
             }
         }
         let user_balance = self.node.query_balance_zhu(&operation.user_address).await?;
@@ -1036,6 +1080,69 @@ impl HubState {
         Ok(channel_close_response(&retired))
     }
 
+    /// Release one channel-close freeze that the durable record proves was
+    /// never signed.
+    ///
+    /// The reason travels with the record (`last_error`) and is served on
+    /// `/v1/l1/channel/close/{id}`, so the person who pressed Close is told why
+    /// their attempt was given up instead of meeting a bare `RecoveryRequired`.
+    fn cancel_close_before_signing(
+        &self,
+        operation: PersistedL1ChannelClose,
+        reason: String,
+    ) -> HubResult<PersistedL1ChannelClose> {
+        self.transition_close_status(
+            operation,
+            L1ChannelCloseStatus::CancelledBeforeSigning,
+            ChannelLifecycleStatus::FrozenBeforeSigning,
+            JournalPhase::L1CloseCancelledBeforeSigning,
+            Some(reason),
+        )
+    }
+
+    /// Give up every channel-close freeze whose authorization has lapsed and
+    /// which the durable record proves was never signed.
+    ///
+    /// This is the close-side counterpart of `retire_unmined_channel_opens`,
+    /// and it exists because the per-operation expiry check inside
+    /// `resume_channel_close` is unreachable in the case that matters: a second
+    /// attempt on the same channel carries a fresh `operation_id` and expiry,
+    /// so it is turned away by the partial-transaction commitment index long
+    /// before any status is looked at. Without a sweep the person holding a
+    /// dead freeze has no button that reaches the state machine at all.
+    ///
+    /// Runs before `ensure_settlement_ready` on purpose: a never-signed close
+    /// pushed to `RecoveryRequired` latches the whole Hub, and this is the only
+    /// thing that can take that latch back down. Every write it makes is
+    /// evidence-gated by `close_is_provably_unsigned`.
+    fn cancel_expired_unsigned_channel_closes(&self) -> HubResult<()> {
+        let now = crate::node::now_unix();
+        let expired: Vec<PersistedL1ChannelClose> = {
+            let guard = self
+                .inner
+                .read()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            guard
+                .l1_channel_closes
+                .values()
+                .filter(|operation| {
+                    close_is_provably_unsigned(operation) && now > operation.expires_unix
+                })
+                .cloned()
+                .collect()
+        };
+        for operation in expired {
+            let operation_id = operation.operation_id.clone();
+            self.cancel_close_before_signing(operation, EXPIRED_UNSIGNED_CLOSE_REASON.to_string())
+                .map_err(|error| {
+                    HubError::State(format!(
+                        "channel-close {operation_id} could not be released: {error}"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
     fn mark_close_recovery_required(
         &self,
         operation: PersistedL1ChannelClose,
@@ -1072,8 +1179,29 @@ impl HubState {
                 "RecoveryRequired: channel-close operation changed".into(),
             ));
         }
-        if current.status == L1ChannelCloseStatus::Retired {
+        if current.status == L1ChannelCloseStatus::Retired
+            || current.status == L1ChannelCloseStatus::CancelledBeforeSigning
+        {
             return Ok(current);
+        }
+        // The proof is re-read from the durable record under the write lock,
+        // never from the caller's copy. If anything about this operation says a
+        // signature may exist, the cancel is refused and the operation keeps
+        // its hold - not knowing is not evidence.
+        if status == L1ChannelCloseStatus::CancelledBeforeSigning
+            && !close_is_provably_unsigned(&current)
+        {
+            return Err(HubError::State(format!(
+                "channel-close {} cannot be cancelled: the durable record does not prove it is \
+                 unsigned (status {}, signed bytes {})",
+                current.operation_id,
+                current.status.public_name(),
+                if current.signed_transaction_hex.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+            )));
         }
         if !can_transition_close_status(&current.status, &status) {
             return Err(HubError::State(format!(
@@ -1094,7 +1222,22 @@ impl HubState {
         let mut next = guard.clone();
         next.l1_channel_closes
             .insert(operation.operation_id.clone(), operation.clone());
-        update_lifecycle(&mut next, &operation, lifecycle_status)?;
+        if status == L1ChannelCloseStatus::CancelledBeforeSigning {
+            // Give back everything the freeze took. The channel is unfrozen so
+            // Fast Pay works again, and the partial-transaction commitment
+            // index is released so a *fresh* close request for the same channel
+            // is not turned away by "commitment maps to different request
+            // content" - which is what happens when only the status changes.
+            //
+            // The operation record and its idempotency key stay: replaying the
+            // exact cancelled request returns `cancelled_before_signing` with
+            // the reason attached, rather than silently starting a second one.
+            next.channel_lifecycle.remove(&operation.channel_id);
+            next.l1_channel_close_commitments
+                .remove(&operation.partial_transaction_commitment);
+        } else {
+            update_lifecycle(&mut next, &operation, lifecycle_status)?;
+        }
         if status == L1ChannelCloseStatus::Retired {
             // On-chain agreement-close confirmation makes the old L2 ledger
             // unusable. Remove only the active indexes; the signed open/close
@@ -1206,8 +1349,18 @@ fn can_transition_close_status(
 ) -> bool {
     use L1ChannelCloseStatus::*;
     match current {
-        FreezeIntentPersisted => matches!(next, FrozenBeforeSigning | RecoveryRequired),
-        FrozenBeforeSigning => matches!(next, SignatureMayExist | RecoveryRequired),
+        FreezeIntentPersisted => {
+            matches!(
+                next,
+                FrozenBeforeSigning | CancelledBeforeSigning | RecoveryRequired
+            )
+        }
+        FrozenBeforeSigning => {
+            matches!(
+                next,
+                SignatureMayExist | CancelledBeforeSigning | RecoveryRequired
+            )
+        }
         // SubmissionStarted remains accepted from SignatureMayExist only to
         // recover authenticated v6 state that already persisted exact bytes.
         SignatureMayExist => matches!(next, SubmissionStarted | RecoveryRequired),
@@ -1217,13 +1370,49 @@ fn can_transition_close_status(
             next,
             SubmissionStarted | Submitted | ConfirmedClosed | RecoveryRequired
         ),
+        // `CancelledBeforeSigning` is admitted here on purpose, and it is the
+        // only way an already-latched Hub can be released. A close can reach
+        // `RecoveryRequired` from either side of the signature: from
+        // `FreezeIntentPersisted`/`FrozenBeforeSigning`, where nothing was ever
+        // signed, or from `Signed`/`Submitted`, where exact bytes are durable
+        // and must be driven to the chain instead. `close_is_provably_unsigned`
+        // separates the two by reading the record, not by reading a clock, and
+        // `transition_close_status` refuses the cancel unless it holds.
         RecoveryRequired => matches!(
             next,
-            SubmissionStarted | Submitted | ConfirmedClosed | RecoveryRequired
+            SubmissionStarted
+                | Submitted
+                | ConfirmedClosed
+                | CancelledBeforeSigning
+                | RecoveryRequired
         ),
         ConfirmedClosed => matches!(next, Retired | RecoveryRequired),
-        Retired => false,
+        Retired | CancelledBeforeSigning => false,
     }
+}
+
+/// Whether the durable record *proves* this close never produced a signature.
+///
+/// Not "probably", and not "it has been a while". Every field that would exist
+/// if the Hub had ever countersigned these bytes is checked to be absent, and
+/// the status is one of the three a never-signed close can be sitting in. A
+/// cooperative close cannot reach the chain without the Hub's countersignature,
+/// so a record that satisfies this describes an operation that did nothing and
+/// can never have done anything.
+///
+/// An unreachable node releases nothing here: this reads only durable state the
+/// Hub itself wrote, and every caller has already been past the chain query
+/// that would have found the channel closed.
+fn close_is_provably_unsigned(operation: &PersistedL1ChannelClose) -> bool {
+    matches!(
+        operation.status,
+        L1ChannelCloseStatus::FreezeIntentPersisted
+            | L1ChannelCloseStatus::FrozenBeforeSigning
+            | L1ChannelCloseStatus::RecoveryRequired
+    ) && operation.signed_transaction_hex.is_none()
+        && operation.signed_transaction_commitment.is_none()
+        && operation.confirmed_block_height.is_none()
+        && operation.observed_confirmations == 0
 }
 fn existing_channel_close_from_state(
     state: &HubPersistedState,
@@ -1298,13 +1487,24 @@ fn require_channel_can_freeze(
     original: &crate::storage::ChannelLedger,
     settlement: &ChannelCloseSettlement,
 ) -> HubResult<crate::storage::ChannelLedger> {
-    if state.pending.values().any(|pending| {
-        pending.channel_id == channel.id
-            || pending.payee_channel_id.as_deref() == Some(channel.id.as_str())
+    // `!is_terminal()` was missing here, and it was the whole defect. Every
+    // other reservation exclusion in the Hub asks the status; this one asked
+    // only the channel id. `Committed` reservations are removed from `pending`,
+    // but `Expired` ones are written back and left there forever - so a payment
+    // that provably never produced a signature, resolved exactly as designed,
+    // took the channel's cooperative exit away permanently, and did it behind a
+    // sentence ("has a pending or recovery payment") that was not true.
+    if let Some(blocking) = state.pending.values().find(|pending| {
+        !pending.status.is_terminal()
+            && (pending.channel_id == channel.id
+                || pending.payee_channel_id.as_deref() == Some(channel.id.as_str()))
     }) {
-        return Err(HubError::Channel(
-            "channel has a pending or recovery payment and cannot close".into(),
-        ));
+        return Err(HubError::Channel(format!(
+            "channel has an unresolved Fast Pay reservation ({}, {}) and cannot close until it is \
+             reconciled",
+            blocking.operation_id,
+            blocking.status.public_name()
+        )));
     }
     if channel.reuse_version != 1 || channel.left.satoshi != 0 || channel.right.satoshi != 0 {
         return Err(HubError::Channel(
@@ -1497,6 +1697,26 @@ fn persisted_close_network_binding(
     }
 }
 
+/// The close that is currently holding the Hub-wide close-liquidity
+/// reservation, read with exactly the predicate `require_close_liquidity`
+/// refuses on, so the document and the gate can never disagree.
+pub(super) fn close_liquidity_reservation(
+    state: &HubPersistedState,
+) -> Option<crate::readiness::CloseLiquidityReservation> {
+    state
+        .l1_channel_closes
+        .values()
+        .find(|operation| {
+            signature_may_exist(operation) && operation.status != L1ChannelCloseStatus::Retired
+        })
+        .map(|operation| crate::readiness::CloseLiquidityReservation {
+            operation_id: operation.operation_id.clone(),
+            channel_id: operation.channel_id.clone(),
+            status: operation.status.public_name().to_string(),
+            transaction_hash: operation.transaction_hash.clone(),
+        })
+}
+
 fn signature_may_exist(operation: &PersistedL1ChannelClose) -> bool {
     matches!(
         operation.status,
@@ -1523,6 +1743,7 @@ fn channel_close_response(operation: &PersistedL1ChannelClose) -> L1ChannelClose
         // signed bytes stay here.
         signed_transaction_hex: None,
         signed_transaction_commitment: None,
+        reason: operation.last_error.clone(),
     }
 }
 
@@ -1539,6 +1760,7 @@ fn channel_close_voucher_response(
         transaction_hash: Some(voucher.transaction_hash.clone()),
         signed_transaction_hex: voucher.signed_transaction_hex.clone(),
         signed_transaction_commitment: voucher.signed_transaction_commitment.clone(),
+        reason: None,
     }
 }
 
@@ -1968,5 +2190,244 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A Fast Pay reservation that resolved is not a reason to refuse a close.
+    ///
+    /// `require_channel_can_freeze` read `state.pending` by channel id alone,
+    /// with no status filter - the only reservation exclusion in the Hub that
+    /// did. `Committed` reservations are deleted from `pending`, but `Expired`
+    /// ones are written back and stay there for the life of the state file, so
+    /// one payment that provably never produced a signature, and that the Hub
+    /// resolved exactly as designed, took that channel's cooperative exit away
+    /// forever - behind the sentence "channel has a pending or recovery
+    /// payment", which was not true of it.
+    #[test]
+    fn a_resolved_fast_pay_reservation_does_not_take_the_channel_exit_away() {
+        let user = Account::create_by("close-terminal-pending-user").unwrap();
+        let hub = Account::create_by("close-terminal-pending-hub").unwrap();
+        let open = canonical_open_anchor(&user, &hub, 100);
+        let original = ChannelLedger {
+            left_balance_mei: HacAmount::from_millimeis(10),
+            right_balance_mei: HacAmount::ZERO,
+            bill_auto_number: 0,
+        };
+        let channel = ChannelInfo {
+            ret: 0,
+            id: open.channel_id.clone(),
+            status: crate::node::CHANNEL_STATUS_OPENING,
+            open_height: 100,
+            close_height: 0,
+            reuse_version: 1,
+            left: crate::node::ChannelPartyBalance {
+                address: user.readable().into(),
+                hacash: "0.01".into(),
+                satoshi: 0,
+            },
+            right: crate::node::ChannelPartyBalance {
+                address: hub.readable().into(),
+                hacash: "0".into(),
+                satoshi: 0,
+            },
+            challenging: None,
+        };
+        let mut state = HubPersistedState::default();
+        state.l1_channel_opens.insert("open-operation".into(), open);
+        state.channels.insert(channel.id.clone(), original.clone());
+        require_channel_can_freeze(
+            &state,
+            &channel,
+            hub.readable(),
+            &original,
+            &ChannelCloseSettlement::OriginalDistribution,
+        )
+        .expect("a clean channel closes");
+
+        let reservation = |status: crate::operation::ReservationStatus| -> PendingSettlement {
+            let mut record: PendingSettlement = serde_json::from_value(serde_json::json!({
+                "created_at": 1,
+                "channel_id": channel.id.clone(),
+                "base_ledger": original,
+                "next_ledger": {
+                    "left_balance_mei": 10, "right_balance_mei": 0, "bill_auto_number": 1
+                },
+                "response": {"payment_id":"p", "status":"pending"}
+            }))
+            .unwrap();
+            record.status = status;
+            record
+        };
+
+        // Unresolved: still refuses, and now says which reservation it is.
+        state.pending.insert(
+            "p".into(),
+            reservation(crate::operation::ReservationStatus::Signed),
+        );
+        let refusal = require_channel_can_freeze(
+            &state,
+            &channel,
+            hub.readable(),
+            &original,
+            &ChannelCloseSettlement::OriginalDistribution,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refusal.contains("Fast Pay reservation"), "{refusal}");
+        assert!(refusal.contains("signed"), "{refusal}");
+
+        // Every terminal status releases the exit.
+        for status in [
+            crate::operation::ReservationStatus::Expired,
+            crate::operation::ReservationStatus::Committed,
+            crate::operation::ReservationStatus::Rejected,
+            crate::operation::ReservationStatus::Released,
+        ] {
+            state.pending.insert("p".into(), reservation(status));
+            require_channel_can_freeze(
+                &state,
+                &channel,
+                hub.readable(),
+                &original,
+                &ChannelCloseSettlement::OriginalDistribution,
+            )
+            .unwrap_or_else(|error| {
+                panic!("terminal reservation {status:?} still blocks the close: {error}")
+            });
+        }
+    }
+
+    fn unsigned_close_record() -> PersistedL1ChannelClose {
+        PersistedL1ChannelClose {
+            operation_id: "op".into(),
+            idempotency_key: "key".into(),
+            request_commitment: "commitment".into(),
+            network: "testnet".into(),
+            chain_id: 1,
+            mainnet: false,
+            block_1_hash: "b1".into(),
+            node_profile_id: "profile".into(),
+            network_instance_id: "instance".into(),
+            transaction_format_version: 2,
+            channel_id: "channel".into(),
+            hub_address: "hub".into(),
+            user_address: "user".into(),
+            reuse_version: 1,
+            open_height: 100,
+            original_ledger: ChannelLedger {
+                left_balance_mei: HacAmount::from_millimeis(10),
+                right_balance_mei: HacAmount::ZERO,
+                bill_auto_number: 0,
+            },
+            final_ledger: None,
+            partial_transaction_hex: "00".into(),
+            partial_transaction_commitment: "pc".into(),
+            authorization_public_key_hex: String::new(),
+            authorization_signature_hex: String::new(),
+            transaction_hash: Some("hash".into()),
+            signed_transaction_hex: None,
+            signed_transaction_commitment: None,
+            confirmed_block_height: None,
+            observed_confirmations: 0,
+            status: L1ChannelCloseStatus::FrozenBeforeSigning,
+            created_unix: 1,
+            expires_unix: 2,
+            updated_unix: 1,
+            last_error: None,
+        }
+    }
+
+    /// The release is gated on evidence, never on a clock.
+    #[test]
+    fn only_a_provably_unsigned_close_may_be_cancelled() {
+        let mut operation = unsigned_close_record();
+        assert!(close_is_provably_unsigned(&operation));
+
+        // Reachable from an already-latched Hub, which is the whole point: a
+        // never-signed close that an older build pushed to RecoveryRequired
+        // has to have a way back out, or the latch is permanent.
+        operation.status = L1ChannelCloseStatus::RecoveryRequired;
+        assert!(close_is_provably_unsigned(&operation));
+
+        // Any trace of a signature refuses the release.
+        let mut signed = operation.clone();
+        signed.signed_transaction_hex = Some("deadbeef".into());
+        assert!(!close_is_provably_unsigned(&signed));
+        let mut committed = operation.clone();
+        committed.signed_transaction_commitment = Some("c".into());
+        assert!(!close_is_provably_unsigned(&committed));
+        let mut mined = operation.clone();
+        mined.confirmed_block_height = Some(900_001);
+        assert!(!close_is_provably_unsigned(&mined));
+        let mut confirmed = operation.clone();
+        confirmed.observed_confirmations = 1;
+        assert!(!close_is_provably_unsigned(&confirmed));
+        for status in [
+            L1ChannelCloseStatus::SignatureMayExist,
+            L1ChannelCloseStatus::Signed,
+            L1ChannelCloseStatus::SubmissionStarted,
+            L1ChannelCloseStatus::Submitted,
+            L1ChannelCloseStatus::ConfirmedClosed,
+            L1ChannelCloseStatus::Retired,
+        ] {
+            let mut past = operation.clone();
+            past.status = status.clone();
+            assert!(!close_is_provably_unsigned(&past), "{status:?}");
+        }
+    }
+
+    /// The close status machine has a terminal state that is not `Retired`,
+    /// and every never-signed status can reach it - including the latched one.
+    #[test]
+    fn an_unsigned_close_has_somewhere_terminal_to_go() {
+        use L1ChannelCloseStatus::*;
+        for from in [FreezeIntentPersisted, FrozenBeforeSigning, RecoveryRequired] {
+            assert!(
+                can_transition_close_status(&from, &CancelledBeforeSigning),
+                "{from:?}"
+            );
+        }
+        for to in [
+            FreezeIntentPersisted,
+            FrozenBeforeSigning,
+            SignatureMayExist,
+            Signed,
+            SubmissionStarted,
+            Submitted,
+            ConfirmedClosed,
+            Retired,
+            RecoveryRequired,
+            CancelledBeforeSigning,
+        ] {
+            assert!(
+                !can_transition_close_status(&CancelledBeforeSigning, &to),
+                "{to:?}"
+            );
+        }
+    }
+
+    /// A released close holds nothing, and the readiness document says who
+    /// does hold the Hub-wide close-liquidity reservation.
+    #[test]
+    fn a_released_close_stops_reserving_and_a_live_one_is_named() {
+        let mut state = HubPersistedState::default();
+        let mut operation = unsigned_close_record();
+        operation.status = L1ChannelCloseStatus::CancelledBeforeSigning;
+        state
+            .l1_channel_closes
+            .insert(operation.operation_id.clone(), operation.clone());
+        assert!(close_liquidity_reservation(&state).is_none());
+
+        let mut submitted = operation.clone();
+        submitted.operation_id = "live".into();
+        submitted.status = L1ChannelCloseStatus::Submitted;
+        submitted.signed_transaction_hex = Some("deadbeef".into());
+        state
+            .l1_channel_closes
+            .insert(submitted.operation_id.clone(), submitted);
+        let held = close_liquidity_reservation(&state).expect("a submitted close reserves");
+        assert_eq!(held.operation_id, "live");
+        assert_eq!(held.channel_id, "channel");
+        assert_eq!(held.status, "submitted");
+        assert_eq!(held.transaction_hash.as_deref(), Some("hash"));
     }
 }

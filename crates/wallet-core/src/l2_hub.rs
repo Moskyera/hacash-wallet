@@ -1863,6 +1863,43 @@ impl L2HubClient {
         Self::read_hub_json(response, "Hub channel close").await
     }
 
+    /// What the Hub's own durable record says about one cooperative close.
+    ///
+    /// `Ok(None)` means the Hub answered and has never heard of this operation.
+    /// That is the evidence a wallet needs to release a close marker it can
+    /// never POST: if the Hub has no record, no freeze was taken, no
+    /// countersignature was produced, and the half-signature this wallet may or
+    /// may not hold cannot be acted on by anyone, because a cooperative close
+    /// reaches a chain only through the Hub.
+    ///
+    /// A Hub that cannot be reached is an `Err`, never an `Ok(None)`. Not
+    /// knowing is not evidence and must release nothing.
+    pub async fn channel_close_status(
+        &self,
+        operation_id: &str,
+    ) -> WalletResult<Option<l2_fast_pay_hub::l1_channel_close::L1ChannelCloseResponse>> {
+        let encoded: String = operation_id
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+                    (byte as char).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect();
+        let url = format!("{}/v1/l1/channel/close/{encoded}", self.base_url);
+        let response = self.http()?.get(url).send().await.map_err(|error| {
+            WalletError::L2(format!("Hub channel-close status unavailable: {error}"))
+        })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Self::read_hub_json(response, "Hub channel-close status")
+            .await
+            .map(Some)
+    }
+
     /// Ask the Hub to countersign one delta-zero close and return the exact
     /// bytes rather than broadcasting them.
     ///

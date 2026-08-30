@@ -198,6 +198,14 @@ pub fn build_router_with_trusted_proxy(
         )
         .route("/v1/l1/channel/open", post(channel_open_handler))
         .route("/v1/l1/channel/close", post(channel_close_handler))
+        // Read-only. A wallet that holds a durable close marker but no signed
+        // bytes - an interrupted or refused signature - has no way to POST and
+        // no way to learn whether the Hub ever heard of the operation. Without
+        // this route its only honest answer was to stay latched forever.
+        .route(
+            "/v1/l1/channel/close/{operation_id}",
+            get(channel_close_status_handler),
+        )
         .route(
             "/v1/l1/channel/close-voucher",
             post(channel_close_voucher_handler),
@@ -534,6 +542,18 @@ async fn recipient_inbox_handler(
     Path(payee): Path<String>,
 ) -> Json<Vec<FastPayInboxItem>> {
     Json(state.hub.recipient_inbox(&payee))
+}
+
+/// What the Hub's durable record says about one cooperative close.
+///
+/// 404 means the Hub has never heard of this operation, which is itself
+/// evidence: nothing was frozen, nothing was countersigned, and nothing can
+/// land. A wallet holding a stuck close marker uses exactly that to release it.
+async fn channel_close_status_handler(
+    State(state): State<AppState>,
+    Path(operation_id): Path<String>,
+) -> Result<Json<L1ChannelCloseResponse>, HubHttpError> {
+    Ok(Json(state.hub.channel_close_status(&operation_id)?))
 }
 
 async fn payment_status_handler(

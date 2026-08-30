@@ -10,7 +10,7 @@ node. Where something is an inference it says so.
 
 `GET /v1/readiness/mainnet` on a running Hub is the machine-readable answer.
 It is evaluated by `MainnetReadinessV1::evaluate`
-(`crates/l2-fast-pay-hub/src/readiness.rs:313-568`). Ask it rather than trusting
+(`crates/l2-fast-pay-hub/src/readiness.rs:353-613`). Ask it rather than trusting
 a checklist.
 
 The measurement that matters is a mainnet-profile Hub pointed at the real
@@ -69,7 +69,7 @@ close_blockers  []
 ```
 
 `close_blockers` is empty on both, so cooperative close is available on both
-profiles even while the full profile refuses payments (`readiness.rs:453-484`
+profiles even while the full profile refuses payments (`readiness.rs:493-524`
 filters the waived and admission identifiers out of `blockers`).
 
 Two identifiers that look like blockers and are not. The control, the same two
@@ -85,14 +85,14 @@ mainnet-bounded-pilot  blockers  mainnet_pilot_requires_hacash_mainnet_fullnode
                                  fullnode_below_pinned_mainnet_checkpoint_765432
 ```
 
-`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:415-417`) and
-`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:418-423`) are
+`mainnet_pilot_requires_hacash_mainnet_fullnode` (`readiness.rs:455-457`) and
+`fullnode_below_pinned_mainnet_checkpoint_765432` (`readiness.rs:458-463`) are
 artefacts of pointing a mainnet profile at the wrong chain. They vanish against
 the real mainnet node, as the two documents above show, and are not work.
 
 ## Two mainnet routes exist, and they are not the same thing
 
-`readiness.rs:354-390` branches on `is_bounded_pilot`:
+`readiness.rs:394-430` branches on `is_bounded_pilot`:
 
 ```rust
 let is_bounded_pilot = profile == MAINNET_BOUNDED_PILOT_PROFILE;
@@ -110,7 +110,7 @@ the invariant is in the type, not in a comment: `blockers` and
 to be outstanding. `payments_enabled` and `close_enabled` still read only the
 first two, so nothing the bounded pilot was allowed to do changed.
 
-The dispute-path branch is gated on the profile again at `readiness.rs:432-435`,
+The dispute-path branch is gated on the profile again at `readiness.rs:472-475`,
 which raises `fullnode_does_not_report_verified_registry_unilateral_exit` on
 `mainnet-pilot` only.
 
@@ -134,12 +134,12 @@ bounded profile identically:
 
 | demand | where |
 | --- | --- |
-| Hub signer plus authenticated durable storage | `readiness.rs:351-353` |
-| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:396-409`, `readiness.rs:882-897` |
-| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:415-423` |
-| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:424-431` |
-| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:779-832` |
-| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:816-867` |
+| Hub signer plus authenticated durable storage | `readiness.rs:391-393` |
+| payment and channel-funding caps inside their compile-time ceilings | `readiness.rs:436-449`, `readiness.rs:949-964` |
+| the fullnode reports mainnet, at or above height 765432 | `readiness.rs:455-463` |
+| action 2 channel open and action 3 cooperative close enabled | `readiness.rs:464-471` |
+| a configured user allowlist and aggregate TVL inside its cap | `readiness.rs:846-899` |
+| a zero wallet fee, re-checked at the signing boundary | `readiness.rs:883-934` |
 
 **Full mainnet** does not waive them. It needs all three to be genuinely true.
 
@@ -156,7 +156,7 @@ rather than hiding it.
 
 ## Why full mainnet cannot be reached today
 
-`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:557-560`)
+`MainnetReadinessV1::evaluate` (`crates/l2-fast-pay-hub/src/readiness.rs:602-607`)
 publishes the measurement:
 
 ```rust
@@ -192,7 +192,7 @@ wallet gating on one could never be un-bricked by the guarantee arriving.
 gating on `HubHealth` for one is a compile error.
 
 `HubHardGuarantees::production_mainnet_ready` still exists as the Hub's internal
-aggregate measurement (`readiness.rs:2044-2050`); it is simply no longer exported
+aggregate measurement (`readiness.rs:2111-2117`); it is simply no longer exported
 on the liveness endpoint.
 
 ### 1. Unilateral L1 dispute path

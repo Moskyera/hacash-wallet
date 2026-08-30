@@ -193,6 +193,36 @@ pub enum ChannelCloseStatus {
     /// no matter how far the channel is later spent down. That is acceptable
     /// only in this bounded pilot, where the owner runs the Hub.
     VoucherHeld,
+    /// The Hub released a close freeze it proved it had never signed, and this
+    /// wallet accepted that release.
+    ///
+    /// The close store had no terminal concept at all before this: `grep -c
+    /// is_terminal` on this file returned zero, there was no `cancel_*` and no
+    /// `abandon_*`, and `begin_or_resume` refused every close whose intent was
+    /// not byte-identical to the stuck one - which no second attempt can be,
+    /// because `prepare_channel_close` mints a fresh operation id and fresh
+    /// timestamps every time. One interrupted signature took the channel's
+    /// cooperative exit away for the life of the wallet.
+    ///
+    /// Terminal. The Hub only publishes `cancelled_before_signing` when its own
+    /// durable record carries no signed bytes, no signed-transaction commitment
+    /// and no confirmed height, so nothing was broadcast and nothing can land.
+    /// A fresh close is free to start.
+    CancelledBeforeSigning,
+}
+
+impl ChannelCloseStatus {
+    /// Whether this operation is finished with, one way or another.
+    ///
+    /// `VoucherHeld` counts: the owner is holding countersigned close bytes
+    /// they can broadcast themselves, so that operation is done even though the
+    /// channel is still open.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Confirmed | Self::VoucherHeld | Self::CancelledBeforeSigning
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,9 +354,16 @@ impl ChannelCloseSafety {
             ) {
                 return Ok(existing);
             }
-            return Err(WalletError::L2(
-                "RecoveryRequired: a different channel-close operation is unresolved".into(),
-            ));
+            if existing.status == ChannelCloseStatus::CancelledBeforeSigning {
+                // The Hub proved this freeze was never signed and released it,
+                // so the channel is unfrozen and a fresh close may start. This
+                // is the store's only way out; without it one interrupted
+                // signature ended cooperative close for this channel forever.
+            } else {
+                return Err(WalletError::L2(
+                    "RecoveryRequired: a different channel-close operation is unresolved".into(),
+                ));
+            }
         }
         if input.reuse_version == 0
             || input.open_height == 0
@@ -445,11 +482,71 @@ impl ChannelCloseSafety {
             ChannelCloseStatus::HubSubmitted => JournalPhase::L1CloseSubmitted,
             ChannelCloseStatus::RecoveryRequired => JournalPhase::L1CloseRecoveryRequired,
             ChannelCloseStatus::VoucherHeld => JournalPhase::L1CloseVoucherIssued,
+            ChannelCloseStatus::CancelledBeforeSigning => JournalPhase::RecoveryCompleted,
             _ => unreachable!(),
         };
         self.transition(operation.clone(), phase)?;
         Ok(operation)
     }
+    /// Release a close the Hub has never heard of.
+    ///
+    /// # What this is for
+    ///
+    /// The one state this store could reach and never leave: `begin_or_resume`
+    /// and `mark_signature_may_exist` are two durable writes with the signing
+    /// prompt between them, so a cancelled prompt, a wrong passphrase, a locked
+    /// session or a crash leaves `SignatureMayExist` with `request == None`.
+    /// `recover_channel_close` refuses that record before it reaches the Hub
+    /// ("exact user-signed bytes are unavailable"), and every later close is
+    /// refused because no second attempt can match the stuck intent. The owner
+    /// loses cooperative close on that channel, and the voucher with it,
+    /// permanently.
+    ///
+    /// # What must hold, all of it, checked here
+    ///
+    /// * This wallet never captured a request. `request.is_none()`. The POST
+    ///   body *is* the request and `persist_user_signed` runs before the POST,
+    ///   so a record with no request never left this machine.
+    /// * The Hub never answered. `response.is_none()`.
+    /// * The store never advanced past the signing marker.
+    /// * The caller has asked the Hub and been told, by a Hub that answered,
+    ///   that it holds no record of this operation. An unreachable Hub proves
+    ///   nothing and must not reach this call.
+    ///
+    /// # Why this is safe even if a signature really was produced
+    ///
+    /// A cooperative close reaches a chain only by the Hub countersigning it
+    /// and broadcasting it. A user signature that was never sent cannot be
+    /// countersigned by anybody, and the Hub's own record says it never was.
+    /// If that answer is ever contradicted - the Hub does have the operation
+    /// after all - the release is taken back: the next close goes through
+    /// `require_channel_can_freeze` and the Hub refuses a second close for a
+    /// channel it already owns.
+    pub fn release_close_the_hub_never_received(&mut self) -> WalletResult<()> {
+        let mut operation = self.operation()?;
+        if operation.status == ChannelCloseStatus::CancelledBeforeSigning {
+            // A previous run got this far and died before the caller finished.
+            return Ok(());
+        }
+        if operation.request.is_some()
+            || operation.response.is_some()
+            || !matches!(
+                operation.status,
+                ChannelCloseStatus::PersistedBeforeSigning
+                    | ChannelCloseStatus::SignatureMayExist
+                    | ChannelCloseStatus::RecoveryRequired
+            )
+        {
+            return Err(WalletError::L2(
+                "only a channel-close that never produced exact bytes and never reached the Hub may be released"
+                    .into(),
+            ));
+        }
+        operation.status = ChannelCloseStatus::CancelledBeforeSigning;
+        operation.updated_unix = unix_timestamp();
+        self.transition(operation, JournalPhase::RecoveryCompleted)
+    }
+
     pub fn mark_recovery_required(&mut self) -> WalletResult<()> {
         let mut operation = self.operation()?;
         if operation.status == ChannelCloseStatus::RecoveryRequired {
@@ -466,6 +563,11 @@ impl ChannelCloseSafety {
         if operation.status == ChannelCloseStatus::VoucherHeld {
             return Err(WalletError::L2(
                 "a verified close voucher is terminal and is never replaced".into(),
+            ));
+        }
+        if operation.status == ChannelCloseStatus::CancelledBeforeSigning {
+            return Err(WalletError::L2(
+                "a released channel-close is terminal and is never replaced".into(),
             ));
         }
         operation.status = ChannelCloseStatus::RecoveryRequired;
@@ -805,6 +907,7 @@ fn durable_status_for_hub_status(status: &str) -> Option<ChannelCloseStatus> {
         "retired" => Some(ChannelCloseStatus::Confirmed),
         "submitted" | "confirmed_closed" => Some(ChannelCloseStatus::HubSubmitted),
         "recovery_required" => Some(ChannelCloseStatus::RecoveryRequired),
+        "cancelled_before_signing" => Some(ChannelCloseStatus::CancelledBeforeSigning),
         L1_CHANNEL_CLOSE_VOUCHER_STATUS => Some(ChannelCloseStatus::VoucherHeld),
         _ => None,
     }
@@ -819,16 +922,26 @@ fn can_accept_hub_status(current: ChannelCloseStatus, next: ChannelCloseStatus) 
         // confirmation for it to report, and a channel that has a voucher can
         // never also be closed cooperatively.
         VoucherHeld => next == VoucherHeld,
+        // Terminal, and the only status the Hub will never contradict: it is
+        // published only for a record the Hub proved carries no signature.
+        CancelledBeforeSigning => next == CancelledBeforeSigning,
         PersistedBeforeSigning | SignatureMayExist | UserSigned => {
             matches!(
                 next,
-                HubSubmitted | RecoveryRequired | Confirmed | VoucherHeld
+                HubSubmitted | RecoveryRequired | Confirmed | VoucherHeld | CancelledBeforeSigning
             )
         }
         // Once a close was submitted or has failed into recovery, a voucher
         // for the same operation would be a second signed close.
+        // `CancelledBeforeSigning` is admitted from `RecoveryRequired` on
+        // purpose and is the release for a wallet that latched over a Hub or
+        // node outage: the Hub answering "I proved this was never signed" is
+        // evidence, not a guess, and it is the Hub's own durable record.
         HubSubmitted | RecoveryRequired => {
-            matches!(next, HubSubmitted | RecoveryRequired | Confirmed)
+            matches!(
+                next,
+                HubSubmitted | RecoveryRequired | Confirmed | CancelledBeforeSigning
+            )
         }
     }
 }
@@ -1201,6 +1314,7 @@ mod voucher_tests {
             transaction_hash: Some(transaction_hash),
             signed_transaction_hex: Some(signed_transaction_hex),
             signed_transaction_commitment: Some(hex::encode(Sha256::digest(&signed))),
+            reason: None,
         };
         VoucherFixture {
             owner: owner.readable().into(),
@@ -1382,6 +1496,165 @@ mod tests {
             durable_status_for_hub_status("submitted"),
             Some(ChannelCloseStatus::HubSubmitted)
         );
+    }
+
+    /// A request that satisfies `require_request_binding` for `operation`.
+    ///
+    /// `persist_user_signed` only checks the binding, so the transaction bytes
+    /// do not have to be real for the state-machine tests below.
+    fn signed_close_request_for(operation: &ChannelCloseOperation) -> L1ChannelCloseRequest {
+        L1ChannelCloseRequest {
+            schema: l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA.into(),
+            network: "testnet".into(),
+            chain_id: 7,
+            mainnet: false,
+            block_1_hash: "11".repeat(32),
+            node_profile_id: "hpay-pilot".into(),
+            network_instance_id: "aa".repeat(16),
+            transaction_format_version: 2,
+            operation_id: operation.operation_id.clone(),
+            idempotency_key: operation.idempotency_key.clone(),
+            created_unix: operation.created_unix,
+            expires_unix: operation.expires_unix,
+            hub_address: operation.hub_identity.clone(),
+            user_address: operation.user_address.clone(),
+            channel_id: operation.channel_id.clone(),
+            reuse_version: operation.reuse_version,
+            open_height: operation.open_height,
+            partial_transaction_commitment: "cd".repeat(32),
+            partial_transaction_hex: "020001".into(),
+            authorization_public_key_hex: "02".to_owned() + &"11".repeat(32),
+            authorization_signature_hex: "ef".repeat(64),
+        }
+    }
+
+    /// An interrupted close signature must not end cooperative close forever.
+    ///
+    /// `begin_or_resume` and `mark_signature_may_exist` are two durable writes
+    /// with the signing prompt between them, so a cancelled prompt, a wrong
+    /// passphrase, a locked session or a crash leaves `SignatureMayExist` with
+    /// no request. This store had no terminal concept at all - no
+    /// `is_terminal`, no cancel, no abandon - and `begin_or_resume` refuses any
+    /// intent that is not byte-identical, which no second attempt can be
+    /// because `prepare_channel_close` mints a fresh operation id and fresh
+    /// timestamps every time. The owner lost cooperative close on that channel,
+    /// and the voucher with it, for the life of the wallet.
+    #[test]
+    fn an_interrupted_close_signature_can_be_released_and_replaced() {
+        let _isolated = IsolatedWalletData::new();
+        let account = WalletAccount::create("channel-close-interrupted").unwrap();
+        let mut safety = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        let address = account.address();
+        let first = safety
+            .begin_or_resume(BeginChannelClose {
+                operation_id: "0e2b6cf6-2f7a-4a1e-9d1a-6a2f8c4b1d33",
+                idempotency_key: "hpay:test:channel-close:interrupted",
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        // The signing prompt is where it dies: the marker is durable, the
+        // bytes never arrive.
+        safety.mark_signature_may_exist().unwrap();
+        assert!(safety.operation().unwrap().request.is_none());
+
+        let second = || BeginChannelClose {
+            operation_id: "6d4c1a90-88b1-4c6b-9f2e-7c5d3e1a2b40",
+            idempotency_key: "hpay:test:channel-close:second",
+            user_address: &address,
+            reuse_version: 1,
+            open_height: 900_000,
+            unsigned_transaction_hex: "020001",
+            created_unix: 1_700_000_400,
+            expires_unix: 1_700_000_700,
+        };
+        let blocked = safety.begin_or_resume(second()).unwrap_err().to_string();
+        assert!(blocked.contains("a different channel-close operation is unresolved"));
+
+        // The release, gated on the caller having asked the Hub and been told
+        // it holds no such operation.
+        safety.release_close_the_hub_never_received().unwrap();
+        let released = safety.operation().unwrap();
+        assert_eq!(released.status, ChannelCloseStatus::CancelledBeforeSigning);
+        assert!(released.status.is_terminal());
+        assert_ne!(released.operation_id, second().operation_id);
+        assert_eq!(released.operation_id, first.operation_id);
+
+        // Terminal means terminal: nothing moves it again.
+        assert!(safety.mark_recovery_required().is_err());
+        assert!(safety.mark_signature_may_exist().is_err());
+
+        // And the channel has its cooperative exit back, across a restart.
+        drop(safety);
+        let mut reopened = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        assert_eq!(
+            reopened.operation().unwrap().status,
+            ChannelCloseStatus::CancelledBeforeSigning
+        );
+        let fresh = reopened
+            .begin_or_resume(second())
+            .expect("a released close must not block the next one");
+        assert_eq!(fresh.status, ChannelCloseStatus::PersistedBeforeSigning);
+        assert_eq!(fresh.operation_id, second().operation_id);
+    }
+
+    /// The release is refused the moment exact bytes exist, because then the
+    /// Hub may well have them.
+    #[test]
+    fn a_close_that_produced_exact_bytes_is_never_released_as_unsent() {
+        let _isolated = IsolatedWalletData::new();
+        let account = WalletAccount::create("channel-close-has-bytes").unwrap();
+        let mut safety = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        let address = account.address();
+        let operation = safety
+            .begin_or_resume(BeginChannelClose {
+                operation_id: "3a5f7b21-4c8d-4e9a-8b1c-2d3e4f5a6b70",
+                idempotency_key: "hpay:test:channel-close:signed",
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        safety.mark_signature_may_exist().unwrap();
+        let request = signed_close_request_for(&operation);
+        safety.persist_user_signed(&request).unwrap();
+        let refusal = safety
+            .release_close_the_hub_never_received()
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("never reached the Hub"), "{refusal}");
+        assert_eq!(
+            safety.operation().unwrap().status,
+            ChannelCloseStatus::UserSigned
+        );
+    }
+
+    /// The Hub's own release word is understood, and it is terminal here too.
+    #[test]
+    fn the_hub_release_status_is_read_and_is_terminal() {
+        assert_eq!(
+            durable_status_for_hub_status("cancelled_before_signing"),
+            Some(ChannelCloseStatus::CancelledBeforeSigning)
+        );
+        assert!(ChannelCloseStatus::CancelledBeforeSigning.is_terminal());
+        for from in [
+            ChannelCloseStatus::PersistedBeforeSigning,
+            ChannelCloseStatus::SignatureMayExist,
+            ChannelCloseStatus::UserSigned,
+            ChannelCloseStatus::RecoveryRequired,
+        ] {
+            assert!(
+                can_accept_hub_status(from, ChannelCloseStatus::CancelledBeforeSigning),
+                "{from:?}"
+            );
+        }
     }
 
     #[test]

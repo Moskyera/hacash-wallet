@@ -87,6 +87,10 @@ pub enum JournalPhase {
     L1CloseSubmitted,
     L1CloseConfirmed,
     L1CloseRetired,
+    /// A channel-close freeze that the durable record proves was never signed
+    /// was released: the channel is unfrozen and the Hub-wide close-liquidity
+    /// reservation it was holding is given up. The audit record is kept.
+    L1CloseCancelledBeforeSigning,
     L1CloseRecoveryRequired,
     /// A channel-close voucher was reserved for one channel and made durable
     /// before the Hub signer was called. The entry alone bars this channel from

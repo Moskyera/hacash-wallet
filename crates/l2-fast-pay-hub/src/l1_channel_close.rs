@@ -85,6 +85,16 @@ pub struct L1ChannelCloseResponse {
     /// can pin what it stored without re-deriving it from a parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_transaction_commitment: Option<String>,
+    /// Why this operation is in the status it is in, in a sentence meant for
+    /// the person who pressed Close.
+    ///
+    /// The Hub has always written a reason onto the durable record and has
+    /// never served it, so a released or stalled close arrived at the wallet as
+    /// a bare status string and the wallet had nothing to show but the string.
+    /// Optional and skipped when empty, so the response is unchanged for every
+    /// status that has no reason to give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

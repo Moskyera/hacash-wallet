@@ -40,6 +40,24 @@ impl ReservationStatus {
             Self::Committed | Self::Rejected | Self::Expired | Self::Released
         )
     }
+
+    /// The status as a person and an operator read it, for refusals that have
+    /// to say which reservation is in the way.
+    pub fn public_name(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Reserved => "reserved",
+            Self::PersistedBeforeSigning => "persisted_before_signing",
+            Self::Signed => "signed",
+            Self::AwaitingRecipientConfirmation => "awaiting_recipient_confirmation",
+            Self::Acknowledged => "acknowledged",
+            Self::Committed => "committed",
+            Self::Rejected => "rejected",
+            Self::Expired => "expired",
+            Self::RecoveryRequired => "recovery_required",
+            Self::Released => "released",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

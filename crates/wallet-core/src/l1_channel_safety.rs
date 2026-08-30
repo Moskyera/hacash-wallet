@@ -75,13 +75,39 @@ pub enum ChannelOpenStatus {
     /// envelope has expired. See `abandon_dead_request` for the full set of
     /// conditions, every one of which is checked before this is written.
     AbandonedDeadRequest,
+    /// The Hub retired a broadcast-but-never-mined channel open, and this
+    /// wallet accepted that retirement.
+    ///
+    /// This status exists because the Hub grew `abandoned_unmined` and the
+    /// wallet did not. The Hub retires such an open only after re-reading the
+    /// chain and finding the transaction neither mined nor pending, and only
+    /// past its own 288-block / 86400-second horizon; it then releases the
+    /// pilot admission budget the open was holding and reports the retirement
+    /// on the status endpoint. The wallet's allowlist did not know the word, so
+    /// it answered "Hub channel-open status changed the durable operation",
+    /// latched into `RecoveryRequired`, and - because this store is keyed by
+    /// the deterministic channel ID and `abandon_dead_request` refuses anything
+    /// that carries a node transaction hash - could never open a Fast Pay
+    /// channel with that Hub again. The Hub released a reservation the wallet
+    /// could not read, which is the mirror image of the Hub holding one the
+    /// wallet could not see.
+    ///
+    /// Terminal, and safe to be terminal for the same reason
+    /// `AbandonedDeadRequest` is: the release can be contradicted later and is
+    /// taken back if it is. A fresh open re-reads the deterministic channel's
+    /// reuse version from the chain, so if the retired transaction ever does
+    /// land, the wallet refuses the new open before it signs anything.
+    AbandonedUnmined,
 }
 
 impl ChannelOpenStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Confirmed | Self::CancelledBeforeSigning | Self::AbandonedDeadRequest
+            Self::Confirmed
+                | Self::CancelledBeforeSigning
+                | Self::AbandonedDeadRequest
+                | Self::AbandonedUnmined
         )
     }
 }
@@ -245,6 +271,11 @@ impl ChannelOpenSafety {
             }
             if existing.status == ChannelOpenStatus::CancelledBeforeSigning {
                 // A definitely unsigned intent may be replaced after explicit recovery cancellation.
+            } else if existing.status == ChannelOpenStatus::AbandonedUnmined {
+                // The Hub retired this open against the chain and said so. The
+                // wallet may start a fresh one, and the chain read below is
+                // what takes the release back if the retired transaction ever
+                // does land.
             } else if existing.status == ChannelOpenStatus::AbandonedDeadRequest {
                 // A signed intent whose envelope died with nothing behind it
                 // may be replaced too, and it has to be: this store is keyed by
@@ -345,7 +376,15 @@ impl ChannelOpenSafety {
             || response.channel_id != operation.channel_id
             || !matches!(
                 response.status.as_str(),
-                "submission_started" | "submitted" | "confirmed" | "recovery_required"
+                "submission_started"
+                    | "submitted"
+                    | "confirmed"
+                    | "recovery_required"
+                    // The Hub's terminal retirement of an open it broadcast and
+                    // then found on no chain. Absent from this list, it was
+                    // read as "the Hub changed the operation" and the wallet
+                    // wedged; see `ChannelOpenStatus::AbandonedUnmined`.
+                    | "abandoned_unmined"
             )
             || response.transaction_hash.as_ref().is_none_or(|hash| {
                 hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -378,7 +417,10 @@ impl ChannelOpenSafety {
         }
         operation.response = Some(response.clone());
         operation.node_transaction_hash = response.transaction_hash.clone();
-        let phase = if response.status == "recovery_required" {
+        let phase = if response.status == "abandoned_unmined" {
+            operation.status = ChannelOpenStatus::AbandonedUnmined;
+            JournalPhase::RecoveryCompleted
+        } else if response.status == "recovery_required" {
             operation.status = ChannelOpenStatus::RecoveryRequired;
             JournalPhase::RecoveryStarted
         } else {
@@ -1040,6 +1082,81 @@ mod tests {
         safety.persist_user_signed(&request).unwrap();
         let dead = operation.expires_unix + 1;
         (safety, dead)
+    }
+
+    /// The Hub's own word for "I broadcast this and the chain never took it".
+    ///
+    /// `retire_unmined_channel_opens` was added to the Hub so a broadcast that
+    /// never mined would stop holding pilot admission budget forever. The
+    /// wallet was never taught the word. `persist_hub_status` allowlisted four
+    /// statuses, `abandoned_unmined` was not one of them, and the answer came
+    /// back "Hub channel-open status changed the durable operation" - so the
+    /// wallet latched into `RecoveryRequired` with nowhere terminal to go,
+    /// because `abandon_dead_request` refuses anything carrying a node
+    /// transaction hash. This store is keyed by the deterministic channel ID,
+    /// so that wallet could never open a Fast Pay channel with that Hub again,
+    /// while the Hub's readiness document reported perfect health with the
+    /// budget released. The Hub gave a reservation back that the wallet could
+    /// not read.
+    #[test]
+    fn a_hub_retirement_of_an_unmined_open_releases_the_wallet_store() {
+        let data = tempfile::tempdir().unwrap();
+        let account = WalletAccount::create("hub-retired-unmined-open").unwrap();
+        let scope = format!("personal:{}", account.address());
+        let root = data.path().join("l2-retired");
+        let (mut safety, _dead) = signed_store(&account, &root, &scope);
+        let operation = safety.operation().unwrap();
+        let envelope = |status: &str| L1ChannelOpenStatusResponse {
+            schema: l2_fast_pay_hub::l1_channel::L1_CHANNEL_OPEN_SCHEMA.into(),
+            operation_id: operation.operation_id.clone(),
+            channel_id: operation.channel_id.clone(),
+            status: status.into(),
+            transaction_hash: Some("ab".repeat(32)),
+        };
+
+        // Broadcast, then never mined.
+        safety.persist_hub_status(&envelope("submitted")).unwrap();
+        assert_eq!(
+            safety.operation().unwrap().status,
+            ChannelOpenStatus::NodeSubmitted
+        );
+        assert!(!safety.operation().unwrap().status.is_terminal());
+
+        // The retirement is read, not refused, and it is terminal.
+        let retired = safety
+            .persist_hub_status(&envelope("abandoned_unmined"))
+            .expect("the Hub's retirement must be readable");
+        assert_eq!(retired.status, ChannelOpenStatus::AbandonedUnmined);
+        assert!(retired.status.is_terminal());
+
+        // Neither escape hatch covers this state, which is exactly why the
+        // store needed the status: without it there was no way out at all.
+        assert!(safety.cancel_before_signing().is_err());
+        assert!(safety.abandon_dead_request(u64::MAX).is_err());
+
+        // The whole point: this wallet can open a Fast Pay channel again.
+        drop(safety);
+        let mut reopened =
+            ChannelOpenSafety::open_scoped(&account, &root, &scope, "1Hub", "1Channel", 1).unwrap();
+        assert_eq!(
+            reopened.operation().unwrap().status,
+            ChannelOpenStatus::AbandonedUnmined,
+            "the retirement must survive a restart"
+        );
+        let address = account.address();
+        let fresh = reopened
+            .begin_or_resume(BeginChannelOpen {
+                operation_id: "8b1f6e02-3a1d-4a2f-9d0c-1e2b3c4d5e6f",
+                idempotency_key: "hpay:test:channel-open:two",
+                user_address: &address,
+                reuse_version: 1,
+                user_deposit_zhu: 100_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_001_000,
+                expires_unix: 1_700_001_300,
+            })
+            .expect("a retired open must not block the next one");
+        assert_eq!(fresh.status, ChannelOpenStatus::PersistedBeforeSigning);
     }
 
     /// Every conjunct of the retirement bar, one at a time, at the store.

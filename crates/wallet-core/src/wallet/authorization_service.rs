@@ -1827,17 +1827,47 @@ impl WalletService {
                 "RecoveryRequired: fullnode channel incarnation changed".into(),
             ));
         }
-        let request = operation.request.as_ref().ok_or_else(|| {
-            WalletError::L2(format!(
-                "RecoveryRequired: exact user-signed bytes are unavailable for operation {}",
-                operation.operation_id
-            ))
-        })?;
         let client = crate::l2_hub::L2HubClient::new_for_wallet_policy(
             &hub_url,
             &self.settings.network_mode,
             self.settings.trusted_mainnet_fast_pay_pilot,
         );
+        let Some(request) = operation.request.as_ref() else {
+            // No exact bytes were ever captured, so this wallet never POSTed
+            // anything: `persist_user_signed` runs before the Hub call. This
+            // used to be the end of the road - the store had no terminal state
+            // at all, so the refusal below stood forever and every later close
+            // on this channel was refused with it.
+            //
+            // Ask the Hub. Its durable record is the evidence, and only a Hub
+            // that actually answers produces any: an unreachable Hub returns
+            // Err here and releases nothing.
+            return match client.channel_close_status(&operation.operation_id).await? {
+                None => {
+                    safety.release_close_the_hub_never_received()?;
+                    Ok(format!(
+                        "Channel close {} was released: the signature was interrupted and the Hub \
+                         has no record of it, so nothing was frozen and nothing can land. You can \
+                         close this channel again.",
+                        operation.operation_id
+                    ))
+                }
+                Some(response) => {
+                    safety.validate_hub_response(&response)?;
+                    let durable = safety.persist_hub_response(&response)?;
+                    Err(WalletError::L2(format!(
+                        "channel-close recovery is still required for operation {}: this wallet \
+                         has no exact signed bytes and the Hub holds the operation as {}{}",
+                        operation.operation_id,
+                        response.status,
+                        match (&response.reason, durable.status) {
+                            (Some(reason), _) => format!(" ({reason})"),
+                            _ => String::new(),
+                        }
+                    )))
+                }
+            };
+        };
         let response = client.close_channel(request).await.map_err(|error| {
             WalletError::L2(format!(
                 "channel-close recovery remains pending for {}: {error}",
@@ -1884,9 +1914,26 @@ impl WalletService {
                     "Channel close submitted: {hash}. Confirmation is pending."
                 ))
             }
+            crate::l1_channel_close_safety::ChannelCloseStatus::CancelledBeforeSigning => {
+                Ok(format!(
+                    "Channel close {} was released by the Hub: {}",
+                    operation.operation_id,
+                    response.reason.as_deref().unwrap_or(
+                        "it proved the close was never signed, so nothing was broadcast and \
+                         nothing can land. You can close this channel again."
+                    )
+                ))
+            }
+            // The reason the Hub wrote onto its own record, carried through
+            // instead of being replaced by a bare "recovery is still required".
             _ => Err(WalletError::L2(format!(
-                "channel-close recovery is still required for operation {}",
-                operation.operation_id
+                "channel-close recovery is still required for operation {}{}",
+                operation.operation_id,
+                response
+                    .reason
+                    .as_deref()
+                    .map(|reason| format!(": {reason}"))
+                    .unwrap_or_default()
             ))),
         }
     }
@@ -2443,7 +2490,15 @@ fn verify_hub_channel_open_status(
         || response.channel_id != preview.channel_id
         || !matches!(
             response.status.as_str(),
-            "submission_started" | "submitted" | "confirmed" | "recovery_required"
+            "submission_started"
+                | "submitted"
+                | "confirmed"
+                | "recovery_required"
+                // The Hub's chain-backed retirement of an open that was
+                // broadcast and never mined. Rejecting the word here made the
+                // recovery command answer "Hub returned an invalid
+                // channel-open status envelope" forever.
+                | "abandoned_unmined"
         )
     {
         return Err(WalletError::L2(

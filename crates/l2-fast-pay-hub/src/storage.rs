@@ -492,6 +492,22 @@ pub(crate) enum L1ChannelCloseStatus {
     Submitted,
     ConfirmedClosed,
     Retired,
+    /// Terminal. The freeze was persisted, the Hub never produced a signature
+    /// for it, and the durable record proves that.
+    ///
+    /// This is the close-side twin of `AbandonedUnsigned` on the open path, and
+    /// it exists for the same reason `AbandonedUnmined` had to be added there:
+    /// a status a record can be left in durably with no transition out of it is
+    /// not a slow path, it is a missing state. Before this variant existed the
+    /// only exit an unsigned freeze had was `RecoveryRequired`, whose own
+    /// recovery gate demands `signed_transaction_hex` - which a never-signed
+    /// operation can never have - so it latched the whole Hub forever.
+    ///
+    /// Entered only where `close_is_provably_unsigned` holds: no signed bytes,
+    /// no signed-transaction commitment, no confirmed height. Never entered on
+    /// a clock alone; expiry decides *when* the Hub looks, the durable record
+    /// decides whether releasing is safe.
+    CancelledBeforeSigning,
     RecoveryRequired,
 }
 
@@ -500,6 +516,7 @@ impl L1ChannelCloseStatus {
         match self {
             Self::FreezeIntentPersisted => "freeze_intent_persisted",
             Self::FrozenBeforeSigning => "frozen_before_signing",
+            Self::CancelledBeforeSigning => "cancelled_before_signing",
             Self::SignatureMayExist => "signature_may_exist",
             Self::Signed => "signed",
             Self::SubmissionStarted => "submission_started",

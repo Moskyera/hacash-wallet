@@ -150,6 +150,23 @@ impl Default for MainnetPilotAdmissionPolicy {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// The one cooperative close that is currently holding the Hub-wide
+/// close-liquidity reservation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseLiquidityReservation {
+    pub operation_id: String,
+    pub channel_id: String,
+    /// The durable status, verbatim, so a reader can tell "waiting for a block"
+    /// (`submitted`) from "needs an operator" (`recovery_required`).
+    pub status: String,
+    /// The transaction the reservation is waiting on, when one exists.
+    pub transaction_hash: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MainnetReadinessV1 {
     pub schema: &'static str,
@@ -240,6 +257,29 @@ pub struct MainnetReadinessV1 {
     /// exactly what this one field says.
     #[serde(default)]
     pub new_channel_admission_available: bool,
+    /// Whether a cooperative close can be started at all right now.
+    ///
+    /// The Hub countersigns and reserves refund liquidity for one cooperative
+    /// close at a time, Hub-wide - not per channel. That reservation is held
+    /// until the reserving close confirms on chain and is retired, so a close
+    /// that is broadcast and never mined turns every other user's Close button
+    /// into a refusal for as long as the transaction stays out of a block.
+    ///
+    /// The document had no field for it. `close_enabled` was true, the blocker
+    /// lists were empty, and the gate refused everybody - the same shape as a
+    /// Hub sitting exactly on its TVL cap. Deliberately not a blocker and not
+    /// folded into `close_enabled`, for the same reason
+    /// `new_channel_admission_available` is not: nothing is broken, one
+    /// operation is in flight, and closes resume the moment it lands.
+    #[serde(default = "default_true")]
+    pub cooperative_close_admission_available: bool,
+    /// Which close is holding that reservation, and on which channel.
+    ///
+    /// `None` when nothing is. Named rather than counted so an operator can go
+    /// and look the transaction up instead of guessing which of their users is
+    /// in the way.
+    #[serde(default)]
+    pub close_liquidity_reserved_by: Option<CloseLiquidityReservation>,
     pub max_payment_satoshi: u64,
     pub wallet_fee_hac: &'static str,
     pub trustless_finality: bool,
@@ -546,6 +586,11 @@ impl MainnetReadinessV1 {
             } else {
                 0
             },
+            // Filled in by `note_cooperative_close_reservation`, which reads
+            // the durable close records. `evaluate` is given only probe
+            // evidence and has nothing to measure it from.
+            cooperative_close_admission_available: true,
+            close_liquidity_reserved_by: None,
             allowlist_configured: false,
             aggregate_tvl_within_limit: false,
             max_aggregate_tvl_hac_zhu: 0,
@@ -568,6 +613,28 @@ impl MainnetReadinessV1 {
             disclosed_blockers,
             limitations,
         }
+    }
+
+    /// Publish the Hub-wide cooperative-close reservation, if one is held.
+    ///
+    /// Called with whatever the durable close records say. Not a blocker: a Hub
+    /// with one close in flight is healthy for everything else it does, and
+    /// blocking `close_enabled` over it would take the owner's way out away to
+    /// tell them it is busy. The limitation sentence is what a person reads.
+    pub fn note_cooperative_close_reservation(
+        &mut self,
+        reservation: Option<CloseLiquidityReservation>,
+    ) {
+        self.cooperative_close_admission_available = reservation.is_none();
+        if let Some(reservation) = reservation.as_ref() {
+            self.limitations.push(format!(
+                "this Hub countersigns one cooperative close at a time and operation {} on \
+                 channel {} currently holds that reservation ({}). Every other channel's Close \
+                 will be refused until it confirms on chain and is retired",
+                reservation.operation_id, reservation.channel_id, reservation.status
+            ));
+        }
+        self.close_liquidity_reserved_by = reservation;
     }
 
     pub fn require_channel_funding_ready_zhu(&self, amount_zhu: u64) -> HubResult<()> {

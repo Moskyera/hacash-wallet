@@ -744,7 +744,16 @@ impl HubState {
             &self.mainnet_admission_policy,
             self.aggregate_pilot_tvl_zhu(),
         );
+        // The Hub-wide cooperative-close reservation. Published because it was
+        // the one gate in this document with no field at all: `close_enabled`
+        // read true and every Close but one was refused.
+        readiness.note_cooperative_close_reservation(self.close_liquidity_reservation());
         readiness
+    }
+
+    fn close_liquidity_reservation(&self) -> Option<crate::readiness::CloseLiquidityReservation> {
+        let guard = self.inner.read().ok()?;
+        crate::state::close::close_liquidity_reservation(&guard)
     }
 
     fn aggregate_pilot_tvl_zhu(&self) -> HubResult<u64> {
@@ -2238,6 +2247,16 @@ impl HubState {
             )));
         }
         *guard = next_state;
+        // Every other commit path in this file already does this
+        // (`commit_channel_close_transition`, the open path, the HVM paths).
+        // The Fast Pay path did not, so the in-memory latch lagged the durable
+        // state it is computed from: a reservation pushed to
+        // `RecoveryRequired` here made the Hub refuse everything while
+        // `/v1/health` went on reporting `settlement_ready: true` until some
+        // unrelated call or a restart happened to recompute it. A surface that
+        // reports healthy while the gate refuses everyone is the exact failure
+        // this whole review exists to remove.
+        self.refresh_recovery_gate(guard);
         Ok(())
     }
 }

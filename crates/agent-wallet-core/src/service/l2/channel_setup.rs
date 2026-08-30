@@ -551,7 +551,16 @@ impl AgentWalletManager {
             || response.schema != l2_fast_pay_hub::l1_channel::L1_CHANNEL_OPEN_SCHEMA
             || !matches!(
                 response.status.as_str(),
-                "submission_started" | "submitted" | "confirmed" | "recovery_required"
+                "submission_started"
+                    | "submitted"
+                    | "confirmed"
+                    | "recovery_required"
+                    // The Hub's chain-backed retirement of an open it broadcast
+                    // and then found on no chain. The Agent Wallet shares
+                    // wallet-core's open store and carried the same wedge: an
+                    // unknown status here answered `mark_recovery_required` and
+                    // the store had no terminal state to reach afterwards.
+                    | "abandoned_unmined"
             )
         {
             safety
@@ -856,7 +865,10 @@ impl AgentWalletManager {
                 // A retired dead request is not an unsigned one. It has its
                 // own exit, `abandon_dead_l2_channel_setup`, and the unsigned
                 // discard must never be the thing that clears it.
-                | ChannelOpenStatus::AbandonedDeadRequest => {
+                | ChannelOpenStatus::AbandonedDeadRequest
+                // The Hub's own chain-backed retirement. Terminal, and cleared
+                // by that retirement rather than by the unsigned discard.
+                | ChannelOpenStatus::AbandonedUnmined => {
                     return Err(AgentWalletError::ChannelSetupNotDiscardable);
                 }
             }
@@ -1023,6 +1035,7 @@ impl AgentWalletManager {
             | ChannelOpenStatus::HubCosigned
             | ChannelOpenStatus::NodeSubmitted
             | ChannelOpenStatus::Opening
+            | ChannelOpenStatus::AbandonedUnmined
             | ChannelOpenStatus::Confirmed => {
                 return Err(AgentWalletError::ChannelSetupNotDiscardable);
             }
