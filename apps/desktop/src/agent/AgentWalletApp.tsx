@@ -3,6 +3,8 @@ import { open } from "@tauri-apps/plugin-shell";
 import {
   AGENT_WALLET_HOW_IT_WORKS_URL,
   AGENT_WITNESS_PHONE_REQUIREMENT,
+  channelSetupReviewIsBlocked,
+  explainInvalidDepositAmount,
   mainnetSigningTransportIsEligible,
 } from "@hacash/wallet-ui";
 import WalletLogo from "../components/WalletLogo";
@@ -1196,6 +1198,55 @@ function AgentPageContent(props: PageContentProps) {
   );
 }
 
+/**
+ * The deposit complaint and the button it must govern, in one component.
+ *
+ * They are together because they were apart, and being apart is how a screen
+ * comes to explain a problem it then allows. The core reports every malformed
+ * amount as the same five words, "payment amount is invalid", after a round
+ * trip. An owner typed `0,2` on a Greek keyboard, read those five words, and
+ * had no way to know a comma was the whole problem. Naming the rule here is
+ * only half the fix; the other half is that the press cannot go through while
+ * the rule is named, and both halves now read the same value.
+ *
+ * It does NOT rewrite what was typed. A wallet quietly correcting `0,2` to
+ * `0.2` is a wallet guessing about money.
+ *
+ * Exported so a test can render it with an amount. The panel keeps this state
+ * in `useState`, and the desktop tests render to static markup and cannot
+ * type, so a gate left inside the panel is a gate nothing can check.
+ */
+export function ChannelSetupReviewControl({
+  hubUrl,
+  deposit,
+  busy,
+  onReview,
+}: {
+  hubUrl: string;
+  deposit: string;
+  busy: boolean;
+  onReview: () => void;
+}) {
+  const problem = deposit.trim().length > 0 ? explainInvalidDepositAmount(deposit) : null;
+  return (
+    <>
+      {problem ? (
+        <p className="agent-warning" role="status">
+          {problem}
+        </p>
+      ) : null}
+      <button
+        type="button"
+        className="agent-primary"
+        disabled={busy || channelSetupReviewIsBlocked(hubUrl, deposit)}
+        onClick={onReview}
+      >
+        Review channel setup
+      </button>
+    </>
+  );
+}
+
 export function AgentFastPayChannelPanel({
   overview,
   busy,
@@ -1223,6 +1274,18 @@ export function AgentFastPayChannelPanel({
   // twice.
   const discardable = setup?.phase === "prepared";
   const reviewExpired = Boolean(setup && setup.expires_at * 1000 <= Date.now());
+  // A setup that holds a signature the Hub will never accept again.
+  //
+  // The core decides this, not the screen; this only decides whether to offer
+  // the control. The clock it uses is exact rather than a guess: prepare sets
+  // expires_at to created_at + 300, and the core's own bar is created_at + 600
+  // (CHANNEL_OPEN_DEAD_AFTER, the age past which no Hub will accept the
+  // transaction), so expires_at + 300 is the same instant. The core still
+  // re-checks the clock, its durable store and the live chain before it agrees.
+  const signedSetup = setup?.phase === "signed" || setup?.phase === "recovery_required";
+  const requestIsDead = Boolean(
+    setup && signedSetup && (setup.expires_at + 300) * 1000 <= Date.now(),
+  );
 
   const finish = async (message: string) => {
     onInfo(message);
@@ -1258,11 +1321,11 @@ export function AgentFastPayChannelPanel({
               disabled={busy}
             />
           </label>
-          <button
-            type="button"
-            className="agent-primary"
-            disabled={busy || !hubUrl.trim() || !deposit.trim()}
-            onClick={() =>
+          <ChannelSetupReviewControl
+            hubUrl={hubUrl}
+            deposit={deposit}
+            busy={busy}
+            onReview={() =>
               void run(async () => {
                 await agentWalletApi.prepareFastPayChannel(
                   overview.wallet_id,
@@ -1272,9 +1335,7 @@ export function AgentFastPayChannelPanel({
                 await finish("Review the exact Agent channel deposit and network fee.");
               })
             }
-          >
-            Review channel setup
-          </button>
+          />
         </>
       )}
 
@@ -1289,6 +1350,31 @@ export function AgentFastPayChannelPanel({
           {setup.fee_estimate_degraded ? (
             <p className="agent-warning" role="status">
               {setup.fee_estimate_degraded}
+            </p>
+          ) : null}
+          {/*
+            What the Hub said, kept across a refresh.
+
+            An owner opened their first mainnet channel, the Hub refused, and
+            the core mapped the refusal to Err(_) and returned five generic
+            words. They pressed the button twice more and learned nothing three
+            times. The core now stores the Hub's own sentence on the setup, so
+            it is still here after this panel reloads, which a returned error
+            is not.
+          */}
+          {setup.last_hub_refusal ? (
+            <p className="agent-warning" role="status">
+              The Fast Pay Hub refused this channel. Nothing was sent to the
+              chain and nothing was spent. The Hub said: {setup.last_hub_refusal}
+            </p>
+          ) : null}
+          {requestIsDead ? (
+            <p className="agent-warning" role="status">
+              This setup was signed and its signing window has closed, so no Hub
+              will accept it now. Your deposit was never sent. Abandon it to set
+              the channel up again; this wallet checks its own records and asks
+              the chain before it agrees, and refuses if either says the channel
+              may exist.
             </p>
           ) : null}
           <p className="agent-exact-address">{setup.channel_id}</p>
@@ -1377,6 +1463,38 @@ export function AgentFastPayChannelPanel({
                 }
               >
                 Discard this review
+              </button>
+            ) : null}
+            {/*
+              The exit from a signature nobody will accept.
+
+              Deliberately separate from Discard, and worded differently,
+              because it is a different claim. Discard says no signature was
+              ever produced. This says one was, and that it is now unusable by
+              anybody: the request envelope has closed, the transaction is past
+              the age any Hub will take, the wallet's own durable record shows
+              nothing came back, and the chain says the channel does not exist.
+              The core checks all four and refuses if any of them fails.
+            */}
+            {requestIsDead ? (
+              <button
+                type="button"
+                className="agent-primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.abandonDeadFastPayChannelSetup(
+                      overview.wallet_id,
+                      setup.operation_id,
+                      setup.review_commitment,
+                    );
+                    await finish(
+                      "That setup was abandoned. Its deposit never left this wallet, and the channel was never opened. Set the channel up again when you are ready.",
+                    );
+                  })
+                }
+              >
+                Abandon this signed setup
               </button>
             ) : null}
           </div>

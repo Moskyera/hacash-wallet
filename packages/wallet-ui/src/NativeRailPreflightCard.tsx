@@ -66,6 +66,8 @@ export type NativeRailPreflightView = {
     max_channel_funding_hac: string | null;
     max_aggregate_tvl_hac: string | null;
     aggregate_tvl_within_limit: boolean | null;
+    new_channel_admission_available?: boolean | null;
+    aggregate_tvl_hac?: string | null;
   };
   cannot_be_checked: UncheckableFactView[];
 };

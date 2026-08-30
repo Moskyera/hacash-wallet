@@ -244,6 +244,40 @@ pub enum AgentWalletError {
     JournalAuthenticationFailed,
     #[error("Agent Wallet state requires manual recovery")]
     RecoveryRequired,
+    // The Fast Pay Hub refused a channel open, in the Hub's own words.
+    //
+    // This variant exists because of one night. An owner opened their first
+    // mainnet Fast Pay channel, the wallet signed, the Hub refused, and
+    // `channel_setup.rs` mapped the `HubError` to `Err(_)` and returned a bare
+    // `RecoveryRequired`. The Hub does not log route refusals, so the sentence
+    // the wallet threw away was the only copy that ever existed. The owner
+    // pressed the button twice more and got the same five words twice more.
+    //
+    // The Hub's message is written in this workspace, for a person to read,
+    // and carries no key, nonce or device identifier: it is amounts, caps,
+    // addresses the owner already knows, and the name of the rule that fired.
+    // It is carried verbatim for exactly the same reason `RegistryExitRefused`
+    // is, and it is a distinct variant from `RecoveryRequired` because its
+    // remedy is not recovery. Recovery re-runs the confirm, and the confirm is
+    // what refused.
+    #[error(
+        "The Fast Pay Hub refused to open this channel, so nothing was sent to the chain and nothing was spent. The Hub said: {0}"
+    )]
+    ChannelSetupHubRefused(String),
+    // The Fast Pay Hub could not be reached, or says it is not in a state to
+    // take a channel open, in the Hub's own words.
+    //
+    // Same defect, one step earlier. Both `prepare` and the re-verification
+    // inside `confirm` collapsed `require_channel_open_ready` into
+    // `SigningBlocked` - "transaction signing is blocked" - which names
+    // neither the Hub nor the unmet clause. The Hub client builds that
+    // sentence with `describe_unmet_contract` specifically so a person can
+    // read which part of the provider contract is unmet, and it was being
+    // deleted one line later.
+    #[error(
+        "The Fast Pay Hub is not ready to open a channel, so nothing was signed and nothing was spent. The Hub said: {0}"
+    )]
+    ChannelSetupHubNotReady(String),
     #[error("transaction signing is blocked")]
     SigningBlocked,
     // Shown verbatim in the desktop UI, so it says what was not done rather

@@ -8,6 +8,34 @@ use crate::storage::{L1ChannelOpenStatus, PersistedL1ChannelOpen};
 const SUBMITTED_EXACT_RETRY_GRACE_SECONDS: u64 = 30;
 const L1_OPEN_MIN_CONFIRMATIONS: u64 = 6;
 
+/// How many blocks the chain must produce, without including a broadcast
+/// channel-open, before the Hub stops holding admission budget for it.
+///
+/// Blocks and not seconds, deliberately. "This should have been mined by now"
+/// is a statement about the chain having had opportunities, and a stalled or
+/// unreachable chain has given none. A wall clock cannot say that: it would
+/// call an open dead during exactly the outage that stopped it from being
+/// included. Counting blocks makes the rule self-correcting - no blocks, no
+/// retirements - and it is the same unit the rest of this file already judges
+/// finality in.
+///
+/// 288 blocks is a day at this chain's five minute target. This crate's own
+/// scheduler already calls fifteen minutes of silence far past normal
+/// (`HVM_SUBMITTED_STALE_SECONDS`); this is ninety-six times that, and every
+/// resume or recovery marker on an open re-arms it from the new height.
+pub(crate) const OPEN_UNMINED_RETIREMENT_BLOCKS: u64 = 288;
+
+/// The same rule for records written before `broadcast_height` existed.
+///
+/// Those carry no height to count from, so seconds are the only measure left.
+/// It is a strictly weaker rule and it applies to strictly older records - the
+/// owner's five day old open among them - which is the whole reason it is here
+/// rather than being tightened away.
+///
+/// Measured from the *later* of creation and the last transition, so an open
+/// that anything is still working on is never a candidate.
+pub(crate) const OPEN_UNMINED_RETIREMENT_SECONDS: u64 = 86_400;
+
 pub(super) fn confirmed_open_has_finality_evidence(operation: &PersistedL1ChannelOpen) -> bool {
     operation.status == L1ChannelOpenStatus::Confirmed
         && operation
@@ -149,6 +177,14 @@ impl HubState {
             }
         }
 
+        // Reached only when the chain has just been asked and still does not
+        // have this channel. A retired open is one the Hub already decided to
+        // stop carrying, so it does not go back on the wire here; the arms
+        // above are what take it back, and only on chain evidence.
+        if operation.status.is_retired_unmined() {
+            return Ok(channel_open_status_response(&operation));
+        }
+
         if operation.status == L1ChannelOpenStatus::Submitted
             && !submitted_exact_retry_due(operation.updated_unix, crate::node::now_unix())
         {
@@ -175,18 +211,23 @@ impl HubState {
                     .into(),
             )
         })?;
-        let live_before_submit = self
-            .node
-            .capabilities()
-            .await
-            .and_then(|capabilities| capabilities.l1_channel_network_binding());
-        if live_before_submit.as_ref().ok() != Some(&expected_network) {
+        let capabilities_before_submit = self.node.capabilities().await.ok();
+        let live_before_submit = capabilities_before_submit
+            .as_ref()
+            .and_then(|capabilities| capabilities.l1_channel_network_binding().ok());
+        if live_before_submit.as_ref() != Some(&expected_network) {
             let operation = self.mark_open_recovery_required(
                 operation,
                 "fullnode network identity changed before channel-open broadcast".into(),
             )?;
             return Ok(channel_open_status_response(&operation));
         }
+        // The height these bytes are about to go on the wire at. Every
+        // broadcast attempt re-arms it, so the retirement rule always counts
+        // blocks from the most recent chance the chain was given.
+        operation.broadcast_height = capabilities_before_submit
+            .as_ref()
+            .map(|capabilities| capabilities.height);
         if operation.status != L1ChannelOpenStatus::SubmissionStarted {
             operation = self.transition_open_status(
                 operation,
@@ -429,6 +470,13 @@ impl HubState {
             current.confirmed_block_height = confirmed_block_height;
             current.observed_confirmations = observed_confirmations;
         }
+        // Carried the same way, and only forward: the caller sets it
+        // immediately before putting bytes on the wire, and a transition that
+        // has nothing to say about a broadcast leaves the recorded height
+        // alone rather than clearing it.
+        if operation.broadcast_height.is_some() {
+            current.broadcast_height = operation.broadcast_height;
+        }
         current.status = status;
         current.updated_unix = crate::node::now_unix();
         current.last_error = last_error;
@@ -450,6 +498,117 @@ impl HubState {
             JournalPhase::L1OpenRecoveryRequired,
             Some(error),
         )
+    }
+
+    /// Release admission budget held by channel-opens that the chain says do
+    /// not exist.
+    ///
+    /// **The defect this exists for.** A channel-open reserves its whole
+    /// deposit against the pilot aggregate TVL cap from the moment it is
+    /// created until it reaches `Confirmed`. Nothing in the tree moved a
+    /// signed-and-broadcast-but-never-mined open anywhere else, so one
+    /// transaction that failed to be included held its deposit against the cap
+    /// forever. On a Hub whose cap is one channel wide, that is one broadcast
+    /// away from never opening another channel, and the Hub reports itself
+    /// perfectly healthy the whole time.
+    ///
+    /// **What it takes to retire one.** Every conjunct is required, and any
+    /// unavailable answer leaves the reservation standing:
+    ///
+    /// 1. the operation reserves admission and is not `Confirmed`;
+    /// 2. the Hub has never recorded inclusion evidence for it - no confirmed
+    ///    block height and no observed confirmations;
+    /// 3. the chain has produced [`OPEN_UNMINED_RETIREMENT_BLOCKS`] blocks
+    ///    since these bytes went on the wire and included none of them - or,
+    ///    for a record written before that height was captured, it has been
+    ///    dead still for [`OPEN_UNMINED_RETIREMENT_SECONDS`], measured from the
+    ///    later of its creation and its last transition;
+    /// 4. the fullnode answers `NotFound` for its channel ID, so no channel
+    ///    exists to reconcile against;
+    /// 5. the fullnode has never heard of its transaction hash - not in a
+    ///    block, and not pending in a mempool.
+    ///
+    /// A fullnode that errors, or that answers anything other than those two
+    /// absences, retires nothing. Not knowing is not evidence.
+    ///
+    /// **Why releasing the budget is safe.** The reservation is a policy bound,
+    /// not a solvency bound: the Hub's own deposit in a channel-open is exactly
+    /// zero (`validate_channel_open` refuses any other), so nothing the Hub
+    /// owns is at stake in the retired operation. What is at stake is the pilot
+    /// cap being overshot if the retired bytes are somehow mined later. That is
+    /// bounded by the retired deposit, it is detectable, and it is caught at
+    /// the next decision point rather than never: the operation is kept,
+    /// `has_durable_signature` stays true, and this sweep keeps asking the
+    /// chain about it on every subsequent open. If the channel appears,
+    /// `resume_channel_open_locked` reconciles it back into a real ledger.
+    ///
+    /// Weighed against that: today the failure mode is certain and permanent.
+    pub(super) async fn retire_unmined_channel_opens(&self) -> HubResult<Vec<String>> {
+        let now = crate::node::now_unix();
+        // The tip the retirement is judged against. An unreachable fullnode
+        // ends the sweep before a single reservation is touched, which is the
+        // same rule as every other conjunct: not knowing is not evidence.
+        let tip_height = self.node.capabilities().await?.height;
+        let candidates: Vec<PersistedL1ChannelOpen> = {
+            let guard = self
+                .inner
+                .read()
+                .map_err(|_| HubError::State("state lock poisoned".into()))?;
+            guard
+                .l1_channel_opens
+                .values()
+                .filter(|operation| open_is_retirement_candidate(operation, now, tip_height))
+                .cloned()
+                .collect()
+        };
+        let mut retired = Vec::new();
+        for operation in candidates {
+            match self.node.query_channel(&operation.channel_id).await {
+                Err(HubError::NotFound(_)) => {}
+                _ => continue,
+            }
+            match self
+                .node
+                .query_transaction(&operation.transaction_hash)
+                .await
+            {
+                Ok(None) => {}
+                _ => continue,
+            }
+            let waited = match operation.broadcast_height {
+                Some(broadcast_height) => format!(
+                    "the chain has produced {} blocks since it was broadcast at height \
+                     {broadcast_height} and included it in none of them",
+                    tip_height.saturating_sub(broadcast_height)
+                ),
+                None => format!(
+                    "it was broadcast {} seconds ago",
+                    now.saturating_sub(open_last_progress_unix(&operation))
+                ),
+            };
+            let reason = format!(
+                "channel-open transaction {}: {waited}, the fullnode does not hold it pending \
+                 either, and channel {} does not exist; the pilot admission budget it reserved \
+                 ({} zhu) is released. The signed bytes are kept and still watched: if that \
+                 transaction is ever included, this operation is taken back at the next \
+                 channel-open.",
+                operation.transaction_hash, operation.channel_id, operation.user_deposit_zhu
+            );
+            let operation_id = operation.operation_id.clone();
+            match self.transition_open_status(
+                operation,
+                L1ChannelOpenStatus::AbandonedUnmined,
+                JournalPhase::L1OpenAbandonedUnmined,
+                Some(reason),
+            ) {
+                Ok(_) => retired.push(operation_id),
+                // A concurrent transition won the write lock. The reservation
+                // simply stands until the next sweep, which is the safe way to
+                // lose this race.
+                Err(_) => continue,
+            }
+        }
+        Ok(retired)
     }
 
     fn load_channel_open(&self, operation_id: &str) -> HubResult<PersistedL1ChannelOpen> {
@@ -529,6 +688,57 @@ fn exact_open_channel_matches(
         && right_zhu == 0)
 }
 
+/// The last moment anything happened to this open, as far as durable state can
+/// tell. `updated_unix` defaults to zero on records written before it existed,
+/// so creation is the floor.
+fn open_last_progress_unix(operation: &PersistedL1ChannelOpen) -> u64 {
+    operation.created_unix.max(operation.updated_unix)
+}
+
+/// Everything that can be decided about a retirement without asking the chain.
+///
+/// Kept pure and separate from the sweep so the boundary conditions can be
+/// tested without a fullnode, and so the sweep never opens a socket for an
+/// operation that was never eligible.
+fn open_is_retirement_candidate(
+    operation: &PersistedL1ChannelOpen,
+    now: u64,
+    tip_height: u64,
+) -> bool {
+    if !operation.status.reserves_admission() {
+        return false;
+    }
+    // Only opens whose bytes are real and final. A `ValidatedBeforeSigning`
+    // open is retired by `AbandonedUnsigned`, and a `SignatureMayExist` open is
+    // the one case where the Hub does not know whether signed bytes exist at
+    // all - that uncertainty is not something a chain absence resolves, so it
+    // is deliberately left alone here.
+    if !operation.status.has_durable_signature() {
+        return false;
+    }
+    if operation.status == L1ChannelOpenStatus::Confirmed {
+        return false;
+    }
+    // The Hub has seen this in a block before. That is a reorganisation
+    // question, which `resume_channel_open_locked` already answers by latching
+    // recovery, and never a retirement question.
+    if operation.confirmed_block_height.is_some() || operation.observed_confirmations > 0 {
+        return false;
+    }
+    match operation.broadcast_height {
+        // The chain has had this many chances to include these bytes and took
+        // none of them. A chain that produced no blocks retires nothing.
+        Some(broadcast_height) => {
+            tip_height.saturating_sub(broadcast_height) >= OPEN_UNMINED_RETIREMENT_BLOCKS
+        }
+        // Written before the height was recorded. Seconds are all there is.
+        None => {
+            now.saturating_sub(open_last_progress_unix(operation))
+                >= OPEN_UNMINED_RETIREMENT_SECONDS
+        }
+    }
+}
+
 fn can_transition_open_status(current: &L1ChannelOpenStatus, next: &L1ChannelOpenStatus) -> bool {
     use L1ChannelOpenStatus::*;
     match current {
@@ -539,16 +749,29 @@ fn can_transition_open_status(current: &L1ChannelOpenStatus, next: &L1ChannelOpe
             )
         }
         SignatureMayExist => matches!(next, Signed | RecoveryRequired),
-        Signed => matches!(next, SubmissionStarted | RecoveryRequired),
-        SubmissionStarted => matches!(next, Submitted | RecoveryRequired),
+        Signed => matches!(
+            next,
+            SubmissionStarted | AbandonedUnmined | RecoveryRequired
+        ),
+        SubmissionStarted => matches!(next, Submitted | AbandonedUnmined | RecoveryRequired),
         Submitted => matches!(
             next,
-            SubmissionStarted | Submitted | Confirmed | RecoveryRequired
+            SubmissionStarted | Submitted | Confirmed | AbandonedUnmined | RecoveryRequired
         ),
         RecoveryRequired => matches!(
             next,
-            SubmissionStarted | Submitted | Confirmed | RecoveryRequired
+            SubmissionStarted | Submitted | Confirmed | AbandonedUnmined | RecoveryRequired
         ),
+        // Retired, not buried. A retirement is a statement about the chain at
+        // one instant - "these bytes are neither in a block nor in a mempool" -
+        // and the chain is allowed to contradict it later. If it does, the
+        // sweep must be able to take the operation back, which is why every
+        // evidence-bearing status is still reachable from here. What is not
+        // reachable is a fresh `SubmissionStarted`: the Hub gave these bytes up
+        // and does not put them on the wire again. `Submitted` is reachable
+        // only because that is the status an already-mined-but-unconfirmed
+        // open is reconciled into, never because the Hub rebroadcast anything.
+        AbandonedUnmined => matches!(next, Submitted | Confirmed | RecoveryRequired),
         Confirmed | AbandonedUnsigned => false,
     }
 }
@@ -573,6 +796,7 @@ fn channel_open_status_response(operation: &PersistedL1ChannelOpen) -> L1Channel
 #[cfg(test)]
 mod tests {
     use super::*;
+    use L1ChannelOpenStatus::*;
 
     fn operation(
         index: usize,
@@ -601,6 +825,7 @@ mod tests {
             signed_transaction_hex: None,
             signed_transaction_commitment: None,
             confirmed_block_height: None,
+            broadcast_height: None,
             observed_confirmations: 0,
             status,
             created_unix: 1,
@@ -614,6 +839,161 @@ mod tests {
     fn submitted_retry_has_a_bounded_grace_period() {
         assert!(!submitted_exact_retry_due(100, 129));
         assert!(submitted_exact_retry_due(100, 130));
+    }
+
+    /// The owner's Aug 25 record, in the shape their durable state actually
+    /// held it: `Submitted`, no inclusion evidence, and no `broadcast_height`,
+    /// because the field did not exist when it was written. That record is the
+    /// one this whole change exists to release, so the fallback rule is not an
+    /// afterthought - it is the rule that has to fire for them.
+    fn owners_record(broadcast_height: Option<u64>) -> PersistedL1ChannelOpen {
+        let mut operation = operation(1, "1LCY6uQS3iNGy2mKSmhFVU2dHgBQLf74Fx", Submitted);
+        operation.user_deposit_zhu = 20_000_000;
+        operation.created_unix = 1_787_662_846;
+        operation.updated_unix = 1_787_662_846;
+        operation.broadcast_height = broadcast_height;
+        operation
+    }
+
+    #[test]
+    fn a_record_written_before_broadcast_height_existed_is_judged_in_seconds() {
+        let operation = owners_record(None);
+        let broadcast = operation.updated_unix;
+        // The owner's own record was five days old.
+        assert!(open_is_retirement_candidate(
+            &operation,
+            broadcast + OPEN_UNMINED_RETIREMENT_SECONDS,
+            0
+        ));
+        assert!(!open_is_retirement_candidate(
+            &operation,
+            broadcast + OPEN_UNMINED_RETIREMENT_SECONDS - 1,
+            0
+        ));
+        // No height is recorded, so no height can move the answer.
+        assert!(!open_is_retirement_candidate(
+            &operation,
+            broadcast,
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn a_record_with_a_broadcast_height_is_judged_in_blocks_and_ignores_the_clock() {
+        let operation = owners_record(Some(777_754));
+        let far_future = operation.updated_unix + OPEN_UNMINED_RETIREMENT_SECONDS * 365;
+        assert!(!open_is_retirement_candidate(
+            &operation,
+            far_future,
+            777_754 + OPEN_UNMINED_RETIREMENT_BLOCKS - 1
+        ));
+        assert!(open_is_retirement_candidate(
+            &operation,
+            far_future,
+            777_754 + OPEN_UNMINED_RETIREMENT_BLOCKS
+        ));
+        // A stalled chain retires nothing, however long the wall clock runs.
+        // That is the whole reason the rule counts blocks.
+        assert!(!open_is_retirement_candidate(
+            &operation, far_future, 777_754
+        ));
+    }
+
+    #[test]
+    fn a_reorganisation_question_is_never_a_retirement_question() {
+        let mut operation = owners_record(Some(777_754));
+        operation.confirmed_block_height = Some(777_800);
+        assert!(!open_is_retirement_candidate(
+            &operation,
+            u64::MAX,
+            u64::MAX
+        ));
+
+        let mut operation = owners_record(Some(777_754));
+        operation.observed_confirmations = 1;
+        assert!(!open_is_retirement_candidate(
+            &operation,
+            u64::MAX,
+            u64::MAX
+        ));
+    }
+
+    #[test]
+    fn only_an_open_whose_exact_bytes_exist_can_be_retired() {
+        for status in [
+            ValidatedBeforeSigning,
+            AbandonedUnsigned,
+            SignatureMayExist,
+            Confirmed,
+            AbandonedUnmined,
+        ] {
+            let mut operation = owners_record(Some(777_754));
+            operation.status = status.clone();
+            assert!(
+                !open_is_retirement_candidate(&operation, u64::MAX, u64::MAX),
+                "{status:?} must never be retired as unmined"
+            );
+        }
+        for status in [Signed, SubmissionStarted, Submitted, RecoveryRequired] {
+            let mut operation = owners_record(Some(777_754));
+            operation.status = status.clone();
+            assert!(
+                open_is_retirement_candidate(&operation, u64::MAX, u64::MAX),
+                "{status:?} holds budget for bytes that exist and must be retirable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_open_stops_holding_admission_budget_and_keeps_its_signature() {
+        assert!(!AbandonedUnmined.reserves_admission());
+        assert!(AbandonedUnmined.has_durable_signature());
+        assert!(AbandonedUnmined.is_retired_unmined());
+        assert!(!Submitted.is_retired_unmined());
+        assert_eq!(AbandonedUnmined.public_name(), "abandoned_unmined");
+    }
+
+    #[test]
+    fn a_retirement_is_reversible_by_chain_evidence_but_never_by_the_hub() {
+        assert!(can_transition_open_status(&Submitted, &AbandonedUnmined));
+        assert!(can_transition_open_status(
+            &RecoveryRequired,
+            &AbandonedUnmined
+        ));
+        assert!(can_transition_open_status(&Signed, &AbandonedUnmined));
+        assert!(can_transition_open_status(
+            &SubmissionStarted,
+            &AbandonedUnmined
+        ));
+        // Never from a state whose bytes are settled or never existed.
+        assert!(!can_transition_open_status(&Confirmed, &AbandonedUnmined));
+        assert!(!can_transition_open_status(
+            &AbandonedUnsigned,
+            &AbandonedUnmined
+        ));
+        assert!(!can_transition_open_status(
+            &ValidatedBeforeSigning,
+            &AbandonedUnmined
+        ));
+        assert!(!can_transition_open_status(
+            &SignatureMayExist,
+            &AbandonedUnmined
+        ));
+        // Out of retirement only on evidence, and never back onto the wire.
+        assert!(can_transition_open_status(&AbandonedUnmined, &Confirmed));
+        assert!(can_transition_open_status(&AbandonedUnmined, &Submitted));
+        assert!(can_transition_open_status(
+            &AbandonedUnmined,
+            &RecoveryRequired
+        ));
+        assert!(!can_transition_open_status(
+            &AbandonedUnmined,
+            &SubmissionStarted
+        ));
+        assert!(!can_transition_open_status(
+            &AbandonedUnmined,
+            &AbandonedUnsigned
+        ));
     }
 
     #[test]

@@ -331,3 +331,87 @@ cargo test -p agent-wallet-core --features agent-wallet-testnet-pilot --lib -- \
   --ignored --exact --nocapture --test-threads=1 \
   service::companion::tests::chain7_live_voucher::the_wallet_refuses_a_voucher_that_is_not_exactly_one
 ```
+
+## The negatives, on the same live chain
+
+Four more `#[ignore]` tests live in the same file. They exist because a path
+that only works when nothing goes wrong is not proven, and each one breaks
+exactly one thing against the real node and a real Hub over real HTTP.
+
+```
+cargo test -p agent-wallet-core --features agent-wallet-testnet-pilot --lib -- \
+  --ignored --exact --nocapture --test-threads=1 \
+  service::companion::tests::chain7_live_voucher::<name>
+```
+
+| name | what it breaks | chain time |
+| --- | --- | --- |
+| `a_hub_outage_inside_the_envelope_refuses_the_discard_and_the_retry_still_opens_the_channel` | the Hub settlement route, after the wallet signs | about 70 s |
+| `a_retry_after_the_envelope_expires_fails_cleanly_and_the_dead_setup_has_an_exit` | the same route, held down past the envelope | about 11 min |
+| `a_mainnet_shaped_consent_is_refused_on_a_chain_that_is_not_mainnet` | nothing; it asks for a consent this chain cannot take | none |
+| `the_amounts_the_panel_names_are_the_amounts_the_core_refuses` | ten malformed deposit amounts | about 25 s |
+
+Each takes its own work directory under `HPAY_LIVE_WORKDIR` and its own owner
+wallet, so each gets a fresh deterministic channel ID. Extra optional ports:
+`HPAY_LIVE_HUB_OUTAGE_LISTEN` (8892), `HPAY_LIVE_HUB_OUTAGE_FRONT` (8894),
+`HPAY_LIVE_HUB_EXPIRED_LISTEN` (8893), `HPAY_LIVE_HUB_EXPIRED_FRONT` (8895),
+`HPAY_LIVE_HUB_AMOUNTS_LISTEN` (8896).
+
+### Why the outage is a proxy and not a killed process
+
+The first draft of these tests simply aborted the Hub before the confirm. It
+went red, and the red was worth more than the green would have been:
+
+```
+[neg ] confirm against a dead Hub: ChannelSetupHubNotReady(
+         "l2: hub unreachable: error sending request for url (.../v1/health)")
+[neg ] stored phase Prepared, signature present false, node tx hash None
+```
+
+`confirm_l2_channel_setup` re-verifies the Hub before it signs, so a Hub that
+is already gone is refused while the setup is still `Prepared` and provably
+unsigned. That is the good case, and it is now asserted first. It is not the
+state this feature exists for. To reach the state the owner of this machine was
+actually in, the front door has to stay up and the settlement route has to
+refuse, which is what a reverse proxy in front of the Hub does. Everything else
+in those runs is the real Hub, the real router and the real chain.
+
+### The two clocks the dead-request exit reads
+
+`abandon_dead_l2_channel_setup` needs both the envelope closed and the
+transaction past `CHANNEL_OPEN_DEAD_AFTER` (600 s), and the gap between them is
+covered on purpose:
+
+```
+[neg ] signed at 1788089380, envelope closes 1788089680,
+       unusable by anybody after 1788089980
+[neg ] envelope closed but transaction still young: ChannelSetupNotDiscardable
+[neg ] 17 clean retry failures, no hang, nothing half written
+[neg ] discard on the dead setup: ChannelSetupNotDiscardable
+[exit] abandoned operation 0f394140-fef8-4c89-b67e-4925d7a0bacb
+[coin] owner 150000000 -> 150000000 Zhu across the whole dead setup
+```
+
+The guard reads the clock its caller passes, so the test waits out the real 600
+seconds rather than handing it a future `now`, which would prove nothing. The
+run then re-prepares on the same deterministic channel ID and opens it for
+real, which is the claim that matters: a retired dead request does not brick
+the channel.
+
+### The consent this chain cannot take
+
+There is no mainnet-shaped consent for a private chain, and the instrument
+pins it rather than leaving it as an assumption:
+
+```
+[neg ] testnet wallet plus mainnet consent: InvalidPaymentRequest
+[neg ] mainnet wallet anchored on chain 7 block 1: InvalidPaymentRequest
+[neg ] control: the testnet consent is accepted
+```
+
+`create_wallet` refuses a testnet wallet carrying
+`AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT`, and `network_mode: "mainnet"` pins
+`MAINNET_BLOCK_ONE_HASH` as the anchor and needs the
+`agent-wallet-bounded-mainnet-pilot` feature, neither of which a chain-7 run
+has. So the consent exercised on this chain is the testnet one, and the
+mainnet consent gate itself is not covered here.

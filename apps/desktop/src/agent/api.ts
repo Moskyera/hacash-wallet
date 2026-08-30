@@ -184,6 +184,14 @@ export type AgentChannelSetupReview = {
   total_debit_units: string;
   /** Why the network fee is a guess, when it is one. Null means the node quoted it. */
   fee_estimate_degraded: string | null;
+  /**
+   * Why the Fast Pay Hub last refused this open, in the Hub's own words.
+   *
+   * Null until a Hub answers. It is stored beside the setup rather than only
+   * returned, because the returned error is gone the moment this panel
+   * refreshes, and the owner this field was written for refreshed.
+   */
+  last_hub_refusal: string | null;
   phase: AgentChannelSetupPhase;
 };
 
@@ -1166,6 +1174,23 @@ export const agentWalletApi = {
     reviewCommitment: string,
   ) =>
     invoke<AgentChannelSetupReview>("agent_wallet_discard_fast_pay_channel_setup", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
+  /**
+   * Retire one reviewed setup whose signed request is provably dead.
+   *
+   * The companion to the discard, for the state the discard cannot touch: a
+   * signature exists, its request envelope has closed, and the core has
+   * checked both its own durable store and the chain before agreeing.
+   */
+  abandonDeadFastPayChannelSetup: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_abandon_dead_fast_pay_channel_setup", {
       walletId,
       operationId,
       reviewCommitment,

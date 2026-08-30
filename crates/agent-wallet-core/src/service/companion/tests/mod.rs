@@ -23,6 +23,8 @@ mod broadcast_crash_recovery;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod chain7_live_voucher;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
+mod channel_open_retry;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
 mod close_voucher;
 mod decisions;
 mod desktop_approval;

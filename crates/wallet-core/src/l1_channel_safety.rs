@@ -64,11 +64,25 @@ pub enum ChannelOpenStatus {
     Confirmed,
     RecoveryRequired,
     CancelledBeforeSigning,
+    /// A user signature exists, its request envelope is long dead, and nothing
+    /// ever came back from the Hub or the chain for it.
+    ///
+    /// Distinct from `CancelledBeforeSigning`, which asserts no signature was
+    /// ever produced. This one asserts the opposite and retires it anyway,
+    /// because a channel-open transaction carrying only the user's signature
+    /// cannot be mined - the Hub's countersignature is a consensus requirement
+    /// of the action - and the Hub will not produce one for a request whose
+    /// envelope has expired. See `abandon_dead_request` for the full set of
+    /// conditions, every one of which is checked before this is written.
+    AbandonedDeadRequest,
 }
 
 impl ChannelOpenStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Confirmed | Self::CancelledBeforeSigning)
+        matches!(
+            self,
+            Self::Confirmed | Self::CancelledBeforeSigning | Self::AbandonedDeadRequest
+        )
     }
 }
 
@@ -231,6 +245,16 @@ impl ChannelOpenSafety {
             }
             if existing.status == ChannelOpenStatus::CancelledBeforeSigning {
                 // A definitely unsigned intent may be replaced after explicit recovery cancellation.
+            } else if existing.status == ChannelOpenStatus::AbandonedDeadRequest {
+                // A signed intent whose envelope died with nothing behind it
+                // may be replaced too, and it has to be: this store is keyed by
+                // the deterministic channel ID, so refusing here is what left
+                // an owner unable to ever open a Fast Pay channel again. The
+                // retirement itself is what carries the safety argument; see
+                // `abandon_dead_request`. The chain is the backstop: a fresh
+                // open re-reads the reuse version, and if the retired
+                // transaction ever did land, that read returns 2 and the
+                // wallet refuses the new open before it signs anything.
             } else if !existing.status.is_terminal() {
                 return Err(WalletError::L2(
                     "RecoveryRequired: a different channel-open operation is unresolved".into(),
@@ -432,6 +456,68 @@ impl ChannelOpenSafety {
         }
         self.set_status(
             ChannelOpenStatus::CancelledBeforeSigning,
+            JournalPhase::RecoveryCompleted,
+        )
+    }
+
+    /// Retire a signed channel-open request that is provably dead.
+    ///
+    /// # What this is for
+    ///
+    /// `cancel_before_signing` covers the case where no signature was ever
+    /// produced. It cannot cover the case an owner actually reached: signed,
+    /// refused by the Hub, envelope expired. That state had no exit at all.
+    /// The setup could not be confirmed (the Hub refuses an expired envelope),
+    /// could not be discarded (a signature exists), and blocked every future
+    /// `prepare` for the life of the wallet.
+    ///
+    /// # What must hold, all of it, checked here
+    ///
+    /// * The Hub never answered. `response.is_none()`.
+    /// * Nothing was ever broadcast. `node_transaction_hash.is_none()`.
+    /// * The store never advanced past the user's own signature. Only
+    ///   `SignatureMayExist`, `UserSigned` and `RecoveryRequired` qualify;
+    ///   `HubCosigned`, `NodeSubmitted`, `Opening` and `Confirmed` all mean
+    ///   something left this machine and are refused.
+    /// * `now` is past `expires_unix`, so no honest Hub will cosign these
+    ///   bytes: the request envelope is checked against the Hub's own clock in
+    ///   `l2_fast_pay_hub::l1_channel`.
+    ///
+    /// The caller adds the two facts this module cannot see: that the chain
+    /// does not carry this channel, and that enough time has passed that the
+    /// transaction's own timestamp is outside the Hub's acceptance window.
+    ///
+    /// # Why retiring a real signature is safe
+    ///
+    /// A `ChannelOpen` action needs both parties' signatures to be valid. The
+    /// bytes retired here carry exactly one, the user's. They cannot be mined
+    /// by anybody, including whoever received the POST, unless the Hub
+    /// cosigns - and the conditions above are precisely the conditions under
+    /// which it will not.
+    pub fn abandon_dead_request(&mut self, now: u64) -> WalletResult<()> {
+        let operation = self.operation()?;
+        if operation.status == ChannelOpenStatus::AbandonedDeadRequest {
+            // A previous run got this far and died before the caller finished.
+            return Ok(());
+        }
+        if operation.request.is_none()
+            || operation.response.is_some()
+            || operation.node_transaction_hash.is_some()
+            || now <= operation.expires_unix
+            || !matches!(
+                operation.status,
+                ChannelOpenStatus::SignatureMayExist
+                    | ChannelOpenStatus::UserSigned
+                    | ChannelOpenStatus::RecoveryRequired
+            )
+        {
+            return Err(WalletError::L2(
+                "RecoveryRequired: only an expired channel-open request that never reached the Hub or the chain may be retired"
+                    .into(),
+            ));
+        }
+        self.set_status(
+            ChannelOpenStatus::AbandonedDeadRequest,
             JournalPhase::RecoveryCompleted,
         )
     }
@@ -910,6 +996,267 @@ mod tests {
             created_unix: 1_700_000_000,
             expires_unix: 1_700_000_300,
         }
+    }
+
+    fn signed_request_for(operation: &ChannelOpenOperation) -> L1ChannelOpenRequest {
+        L1ChannelOpenRequest {
+            schema: l2_fast_pay_hub::l1_channel::L1_CHANNEL_OPEN_SCHEMA.into(),
+            network: "mainnet".into(),
+            chain_id: 0,
+            mainnet: true,
+            block_1_hash: "00".repeat(32),
+            node_profile_id: "hacash-mainnet".into(),
+            network_instance_id: "ab".repeat(32),
+            transaction_format_version: 2,
+            operation_id: operation.operation_id.clone(),
+            idempotency_key: operation.idempotency_key.clone(),
+            created_unix: operation.created_unix,
+            expires_unix: operation.expires_unix,
+            hub_address: operation.hub_identity.clone(),
+            channel_id: operation.channel_id.clone(),
+            expected_reuse_version: operation.reuse_version,
+            partial_transaction_hex: "020001".into(),
+            partial_transaction_commitment: "cd".repeat(32),
+            authorization_public_key_hex: "02".to_owned() + &"11".repeat(32),
+            authorization_signature_hex: "ef".repeat(64),
+        }
+    }
+
+    /// A signed store, driven through the real calls, ready to be retired.
+    ///
+    /// Returns the store and the instant one second past the envelope, which
+    /// is the earliest moment `abandon_dead_request` will look at anything
+    /// else.
+    fn signed_store(
+        account: &WalletAccount,
+        root: &std::path::Path,
+        scope: &str,
+    ) -> (ChannelOpenSafety, u64) {
+        let mut safety =
+            ChannelOpenSafety::open_scoped(account, root, scope, "1Hub", "1Channel", 1).unwrap();
+        let operation = safety.begin_or_resume(input(account)).unwrap();
+        let request = signed_request_for(&operation);
+        safety.mark_signature_may_exist().unwrap();
+        safety.persist_user_signed(&request).unwrap();
+        let dead = operation.expires_unix + 1;
+        (safety, dead)
+    }
+
+    /// Every conjunct of the retirement bar, one at a time, at the store.
+    ///
+    /// The manager repeats most of these before it ever opens the store. They
+    /// are pinned here as well because the store is the copy that survives a
+    /// crash and is read first on the way back up, and a guard that only one
+    /// layer holds is a guard one refactor away from nobody holding it.
+    #[test]
+    fn a_dead_request_is_only_retired_when_every_condition_holds() {
+        let data = tempfile::tempdir().unwrap();
+        let account = WalletAccount::create("dead-request-retirement").unwrap();
+        let scope = format!("personal:{}", account.address());
+
+        // The envelope is still open.
+        {
+            let root = data.path().join("l2-live");
+            let (mut safety, dead) = signed_store(&account, &root, &scope);
+            let envelope = dead - 1;
+            let error = safety.abandon_dead_request(envelope).unwrap_err();
+            println!("envelope still open -> {error}");
+            assert!(safety.abandon_dead_request(envelope).is_err());
+            assert_eq!(
+                safety.operation().unwrap().status,
+                ChannelOpenStatus::UserSigned
+            );
+        }
+
+        // THE DANGEROUS ONE. A Hub that answers "recovery_required" carries a
+        // transaction hash and drives the operation to `RecoveryRequired`,
+        // which is one of the three statuses a retirement accepts. Only the
+        // response and hash conjuncts stand between that state and a wallet
+        // forgetting an open the Hub cosigned and broadcast. This is the state
+        // the owner's wallet was one Hub answer away from.
+        {
+            let root = data.path().join("l2-answered");
+            let (mut safety, dead) = signed_store(&account, &root, &scope);
+            let operation = safety.operation().unwrap();
+            safety
+                .persist_hub_status(&L1ChannelOpenStatusResponse {
+                    schema: l2_fast_pay_hub::l1_channel::L1_CHANNEL_OPEN_SCHEMA.into(),
+                    operation_id: operation.operation_id.clone(),
+                    channel_id: operation.channel_id.clone(),
+                    status: "recovery_required".into(),
+                    transaction_hash: Some("ab".repeat(32)),
+                })
+                .unwrap();
+            let answered = safety.operation().unwrap();
+            assert_eq!(answered.status, ChannelOpenStatus::RecoveryRequired);
+            assert!(answered.response.is_some());
+            assert!(answered.node_transaction_hash.is_some());
+            let error = safety.abandon_dead_request(dead).unwrap_err();
+            println!("hub answered recovery_required with a hash -> {error}");
+            assert_eq!(
+                safety.operation().unwrap().status,
+                ChannelOpenStatus::RecoveryRequired
+            );
+        }
+
+        // A status that means something left this machine.
+        for status in [
+            ChannelOpenStatus::HubCosigned,
+            ChannelOpenStatus::NodeSubmitted,
+            ChannelOpenStatus::Opening,
+            ChannelOpenStatus::Confirmed,
+            ChannelOpenStatus::PersistedBeforeSigning,
+            ChannelOpenStatus::CancelledBeforeSigning,
+        ] {
+            let root = data.path().join(format!("l2-status-{status:?}"));
+            let (mut safety, dead) = signed_store(&account, &root, &scope);
+            let mut moved = safety.operation().unwrap();
+            moved.status = status;
+            safety.state.operation = Some(moved);
+            assert!(
+                safety.abandon_dead_request(dead).is_err(),
+                "{status:?} must never be retired"
+            );
+            assert_eq!(safety.operation().unwrap().status, status);
+        }
+
+        // And the one shape that qualifies.
+        {
+            let root = data.path().join("l2-dead");
+            let (mut safety, dead) = signed_store(&account, &root, &scope);
+            safety.abandon_dead_request(dead).unwrap();
+            assert_eq!(
+                safety.operation().unwrap().status,
+                ChannelOpenStatus::AbandonedDeadRequest
+            );
+            assert!(
+                safety.operation().unwrap().request.is_some(),
+                "the signature is retired, never forgotten"
+            );
+            // Running it again finishes a crash between the store write and
+            // the wallet-state write rather than refusing.
+            safety.abandon_dead_request(dead).unwrap();
+        }
+    }
+
+    /// A retired operation survives a restart, and the store it lives in can
+    /// carry a fresh open afterwards. Without the second half the owner could
+    /// never open a Fast Pay channel again: the store directory is derived
+    /// from the deterministic channel ID.
+    #[test]
+    fn a_retired_dead_request_survives_restart_and_frees_the_channel_id() {
+        let data = tempfile::tempdir().unwrap();
+        let account = WalletAccount::create("retired-dead-request-restart").unwrap();
+        let scope = format!("personal:{}", account.address());
+        let root = data.path().join("l2");
+
+        let dead = {
+            let (mut safety, dead) = signed_store(&account, &root, &scope);
+            safety.abandon_dead_request(dead).unwrap();
+            dead
+        };
+
+        let mut reopened =
+            ChannelOpenSafety::open_scoped(&account, &root, &scope, "1Hub", "1Channel", 1).unwrap();
+        assert_eq!(
+            reopened.operation().unwrap().status,
+            ChannelOpenStatus::AbandonedDeadRequest
+        );
+        assert_eq!(reopened.abandon_dead_request(dead).ok(), Some(()));
+
+        let fresh = reopened
+            .begin_or_resume(BeginChannelOpen {
+                operation_id: "0d5a2d0f-1f7a-4a91-9d5c-1f0f8a5f1f4a",
+                idempotency_key: "hpay:test:channel-open:two",
+                user_address: Box::leak(account.address().into_boxed_str()),
+                reuse_version: 1,
+                user_deposit_zhu: 100_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_001_000,
+                expires_unix: 1_700_001_300,
+            })
+            .expect("a retired dead request must not brick this channel ID");
+        assert_eq!(fresh.status, ChannelOpenStatus::PersistedBeforeSigning);
+        assert!(fresh.request.is_none());
+    }
+
+    /// The durable channel-open store round-trips the signed request without
+    /// changing a byte, so the resume comparison in
+    /// `service/l2/channel_setup.rs` (`setup.signed_request != Some(&request)`)
+    /// does not fire on a request that was written once and read back.
+    #[test]
+    fn a_reloaded_durable_request_is_byte_identical_to_the_one_persisted() {
+        let data = tempfile::tempdir().unwrap();
+        let account = WalletAccount::create("durable-open-request-roundtrip").unwrap();
+        let scope = format!("personal:{}", account.address());
+        let root = data.path().join("l2");
+
+        let request = {
+            let mut safety =
+                ChannelOpenSafety::open_scoped(&account, &root, &scope, "1Hub", "1Channel", 1)
+                    .unwrap();
+            let operation = safety.begin_or_resume(input(&account)).unwrap();
+            let request = signed_request_for(&operation);
+            safety.mark_signature_may_exist().unwrap();
+            safety.persist_user_signed(&request).unwrap();
+            request
+        };
+
+        let reloaded =
+            ChannelOpenSafety::open_scoped(&account, &root, &scope, "1Hub", "1Channel", 1)
+                .unwrap()
+                .operation()
+                .unwrap()
+                .request
+                .expect("the durable store must still hold the request");
+        assert_eq!(
+            reloaded, request,
+            "a reloaded durable request must equal the one that was persisted"
+        );
+    }
+
+    /// A repeat `mark_recovery_required` on an operation that is already in
+    /// `RecoveryRequired` returns `Ok` from the early return in `set_status`
+    /// without touching the store. That, and not a failed request comparison,
+    /// is why a retry leaves `updated_unix` frozen.
+    #[test]
+    fn a_repeat_recovery_marker_leaves_the_durable_store_untouched() {
+        let data = tempfile::tempdir().unwrap();
+        let account = WalletAccount::create("repeat-recovery-marker").unwrap();
+        let scope = format!("personal:{}", account.address());
+        let root = data.path().join("l2");
+        let mut safety =
+            ChannelOpenSafety::open_scoped(&account, &root, &scope, "1Hub", "1Channel", 1).unwrap();
+        let operation = safety.begin_or_resume(input(&account)).unwrap();
+        let request = signed_request_for(&operation);
+        safety.mark_signature_may_exist().unwrap();
+        safety.persist_user_signed(&request).unwrap();
+
+        safety.mark_recovery_required().unwrap();
+        let first = safety.operation().unwrap();
+        assert_eq!(first.status, ChannelOpenStatus::RecoveryRequired);
+        let path = safety.path.clone();
+        let bytes_after_first = std::fs::read(&path).unwrap();
+
+        // The two retries. Both return Ok and neither writes.
+        safety.mark_recovery_required().unwrap();
+        safety.mark_recovery_required().unwrap();
+        let after_retries = safety.operation().unwrap();
+
+        assert_eq!(
+            after_retries.updated_unix, first.updated_unix,
+            "updated_unix must stay frozen across repeat recovery markers"
+        );
+        assert_eq!(after_retries, first);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes_after_first,
+            "the durable channel-open file must not be rewritten"
+        );
+        assert!(
+            after_retries.request.is_some() && after_retries.response.is_none(),
+            "request present, response absent, exactly as the owner's store reads"
+        );
     }
 
     #[test]

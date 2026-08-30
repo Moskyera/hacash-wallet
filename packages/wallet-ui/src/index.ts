@@ -23,6 +23,7 @@ export * from "./paymentQr";
 export * from "./istanbul";
 export * from "./IstanbulSafetyPanel";
 export * from "./prices";
+export * from "./depositAmount";
 export * from "./securityPolicy";
 export * from "./signingTransport";
 export * from "./QuantumFundingCard";

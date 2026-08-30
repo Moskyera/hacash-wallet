@@ -322,6 +322,23 @@ pub(crate) enum L1ChannelOpenStatus {
     SubmissionStarted,
     Submitted,
     Confirmed,
+    /// Broadcast, never mined, and the chain says so.
+    ///
+    /// Before this variant existed the only two statuses that stopped holding
+    /// pilot admission budget were `Confirmed` and `AbandonedUnsigned`, and
+    /// `AbandonedUnsigned` is reachable only before a signature exists. So an
+    /// open that was signed, broadcast and then never included held its whole
+    /// deposit against `--mainnet-max-aggregate-tvl-hac-zhu` for the life of
+    /// the durable state, and nothing in the tree could ever release it. On a
+    /// pilot Hub whose cap is one channel wide that is a permanent brick: the
+    /// budget was spent by a transaction that does not exist.
+    ///
+    /// It is not a tombstone. The bytes are real and carry both signatures, so
+    /// `has_durable_signature` stays true and the sweep keeps asking the chain
+    /// about it. If the transaction is ever mined after all, the very next
+    /// admission re-adopts it and the deposit starts counting again. What the
+    /// variant retires is the *reservation*, not the operation.
+    AbandonedUnmined,
     RecoveryRequired,
 }
 
@@ -335,12 +352,16 @@ impl L1ChannelOpenStatus {
             Self::SubmissionStarted => "submission_started",
             Self::Submitted => "submitted",
             Self::Confirmed => "confirmed",
+            Self::AbandonedUnmined => "abandoned_unmined",
             Self::RecoveryRequired => "recovery_required",
         }
     }
 
     pub(crate) fn reserves_admission(&self) -> bool {
-        !matches!(self, Self::Confirmed | Self::AbandonedUnsigned)
+        !matches!(
+            self,
+            Self::Confirmed | Self::AbandonedUnsigned | Self::AbandonedUnmined
+        )
     }
 
     pub(crate) fn has_durable_signature(&self) -> bool {
@@ -350,8 +371,19 @@ impl L1ChannelOpenStatus {
                 | Self::SubmissionStarted
                 | Self::Submitted
                 | Self::Confirmed
+                | Self::AbandonedUnmined
                 | Self::RecoveryRequired
         )
+    }
+
+    /// This open's signed bytes must not be put on the wire again by the Hub.
+    ///
+    /// A retired open was retired precisely because the Hub decided to stop
+    /// carrying it. Re-broadcasting it on the next resume would hand the
+    /// deposit straight back to the budget it was released from, which is the
+    /// opposite of the point.
+    pub(crate) fn is_retired_unmined(&self) -> bool {
+        matches!(self, Self::AbandonedUnmined)
     }
 }
 
@@ -388,6 +420,31 @@ pub(crate) struct PersistedL1ChannelOpen {
     pub signed_transaction_commitment: Option<String>,
     #[serde(default)]
     pub confirmed_block_height: Option<u64>,
+    /// Chain height the fullnode reported when these bytes went on the wire.
+    ///
+    /// Recorded so that "this was broadcast and never mined" can be judged in
+    /// blocks rather than in seconds. A chain that stalls produces no blocks
+    /// and therefore retires nothing, which a wall clock cannot express: it
+    /// would call an open dead during an outage that never gave it a chance to
+    /// be included in the first place.
+    ///
+    /// `None` for every record written before this field existed - including
+    /// the one this whole change is about. Those fall back to the wall clock;
+    /// see `open_is_retirement_candidate`.
+    ///
+    /// `skip_serializing_if` is not tidiness, it is the difference between the
+    /// owner's Hub starting and not starting. `state_commitment` is a SHA over
+    /// the serialized state, and `initialize_authenticated_state` refuses to
+    /// boot when that hash does not match the one the journal recorded. A new
+    /// field that always serializes changes the hash of every durable state
+    /// that already contains a channel-open, so upgrading the binary would
+    /// bricked the Hub with `StateCommitmentMismatch` on a state that was never
+    /// touched. Skipped when absent, an untouched record serializes exactly as
+    /// it did before and its commitment is unchanged; the first transition that
+    /// records a height recomputes both sides together, which is the normal
+    /// path. Pinned by `a_new_field_must_not_move_an_untouched_state_commitment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_height: Option<u64>,
     #[serde(default)]
     pub observed_confirmations: u64,
     pub status: L1ChannelOpenStatus,
@@ -2039,5 +2096,113 @@ mod tests {
                 status.as_str()
             );
         }
+    }
+
+    /// UPGRADING THE HUB BINARY MUST NOT BRICK A DURABLE STATE IT NEVER TOUCHED.
+    ///
+    /// `state_commitment` is a SHA over the serialized `HubPersistedState`, and
+    /// `initialize_authenticated_state` refuses to start when it does not match
+    /// the commitment the authenticated journal recorded. A field added to a
+    /// persisted struct that always serializes therefore rewrites the hash of
+    /// every state file already on disk, and the next start of the upgraded
+    /// binary fails with `StateCommitmentMismatch` on a state nobody edited.
+    /// On a Hub holding real channels that is not an inconvenience; it is the
+    /// Hub refusing to come back.
+    ///
+    /// The key set below is what the binary before `broadcast_height` wrote.
+    /// It is spelled out rather than derived so that the next field added
+    /// without `skip_serializing_if` fails here, in a test that says why,
+    /// instead of on an owner's machine after an upgrade.
+    #[test]
+    fn a_new_field_must_not_move_an_untouched_state_commitment() {
+        const KEYS_THE_PREVIOUS_BINARY_WROTE: &[&str] = &[
+            "block_1_hash",
+            "chain_id",
+            "channel_id",
+            "confirmed_block_height",
+            "created_unix",
+            "expires_unix",
+            "idempotency_key",
+            "last_error",
+            "mainnet",
+            "network",
+            "network_fee_zhu",
+            "network_instance_id",
+            "node_profile_id",
+            "observed_confirmations",
+            "operation_id",
+            "partial_transaction_commitment",
+            "partial_transaction_hex",
+            "request_commitment",
+            "reuse_version",
+            "signed_transaction_commitment",
+            "signed_transaction_hex",
+            "status",
+            "transaction_format_version",
+            "transaction_hash",
+            "updated_unix",
+            "user_address",
+            "user_deposit_zhu",
+        ];
+
+        // An operation as the owner's Hub holds it: broadcast, never mined, and
+        // written before any height was recorded.
+        let untouched = PersistedL1ChannelOpen {
+            operation_id: "e2d8136b-201f-4a20-ba87-2fd2500cb270".into(),
+            idempotency_key: "hpay:channel-open:3e6dfcee".into(),
+            request_commitment: "7be664e9".into(),
+            network: "mainnet".into(),
+            chain_id: 0,
+            mainnet: true,
+            block_1_hash: "001e231c".into(),
+            node_profile_id: "hacash-mainnet".into(),
+            network_instance_id: "5a310ec0".into(),
+            transaction_format_version: 2,
+            channel_id: "ec74cea2f8fc576fecbbac878cb46a6d".into(),
+            reuse_version: 1,
+            user_address: "1LCY6uQS3iNGy2mKSmhFVU2dHgBQLf74Fx".into(),
+            user_deposit_zhu: 20_000_000,
+            network_fee_zhu: 24_100,
+            partial_transaction_hex: "00".into(),
+            partial_transaction_commitment: "partial".into(),
+            transaction_hash: "hash".into(),
+            signed_transaction_hex: Some("0011".into()),
+            signed_transaction_commitment: Some("signed".into()),
+            confirmed_block_height: None,
+            broadcast_height: None,
+            observed_confirmations: 0,
+            status: L1ChannelOpenStatus::Submitted,
+            created_unix: 1_787_662_846,
+            expires_unix: 1_787_663_146,
+            updated_unix: 1_787_662_846,
+            last_error: None,
+        };
+
+        let serialized = serde_json::to_value(&untouched).unwrap();
+        let keys: Vec<String> = serialized.as_object().unwrap().keys().cloned().collect();
+        let expected: Vec<String> = KEYS_THE_PREVIOUS_BINARY_WROTE
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted, expected,
+            "the serialized shape of an untouched channel-open changed, which moves its              state commitment and stops an upgraded Hub from starting. A new field must              carry #[serde(default, skip_serializing_if = \"Option::is_none\")]"
+        );
+        assert!(
+            !keys.iter().any(|key| key == "broadcast_height"),
+            "broadcast_height must be absent until something records one"
+        );
+
+        // And once a height is recorded it does appear, through the normal
+        // committed transition that recomputes both sides of the commitment.
+        let mut broadcast = untouched.clone();
+        broadcast.broadcast_height = Some(777_754);
+        let serialized = serde_json::to_value(&broadcast).unwrap();
+        assert_eq!(
+            serialized.get("broadcast_height"),
+            Some(&serde_json::json!(777_754))
+        );
     }
 }

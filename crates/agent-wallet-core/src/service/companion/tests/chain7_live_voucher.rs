@@ -276,10 +276,24 @@ fn persistent_hub_account(work: &std::path::Path, tag: &str) -> WalletAccount {
 }
 
 async fn start_hub(work: &std::path::Path, account: &WalletAccount, tag: &str) -> LiveHub {
-    let listener =
-        tokio::net::TcpListener::bind(optional_env("HPAY_LIVE_HUB_LISTEN", "127.0.0.1:8791"))
-            .await
-            .unwrap();
+    let listen = optional_env("HPAY_LIVE_HUB_LISTEN", "127.0.0.1:8791");
+    start_hub_at(work, account, tag, &listen).await
+}
+
+/// The same Hub, on an address the caller names.
+///
+/// The wallet's durable setup record pins the Hub URL, so a Hub that is killed
+/// and brought back has to return on the exact same port with the exact same
+/// key or the wallet is talking to a stranger. The outage tests below need
+/// that, and they need their own ports so they never collide with the main
+/// run's Hub.
+async fn start_hub_at(
+    work: &std::path::Path,
+    account: &WalletAccount,
+    tag: &str,
+    listen: &str,
+) -> LiveHub {
+    let listener = tokio::net::TcpListener::bind(listen).await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let address = account.address();
     let state = Arc::new(
@@ -1031,4 +1045,815 @@ async fn the_wallet_refuses_a_voucher_that_is_not_exactly_one() {
         verify_channel_close_voucher_bytes(&hex_bytes, &hash, &owner, &hub, &channel_id, 1)
             .expect_err("a voucher bound to chain 7 is not a voucher on chain 1");
     println!("[neg ] wrong chain: {refusal}");
+}
+
+// =====================================================================
+// THE NEGATIVES, ON THE SAME LIVE CHAIN.
+//
+// A path that only works when nothing goes wrong is not proven. Each test
+// below breaks one thing on purpose against the real chain-7 node and a real
+// Hub served over real HTTP, and asserts on what the shipped code does about
+// it. All are `#[ignore]`, like the run above.
+// =====================================================================
+
+const AWAY_PASSPHRASE: &str = "chain7 live negatives owner passphrase";
+
+/// Open a funded Agent Wallet of its own in `work/tag`, so each negative gets
+/// a fresh owner address and therefore a fresh deterministic channel ID.
+async fn funded_owner(
+    work: &std::path::Path,
+    tag: &str,
+    anchor: &str,
+    fund_hac: f64,
+    wait_budget: Duration,
+) -> (AgentWalletManager, AgentWalletId, String) {
+    let root = work.join(tag);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut manager = AgentWalletManager::open(&root).unwrap();
+    let (wallet_id, address) = match manager.list_wallets().unwrap().first() {
+        Some(existing) => (existing.wallet_id.clone(), existing.address.clone()),
+        None => {
+            let created = manager
+                .create_wallet(
+                    CreateAgentWallet {
+                        passphrase: AWAY_PASSPHRASE.to_owned(),
+                        network_mode: "testnet".to_owned(),
+                        node_url: node_url(),
+                        block_one_fingerprint: Some(anchor.to_owned()),
+                        mainnet_pilot_acknowledgement: None,
+                    },
+                    unix_now(),
+                )
+                .expect("create the owner Agent Wallet");
+            (created.wallet_id, created.address)
+        }
+    };
+    manager
+        .unlock(&wallet_id, AWAY_PASSPHRASE, unix_now())
+        .unwrap();
+    manager
+        .enable_agent_payments_locally(&wallet_id, unix_now())
+        .unwrap();
+    let needed = (fund_hac * 100_000_000.0) as u128;
+    if balance_zhu(&address).await < needed {
+        fund_owner_address(work, &address, fund_hac, wait_budget).await;
+    }
+    println!(
+        "[wall] {tag} owner {address} balance {} Zhu",
+        balance_zhu(&address).await
+    );
+    (manager, wallet_id, address)
+}
+
+/// Read the setup the wallet is actually holding, the way the panel does.
+fn stored_setup(
+    manager: &AgentWalletManager,
+    wallet_id: &AgentWalletId,
+) -> Option<crate::service::l2::AgentChannelSetupOperation> {
+    let (state_master, journal_key) = fixtures::keys(manager, wallet_id);
+    manager
+        .load_verified_state(wallet_id, &state_master, &journal_key)
+        .unwrap()
+        .l2_channel_setup
+        .clone()
+}
+
+/// Prove the Hub on this URL is not answering, rather than assuming it.
+async fn assert_hub_is_dead(url: &str, label: &str) {
+    let answer = reqwest::Client::new()
+        .get(format!("{url}/v1/health"))
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await;
+    assert!(answer.is_err(), "[{label}] the Hub is still answering");
+    println!("[neg ] {label}: Hub at {url} is dead");
+}
+
+/// A reverse proxy in front of a real Hub whose settlement route can be taken
+/// down without taking the Hub down.
+///
+/// This is what a Hub outage looks like from a wallet in practice: the
+/// operator's front door still answers health, and the one request that
+/// matters does not arrive. It is also the only way to reach the state the
+/// owner of this machine was actually in, and finding that out cost this test
+/// a red run. `confirm_l2_channel_setup` re-verifies the Hub before it signs,
+/// so a Hub that is already dead is refused with `ChannelSetupHubNotReady`
+/// while the setup is still `Prepared` and provably unsigned. The interesting
+/// failure, the one with no exit before this pass, is the one AFTER the wallet
+/// has signed.
+struct SettlementOutage {
+    url: String,
+    down: Arc<std::sync::atomic::AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SettlementOutage {
+    fn take_settlement_down(&self) {
+        self.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn bring_settlement_back(&self) {
+        self.down.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone)]
+struct OutageProxy {
+    upstream: String,
+    down: Arc<std::sync::atomic::AtomicBool>,
+}
+
+async fn proxy_or_refuse(
+    axum::extract::State(proxy): axum::extract::State<OutageProxy>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if proxy.down.load(std::sync::atomic::Ordering::SeqCst)
+        && path.starts_with("/v1/l1/channel/open")
+    {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{\"error\":\"the Hub settlement route is not answering\"}",
+        )
+            .into_response();
+    }
+    let target = format!("{}{}", proxy.upstream, path);
+    let sent = reqwest::Client::new()
+        .request(method, target)
+        .header("content-type", "application/json")
+        .body(body.to_vec())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await;
+    match sent {
+        Ok(response) => {
+            let status = axum::http::StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            let bytes = response.bytes().await.unwrap_or_default();
+            (status, bytes.to_vec()).into_response()
+        }
+        Err(error) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("{{\"error\":\"upstream: {error}\"}}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn start_settlement_outage(upstream: &str, listen: &str) -> SettlementOutage {
+    let listener = tokio::net::TcpListener::bind(listen).await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let router = axum::Router::new()
+        .fallback(axum::routing::any(proxy_or_refuse))
+        .with_state(OutageProxy {
+            upstream: upstream.to_owned(),
+            down: down.clone(),
+        });
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    println!("[prox] {url} in front of {upstream}");
+    SettlementOutage { url, down, task }
+}
+
+/// Prove the settlement route really is refusing, rather than assuming it.
+async fn assert_settlement_is_down(url: &str, label: &str) {
+    let answer = reqwest::Client::new()
+        .post(format!("{url}/v1/l1/channel/open"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("the front door still answers");
+    assert_eq!(
+        answer.status().as_u16(),
+        503,
+        "[{label}] the settlement route is still up"
+    );
+    // And the health route the wallet checks before it signs is still up,
+    // which is exactly what makes this an outage and not a dead Hub.
+    let health = reqwest::Client::new()
+        .get(format!("{url}/v1/health"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .expect("health must still answer");
+    assert!(health.status().is_success(), "[{label}] health is down too");
+    println!("[neg ] {label}: health up, settlement route answering 503");
+}
+
+/// THE HUB SETTLEMENT ROUTE GOES DOWN AFTER THE WALLET SIGNS, AND COMES BACK
+/// INSIDE THE ENVELOPE.
+///
+/// Four claims, in one run because they are one story:
+///
+/// 1. A Hub that is already dead at the confirm is refused BEFORE anything is
+///    signed, with `ChannelSetupHubNotReady` carrying the transport error and
+///    the setup still `Prepared`. That is the good case, and it is asserted
+///    first because it is what makes the rest of this test work harder to
+///    reach the bad one.
+/// 2. With the front door up and the settlement route refusing, the confirm
+///    signs and then fails, and the failure carries the Hub's own words rather
+///    than a blank `RecoveryRequired`.
+/// 3. `discard_unsigned_l2_channel_setup` then refuses, because a signature
+///    exists. So does `abandon_dead_l2_channel_setup`, because the envelope is
+///    alive: a live signature is not a dead one.
+/// 4. `recover_l2_channel_setup`, once the route is back and still inside the
+///    300 second envelope, opens the channel for real, on the chain.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only"]
+async fn a_hub_outage_inside_the_envelope_refuses_the_discard_and_the_retry_still_opens_the_channel()
+ {
+    let work = workdir().join("outage");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("outage").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "owner", &anchor, 1.5, wait_budget).await;
+
+    let hub_account = persistent_hub_account(&work, "outage");
+    let listen = optional_env("HPAY_LIVE_HUB_OUTAGE_LISTEN", "127.0.0.1:8892");
+    let front = optional_env("HPAY_LIVE_HUB_OUTAGE_FRONT", "127.0.0.1:8894");
+    let hub = start_hub_at(&work, &hub_account, "outage", &listen).await;
+    let outage = start_settlement_outage(&hub.url, &front).await;
+
+    // ---- (1) A HUB THAT IS ALREADY GONE IS REFUSED BEFORE ANY SIGNATURE ----
+    // Proven first, on a review of its own, because it is the reason the rest
+    // of this test needs a front door that stays up.
+    let doomed = manager
+        .prepare_l2_channel_setup(&wallet_id, &hub.url, "1", unix_now())
+        .await
+        .expect("prepare against the Hub directly");
+    hub.task.abort();
+    assert_hub_is_dead(&hub.url, "before the first confirm").await;
+    let early = manager
+        .confirm_l2_channel_setup(
+            &wallet_id,
+            &doomed.operation_id,
+            &doomed.review_commitment,
+            unix_now(),
+        )
+        .await
+        .expect_err("a Hub that is not there cannot cosign an open");
+    println!("[neg ] confirm against a fully dead Hub: {early:?}");
+    assert!(matches!(
+        early,
+        crate::AgentWalletError::ChannelSetupHubNotReady(_)
+    ));
+    let unsigned = stored_setup(&manager, &wallet_id).expect("the setup survives");
+    assert_eq!(
+        unsigned.review.phase,
+        crate::service::l2::AgentChannelSetupPhase::Prepared,
+        "a dead Hub must be refused before the wallet signs"
+    );
+    assert!(unsigned.signed_request.is_none());
+    // That one really is unsigned, so the unsigned discard is the right door
+    // for it, and taking it clears the way for the interesting case.
+    manager
+        .discard_unsigned_l2_channel_setup(
+            &wallet_id,
+            &doomed.operation_id,
+            &doomed.review_commitment,
+            unix_now(),
+        )
+        .expect("an unsigned setup is discardable");
+    println!("[neg ] the unsigned setup was discarded, as it should be");
+
+    // ---- (2) THE OUTAGE THAT ACTUALLY REACHES THE SIGNER ----
+    let hub = start_hub_at(&work, &hub_account, "outage", &listen).await;
+    let review = manager
+        .prepare_l2_channel_setup(&wallet_id, &outage.url, "1", unix_now())
+        .await
+        .expect("prepare through the front door");
+    println!(
+        "[chan] prepared {} channel {} expires_at {} (envelope {} s)",
+        review.operation_id,
+        review.channel_id,
+        review.expires_at,
+        review.expires_at - unix_now()
+    );
+    let before_open = balance_zhu(&owner_address).await;
+
+    outage.take_settlement_down();
+    assert_settlement_is_down(&outage.url, "before confirm").await;
+
+    let refusal = manager
+        .confirm_l2_channel_setup(
+            &wallet_id,
+            &review.operation_id,
+            &review.review_commitment,
+            unix_now(),
+        )
+        .await
+        .expect_err("a settlement route that refuses cannot cosign an open");
+    println!("[neg ] confirm through a refusing settlement route: {refusal:?}");
+
+    let setup = stored_setup(&manager, &wallet_id).expect("the setup survives the failure");
+    println!(
+        "[neg ] stored phase {:?}, signature present {}, node tx hash {:?}",
+        setup.review.phase,
+        setup.signed_request.is_some(),
+        setup.transaction_hash
+    );
+    assert_eq!(
+        setup.review.phase,
+        crate::service::l2::AgentChannelSetupPhase::RecoveryRequired
+    );
+    assert!(
+        setup.signed_request.is_some(),
+        "the wallet signed before it called the Hub, which is why a discard must refuse"
+    );
+    assert!(setup.transaction_hash.is_none(), "nothing reached a node");
+    let reason = setup
+        .review
+        .last_hub_refusal
+        .clone()
+        .expect("the stored review must remember why, not just that");
+    println!("[neg ] the owner is told: {reason}");
+
+    // ---- (2) NEITHER EXIT IS OPEN WHILE THE SIGNATURE IS LIVE ----
+    let discard = manager
+        .discard_unsigned_l2_channel_setup(
+            &wallet_id,
+            &review.operation_id,
+            &review.review_commitment,
+            unix_now(),
+        )
+        .expect_err("a signed setup is not an unsigned one");
+    println!("[neg ] discard once a signature exists: {discard:?}");
+    assert!(matches!(
+        discard,
+        crate::AgentWalletError::ChannelSetupNotDiscardable
+    ));
+
+    let too_early = manager
+        .abandon_dead_l2_channel_setup(
+            &wallet_id,
+            &review.operation_id,
+            &review.review_commitment,
+            unix_now(),
+        )
+        .await
+        .expect_err("an envelope that is still open is not a dead request");
+    println!("[neg ] abandon while the envelope is alive: {too_early:?}");
+    assert!(matches!(
+        too_early,
+        crate::AgentWalletError::ChannelSetupNotDiscardable
+    ));
+
+    // ---- (4) THE ROUTE COMES BACK, SAME HUB, SAME KEY, SAME ENVELOPE ----
+    outage.bring_settlement_back();
+    assert_eq!(hub.address, hub_account.address());
+    assert!(
+        unix_now() < review.expires_at,
+        "this test is only meaningful inside the envelope"
+    );
+    println!(
+        "[chan] settlement back at {} with {} s of envelope left",
+        outage.url,
+        review.expires_at - unix_now()
+    );
+
+    let deadline = Instant::now() + wait_budget;
+    let opened = loop {
+        let _ = manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now());
+        match manager
+            .recover_l2_channel_setup(&wallet_id, unix_now())
+            .await
+        {
+            Ok(done) => {
+                println!(
+                    "[chan] recover phase {:?} at height {}",
+                    done.phase,
+                    chain_height().await
+                );
+                if done.phase == crate::service::l2::AgentChannelSetupPhase::Confirmed {
+                    break done;
+                }
+            }
+            Err(error) => println!(
+                "[chan] recover still working ({error:?}) at height {}",
+                chain_height().await
+            ),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the retry inside the envelope never opened the channel"
+        );
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    };
+
+    let channel = channel_document(&opened.channel_id).await;
+    println!("[chan] on chain after the retry: {channel}");
+    assert_eq!(channel["ret"].as_i64(), Some(0), "the channel must exist");
+    assert_eq!(
+        channel["left"]["address"].as_str(),
+        Some(owner_address.as_str())
+    );
+    assert_eq!(
+        channel["right"]["address"].as_str(),
+        Some(hub.address.as_str())
+    );
+    assert_eq!(
+        channel["status"].as_u64(),
+        Some(u64::from(
+            hacash_wallet_core::channel::CHANNEL_STATUS_OPENING
+        )),
+        "the retry produced a real open channel"
+    );
+    let after_open = balance_zhu(&owner_address).await;
+    println!(
+        "[coin] owner {before_open} -> {after_open} Zhu across the retried open (open_height {})",
+        channel["open_height"]
+    );
+    assert!(
+        after_open < before_open,
+        "an open that cost nothing did not happen"
+    );
+    outage.task.abort();
+    hub.task.abort();
+}
+
+/// THE ENVELOPE CLOSES WHILE THE HUB IS AWAY.
+///
+/// The state the owner of this machine was actually in on mainnet. The retry
+/// must fail cleanly rather than hang or half-write, the unsigned discard must
+/// still refuse, and the exit built for exactly this must open, retire the
+/// setup and let the wallet prepare the same channel again.
+///
+/// This one waits out real time: `CHANNEL_OPEN_DEAD_AFTER` is 600 seconds
+/// measured from the transaction, and the guard reads the clock the caller
+/// passes, so handing it a future `now` would prove nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only, and waits out a real 600 second envelope"]
+async fn a_retry_after_the_envelope_expires_fails_cleanly_and_the_dead_setup_has_an_exit() {
+    let work = workdir().join("expired");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("expired").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "owner", &anchor, 1.5, wait_budget).await;
+
+    let hub_account = persistent_hub_account(&work, "expired");
+    let listen = optional_env("HPAY_LIVE_HUB_EXPIRED_LISTEN", "127.0.0.1:8893");
+    let front = optional_env("HPAY_LIVE_HUB_EXPIRED_FRONT", "127.0.0.1:8895");
+    let hub = start_hub_at(&work, &hub_account, "expired", &listen).await;
+    let outage = start_settlement_outage(&hub.url, &front).await;
+
+    let review = manager
+        .prepare_l2_channel_setup(&wallet_id, &outage.url, "1", unix_now())
+        .await
+        .expect("prepare through the front door");
+    let balance_at_prepare = balance_zhu(&owner_address).await;
+    println!(
+        "[chan] prepared {} channel {} expires_at {}",
+        review.operation_id, review.channel_id, review.expires_at
+    );
+
+    outage.take_settlement_down();
+    assert_settlement_is_down(&outage.url, "before confirm").await;
+    let refusal = manager
+        .confirm_l2_channel_setup(
+            &wallet_id,
+            &review.operation_id,
+            &review.review_commitment,
+            unix_now(),
+        )
+        .await
+        .expect_err("a settlement route that refuses cannot cosign an open");
+    println!("[neg ] confirm through a refusing settlement route: {refusal:?}");
+    let setup = stored_setup(&manager, &wallet_id).expect("the setup survives");
+    assert_eq!(
+        setup.review.phase,
+        crate::service::l2::AgentChannelSetupPhase::RecoveryRequired
+    );
+    assert!(setup.signed_request.is_some());
+    assert!(setup.transaction_hash.is_none());
+    let dead_after = setup.created_at + crate::service::l2::CHANNEL_OPEN_DEAD_AFTER;
+    println!(
+        "[neg ] signed at {}, envelope closes {}, unusable by anybody after {}",
+        setup.created_at, review.expires_at, dead_after
+    );
+
+    // ---- WAIT OUT THE ENVELOPE, AND THEN THE TRANSACTION AGE RULE ----
+    let mut retries = 0usize;
+    let mut gap_reported = false;
+    while unix_now() <= dead_after {
+        let _ = manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now());
+        if unix_now() > review.expires_at {
+            // Past the envelope, still inside the age rule. The exit must stay
+            // shut here: retiring a signature a Hub could still use is exactly
+            // what it must not do.
+            let gap = manager
+                .abandon_dead_l2_channel_setup(
+                    &wallet_id,
+                    &review.operation_id,
+                    &review.review_commitment,
+                    unix_now(),
+                )
+                .await
+                .expect_err("a closed envelope alone is not a dead request");
+            assert!(matches!(
+                gap,
+                crate::AgentWalletError::ChannelSetupNotDiscardable
+            ));
+            if !gap_reported {
+                println!("[neg ] envelope closed but transaction still young: {gap:?}");
+                gap_reported = true;
+            }
+        }
+        let again = manager
+            .recover_l2_channel_setup(&wallet_id, unix_now())
+            .await;
+        retries += 1;
+        if retries <= 2 {
+            println!("[neg ] retry {retries} on a dead envelope: {again:?}");
+        }
+        assert!(
+            again.is_err(),
+            "a dead Hub and a closed envelope cannot produce a channel"
+        );
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+    println!("[neg ] {retries} clean retry failures, no hang, nothing half written");
+
+    // The wallet still holds exactly the setup it signed, unchanged.
+    let still = stored_setup(&manager, &wallet_id).expect("the setup is still stored");
+    assert_eq!(still.review.operation_id, review.operation_id);
+    assert!(still.transaction_hash.is_none(), "nothing reached a node");
+    let _ = manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now());
+    let discard = manager
+        .discard_unsigned_l2_channel_setup(
+            &wallet_id,
+            &review.operation_id,
+            &review.review_commitment,
+            unix_now(),
+        )
+        .expect_err("the unsigned discard must never be the thing that clears a signed setup");
+    println!("[neg ] discard on the dead setup: {discard:?}");
+
+    // ---- THE EXIT ----
+    let _ = manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now());
+    let retired = manager
+        .abandon_dead_l2_channel_setup(
+            &wallet_id,
+            &review.operation_id,
+            &review.review_commitment,
+            unix_now(),
+        )
+        .await
+        .expect("the exit built for exactly this state must open");
+    println!(
+        "[exit] abandoned operation {} on channel {}",
+        retired.operation_id, retired.channel_id
+    );
+    assert!(
+        stored_setup(&manager, &wallet_id).is_none(),
+        "the wallet must no longer be holding the dead setup"
+    );
+    // Nothing was ever spent: the deposit never left the owner address.
+    let after = balance_zhu(&owner_address).await;
+    println!("[coin] owner {balance_at_prepare} -> {after} Zhu across the whole dead setup");
+    assert_eq!(
+        after, balance_at_prepare,
+        "a setup that never reached a node must not cost a Zhu"
+    );
+    let absent = channel_document(&review.channel_id).await;
+    println!("[chan] the chain on that channel ID: {absent}");
+    assert_ne!(
+        absent["ret"].as_i64(),
+        Some(0),
+        "the channel must not exist on chain"
+    );
+
+    // ---- AND THE WALLET CAN OPEN AGAIN, ON THE SAME CHANNEL ID ----
+    outage.bring_settlement_back();
+    let fresh = manager
+        .prepare_l2_channel_setup(&wallet_id, &outage.url, "1", unix_now())
+        .await
+        .expect("a retired dead request must not brick this channel ID");
+    assert_eq!(fresh.channel_id, review.channel_id);
+    assert_ne!(fresh.operation_id, review.operation_id);
+    println!(
+        "[exit] the wallet prepared again: operation {} on the same channel {}",
+        fresh.operation_id, fresh.channel_id
+    );
+    let reopened = manager
+        .confirm_l2_channel_setup(
+            &wallet_id,
+            &fresh.operation_id,
+            &fresh.review_commitment,
+            unix_now(),
+        )
+        .await
+        .expect("the retired store must not block a real open");
+    println!(
+        "[exit] confirm after the abandonment: phase {:?}",
+        reopened.phase
+    );
+    let deadline = Instant::now() + wait_budget;
+    loop {
+        let opened = channel_document(&fresh.channel_id).await;
+        if opened["ret"].as_i64() == Some(0) {
+            println!("[chan] the reopened channel is on chain: {opened}");
+            assert_eq!(
+                opened["left"]["address"].as_str(),
+                Some(owner_address.as_str())
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reopened channel never reached the chain: {opened}"
+        );
+        let _ = manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now());
+        let _ = manager
+            .recover_l2_channel_setup(&wallet_id, unix_now())
+            .await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    outage.task.abort();
+    hub.task.abort();
+}
+
+/// THE CONSENT THIS CHAIN CANNOT TAKE.
+///
+/// The mainnet-shaped consent is not available on a private chain, and this
+/// pins why rather than leaving it as an assumption. It needs no chain time.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only"]
+async fn a_mainnet_shaped_consent_is_refused_on_a_chain_that_is_not_mainnet() {
+    let work = workdir().join("consent");
+    std::fs::create_dir_all(&work).unwrap();
+    require_chain_seven("consent").await;
+    let anchor = block_one_hash().await;
+    let mut manager = AgentWalletManager::open(&work).unwrap();
+
+    // 1. The chain-7 anchor with the mainnet acknowledgement attached.
+    let refused = manager
+        .create_wallet(
+            CreateAgentWallet {
+                passphrase: AWAY_PASSPHRASE.to_owned(),
+                network_mode: "testnet".to_owned(),
+                node_url: node_url(),
+                block_one_fingerprint: Some(anchor.clone()),
+                mainnet_pilot_acknowledgement: Some(
+                    crate::service::AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT.to_owned(),
+                ),
+            },
+            unix_now(),
+        )
+        .expect_err("a testnet wallet must not carry the mainnet pilot consent");
+    println!("[neg ] testnet wallet plus mainnet consent: {refused:?}");
+
+    // 2. Mainnet mode, pointed at this chain-7 node, anchored on its block 1.
+    let refused = manager
+        .create_wallet(
+            CreateAgentWallet {
+                passphrase: AWAY_PASSPHRASE.to_owned(),
+                network_mode: "mainnet".to_owned(),
+                node_url: node_url(),
+                block_one_fingerprint: Some(anchor.clone()),
+                mainnet_pilot_acknowledgement: Some(
+                    crate::service::AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT.to_owned(),
+                ),
+            },
+            unix_now(),
+        )
+        .expect_err("a mainnet wallet must not be anchored on a private chain block 1");
+    println!("[neg ] mainnet wallet anchored on chain 7 block 1: {refused:?}");
+
+    // 3. The consent this chain can take, so the refusals above are shown to
+    //    be about the consent and not about the call.
+    let made = manager
+        .create_wallet(
+            CreateAgentWallet {
+                passphrase: AWAY_PASSPHRASE.to_owned(),
+                network_mode: "testnet".to_owned(),
+                node_url: node_url(),
+                block_one_fingerprint: Some(anchor),
+                mainnet_pilot_acknowledgement: None,
+            },
+            unix_now(),
+        )
+        .expect("the shipped consent for a private chain is the testnet one");
+    println!(
+        "[neg ] control: the testnet consent is accepted, address {}",
+        made.address
+    );
+}
+
+/// THE AMOUNTS THE PANEL NAMES ARE THE AMOUNTS THE CORE REFUSES.
+///
+/// The desktop tests prove the panel explains the problem and shuts the Review
+/// button. That is only half of it: a panel enforcing rules the core does not
+/// have would be a wallet inventing its own arithmetic. This presents the same
+/// list to the shipped `prepare_l2_channel_setup` against the real Hub over
+/// real HTTP and the real chain-7 node, and asserts that every one of them is
+/// refused with nothing stored, while a well formed amount goes through.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only"]
+async fn the_amounts_the_panel_names_are_the_amounts_the_core_refuses() {
+    let work = workdir().join("amounts");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("amounts").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, _owner_address) =
+        funded_owner(&work, "owner", &anchor, 1.5, wait_budget).await;
+
+    let hub_account = persistent_hub_account(&work, "amounts");
+    let listen = optional_env("HPAY_LIVE_HUB_AMOUNTS_LISTEN", "127.0.0.1:8896");
+    let hub = start_hub_at(&work, &hub_account, "amounts", &listen).await;
+
+    // The exact list `explainInvalidDepositAmount` refuses, in
+    // packages/wallet-ui/src/depositAmount.ts, plus the two blank shapes the
+    // button check covers.
+    let named_by_the_panel = [
+        "0,2", ".2", "0.2000", "0.2 HAC", "1.2.3", "1.", "0", "0.000", "", "   ",
+    ];
+    let mut taken_anyway = Vec::new();
+    for bad in named_by_the_panel {
+        match manager
+            .prepare_l2_channel_setup(&wallet_id, &hub.url, bad, unix_now())
+            .await
+        {
+            Ok(review) => {
+                println!(
+                    "[neg ] deposit {bad:?} -> ACCEPTED as {} units",
+                    review.deposit_units.get()
+                );
+                taken_anyway.push(bad);
+                let _ = manager.discard_unsigned_l2_channel_setup(
+                    &wallet_id,
+                    &review.operation_id,
+                    &review.review_commitment,
+                    unix_now(),
+                );
+            }
+            Err(error) => {
+                println!("[neg ] deposit {bad:?} -> {error:?}");
+                assert!(
+                    stored_setup(&manager, &wallet_id).is_none(),
+                    "a refused amount must leave nothing stored, and {bad:?} left something"
+                );
+            }
+        }
+    }
+    assert!(
+        taken_anyway.is_empty(),
+        "the panel names these as bad and the core took them anyway: {taken_anyway:?}"
+    );
+
+    // The control, so the gate is not simply always shut.
+    let good = manager
+        .prepare_l2_channel_setup(&wallet_id, &hub.url, "0.2", unix_now())
+        .await
+        .expect("a well formed amount must be accepted");
+    println!(
+        "[neg ] control: deposit 0.2 accepted as {} units on channel {}",
+        good.deposit_units.get(),
+        good.channel_id
+    );
+    manager
+        .discard_unsigned_l2_channel_setup(
+            &wallet_id,
+            &good.operation_id,
+            &good.review_commitment,
+            unix_now(),
+        )
+        .expect("the control review is unsigned and discardable");
+    hub.task.abort();
 }

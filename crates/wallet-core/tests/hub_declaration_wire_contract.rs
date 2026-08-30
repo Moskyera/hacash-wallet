@@ -137,3 +137,72 @@ fn a_document_missing_a_required_cap_does_not_decode_at_all() {
     serde_json::from_value::<HubMainnetReadiness>(document)
         .expect_err("a readiness document without a payment cap must not decode");
 }
+
+/// THE FIELD THAT WOULD HAVE ANSWERED THE OWNER'S QUESTION.
+///
+/// `aggregate_tvl_within_limit` is the Hub's `current <= cap`, so a Hub holding
+/// its entire budget publishes `true`. The first mainnet Fast Pay channel open
+/// was refused by a Hub in exactly that state, and every field the wallet could
+/// read said the Hub was healthy. A Hub now also publishes what its TVL is and
+/// whether a new channel can be admitted at all; the wallet has to carry both
+/// across the last hop or the addition changes nothing where a person is
+/// looking.
+#[test]
+fn a_hub_at_exactly_its_cap_is_decoded_as_having_no_room_for_a_new_channel() {
+    let raw = include_str!("fixtures/hub-readiness-mainnet-bounded-pilot.json");
+    let mut document: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let object = document.as_object_mut().unwrap();
+    // The owner's Hub: a cap of exactly one 0.2 HAC channel, entirely spent.
+    object.insert(
+        "max_aggregate_tvl_hac_zhu".into(),
+        serde_json::json!(20_000_000),
+    );
+    object.insert(
+        "aggregate_tvl_hac_zhu".into(),
+        serde_json::json!(20_000_000),
+    );
+    object.insert(
+        "aggregate_tvl_headroom_hac_zhu".into(),
+        serde_json::json!(0),
+    );
+    object.insert(
+        "new_channel_admission_available".into(),
+        serde_json::json!(false),
+    );
+    // Unchanged, and the reason none of the old fields could raise the alarm.
+    object.insert("aggregate_tvl_within_limit".into(), serde_json::json!(true));
+
+    let readiness: HubMainnetReadiness = serde_json::from_value(document).unwrap();
+    let caps = readiness.declared_caps_hac();
+    assert_eq!(caps.max_aggregate_tvl_hac.as_deref(), Some("0.2"));
+    assert_eq!(caps.aggregate_tvl_hac.as_deref(), Some("0.2"));
+    assert_eq!(
+        caps.aggregate_tvl_within_limit,
+        Some(true),
+        "the old flag still reads healthy, which is the whole problem"
+    );
+    assert_eq!(
+        caps.new_channel_admission_available,
+        Some(false),
+        "and the new one says the Hub will refuse the next channel"
+    );
+}
+
+/// A Hub that does not publish the new fields must read as "did not say", never
+/// as "closed". `false` is the alarming value here, so a serde default would
+/// have told every person on an older Hub that their Hub was shut.
+#[test]
+fn an_older_hub_that_omits_the_headroom_fields_says_nothing_rather_than_no() {
+    let readiness = live_document();
+    assert!(
+        !readiness.blockers.is_empty(),
+        "this fixture is a real Hub document, captured before the headroom \
+         fields existed, which is exactly what an older Hub sends"
+    );
+    let caps = readiness.declared_caps_hac();
+    assert_eq!(caps.new_channel_admission_available, None);
+    assert_eq!(caps.aggregate_tvl_hac, None);
+    // The fields it does carry are untouched by the addition.
+    assert_eq!(caps.max_aggregate_tvl_hac.as_deref(), Some("100"));
+    assert_eq!(caps.aggregate_tvl_within_limit, Some(true));
+}

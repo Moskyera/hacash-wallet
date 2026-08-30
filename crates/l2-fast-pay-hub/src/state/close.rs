@@ -1792,6 +1792,7 @@ mod tests {
             signed_transaction_hex: Some(signed.signed_transaction_hex),
             signed_transaction_commitment: Some(signed.signed_transaction_commitment),
             confirmed_block_height: Some(open_height),
+            broadcast_height: Some(open_height),
             observed_confirmations: 6,
             status: L1ChannelOpenStatus::Confirmed,
             created_unix: now,

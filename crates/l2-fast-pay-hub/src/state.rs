@@ -4,6 +4,8 @@ mod hvm_chain;
 mod hvm_registry;
 mod hvm_registry_chain;
 mod open;
+#[cfg(test)]
+mod open_retirement_tests;
 mod rollback_anchor;
 
 /// What a rollback anchor startup probe means for the process, as opposed to
@@ -102,11 +104,82 @@ fn require_pilot_admission(
     })?;
     if proposed > policy.max_aggregate_tvl_hac_zhu() {
         return Err(HubError::Admission(format!(
-            "mainnet pilot aggregate Hub TVL cap exceeded: proposed {proposed} zhu, cap {} zhu",
-            policy.max_aggregate_tvl_hac_zhu()
+            "mainnet pilot aggregate Hub TVL cap exceeded: proposed {proposed} zhu, cap {} zhu. {}",
+            policy.max_aggregate_tvl_hac_zhu(),
+            describe_pilot_tvl_holders(state, current)
         )));
     }
     Ok(())
+}
+
+/// Name what is actually holding the aggregate TVL budget.
+///
+/// The bare cap sentence says a number is too big and stops. It does not say
+/// that the budget is held by one channel-open for a different address that
+/// was broadcast days ago and never mined, which is the only fact that tells
+/// anyone whether to wait, raise the cap, or go looking for a stuck
+/// transaction. A refusal that a person can act on has to carry that.
+///
+/// Deliberately bounded: at most four operations are named, and no signature,
+/// key or transaction body appears - only what an operator would need to find
+/// the record in their own journal.
+fn describe_pilot_tvl_holders(state: &HubPersistedState, current_tvl_zhu: u64) -> String {
+    let now = crate::node::now_unix();
+    let mut open_channels = 0usize;
+    let mut open_channel_zhu = 0u64;
+    for ledger in state.channels.values() {
+        open_channels = open_channels.saturating_add(1);
+        open_channel_zhu = open_channel_zhu.saturating_add(
+            ledger
+                .left_balance_mei
+                .as_millimeis()
+                .saturating_add(ledger.right_balance_mei.as_millimeis())
+                .saturating_mul(crate::readiness::ZHU_PER_MILLIMEI),
+        );
+    }
+    let mut pending: Vec<&crate::storage::PersistedL1ChannelOpen> = state
+        .l1_channel_opens
+        .values()
+        .filter(|operation| operation.status.reserves_admission())
+        .collect();
+    pending.sort_by(|left, right| {
+        right
+            .user_deposit_zhu
+            .cmp(&left.user_deposit_zhu)
+            .then_with(|| left.operation_id.cmp(&right.operation_id))
+    });
+    let mut sentence = format!("{current_tvl_zhu} zhu of that cap is already held");
+    if open_channels > 0 {
+        sentence.push_str(&format!(
+            ": {open_channel_zhu} zhu by {open_channels} open channel(s)"
+        ));
+    }
+    if pending.is_empty() {
+        sentence.push('.');
+        return sentence;
+    }
+    sentence.push_str(if open_channels > 0 { ", and " } else { ": " });
+    sentence.push_str(&format!(
+        "{} zhu by {} channel-open operation(s) that have not confirmed",
+        pending.iter().fold(0u64, |total, operation| total
+            .saturating_add(operation.user_deposit_zhu)),
+        pending.len()
+    ));
+    for operation in pending.iter().take(4) {
+        sentence.push_str(&format!(
+            " [operation {} for {}, {} zhu, status {}, last progress {} seconds ago]",
+            operation.operation_id,
+            operation.user_address,
+            operation.user_deposit_zhu,
+            operation.status.public_name(),
+            now.saturating_sub(operation.created_unix.max(operation.updated_unix))
+        ));
+    }
+    if pending.len() > 4 {
+        sentence.push_str(&format!(" and {} more", pending.len() - 4));
+    }
+    sentence.push('.');
+    sentence
 }
 
 fn require_pilot_payment_admission(
@@ -750,6 +823,35 @@ impl HubState {
             &self.hub_address,
         )?;
 
+        // Release admission budget held by opens the chain says do not exist,
+        // before measuring the budget this one needs. Without this, one
+        // broadcast that never made it into a block holds its whole deposit
+        // against the aggregate TVL cap for the life of the durable state, and
+        // a pilot Hub whose cap is one channel wide never opens another
+        // channel again. See `retire_unmined_channel_opens` for what a
+        // retirement costs in evidence.
+        //
+        // Only on the path that is about to create a new operation: a resume of
+        // an existing one changes no reservation and must not spend two chain
+        // round trips per stale record on the way.
+        if !recovering_existing {
+            match self.retire_unmined_channel_opens().await {
+                Ok(retired) if !retired.is_empty() => tracing::warn!(
+                    retired = retired.len(),
+                    operations = %retired.join(","),
+                    "released pilot admission budget held by channel-opens the fullnode has neither mined nor holds pending"
+                ),
+                Ok(_) => {}
+                // A sweep that cannot run leaves every reservation standing, so
+                // the worst it can do is refuse this open the way it already
+                // would have. It must never be the thing that fails the open.
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "could not sweep unmined channel-opens; admission budget is measured as it stands"
+                ),
+            }
+        }
+
         let operation = {
             let mut guard = self
                 .inner
@@ -795,6 +897,7 @@ impl HubState {
                     signed_transaction_hex: None,
                     signed_transaction_commitment: None,
                     confirmed_block_height: None,
+                    broadcast_height: None,
                     observed_confirmations: 0,
                     status: L1ChannelOpenStatus::ValidatedBeforeSigning,
                     created_unix: request.created_unix,
@@ -2503,6 +2606,7 @@ mod mainnet_admission_tests {
             signed_transaction_hex: None,
             signed_transaction_commitment: None,
             confirmed_block_height: None,
+            broadcast_height: None,
             observed_confirmations: 0,
             status,
             created_unix: 1,

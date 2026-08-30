@@ -57,6 +57,18 @@ export type DeclaredHubCapsView = {
   max_channel_funding_hac: string | null;
   max_aggregate_tvl_hac: string | null;
   aggregate_tvl_within_limit: boolean | null;
+  /**
+   * Whether this Hub can admit a new channel of any size at all.
+   *
+   * Optional because an older Hub does not publish it, and `false` is the
+   * alarming value: a required field defaulted to false would tell everyone
+   * their Hub was closed. `aggregate_tvl_within_limit` cannot answer this
+   * question - it is `current <= cap`, so it reads true at exactly the cap,
+   * which is where the first mainnet channel open landed.
+   */
+  new_channel_admission_available?: boolean | null;
+  /** What the Hub says its aggregate TVL is right now, in HAC. */
+  aggregate_tvl_hac?: string | null;
 };
 
 export type HubDeclarationView = {
@@ -259,6 +271,28 @@ export function closeVoucherSentence(texts: Array<string | null | undefined>): s
   return found ? explainBlocker(NO_UNILATERAL_EXIT_BLOCKER) : null;
 }
 
+/**
+ * Whether this Hub will refuse the next channel because its total cap is spent.
+ *
+ * Two flags, not one, and the second is the reason this function exists.
+ * `aggregate_tvl_within_limit` is the Hub's `current <= cap`, so a Hub sitting
+ * exactly on its cap publishes `true`: nothing is broken, every existing
+ * channel still settles, and it will refuse every new channel. The first
+ * mainnet Fast Pay channel open landed on exactly that state, and the sentence
+ * below, which was already written, could not fire because the only flag it
+ * read said the Hub was fine.
+ *
+ * `new_channel_admission_available` is the Hub answering the actual question.
+ * `undefined` or `null` means an older Hub that does not measure it, and says
+ * nothing rather than guessing.
+ */
+export function hubHasNoRoomForANewChannel(caps: DeclaredHubCapsView): boolean {
+  return (
+    caps.aggregate_tvl_within_limit === false ||
+    caps.new_channel_admission_available === false
+  );
+}
+
 export const DECLARED_CAPS_LEDE =
   "These are its numbers, not this build's ceilings, and they are what will actually apply to you.";
 
@@ -366,10 +400,16 @@ export function HubDeclarationCard({
                 {caps.max_channel_funding_hac}.
               </p>
             )}
-          {caps.aggregate_tvl_within_limit === false && (
+          {hubHasNoRoomForANewChannel(caps) && (
             <p className="small">
-              This Hub is already at or over its own total cap, so it will not
-              take a new channel right now.
+              This Hub is already at its own total cap
+              {caps.aggregate_tvl_hac !== null &&
+              caps.aggregate_tvl_hac !== undefined &&
+              caps.max_aggregate_tvl_hac !== null
+                ? ` (${caps.aggregate_tvl_hac} HAC of ${caps.max_aggregate_tvl_hac} HAC)`
+                : ""}
+              , so it will not take a new channel right now. Its existing
+              channels are unaffected.
             </p>
           )}
         </>

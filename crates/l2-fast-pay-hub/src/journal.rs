@@ -74,6 +74,11 @@ pub enum JournalPhase {
     L1OpenSubmissionStarted,
     L1OpenSubmitted,
     L1OpenConfirmed,
+    /// A signed and broadcast channel-open was read off the chain one last
+    /// time, found to be neither mined nor pending, and retired so that the
+    /// pilot admission budget it was holding is released. The operation is
+    /// kept and keeps being watched; only its reservation is given up.
+    L1OpenAbandonedUnmined,
     L1OpenRecoveryRequired,
     L1CloseFreezeIntentPersisted,
     L1CloseFrozenBeforeSigning,

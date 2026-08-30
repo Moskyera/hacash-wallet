@@ -214,6 +214,32 @@ pub struct MainnetReadinessV1 {
     pub allowlist_configured: bool,
     pub aggregate_tvl_within_limit: bool,
     pub max_aggregate_tvl_hac_zhu: u64,
+    /// What this Hub's aggregate TVL actually is right now, in zhu.
+    ///
+    /// The document already carried the cap and a boolean saying the cap was
+    /// not exceeded. It never carried the measurement, so there was no way to
+    /// tell a Hub with the whole budget free from one with none of it free -
+    /// both published `aggregate_tvl_within_limit: true`, because that field is
+    /// `current <= cap` and equality is inside the cap.
+    #[serde(default)]
+    pub aggregate_tvl_hac_zhu: u64,
+    /// Cap minus current: how much deposit a *new* channel could still bring.
+    ///
+    /// This is the number a person needs and the document did not have. A Hub
+    /// sitting exactly on its cap is simultaneously within its limit and unable
+    /// to admit anything, and for eight hours that state was indistinguishable
+    /// from a healthy one on this endpoint.
+    #[serde(default)]
+    pub aggregate_tvl_headroom_hac_zhu: u64,
+    /// Whether a new channel of any size can be admitted at all.
+    ///
+    /// Deliberately **not** a blocker and deliberately not folded into
+    /// `payments_enabled`. A Hub at its cap is perfectly healthy for every
+    /// channel it already has: payments settle, closes settle, nothing is
+    /// wrong. The only thing it cannot do is take a new channel, and that is
+    /// exactly what this one field says.
+    #[serde(default)]
+    pub new_channel_admission_available: bool,
     pub max_payment_satoshi: u64,
     pub wallet_fee_hac: &'static str,
     pub trustless_finality: bool,
@@ -523,6 +549,9 @@ impl MainnetReadinessV1 {
             allowlist_configured: false,
             aggregate_tvl_within_limit: false,
             max_aggregate_tvl_hac_zhu: 0,
+            aggregate_tvl_hac_zhu: 0,
+            aggregate_tvl_headroom_hac_zhu: 0,
+            new_channel_admission_available: false,
             max_payment_satoshi: 0,
             wallet_fee_hac: "0",
             // Both shadowed values, already narrowed to the evidence published
@@ -766,6 +795,11 @@ impl MainnetReadinessV1 {
         match aggregate_tvl_hac_zhu {
             Ok(current_tvl) => {
                 self.aggregate_tvl_within_limit = current_tvl <= policy.max_aggregate_tvl_hac_zhu();
+                self.aggregate_tvl_hac_zhu = current_tvl;
+                self.aggregate_tvl_headroom_hac_zhu = policy
+                    .max_aggregate_tvl_hac_zhu()
+                    .saturating_sub(current_tvl);
+                self.new_channel_admission_available = self.aggregate_tvl_headroom_hac_zhu > 0;
                 if !self.aggregate_tvl_within_limit {
                     self.blockers
                         .push("mainnet_pilot_aggregate_tvl_limit_exceeded".into());
@@ -780,6 +814,21 @@ impl MainnetReadinessV1 {
             "new channels require an allowlisted user and aggregate Hub TVL at or below {} zhu",
             policy.max_aggregate_tvl_hac_zhu()
         ));
+        // A Hub sitting exactly on its cap satisfies every gate in this
+        // document and refuses every new channel. `aggregate_tvl_within_limit`
+        // is `current <= cap`, so it reads true at full utilisation, and
+        // `blockers` stays empty because nothing is broken. Without this
+        // sentence the served document says "healthy" and means "closed to new
+        // channels", which is the difference between a person waiting five
+        // minutes and a person losing an evening.
+        if self.aggregate_tvl_within_limit && !self.new_channel_admission_available {
+            self.limitations.push(format!(
+                "this Hub is at its aggregate TVL cap ({} zhu of {} zhu) and will refuse every \
+                 new channel until some of that budget is released. Existing channels are \
+                 unaffected: payments and closes still settle",
+                self.aggregate_tvl_hac_zhu, self.max_aggregate_tvl_hac_zhu
+            ));
+        }
     }
 
     pub fn require_payment_ready(&self, amount: HacAmount) -> HubResult<()> {

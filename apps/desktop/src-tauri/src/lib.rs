@@ -128,6 +128,7 @@ pub fn run() {
             wallet_tauri_common::agent_commands::agent_wallet_confirm_fast_pay_channel_setup,
             wallet_tauri_common::agent_commands::agent_wallet_recover_fast_pay_channel_setup,
             wallet_tauri_common::agent_commands::agent_wallet_discard_fast_pay_channel_setup,
+            wallet_tauri_common::agent_commands::agent_wallet_abandon_dead_fast_pay_channel_setup,
             wallet_tauri_common::agent_commands::agent_wallet_prepare_fast_pay_channel_close,
             wallet_tauri_common::agent_commands::agent_wallet_confirm_fast_pay_channel_close,
             wallet_tauri_common::agent_commands::agent_wallet_recover_fast_pay_channel_close,

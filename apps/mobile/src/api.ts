@@ -441,6 +441,18 @@ export type DeclaredHubCaps = {
   max_channel_funding_hac: string | null;
   max_aggregate_tvl_hac: string | null;
   aggregate_tvl_within_limit: boolean | null;
+  /**
+   * Whether this Hub can admit a new channel of any size at all.
+   *
+   * Optional because an older Hub does not publish it, and `false` is the
+   * alarming value: a required field defaulted to false would tell everyone
+   * their Hub was closed. `aggregate_tvl_within_limit` cannot answer this
+   * question - it is `current <= cap`, so it reads true at exactly the cap,
+   * which is where the first mainnet channel open landed.
+   */
+  new_channel_admission_available?: boolean | null;
+  /** What the Hub says its aggregate TVL is right now, in HAC. */
+  aggregate_tvl_hac?: string | null;
 };
 
 /**

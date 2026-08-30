@@ -105,6 +105,28 @@ pub struct HubMainnetReadiness {
     /// defaulted field would refuse every older Hub for a field it never sent.
     #[serde(default)]
     pub aggregate_tvl_within_limit: bool,
+    /// Whether the Hub says it can admit a new channel of any size at all.
+    ///
+    /// This exists because `aggregate_tvl_within_limit` cannot answer that
+    /// question and was read as though it could. It is `current <= cap`, so a
+    /// Hub sitting exactly on its cap publishes `true` while refusing every
+    /// new channel, and the wallet's own "already at or over its own total cap"
+    /// sentence was gated on that flag and therefore never appeared for the one
+    /// person it was written for.
+    ///
+    /// `Option<bool>` and not a defaulted `bool` on purpose. `false` here is
+    /// the alarming value, so a serde default would make every older Hub - one
+    /// that simply never sends the field - look closed to new channels. `None`
+    /// means "not declared" and prints nothing.
+    #[serde(default)]
+    pub new_channel_admission_available: Option<bool>,
+    /// What the Hub says its aggregate TVL actually is, in zhu.
+    ///
+    /// The measurement beside the cap, so a person can see 0.2 of 0.2 rather
+    /// than a boolean. `Option` for the same reason as above: absence is not
+    /// a declaration of zero.
+    #[serde(default)]
+    pub aggregate_tvl_hac_zhu: Option<u64>,
     pub max_payment_satoshi: u64,
     pub wallet_fee_hac: String,
     pub trustless_finality: bool,
@@ -218,6 +240,11 @@ impl HubMainnetReadiness {
                 .then(|| zhu_as_hac(self.max_aggregate_tvl_hac_zhu)),
             aggregate_tvl_within_limit: (self.max_aggregate_tvl_hac_zhu > 0)
                 .then_some(self.aggregate_tvl_within_limit),
+            // Carried straight through. Unlike the flag above, absence here is
+            // absence and not a cap of zero, so there is nothing to infer from
+            // `max_aggregate_tvl_hac_zhu`.
+            new_channel_admission_available: self.new_channel_admission_available,
+            aggregate_tvl_hac: self.aggregate_tvl_hac_zhu.map(zhu_as_hac),
         }
     }
 }
@@ -230,6 +257,11 @@ pub struct DeclaredHubCaps {
     pub max_channel_funding_hac: Option<String>,
     pub max_aggregate_tvl_hac: Option<String>,
     pub aggregate_tvl_within_limit: Option<bool>,
+    /// `Some(false)` is the only value that says anything a person must act
+    /// on: this Hub will refuse a new channel until some of its budget frees
+    /// up. `None` is an older Hub that does not measure it.
+    pub new_channel_admission_available: Option<bool>,
+    pub aggregate_tvl_hac: Option<String>,
 }
 
 /// What a GET against `/v1/l1/channel/close-voucher` came back as.

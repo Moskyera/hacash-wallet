@@ -130,7 +130,14 @@ impl AgentWalletManager {
         let health = hub
             .require_channel_open_ready(health_address_hint(&hub).await?.as_str(), &deposit)
             .await
-            .map_err(|_| AgentWalletError::SigningBlocked)?;
+            // The Hub client builds this sentence with `describe_unmet_contract`
+            // precisely so a person can read which clause of the provider
+            // contract is unmet. It used to be deleted one line later and
+            // replaced with "transaction signing is blocked", which names
+            // neither the Hub nor the clause.
+            .map_err(|error| {
+                AgentWalletError::ChannelSetupHubNotReady(hub_refusal_sentence(&error))
+            })?;
         if !health.ok
             || health.version < 7
             || !health.settlement_ready
@@ -216,6 +223,7 @@ impl AgentWalletManager {
             wallet_fee_units: HacUnits::ZERO,
             total_debit_units,
             fee_estimate_degraded,
+            last_hub_refusal: None,
             phase: AgentChannelSetupPhase::Prepared,
         };
         let mut operation = AgentChannelSetupOperation {
@@ -396,6 +404,13 @@ impl AgentWalletManager {
                     &state_master,
                     &journal_key,
                     operation_id,
+                    Some(if now >= setup.review.expires_at {
+                        "This review's signing window closed before it was confirmed, so it can no longer be signed."
+                            .to_owned()
+                    } else {
+                        "This wallet's durable channel-open record is not in a state a fresh signature may be produced from."
+                            .to_owned()
+                    }),
                     now,
                 )?;
                 return Err(AgentWalletError::RecoveryRequired);
@@ -500,13 +515,23 @@ impl AgentWalletManager {
                 &state_master,
                 &journal_key,
                 operation_id,
+                Some(
+                    "Agent Wallet payments were suspended while this open was in flight, so it was stopped."
+                        .to_owned(),
+                ),
                 now,
             )?;
             return Err(AgentWalletError::AgentPaymentsSuspended);
         }
         let response = match hub.open_channel(&signed_request).await {
             Ok(response) => response,
-            Err(_) => {
+            // The Hub's sentence is the only copy that exists. It does not log
+            // route refusals, so discarding it here - which this line used to
+            // do, with `Err(_)` - left nobody on earth able to say why an open
+            // failed. It is now stored on the setup so a refreshed panel can
+            // still show it, and returned so the caller can show it now.
+            Err(error) => {
+                let reason = hub_refusal_sentence(&error);
                 safety
                     .mark_recovery_required()
                     .map_err(|_| AgentWalletError::RecoveryRequired)?;
@@ -515,9 +540,10 @@ impl AgentWalletManager {
                     &state_master,
                     &journal_key,
                     operation_id,
+                    Some(reason.clone()),
                     now,
                 )?;
-                return Err(AgentWalletError::RecoveryRequired);
+                return Err(AgentWalletError::ChannelSetupHubRefused(reason));
             }
         };
         if response.operation_id != setup.review.operation_id
@@ -536,6 +562,10 @@ impl AgentWalletManager {
                 &state_master,
                 &journal_key,
                 operation_id,
+                Some(
+                    "The Hub answered about a different operation or channel than the one this wallet asked about."
+                        .to_owned(),
+                ),
                 now,
             )?;
             return Err(AgentWalletError::RecoveryRequired);
@@ -549,6 +579,10 @@ impl AgentWalletManager {
                 &state_master,
                 &journal_key,
                 operation_id,
+                Some(
+                    "The Hub accepted this open and then could not carry it through; it reports the operation as needing recovery."
+                        .to_owned(),
+                ),
                 now,
             )?;
             return Err(AgentWalletError::RecoveryRequired);
@@ -818,7 +852,11 @@ impl AgentWalletManager {
                 | ChannelOpenStatus::NodeSubmitted
                 | ChannelOpenStatus::Opening
                 | ChannelOpenStatus::Confirmed
-                | ChannelOpenStatus::RecoveryRequired => {
+                | ChannelOpenStatus::RecoveryRequired
+                // A retired dead request is not an unsigned one. It has its
+                // own exit, `abandon_dead_l2_channel_setup`, and the unsigned
+                // discard must never be the thing that clears it.
+                | ChannelOpenStatus::AbandonedDeadRequest => {
                     return Err(AgentWalletError::ChannelSetupNotDiscardable);
                 }
             }
@@ -843,12 +881,205 @@ impl AgentWalletManager {
         Ok(review)
     }
 
+    /// The exit from a signed request that nobody will ever accept.
+    ///
+    /// # The state this is for
+    ///
+    /// An owner prepared an open, confirmed it, the wallet signed, and the Hub
+    /// refused. Five minutes later the request envelope closed. From then on:
+    /// `confirm` re-posted the same dead bytes and the Hub refused them for a
+    /// second reason; `recover` only re-entered `confirm`;
+    /// `discard_unsigned_l2_channel_setup` refused because a signature exists;
+    /// and `prepare` refused because a setup is stored. There was no exit at
+    /// all, on any network, for the life of the wallet. That is the state the
+    /// owner of this wallet was actually in.
+    ///
+    /// # The bar, and it is the discard's bar
+    ///
+    /// A setup is only forgotten when it is provable that nothing reached the
+    /// Hub or the chain. Here that is six facts, every one of them checked
+    /// below, and every one of them a refusal on its own:
+    ///
+    /// 1. The owner named this exact review: operation ID and review
+    ///    commitment both match.
+    /// 2. A signature exists and no transaction hash does. An unsigned setup
+    ///    belongs to `discard_unsigned_l2_channel_setup` and is sent back
+    ///    there; a setup carrying a transaction hash reached a node.
+    /// 3. The request envelope has closed, so no Hub will cosign it.
+    /// 4. The transaction is older than `CHANNEL_OPEN_DEAD_AFTER`, so even a
+    ///    Hub that kept the bytes cannot use them: its own transaction-age
+    ///    rule has expired too.
+    /// 5. The durable store carries no Hub response and no node transaction
+    ///    hash. This is read from disk, not from the wallet state, because the
+    ///    store is the record that is written first and survives a crash.
+    /// 6. This wallet's own pinned fullnode says the channel does not exist.
+    ///    Asked live, at the moment of the abandonment, and any answer other
+    ///    than a plain "channel not found" refuses - including an unreachable
+    ///    node, which proves nothing and must never be read as proof.
+    ///
+    /// # Why retiring a real signature does not risk the deposit
+    ///
+    /// The bytes carry one signature, the user's. A `ChannelOpen` action needs
+    /// both parties', so they cannot be mined by anyone, the Hub included,
+    /// unless the Hub cosigns - and conditions 3 and 4 are exactly when it
+    /// will not. If some future Hub broke its own rules and got the old
+    /// transaction mined anyway, the wallet still cannot fund the channel
+    /// twice: `prepare_l2_channel_setup` re-reads the reuse version from the
+    /// chain, would see 2, and refuses before it signs anything.
+    ///
+    /// # Why the durable store is retired first
+    ///
+    /// Same reason as the discard. The store directory is derived from the
+    /// deterministic channel ID, so a re-prepared setup lands in the same
+    /// place; clearing the wallet state alone would leave an unresolved
+    /// operation there that nothing in the tree could clear, which is a worse
+    /// brick than the one this fixes. An already-retired store is accepted as
+    /// satisfied, so a crash between the two writes is fixed by running this
+    /// again.
+    pub async fn abandon_dead_l2_channel_setup(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &str,
+        expected_review_commitment: &str,
+        now: u64,
+    ) -> AgentWalletResult<AgentChannelSetupReview> {
+        self.ensure_session_active(wallet_id, now)?;
+        let (state_master, journal_key) = {
+            let session = self.session(wallet_id)?;
+            (session.state_master.clone(), session.journal_key.clone())
+        };
+        let state = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        let setup = state
+            .l2_channel_setup
+            .clone()
+            .ok_or(AgentWalletError::InvalidIdentifier)?;
+        setup.validate(wallet_id, &state.address)?;
+        if state.l2_binding.is_some() {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+        // (1) The owner is retiring this exact review, not whatever is stored.
+        if setup.review.operation_id != operation_id
+            || setup.review.review_commitment != expected_review_commitment
+        {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+        // (2) Signed, and never submitted. The match is exhaustive so a phase
+        // added later cannot fall into the abandonable side by accident.
+        if setup.signed_request.is_none() || setup.transaction_hash.is_some() {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+        match setup.review.phase {
+            AgentChannelSetupPhase::Signed | AgentChannelSetupPhase::RecoveryRequired => {}
+            AgentChannelSetupPhase::Prepared
+            | AgentChannelSetupPhase::SignatureMayExist
+            | AgentChannelSetupPhase::Submitted
+            | AgentChannelSetupPhase::AwaitingConfirmations
+            | AgentChannelSetupPhase::Confirmed => {
+                return Err(AgentWalletError::ChannelSetupNotDiscardable);
+            }
+        }
+        // (3) and (4). The clock, both halves.
+        let unusable_after = setup
+            .created_at
+            .checked_add(crate::service::l2::CHANNEL_OPEN_DEAD_AFTER)
+            .ok_or(AgentWalletError::IntegerOverflow)?;
+        if now <= setup.review.expires_at || now < unusable_after {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+
+        let paths = self.storage.paths(wallet_id)?;
+        let wallet_scope = crate::types::WalletScope::for_agent_wallet(wallet_id);
+        let mut safety = {
+            let signer = &self.session(wallet_id)?.signer;
+            ChannelOpenSafety::open_scoped(
+                signer,
+                paths.l2_dir(),
+                wallet_scope.as_str(),
+                &setup.review.hub_address,
+                &setup.review.channel_id,
+                setup.review.channel_reuse_version,
+            )
+            .map_err(|_| AgentWalletError::RecoveryRequired)?
+        };
+        // (5) The store, read from disk. A setup that reached the signer
+        // always has one, so unlike the discard there is no "no store" case
+        // here: its absence is a refusal.
+        let durable = safety
+            .operation()
+            .map_err(|_| AgentWalletError::ChannelSetupNotDiscardable)?;
+        if durable.request.is_none()
+            || durable.response.is_some()
+            || durable.node_transaction_hash.is_some()
+        {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+        match durable.status {
+            ChannelOpenStatus::SignatureMayExist
+            | ChannelOpenStatus::UserSigned
+            | ChannelOpenStatus::RecoveryRequired
+            | ChannelOpenStatus::AbandonedDeadRequest => {}
+            ChannelOpenStatus::PersistedBeforeSigning
+            | ChannelOpenStatus::CancelledBeforeSigning
+            | ChannelOpenStatus::HubCosigned
+            | ChannelOpenStatus::NodeSubmitted
+            | ChannelOpenStatus::Opening
+            | ChannelOpenStatus::Confirmed => {
+                return Err(AgentWalletError::ChannelSetupNotDiscardable);
+            }
+        }
+
+        // (6) The chain, asked now. Only the fullnode's own "channel not
+        // found" is proof; an unreachable node, a malformed answer or a
+        // channel that exists all refuse.
+        let node = verified_agent_node(
+            &setup.node_url,
+            &state.network_mode,
+            &state.block_one_fingerprint,
+        )
+        .await?;
+        match query_channel(&node, &setup.review.channel_id).await {
+            Ok(_) => return Err(AgentWalletError::ChannelSetupNotDiscardable),
+            Err(hacash_wallet_core::WalletError::Node(message))
+                if message.contains("channel not found") => {}
+            Err(_) => return Err(AgentWalletError::NodeRejected),
+        }
+
+        safety
+            .abandon_dead_request(now)
+            .map_err(|_| AgentWalletError::ChannelSetupNotDiscardable)?;
+
+        let mut current = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        if current.l2_channel_setup.as_ref() != Some(&setup) {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        let review = setup.review.clone();
+        current.l2_channel_setup = None;
+        current.updated_at = now;
+        self.persist_event(
+            &mut current,
+            &state_master,
+            &journal_key,
+            AgentJournalEventKind::ChannelSetupDiscarded,
+            Some(operation_id.as_bytes()),
+            None,
+            now,
+        )?;
+        Ok(review)
+    }
+
+    /// Put the stored setup into `RecoveryRequired` and, this is the point,
+    /// record WHY.
+    ///
+    /// `reason` is shown verbatim on the owner's panel. It is an `Option` so a
+    /// caller that genuinely has nothing to add cannot be forced to invent
+    /// something, not so that callers may shrug.
     fn mark_channel_setup_recovery_required(
         &self,
         wallet_id: &AgentWalletId,
         state_master: &[u8; 32],
         journal_key: &[u8; 32],
         operation_id: &str,
+        reason: Option<String>,
         now: u64,
     ) -> AgentWalletResult<()> {
         let mut state = self.load_verified_state(wallet_id, state_master, journal_key)?;
@@ -860,6 +1091,9 @@ impl AgentWalletManager {
             return Err(AgentWalletError::RecoveryRequired);
         }
         setup.review.phase = AgentChannelSetupPhase::RecoveryRequired;
+        if let Some(reason) = reason {
+            setup.review.last_hub_refusal = Some(truncate_for_display(&reason));
+        }
         state.updated_at = now;
         self.persist_event(
             &mut state,
@@ -906,11 +1140,51 @@ impl AgentWalletManager {
     }
 }
 
+/// The largest refusal sentence this wallet will store or show.
+///
+/// A Hub is a remote party. Its error body reaches the owner's screen and the
+/// wallet's own state file, so it is bounded here rather than trusted to be
+/// short. 600 characters is longer than every message this workspace's Hub
+/// produces and short enough to read.
+const MAX_REFUSAL_SENTENCE: usize = 600;
+
+/// One remote refusal, made safe to store and to show.
+///
+/// Bounded in length, stripped of control characters (a Hub cannot paint the
+/// owner's panel with newlines or escape sequences), and never empty: an empty
+/// reason is the defect this whole change exists to remove, so a Hub that
+/// refuses without saying anything is reported as having said nothing.
+fn truncate_for_display(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return "no reason was given".to_owned();
+    }
+    match cleaned.char_indices().nth(MAX_REFUSAL_SENTENCE) {
+        Some((index, _)) => format!("{}...", &cleaned[..index]),
+        None => cleaned,
+    }
+}
+
+/// What the Hub said, as a sentence.
+fn hub_refusal_sentence(error: &hacash_wallet_core::WalletError) -> String {
+    truncate_for_display(&error.to_string())
+}
+
 async fn health_address_hint(hub: &L2HubClient) -> AgentWalletResult<String> {
     let health = hub
         .health()
         .await
-        .map_err(|_| AgentWalletError::NodeRejected)?;
+        .map_err(|error| AgentWalletError::ChannelSetupHubNotReady(hub_refusal_sentence(&error)))?;
     if !health.ok || !hub_fee_is_zero(&health) {
         return Err(AgentWalletError::NodeCapabilityMismatch);
     }
@@ -945,7 +1219,7 @@ async fn reverify_channel_setup_context(
     let health = hub
         .require_channel_open_ready(&setup.review.hub_address, &setup.deposit)
         .await
-        .map_err(|_| AgentWalletError::SigningBlocked)?;
+        .map_err(|error| AgentWalletError::ChannelSetupHubNotReady(hub_refusal_sentence(&error)))?;
     permit.checkpoint(false)?;
     if health.hub_address.as_deref() != Some(setup.review.hub_address.as_str())
         || !health.ok

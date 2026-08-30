@@ -50,6 +50,22 @@ const AGENT_L2_BINDING_SCHEMA: u32 = 1;
 const REQUIRED_OPEN_CONFIRMATIONS: u64 = 6;
 const MILLIMEI_IN_AGENT_UNITS: u64 = 1_000;
 const BINDING_DOMAIN: &[u8] = b"HPAY/AGENT-WALLET/L2-BINDING/V1";
+/// How long after a channel-open transaction was built the wallet treats the
+/// signature over it as unusable by anybody.
+///
+/// The Hub refuses a channel-open transaction whose own timestamp is older
+/// than 600 seconds (`TRANSACTION_MAX_AGE_SECONDS`, private in
+/// `l2_fast_pay_hub::l1_channel`, quoted here) and refuses a request whose
+/// 300 second envelope has closed. The transaction timestamp is set when the
+/// review is prepared, so 600 seconds after `created_at` no honest Hub will
+/// cosign those bytes, and without the Hub's countersignature the transaction
+/// cannot be mined at all.
+///
+/// This is the clock half of the dead-request exit. The evidence half - the
+/// durable store and a live chain query - is in
+/// `abandon_dead_l2_channel_setup`, and neither half is sufficient alone.
+pub(crate) const CHANNEL_OPEN_DEAD_AFTER: u64 = 600;
+
 const CHANNEL_SETUP_REVIEW_DOMAIN: &[u8] = b"HPAY/AGENT-WALLET/L2-CHANNEL-SETUP-REVIEW/V1";
 const CHANNEL_CLOSE_REVIEW_DOMAIN: &[u8] = b"HPAY/AGENT-WALLET/L2-CHANNEL-CLOSE-REVIEW/V1";
 
@@ -337,6 +353,21 @@ pub struct AgentChannelSetupReview {
     /// records written before it existed.
     #[serde(default)]
     pub fee_estimate_degraded: Option<String>,
+    /// Why the Fast Pay Hub last refused this open, in the Hub's own words.
+    ///
+    /// A returned error is gone the moment the panel refreshes, and the owner
+    /// this field was written for refreshed. So the sentence is stored beside
+    /// the setup and shown for as long as the setup exists.
+    ///
+    /// Deliberately NOT covered by `recompute_review_commitment`. The
+    /// commitment is what the owner approved before confirming, and it is the
+    /// anti-race gate every later call checks; this is written after that
+    /// approval, by the wallet, in response to the Hub. Binding it would make
+    /// the wallet invalidate the owner's own review every time a Hub answered.
+    ///
+    /// `#[serde(default)]` for records written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hub_refusal: Option<String>,
     pub phase: AgentChannelSetupPhase,
 }
 
@@ -1740,6 +1771,7 @@ mod tests {
                 wallet_fee_units: HacUnits::ZERO,
                 total_debit_units: HacUnits::new(1_001_000),
                 fee_estimate_degraded: None,
+                last_hub_refusal: None,
                 phase: AgentChannelSetupPhase::Prepared,
             },
             idempotency_key: "hpay:agent-channel-open:test".into(),

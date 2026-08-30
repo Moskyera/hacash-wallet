@@ -42,6 +42,7 @@ const setup = (overrides: Partial<Setup> = {}): Setup => ({
   wallet_fee_units: "0",
   total_debit_units: "20001000",
   fee_estimate_degraded: null,
+  last_hub_refusal: null,
   phase: "prepared",
   ...overrides,
 });
