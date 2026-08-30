@@ -34,6 +34,55 @@ use hpay_companion_protocol::AgentFastPayNetworkBinding;
 use super::{
     AgentChannelSetupOperation, AgentChannelSetupPhase, AgentChannelSetupReview, AgentWalletManager,
 };
+use crate::service::AgentWalletState;
+
+/// The exact reasons `prepare_l2_channel_setup` refuses to start a new setup.
+///
+/// Named rather than inlined so a test can state what a discard is supposed to
+/// unblock, and so the stored-setup reason can be cleared without anyone
+/// widening the other four by accident.
+pub(super) fn channel_setup_prepare_is_blocked(
+    state: &AgentWalletState,
+) -> AgentWalletResult<bool> {
+    Ok(state.l2_binding.is_some()
+        || state.l2_channel_setup.is_some()
+        || active_reservations(state)? != HacUnits::ZERO
+        || state
+            .operations
+            .values()
+            .any(|operation| !operation.status().is_terminal())
+        || state.fast_pay_operations.values().any(|operation| {
+            !matches!(
+                operation.status(),
+                AgentFastPayStatus::Committed
+                    | AgentFastPayStatus::Rejected
+                    | AgentFastPayStatus::Cancelled
+            )
+        }))
+}
+
+/// Whether one stored setup provably never reached the signer.
+///
+/// `Prepared` is the only phase written before `sign_exact_channel_open` can be
+/// called, and it is only reachable while the durable phase on disk still reads
+/// `Prepared` (see `discard_unsigned_l2_channel_setup`). The match is
+/// exhaustive on purpose: `Submitted` is dead in this flow and a wildcard would
+/// silently swallow it, and any variant added later, into the discardable side.
+pub(super) fn channel_setup_is_provably_unsigned(setup: &AgentChannelSetupOperation) -> bool {
+    match setup.review.phase {
+        AgentChannelSetupPhase::Prepared => {}
+        AgentChannelSetupPhase::SignatureMayExist
+        | AgentChannelSetupPhase::Signed
+        | AgentChannelSetupPhase::Submitted
+        | AgentChannelSetupPhase::AwaitingConfirmations
+        | AgentChannelSetupPhase::RecoveryRequired
+        | AgentChannelSetupPhase::Confirmed => return false,
+    }
+    // Redundant given `AgentChannelSetupOperation::validate`, which makes this
+    // a load-time invariant, and stated anyway so this safety does not depend
+    // on a validator two modules away.
+    setup.signed_request.is_none() && setup.transaction_hash.is_none()
+}
 
 impl AgentWalletManager {
     /// Prepare one exact Agent-owned, zero-Hub-deposit channel for owner review.
@@ -52,22 +101,7 @@ impl AgentWalletManager {
         };
         let state = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
         require_agent_spending_network(&state.network_mode, state.trusted_mainnet_fast_pay_pilot)?;
-        if state.l2_binding.is_some()
-            || state.l2_channel_setup.is_some()
-            || active_reservations(&state)? != HacUnits::ZERO
-            || state
-                .operations
-                .values()
-                .any(|operation| !operation.status().is_terminal())
-            || state.fast_pay_operations.values().any(|operation| {
-                !matches!(
-                    operation.status(),
-                    AgentFastPayStatus::Committed
-                        | AgentFastPayStatus::Rejected
-                        | AgentFastPayStatus::Cancelled
-                )
-            })
-        {
+        if channel_setup_prepare_is_blocked(&state)? {
             return Err(AgentWalletError::RecoveryRequired);
         }
         let deposit_amount = l2_fast_pay_hub::amount::parse_amount_mei(deposit)
@@ -672,6 +706,141 @@ impl AgentWalletManager {
             now,
         )
         .await
+    }
+
+    /// Forget one channel-setup review that provably never reached the signer.
+    ///
+    /// # Why this exists
+    ///
+    /// A prepared review expires after 300 seconds. Confirming it afterwards
+    /// refuses forever (`confirm_l2_channel_setup_inner` requires
+    /// `expires_at > now` while `signed_request` is `None`), `recover` only
+    /// re-enters that same refusal, and `prepare` refuses while any setup is
+    /// stored. Without this method an owner who missed the window could never
+    /// open a Fast Pay channel again on this wallet, on any network, even
+    /// though nothing had been signed and no money had moved.
+    ///
+    /// # Why it cannot lose a signature
+    ///
+    /// The only channel-open signing call in the tree is
+    /// `signer.sign_exact_channel_open` below. It is unreachable unless the
+    /// phase was first driven to `SignatureMayExist` **and persisted**:
+    /// `persist_event` rewrites the state file, appends the journal record and
+    /// reads both back before returning. A persisted phase of `Prepared`
+    /// therefore proves the signer never ran, and `validate` makes
+    /// `Prepared => signed_request.is_none() && transaction_hash.is_none()` a
+    /// load-time invariant besides. Every other phase keeps its existing
+    /// behaviour untouched, including `SignatureMayExist`, whose whole contract
+    /// is that a signature *may* exist even though the code shows it does not
+    /// yet.
+    ///
+    /// Expiry is deliberately not part of the test. An unexpired `Prepared`
+    /// review is exactly as unsigned as an expired one, and making the owner
+    /// wait 300 seconds to back out would be a worse wallet. What makes this
+    /// safe is the phase plus the durable store status; the owner-supplied
+    /// `operation_id` and `review_commitment` are the anti-race gate.
+    ///
+    /// # Why the durable store is cancelled first
+    ///
+    /// Clearing the wallet state alone would strand the `ChannelOpenSafety`
+    /// operation at `PersistedBeforeSigning`. The store directory is derived
+    /// from the channel ID, so a re-prepared setup lands in the same place,
+    /// `begin_or_resume` would see a different unresolved operation and refuse
+    /// forever, and nothing in the tree can clear it - a worse brick than the
+    /// one this fixes, sitting past the confirm button instead of in front of
+    /// it. So the store is cancelled first and an already-cancelled store is
+    /// accepted as satisfied, which makes a crash between the two writes
+    /// recoverable by simply running this again.
+    pub fn discard_unsigned_l2_channel_setup(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &str,
+        expected_review_commitment: &str,
+        now: u64,
+    ) -> AgentWalletResult<AgentChannelSetupReview> {
+        self.ensure_session_active(wallet_id, now)?;
+        let (state_master, journal_key) = {
+            let session = self.session(wallet_id)?;
+            (session.state_master.clone(), session.journal_key.clone())
+        };
+        let state = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        let setup = state
+            .l2_channel_setup
+            .clone()
+            .ok_or(AgentWalletError::InvalidIdentifier)?;
+        setup.validate(wallet_id, &state.address)?;
+        // Belt and braces: `validate_state` already refuses to load a
+        // non-Confirmed setup alongside a binding.
+        if state.l2_binding.is_some() {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+        if !channel_setup_is_provably_unsigned(&setup) {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+        // The owner is discarding this exact review, not whatever is stored.
+        if setup.review.operation_id != operation_id
+            || setup.review.review_commitment != expected_review_commitment
+        {
+            return Err(AgentWalletError::ChannelSetupNotDiscardable);
+        }
+
+        let paths = self.storage.paths(wallet_id)?;
+        let wallet_scope = crate::types::WalletScope::for_agent_wallet(wallet_id);
+        let mut safety = {
+            let signer = &self.session(wallet_id)?.signer;
+            ChannelOpenSafety::open_scoped(
+                signer,
+                paths.l2_dir(),
+                wallet_scope.as_str(),
+                &setup.review.hub_address,
+                &setup.review.channel_id,
+                setup.review.channel_reuse_version,
+            )
+            .map_err(|_| AgentWalletError::RecoveryRequired)?
+        };
+        // `operation()` errors when the store holds none, which is the ordinary
+        // case here: `prepare` never opens this store, so it exists only if a
+        // confirm reached it. Nothing durable to release then.
+        if let Ok(durable) = safety.operation() {
+            if durable.request.is_some() || durable.response.is_some() {
+                return Err(AgentWalletError::ChannelSetupNotDiscardable);
+            }
+            match durable.status {
+                ChannelOpenStatus::PersistedBeforeSigning => safety
+                    .cancel_before_signing()
+                    .map_err(|_| AgentWalletError::ChannelSetupNotDiscardable)?,
+                // A previous run of this method already got this far and then
+                // died before clearing the state. Re-running finishes the job.
+                ChannelOpenStatus::CancelledBeforeSigning => {}
+                ChannelOpenStatus::SignatureMayExist
+                | ChannelOpenStatus::UserSigned
+                | ChannelOpenStatus::HubCosigned
+                | ChannelOpenStatus::NodeSubmitted
+                | ChannelOpenStatus::Opening
+                | ChannelOpenStatus::Confirmed
+                | ChannelOpenStatus::RecoveryRequired => {
+                    return Err(AgentWalletError::ChannelSetupNotDiscardable);
+                }
+            }
+        }
+
+        let mut current = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        if current.l2_channel_setup.as_ref() != Some(&setup) {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        let review = setup.review.clone();
+        current.l2_channel_setup = None;
+        current.updated_at = now;
+        self.persist_event(
+            &mut current,
+            &state_master,
+            &journal_key,
+            AgentJournalEventKind::ChannelSetupDiscarded,
+            Some(operation_id.as_bytes()),
+            None,
+            now,
+        )?;
+        Ok(review)
     }
 
     fn mark_channel_setup_recovery_required(

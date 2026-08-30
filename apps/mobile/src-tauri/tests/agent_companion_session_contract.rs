@@ -56,6 +56,7 @@ fn isolated_permission_and_handler_inventory_is_exactly_typed_read_only_companio
         "agent_wallet_prepare_fast_pay_channel",
         "agent_wallet_confirm_fast_pay_channel_setup",
         "agent_wallet_recover_fast_pay_channel_setup",
+        "agent_wallet_discard_fast_pay_channel_setup",
         "agent_wallet_prepare_fast_pay_channel_close",
         "agent_wallet_confirm_fast_pay_channel_close",
         "agent_wallet_recover_fast_pay_channel_close",

@@ -1196,7 +1196,7 @@ function AgentPageContent(props: PageContentProps) {
   );
 }
 
-function AgentFastPayChannelPanel({
+export function AgentFastPayChannelPanel({
   overview,
   busy,
   run,
@@ -1215,6 +1215,14 @@ function AgentFastPayChannelPanel({
   const close = overview.l2_channel_close;
   const binding = overview.l2_binding;
   const active = Boolean(binding && !binding.closed);
+  // A review that was never confirmed is the only thing this wallet can be
+  // asked to forget, and it is the one state the confirm button can never
+  // resolve once the 300 second window has closed. Every later phase keeps its
+  // recovery path and is offered no discard here, because a signature may exist
+  // for it and a wallet that forgets a signature can fund the same channel
+  // twice.
+  const discardable = setup?.phase === "prepared";
+  const reviewExpired = Boolean(setup && setup.expires_at * 1000 <= Date.now());
 
   const finish = async (message: string) => {
     onInfo(message);
@@ -1284,8 +1292,29 @@ function AgentFastPayChannelPanel({
             </p>
           ) : null}
           <p className="agent-exact-address">{setup.channel_id}</p>
+          {discardable && reviewExpired ? (
+            // This said "Nothing was signed, nothing was sent to the Hub and
+            // nothing was spent" as a flat statement. This screen cannot know
+            // that. It reads the phase and the clock; whether a signature could
+            // exist is decided by the durable ChannelOpenSafety store, which
+            // lives on disk and is never sent here. There is one interleaving,
+            // a crash between `safety.mark_signature_may_exist()` and the state
+            // write that follows it, where the store says a signature may exist
+            // while the phase still reads prepared. In exactly that state the
+            // core refuses the discard, so the screen would have asserted a
+            // correctness claim the wallet itself declines to make.
+            //
+            // So it now says only what the phase and clock actually establish,
+            // and lets the discard itself report the rest.
+            <p className="agent-warning" role="status">
+              This review was never confirmed and its window has closed, so it
+              can no longer be used. Discard it and set the channel up again.
+              Your deposit was never sent, so the funds are still in this
+              wallet either way.
+            </p>
+          ) : null}
           <div className="agent-control-row">
-            {setup.phase === "prepared" ? (
+            {setup.phase === "prepared" && !reviewExpired ? (
               <button
                 type="button"
                 className="agent-primary"
@@ -1303,7 +1332,18 @@ function AgentFastPayChannelPanel({
               >
                 Confirm exact setup
               </button>
-            ) : (
+            ) : setup.phase === "prepared" ? null : (
+              // Deliberately nothing for an expired prepared review. Adding
+              // "Check or recover setup" here was tried and reverted: recovery
+              // for any non-Confirmed phase just re-runs the confirm, and the
+              // confirm is what refused, so the button fails identically. A
+              // control that can only refuse is the defect this panel keeps
+              // growing, not a remedy for it.
+              //
+              // Discard is the answer for this state. In the one interleaving
+              // where the core refuses even that, no button helps, and the
+              // refusal text carries the whole truth instead: nothing changed,
+              // nothing was spent, the deposit never left the wallet.
               <button
                 type="button"
                 className="agent-primary"
@@ -1318,6 +1358,27 @@ function AgentFastPayChannelPanel({
                 Check or recover setup
               </button>
             )}
+            {discardable ? (
+              <button
+                type="button"
+                className={reviewExpired ? "agent-primary" : undefined}
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.discardFastPayChannelSetup(
+                      overview.wallet_id,
+                      setup.operation_id,
+                      setup.review_commitment,
+                    );
+                    await finish(
+                      "That review was discarded. Nothing was signed and nothing was spent. Set the channel up again when you are ready.",
+                    );
+                  })
+                }
+              >
+                Discard this review
+              </button>
+            ) : null}
           </div>
         </>
       )}

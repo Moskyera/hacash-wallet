@@ -194,6 +194,12 @@ pub(crate) enum AgentJournalEventKind {
     ChannelSetupSigned,
     ChannelSetupSubmitted,
     ChannelSetupConfirmed,
+    /// The owner discarded a channel-setup review that was never confirmed. No
+    /// signature was ever produced for it, nothing reached the Hub or the
+    /// chain, and the deposit was never reserved. It releases the durable
+    /// channel-open intent so the same channel can be reviewed again; it moves
+    /// no money.
+    ChannelSetupDiscarded,
     ChannelClosePrepared,
     ChannelCloseSignatureMayExist,
     ChannelCloseSigned,
@@ -293,6 +299,7 @@ impl AgentJournalEventKind {
             Self::ChannelCloseVoucherSigned => 90,
             Self::ChannelCloseVoucherHeld => 91,
             Self::ChannelCloseVoucherBroadcast => 92,
+            Self::ChannelSetupDiscarded => 93,
         }
     }
 }

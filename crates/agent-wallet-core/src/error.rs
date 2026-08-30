@@ -246,6 +246,25 @@ pub enum AgentWalletError {
     RecoveryRequired,
     #[error("transaction signing is blocked")]
     SigningBlocked,
+    // Shown verbatim in the desktop UI, so it says what was not done rather
+    // than naming a phase. Discarding is only ever offered for a review that
+    // provably never reached the signer; anything past that point keeps its
+    // recovery path, because forgetting a setup a signature could exist for is
+    // how an owner funds the same channel twice.
+    // The last sentence used to be "Use Check or recover setup." That named a
+    // way out that does not exist for the state this error is about. Recovery
+    // for any non-Confirmed phase just re-runs the confirm, and the confirm is
+    // what already refused, so the button would fail the same way. Pointing at
+    // it swapped one dead end for a politer one.
+    //
+    // What is true, and is worth more than a button: the refusal changed
+    // nothing, and no signature means no money moved. The wallet is stuck, not
+    // spent, and saying that plainly is better than sending someone in a
+    // circle.
+    #[error(
+        "This channel setup cannot be discarded, because a signature for it may already exist. Only a review that was never confirmed can be discarded. Nothing was changed and nothing was spent. This wallet cannot clear this state on its own; the deposit was never sent, so the funds are still in your wallet."
+    )]
+    ChannelSetupNotDiscardable,
     #[error("transaction broadcast result is uncertain")]
     BroadcastUncertain,
     #[error("node or network rejected the operation")]

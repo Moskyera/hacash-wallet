@@ -1642,6 +1642,9 @@ impl AgentWalletManager {
 mod tests {
     use std::collections::BTreeSet;
 
+    use super::channel_setup::{
+        channel_setup_is_provably_unsigned, channel_setup_prepare_is_blocked,
+    };
     use super::*;
     use crate::operation::AgentPaymentRequest;
     use crate::types::AgentId;
@@ -2440,6 +2443,812 @@ mod tests {
                 now + 5,
             ),
             Err(AgentWalletError::IdempotencyConflict)
+        );
+    }
+    // ---- Discarding a channel-setup review that was never signed ----------
+    //
+    // The owner's first mainnet Fast Pay channel got stuck exactly here. A
+    // review prepared at 15:59:42 expired 300 seconds later, the confirm that
+    // followed eight hours afterwards refused, `recover` only re-entered the
+    // same refusal, and `prepare` refuses while any setup is stored. Nothing
+    // had been signed and no money had moved, and yet that wallet could never
+    // have opened a Fast Pay channel again, on any network.
+
+    /// The wallet clock here has to be the real one. The Agent signer refuses
+    /// to derive the channel-open store's journal key once its unlock window
+    /// has passed in wall-clock time, so a session unlocked at a fixture
+    /// timestamp could never open that store at all. The review inside is
+    /// still the stuck one: it was prepared at 1,000 and expired at 1,300.
+    fn manager_with_prepared_channel_setup() -> (
+        tempfile::TempDir,
+        AgentWalletManager,
+        AgentWalletId,
+        AgentChannelSetupOperation,
+        u64,
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let root = tempfile::tempdir().unwrap();
+        let mut manager = AgentWalletManager::open(root.path()).unwrap();
+        let created = manager
+            .create_wallet(
+                CreateAgentWallet {
+                    passphrase: PASSPHRASE.into(),
+                    network_mode: "testnet".into(),
+                    node_url: "http://127.0.0.1:18081".into(),
+                    block_one_fingerprint: Some(TESTNET_ANCHOR.into()),
+                    mainnet_pilot_acknowledgement: None,
+                },
+                now,
+            )
+            .unwrap();
+        manager.unlock(&created.wallet_id, PASSPHRASE, now).unwrap();
+        let hub = WalletAccount::create_random().unwrap();
+        let setup =
+            prepared_channel_setup(created.wallet_id.clone(), &created.address, &hub.address());
+        let session = manager.session(&created.wallet_id).unwrap();
+        let state_master = *session.state_master;
+        let journal_key = *session.journal_key;
+        let mut state = manager
+            .load_verified_state(&created.wallet_id, &state_master, &journal_key)
+            .unwrap();
+        state.l2_channel_setup = Some(setup.clone());
+        state.updated_at = now;
+        manager
+            .persist_event(
+                &mut state,
+                &state_master,
+                &journal_key,
+                crate::journal::AgentJournalEventKind::ChannelSetupPrepared,
+                Some(setup.review.operation_id.as_bytes()),
+                None,
+                now,
+            )
+            .unwrap();
+        (root, manager, created.wallet_id, setup, now)
+    }
+
+    fn stored_state(
+        manager: &AgentWalletManager,
+        wallet_id: &AgentWalletId,
+    ) -> crate::service::AgentWalletState {
+        let session = manager.session(wallet_id).unwrap();
+        let state_master = *session.state_master;
+        let journal_key = *session.journal_key;
+        manager
+            .load_verified_state(wallet_id, &state_master, &journal_key)
+            .unwrap()
+    }
+
+    fn journal_event_kinds(
+        manager: &AgentWalletManager,
+        wallet_id: &AgentWalletId,
+    ) -> Vec<crate::journal::AgentJournalEventKind> {
+        let journal_key = *manager.session(wallet_id).unwrap().journal_key;
+        let paths = manager.storage.paths(wallet_id).unwrap();
+        let journal = crate::journal::AgentJournal::open(
+            crate::service::state::journal_path(&paths),
+            WalletScope::for_agent_wallet(wallet_id),
+            &journal_key,
+        )
+        .unwrap();
+        journal
+            .verify()
+            .unwrap()
+            .records
+            .iter()
+            .map(|record| record.event_kind())
+            .collect()
+    }
+
+    fn open_setup_safety_store(
+        manager: &AgentWalletManager,
+        wallet_id: &AgentWalletId,
+        setup: &AgentChannelSetupOperation,
+    ) -> hacash_wallet_core::l1_channel_safety::ChannelOpenSafety {
+        let paths = manager.storage.paths(wallet_id).unwrap();
+        let signer = &manager.session(wallet_id).unwrap().signer;
+        hacash_wallet_core::l1_channel_safety::ChannelOpenSafety::open_scoped(
+            signer,
+            paths.l2_dir(),
+            WalletScope::for_agent_wallet(wallet_id).as_str(),
+            &setup.review.hub_address,
+            &setup.review.channel_id,
+            setup.review.channel_reuse_version,
+        )
+        .unwrap()
+    }
+
+    fn begin_durable_channel_open(
+        safety: &mut hacash_wallet_core::l1_channel_safety::ChannelOpenSafety,
+        setup: &AgentChannelSetupOperation,
+        agent_address: &str,
+        operation_id: &str,
+        idempotency_key: &str,
+    ) -> Result<
+        hacash_wallet_core::l1_channel_safety::ChannelOpenOperation,
+        hacash_wallet_core::WalletError,
+    > {
+        safety.begin_or_resume(hacash_wallet_core::l1_channel_safety::BeginChannelOpen {
+            operation_id,
+            idempotency_key,
+            user_address: agent_address,
+            reuse_version: setup.review.channel_reuse_version,
+            user_deposit_zhu: 100_000_000,
+            unsigned_transaction_hex: &setup.unsigned_transaction_hex,
+            created_unix: setup.created_at,
+            expires_unix: setup.review.expires_at,
+        })
+    }
+
+    #[test]
+    fn expired_unsigned_review_can_be_discarded_and_prepare_is_unblocked_again() {
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        // The stored setup is the one thing standing in front of a new prepare,
+        // and without a discard it stands there for the life of the wallet.
+        assert!(channel_setup_prepare_is_blocked(&stored_state(&manager, &wallet_id)).unwrap());
+
+        // Long after the 300-second review window closed.
+        let discarded = manager
+            .discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            )
+            .unwrap();
+        assert_eq!(discarded.operation_id, setup.review.operation_id);
+        assert_eq!(discarded.channel_id, setup.review.channel_id);
+
+        let state = stored_state(&manager, &wallet_id);
+        assert!(state.l2_channel_setup.is_none());
+        assert_eq!(active_reservations(&state).unwrap(), HacUnits::ZERO);
+        assert!(!channel_setup_prepare_is_blocked(&state).unwrap());
+        assert_eq!(
+            journal_event_kinds(&manager, &wallet_id).last(),
+            Some(&crate::journal::AgentJournalEventKind::ChannelSetupDiscarded)
+        );
+    }
+
+    #[test]
+    fn discard_refuses_every_phase_a_signature_could_exist_for() {
+        let wallet_id = AgentWalletId::new();
+        let agent = WalletAccount::create_random().unwrap();
+        let hub = WalletAccount::create_random().unwrap();
+        let setup = prepared_channel_setup(wallet_id.clone(), &agent.address(), &hub.address());
+        assert!(channel_setup_is_provably_unsigned(&setup));
+
+        // Every variant other than `Prepared`, named one at a time so adding a
+        // variant breaks this test instead of widening the discard. `Submitted`
+        // is dead in this flow and is listed anyway.
+        for phase in [
+            AgentChannelSetupPhase::SignatureMayExist,
+            AgentChannelSetupPhase::Signed,
+            AgentChannelSetupPhase::Submitted,
+            AgentChannelSetupPhase::AwaitingConfirmations,
+            AgentChannelSetupPhase::RecoveryRequired,
+            AgentChannelSetupPhase::Confirmed,
+        ] {
+            let mut other = setup.clone();
+            other.review.phase = phase;
+            assert!(
+                !channel_setup_is_provably_unsigned(&other),
+                "phase {phase:?} must never be discardable"
+            );
+        }
+    }
+
+    #[test]
+    fn discard_refuses_an_expired_review_that_carries_a_signature_or_a_transaction() {
+        let wallet_id = AgentWalletId::new();
+        let agent = WalletAccount::create_random().unwrap();
+        let hub = WalletAccount::create_random().unwrap();
+        let setup = prepared_channel_setup(wallet_id, &agent.address(), &hub.address());
+        // Expiry is not what makes a discard safe, and it is not what makes one
+        // unsafe either: this review is expired at every `now` past 1,300, and
+        // it still refuses below.
+        assert_eq!(setup.review.expires_at, 1_300);
+
+        let mut with_transaction = setup.clone();
+        with_transaction.transaction_hash = Some("22".repeat(32));
+        assert!(!channel_setup_is_provably_unsigned(&with_transaction));
+
+        let mut signed = setup;
+        signed.signed_request = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema": "hpay/l1-channel-open/v1",
+                "network": "local_pilot_v1",
+                "chain_id": 7,
+                "mainnet": false,
+                "block_1_hash": "11".repeat(32),
+                "node_profile_id": "hpay-local-pilot-v1",
+                "network_instance_id": "instance",
+                "transaction_format_version": 2,
+                "operation_id": "channel-setup-operation",
+                "idempotency_key": "hpay:agent-channel-open:test",
+                "created_unix": 1_000,
+                "expires_unix": 1_300,
+                "hub_address": hub.address(),
+                "channel_id": derive_channel_id(&agent.address(), &hub.address(), 1),
+                "expected_reuse_version": 1,
+                "partial_transaction_hex": "00",
+                "partial_transaction_commitment": "33".repeat(32),
+                "authorization_public_key_hex": "44".repeat(33),
+                "authorization_signature_hex": "55".repeat(64),
+            }))
+            .unwrap(),
+        );
+        assert!(!channel_setup_is_provably_unsigned(&signed));
+    }
+
+    #[test]
+    fn discard_refuses_a_stored_setup_that_is_not_prepared_and_leaves_it_alone() {
+        for phase in [
+            AgentChannelSetupPhase::SignatureMayExist,
+            AgentChannelSetupPhase::RecoveryRequired,
+        ] {
+            let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+            let session = manager.session(&wallet_id).unwrap();
+            let state_master = *session.state_master;
+            let journal_key = *session.journal_key;
+            let mut state = manager
+                .load_verified_state(&wallet_id, &state_master, &journal_key)
+                .unwrap();
+            state.l2_channel_setup.as_mut().unwrap().review.phase = phase;
+            state.updated_at = now;
+            manager
+                .persist_event(
+                    &mut state,
+                    &state_master,
+                    &journal_key,
+                    crate::journal::AgentJournalEventKind::RecoveryRequired,
+                    Some(setup.review.operation_id.as_bytes()),
+                    None,
+                    now,
+                )
+                .unwrap();
+
+            assert_eq!(
+                manager.discard_unsigned_l2_channel_setup(
+                    &wallet_id,
+                    &setup.review.operation_id,
+                    &setup.review.review_commitment,
+                    now + 1,
+                ),
+                Err(AgentWalletError::ChannelSetupNotDiscardable),
+                "phase {phase:?} must keep its recovery path"
+            );
+            let after = stored_state(&manager, &wallet_id);
+            assert_eq!(after.l2_channel_setup.unwrap().review.phase, phase);
+        }
+    }
+
+    #[test]
+    fn discard_refuses_a_review_the_owner_did_not_name() {
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        assert_eq!(
+            manager.discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                "some-other-operation",
+                &setup.review.review_commitment,
+                now + 1,
+            ),
+            Err(AgentWalletError::ChannelSetupNotDiscardable)
+        );
+        assert_eq!(
+            manager.discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &"aa".repeat(32),
+                now + 1,
+            ),
+            Err(AgentWalletError::ChannelSetupNotDiscardable)
+        );
+        assert!(
+            stored_state(&manager, &wallet_id)
+                .l2_channel_setup
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn discard_cancels_the_durable_intent_so_the_same_channel_can_be_confirmed_later() {
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let agent_address = stored_state(&manager, &wallet_id).address;
+        // A confirm that reached the durable store and then stopped, which is
+        // what the wallet does before it signs anything at all.
+        {
+            let mut safety = open_setup_safety_store(&manager, &wallet_id, &setup);
+            let durable = begin_durable_channel_open(
+                &mut safety,
+                &setup,
+                &agent_address,
+                &setup.review.operation_id,
+                &setup.idempotency_key,
+            )
+            .unwrap();
+            assert_eq!(
+                durable.status,
+                hacash_wallet_core::l1_channel_safety::ChannelOpenStatus::PersistedBeforeSigning
+            );
+            assert!(durable.request.is_none());
+        }
+
+        manager
+            .discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            )
+            .unwrap();
+
+        let mut safety = open_setup_safety_store(&manager, &wallet_id, &setup);
+        assert_eq!(
+            safety.operation().unwrap().status,
+            hacash_wallet_core::l1_channel_safety::ChannelOpenStatus::CancelledBeforeSigning
+        );
+        // The channel ID is deterministic, so a re-prepared setup lands in this
+        // same store under a fresh operation ID. Without the cancellation above
+        // that refuses forever, and nothing in the tree can clear it.
+        begin_durable_channel_open(
+            &mut safety,
+            &setup,
+            &agent_address,
+            "re-prepared-operation",
+            "hpay:agent-channel-open:re-prepared",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn discard_can_be_run_again_after_a_crash_between_its_two_writes() {
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let agent_address = stored_state(&manager, &wallet_id).address;
+        {
+            let mut safety = open_setup_safety_store(&manager, &wallet_id, &setup);
+            begin_durable_channel_open(
+                &mut safety,
+                &setup,
+                &agent_address,
+                &setup.review.operation_id,
+                &setup.idempotency_key,
+            )
+            .unwrap();
+            // The store is cancelled first on purpose, so this is the state a
+            // crash before the wallet-state write leaves behind.
+            safety.cancel_before_signing().unwrap();
+        }
+        manager
+            .discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            )
+            .unwrap();
+        assert!(
+            stored_state(&manager, &wallet_id)
+                .l2_channel_setup
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn discard_refuses_when_the_durable_store_says_a_signature_may_exist() {
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let agent_address = stored_state(&manager, &wallet_id).address;
+        {
+            let mut safety = open_setup_safety_store(&manager, &wallet_id, &setup);
+            begin_durable_channel_open(
+                &mut safety,
+                &setup,
+                &agent_address,
+                &setup.review.operation_id,
+                &setup.idempotency_key,
+            )
+            .unwrap();
+            // The wallet state can still read `Prepared` here: the store marker
+            // is written first and the state write after it can be lost. The
+            // store wins, because its marker means a signature may exist.
+            safety.mark_signature_may_exist().unwrap();
+        }
+        assert_eq!(
+            manager.discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            ),
+            Err(AgentWalletError::ChannelSetupNotDiscardable)
+        );
+        assert!(
+            stored_state(&manager, &wallet_id)
+                .l2_channel_setup
+                .is_some()
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Adversarial pass. These tests try to make the wallet discard a
+    // setup a signature could exist for, or forget money.
+    // ---------------------------------------------------------------
+
+    /// Rewrite the stored review's clock and rebind its commitment, so a test
+    /// can put the review inside or outside its window against the real
+    /// session clock.
+    fn restore_channel_setup_window(
+        manager: &mut AgentWalletManager,
+        wallet_id: &AgentWalletId,
+        created_at: u64,
+        expires_at: u64,
+        now: u64,
+    ) -> AgentChannelSetupOperation {
+        let session = manager.session(wallet_id).unwrap();
+        let state_master = *session.state_master;
+        let journal_key = *session.journal_key;
+        let mut state = manager
+            .load_verified_state(wallet_id, &state_master, &journal_key)
+            .unwrap();
+        {
+            let setup = state.l2_channel_setup.as_mut().unwrap();
+            setup.created_at = created_at;
+            setup.review.expires_at = expires_at;
+            setup.review.review_commitment = setup.recompute_review_commitment();
+        }
+        let setup = state.l2_channel_setup.clone().unwrap();
+        state.updated_at = now;
+        manager
+            .persist_event(
+                &mut state,
+                &state_master,
+                &journal_key,
+                crate::journal::AgentJournalEventKind::ChannelSetupPrepared,
+                Some(setup.review.operation_id.as_bytes()),
+                None,
+                now,
+            )
+            .unwrap();
+        setup
+    }
+
+    /// A syntactically complete signed open request bound to one stored setup.
+    /// It carries a junk signature on purpose: every gate this is aimed at
+    /// checks only that a request is *present*, which is the whole point.
+    fn bound_open_request(
+        setup: &AgentChannelSetupOperation,
+    ) -> l2_fast_pay_hub::l1_channel::L1ChannelOpenRequest {
+        serde_json::from_value(serde_json::json!({
+            "schema": l2_fast_pay_hub::l1_channel::L1_CHANNEL_OPEN_SCHEMA,
+            "network": setup.network_binding.network_kind,
+            "chain_id": setup.network_binding.chain_id,
+            "mainnet": setup.network_binding.mainnet,
+            "block_1_hash": setup.network_binding.block_1_hash,
+            "node_profile_id": setup.network_binding.node_profile_id,
+            "network_instance_id": setup.network_binding.network_instance_id,
+            "transaction_format_version": setup.network_binding.transaction_format_version,
+            "operation_id": setup.review.operation_id,
+            "idempotency_key": setup.idempotency_key,
+            "created_unix": setup.created_at,
+            "expires_unix": setup.review.expires_at,
+            "hub_address": setup.review.hub_address,
+            "channel_id": setup.review.channel_id,
+            "expected_reuse_version": setup.review.channel_reuse_version,
+            "partial_transaction_hex": setup.unsigned_transaction_hex,
+            "partial_transaction_commitment": "33".repeat(32),
+            "authorization_public_key_hex": "44".repeat(33),
+            "authorization_signature_hex": "55".repeat(64),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn attack_no_phase_but_prepared_survives_the_manager_and_the_rest_cannot_be_stored() {
+        // Every non-Prepared variant, driven at the real manager rather than at
+        // the helper. Two are storable without a signature and must refuse.
+        // The other four cannot be written to disk at all unless a signature is
+        // present, which is the same guarantee reached from the other side.
+        let mut refused = BTreeSet::new();
+        let mut unstorable = BTreeSet::new();
+        for phase in [
+            AgentChannelSetupPhase::SignatureMayExist,
+            AgentChannelSetupPhase::Signed,
+            AgentChannelSetupPhase::Submitted,
+            AgentChannelSetupPhase::AwaitingConfirmations,
+            AgentChannelSetupPhase::RecoveryRequired,
+            AgentChannelSetupPhase::Confirmed,
+        ] {
+            let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+            let session = manager.session(&wallet_id).unwrap();
+            let state_master = *session.state_master;
+            let journal_key = *session.journal_key;
+            let mut state = manager
+                .load_verified_state(&wallet_id, &state_master, &journal_key)
+                .unwrap();
+            state.l2_channel_setup.as_mut().unwrap().review.phase = phase;
+            state.updated_at = now;
+            let stored = manager.persist_event(
+                &mut state,
+                &state_master,
+                &journal_key,
+                crate::journal::AgentJournalEventKind::RecoveryRequired,
+                Some(setup.review.operation_id.as_bytes()),
+                None,
+                now,
+            );
+            if stored.is_err() {
+                unstorable.insert(format!("{phase:?}"));
+                // The stored Prepared review is untouched, so nothing was lost
+                // by the attempt.
+                assert_eq!(
+                    stored_state(&manager, &wallet_id)
+                        .l2_channel_setup
+                        .unwrap()
+                        .review
+                        .phase,
+                    AgentChannelSetupPhase::Prepared
+                );
+                continue;
+            }
+            assert_eq!(
+                manager.discard_unsigned_l2_channel_setup(
+                    &wallet_id,
+                    &setup.review.operation_id,
+                    &setup.review.review_commitment,
+                    now + 1,
+                ),
+                Err(AgentWalletError::ChannelSetupNotDiscardable),
+                "phase {phase:?} must refuse"
+            );
+            assert_eq!(
+                stored_state(&manager, &wallet_id)
+                    .l2_channel_setup
+                    .unwrap()
+                    .review
+                    .phase,
+                phase
+            );
+            refused.insert(format!("{phase:?}"));
+        }
+        assert_eq!(
+            refused,
+            BTreeSet::from([
+                "SignatureMayExist".to_owned(),
+                "RecoveryRequired".to_owned()
+            ])
+        );
+        assert_eq!(
+            unstorable,
+            BTreeSet::from([
+                "Signed".to_owned(),
+                "Submitted".to_owned(),
+                "AwaitingConfirmations".to_owned(),
+                "Confirmed".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn attack_a_prepared_review_carrying_a_signature_cannot_be_stored_and_is_refused_in_memory() {
+        let (_root, manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let session = manager.session(&wallet_id).unwrap();
+        let state_master = *session.state_master;
+        let journal_key = *session.journal_key;
+
+        for mutate in [0_u8, 1] {
+            let mut state = manager
+                .load_verified_state(&wallet_id, &state_master, &journal_key)
+                .unwrap();
+            {
+                let stored = state.l2_channel_setup.as_mut().unwrap();
+                if mutate == 0 {
+                    stored.signed_request = Some(bound_open_request(&setup));
+                } else {
+                    stored.transaction_hash = Some("22".repeat(32));
+                }
+                // The in-memory predicate refuses it on its own, without
+                // leaning on the validator.
+                assert!(!channel_setup_is_provably_unsigned(stored));
+            }
+            state.updated_at = now;
+            assert!(
+                manager
+                    .persist_event(
+                        &mut state,
+                        &state_master,
+                        &journal_key,
+                        crate::journal::AgentJournalEventKind::ChannelSetupPrepared,
+                        Some(setup.review.operation_id.as_bytes()),
+                        None,
+                        now,
+                    )
+                    .is_err(),
+                "a Prepared review carrying a signature must not be writable"
+            );
+        }
+
+        // Nothing above reached disk, so the real review is still there.
+        assert_eq!(
+            stored_state(&manager, &wallet_id).l2_channel_setup.unwrap(),
+            setup
+        );
+    }
+
+    #[test]
+    fn attack_a_live_unexpired_review_is_discardable_and_that_is_the_intended_behaviour() {
+        // The brief asked for this to refuse. It does not, deliberately: an
+        // unexpired Prepared review is exactly as unsigned as an expired one,
+        // and refusing here would deny the owner a way out during the 300
+        // seconds they are most likely to want one. This test pins the actual
+        // behaviour so nobody has to guess which way it went.
+        let (_root, mut manager, wallet_id, _setup, now) = manager_with_prepared_channel_setup();
+        let live = restore_channel_setup_window(&mut manager, &wallet_id, now, now + 300, now);
+        assert!(live.review.expires_at > now + 1);
+
+        manager
+            .discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &live.review.operation_id,
+                &live.review.review_commitment,
+                now + 1,
+            )
+            .unwrap();
+        let state = stored_state(&manager, &wallet_id);
+        assert!(state.l2_channel_setup.is_none());
+        assert_eq!(active_reservations(&state).unwrap(), HacUnits::ZERO);
+    }
+
+    #[test]
+    fn attack_a_durable_store_holding_signed_bytes_refuses_even_though_the_state_reads_prepared() {
+        // The one interleaving that matters: the store is driven all the way to
+        // holding exact signed bytes while the wallet state still says
+        // Prepared. The store must win.
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let agent_address = stored_state(&manager, &wallet_id).address;
+        {
+            let mut safety = open_setup_safety_store(&manager, &wallet_id, &setup);
+            begin_durable_channel_open(
+                &mut safety,
+                &setup,
+                &agent_address,
+                &setup.review.operation_id,
+                &setup.idempotency_key,
+            )
+            .unwrap();
+            safety.mark_signature_may_exist().unwrap();
+            safety
+                .persist_user_signed(&bound_open_request(&setup))
+                .unwrap();
+            assert_eq!(
+                safety.operation().unwrap().status,
+                hacash_wallet_core::l1_channel_safety::ChannelOpenStatus::UserSigned
+            );
+        }
+        assert_eq!(
+            manager.discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            ),
+            Err(AgentWalletError::ChannelSetupNotDiscardable)
+        );
+        assert_eq!(
+            stored_state(&manager, &wallet_id).l2_channel_setup.unwrap(),
+            setup
+        );
+        // And the store still holds the bytes, so nothing was forgotten.
+        let safety = open_setup_safety_store(&manager, &wallet_id, &setup);
+        assert!(safety.operation().unwrap().request.is_some());
+    }
+
+    #[test]
+    fn attack_a_durable_store_at_recovery_required_refuses_a_prepared_discard() {
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let agent_address = stored_state(&manager, &wallet_id).address;
+        {
+            let mut safety = open_setup_safety_store(&manager, &wallet_id, &setup);
+            begin_durable_channel_open(
+                &mut safety,
+                &setup,
+                &agent_address,
+                &setup.review.operation_id,
+                &setup.idempotency_key,
+            )
+            .unwrap();
+            safety.mark_recovery_required().unwrap();
+        }
+        assert_eq!(
+            manager.discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            ),
+            Err(AgentWalletError::ChannelSetupNotDiscardable)
+        );
+        assert!(
+            stored_state(&manager, &wallet_id)
+                .l2_channel_setup
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn attack_the_discarded_channel_id_is_the_same_one_a_reprepare_would_derive() {
+        // A discard must not silently move the wallet to a second incarnation
+        // of the channel, because a close voucher names an ID and never
+        // expires. The ID is a pure function of the two addresses and reuse
+        // version 1, which `validate` pins, so it cannot move.
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let agent_address = stored_state(&manager, &wallet_id).address;
+        assert_eq!(setup.review.channel_reuse_version, 1);
+        assert_eq!(
+            setup.review.channel_id,
+            derive_channel_id(&agent_address, &setup.review.hub_address, 1)
+        );
+        let discarded = manager
+            .discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            )
+            .unwrap();
+        assert_eq!(
+            discarded.channel_id,
+            derive_channel_id(&agent_address, &setup.review.hub_address, 1)
+        );
+        // A review at reuse version 2 is not loadable at all, so there is no
+        // second-incarnation escape hatch for a discard to open.
+        let mut second = setup;
+        second.review.channel_reuse_version = 2;
+        second.review.review_commitment = second.recompute_review_commitment();
+        assert!(second.validate(&wallet_id, &agent_address).is_err());
+    }
+
+    #[test]
+    fn attack_a_discard_forgets_the_review_and_nothing_else_in_the_whole_state() {
+        // The broadest statement of "it must not forget money": compare the
+        // entire serialised wallet state before and after. Anything the discard
+        // touched that is not the review itself, or the journal bookkeeping
+        // every write moves, shows up here.
+        let (_root, mut manager, wallet_id, setup, now) = manager_with_prepared_channel_setup();
+        let before = serde_json::to_value(stored_state(&manager, &wallet_id)).unwrap();
+        manager
+            .discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &setup.review.operation_id,
+                &setup.review.review_commitment,
+                now + 1,
+            )
+            .unwrap();
+        let after = serde_json::to_value(stored_state(&manager, &wallet_id)).unwrap();
+
+        let before_map = before.as_object().unwrap();
+        let after_map = after.as_object().unwrap();
+        let mut changed: BTreeSet<String> = BTreeSet::new();
+        for key in before_map.keys().chain(after_map.keys()) {
+            if before_map.get(key) != after_map.get(key) {
+                changed.insert(key.clone());
+            }
+        }
+        assert_eq!(
+            changed,
+            BTreeSet::from([
+                "l2_channel_setup".to_owned(),
+                "updated_at".to_owned(),
+                "journal_sequence".to_owned(),
+                "journal_head_hash".to_owned(),
+            ]),
+            "a discard must move nothing but the review it forgets"
+        );
+        assert!(
+            after_map
+                .get("l2_channel_setup")
+                .is_none_or(|value| value.is_null())
         );
     }
 }

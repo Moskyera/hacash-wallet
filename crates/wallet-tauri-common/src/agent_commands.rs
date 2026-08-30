@@ -836,6 +836,43 @@ pub async fn agent_wallet_recover_fast_pay_channel_setup(
     }
 }
 
+/// Forget one channel-setup review that was never confirmed.
+///
+/// Owner-shell only, like the other three. There is deliberately no
+/// companion or agent surface for this: a paired phone or an AI agent must
+/// never be able to make the wallet forget a channel it may be opening.
+#[tauri::command]
+pub async fn agent_wallet_discard_fast_pay_channel_setup(
+    wallet_id: String,
+    operation_id: String,
+    review_commitment: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    {
+        let wallet_id = parse_wallet_id(wallet_id)?;
+        let _transition = state.transition.lock().await;
+        let review = require_manager(&state)?
+            .lock()
+            .await
+            .discard_unsigned_l2_channel_setup(
+                &wallet_id,
+                &operation_id,
+                &review_commitment,
+                unix_now()?,
+            )
+            .map_err(public_error)?;
+        serde_json::to_value(review).map_err(|_| "Agent channel discard encoding failed".to_owned())
+    }
+    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    {
+        let _ = (wallet_id, operation_id, review_commitment, state);
+        Err("Agent channel setup is disabled in this build".to_owned())
+    }
+}
+
 #[tauri::command]
 pub async fn agent_wallet_prepare_fast_pay_channel_close(
     wallet_id: String,

@@ -141,6 +141,18 @@ fn measured_command_futures() -> Vec<(&'static str, usize)> {
             }),
         ),
         (
+            "agent_wallet_discard_fast_pay_channel_setup",
+            future_size(|(w, s): Ctx<'_>| {
+                c::agent_wallet_discard_fast_pay_channel_setup(
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    w,
+                    s,
+                )
+            }),
+        ),
+        (
             "agent_wallet_prepare_fast_pay_channel_close",
             future_size(|(w, s): Ctx<'_>| {
                 c::agent_wallet_prepare_fast_pay_channel_close(String::new(), w, s)

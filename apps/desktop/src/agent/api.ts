@@ -1159,6 +1159,17 @@ export const agentWalletApi = {
     }),
   recoverFastPayChannelSetup: (walletId: string) =>
     invoke<AgentChannelSetupReview>("agent_wallet_recover_fast_pay_channel_setup", { walletId }),
+  /** Forget one reviewed setup that was never confirmed. It signs nothing and moves nothing. */
+  discardFastPayChannelSetup: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_discard_fast_pay_channel_setup", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
   prepareFastPayChannelClose: (walletId: string) =>
     invoke<AgentChannelCloseReview>("agent_wallet_prepare_fast_pay_channel_close", { walletId }),
   confirmFastPayChannelClose: (
