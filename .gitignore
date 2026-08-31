@@ -37,3 +37,8 @@ test-*.txt
 # scripts/DEV-ONLY-HUB-AND-WITNESS-SAME-HOST.*. Nothing here is an anchor and
 # nothing here may ever hold value.
 /.dev-anchor/
+
+# The seeded design canvas: ~2.5 MB of editor payload regenerated from the
+# .dc.html artboards beside it. The artboards are the source and are tracked;
+# this is build output and does not belong in the history.
+design/fast-pay-channel-flow.html

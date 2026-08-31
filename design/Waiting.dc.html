@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, "Segoe UI", system-ui, sans-serif; background: #000; }
+    a { color: #f5a623; } a:hover { color: #ffb43c; }
+    .mono { font-family: ui-monospace, Consolas, monospace; }
+    button { font-family: inherit; cursor: pointer; transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease; }
+    button:hover { border-color: rgba(245, 166, 35, 0.34); }
+  </style>
+</helmet>
+
+<div style="background:#000;color:#edf2f7;min-height:100%;padding:36px 40px;box-sizing:border-box">
+
+  <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:26px">
+    <span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#8d8d8d;font-weight:600">{{stepLabel}}</span>
+    <h1 style="margin:0;font-size:26px;font-weight:600;letter-spacing:-.01em">{{heading}}</h1>
+    <p style="margin:0;font-size:14px;line-height:1.55;color:#8d8d8d;max-width:64ch">{{subheading}}</p>
+  </div>
+
+  <!--
+    The half hour that broke people, made to actually run. In the shipped build
+    this stretch rendered nothing at all, so a person watched an empty page with
+    their money committed and could not tell a normal wait from a dead app.
+    Here the blocks arrive, the count moves, and the exit appears on its own.
+  -->
+  <div style="border:1px solid #1f1f1f;border-radius:16px;background:#0a0a0a;padding:22px 24px;margin-bottom:20px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:16px">
+      <span style="font-size:14px;font-weight:600">{{blockLabel}}</span>
+      <span class="mono" style="font-size:13px;color:#8d8d8d">{{timeLeftLabel}}</span>
+    </div>
+
+    <div style="display:flex;gap:6px;margin-bottom:16px">
+      <sc-for list="{{blocks}}" as="block" hint-placeholder-count="6">
+        <div style="flex-grow:1;height:6px;border-radius:3px;background:{{block.fill}};transition:background-color 320ms ease"></div>
+      </sc-for>
+    </div>
+
+    <div style="display:flex;gap:28px">
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <span style="font-size:12px;color:#8d8d8d">Opened at block</span>
+        <span class="mono" style="font-size:14px">777933</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <span style="font-size:12px;color:#8d8d8d">Chain is at</span>
+        <span class="mono" style="font-size:14px">{{currentHeight}}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px">
+        <span style="font-size:12px;color:#8d8d8d">In the channel</span>
+        <span class="mono" style="font-size:14px">0.2 HAC</span>
+      </div>
+    </div>
+  </div>
+
+  <sc-if value="{{waiting}}" hint-placeholder-val="{{ true }}">
+    <div style="border:1px solid #1f1f1f;border-radius:16px;background:#0a0a0a;padding:18px 20px;margin-bottom:20px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:8px">Why there is no exit button yet</div>
+      <p style="margin:0;font-size:13px;line-height:1.6;color:#8d8d8d">
+        The Hub cannot sign a closing transaction for a channel the chain has not settled.
+        The button appears here on its own the moment it can.
+      </p>
+    </div>
+
+    <div style="display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(245,166,35,.34);border-radius:16px;background:rgba(245,166,35,.06);padding:16px 20px">
+      <svg viewBox="0 0 24 24" style="width:20px;height:20px;flex:none;margin-top:1px" fill="none" stroke="#f5a623" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 9v4"></path><path d="M12 17h.01"></path>
+        <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
+      </svg>
+      <div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:4px">Leave this window open</div>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#8d8d8d">
+          Do not turn payments off and on while this is running. Doing it at the wrong
+          moment destroys this channel's way out for good.
+        </p>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{settled}}" hint-placeholder-val="{{ false }}">
+    <div style="border:1px solid rgba(245,166,35,.34);border-radius:16px;background:rgba(245,166,35,.06);padding:22px 24px;margin-bottom:18px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <svg viewBox="0 0 24 24" style="width:22px;height:22px;flex:none" fill="none" stroke="#f5a623" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 12l2 2 4-4"></path><circle cx="12" cy="12" r="9"></circle>
+        </svg>
+        <span style="font-size:15px;font-weight:600">The chain has settled. Your way out can be issued now.</span>
+      </div>
+      <p style="margin:0 0 18px;font-size:13px;line-height:1.6;color:#8d8d8d;max-width:62ch">
+        Take it while the Hub is answering. Once you hold it, a Hub that later goes
+        quiet cannot keep your deposit.
+      </p>
+      <button style="border:1px solid rgba(245,166,35,.34);background:#f5a623;color:#0a0a0a;border-radius:12px;padding:0 22px;font-size:14px;font-weight:600;min-height:46px">Take my way out</button>
+    </div>
+  </sc-if>
+
+  <div style="display:flex;align-items:center;gap:14px;margin-top:22px;padding-top:18px;border-top:1px solid #1f1f1f">
+    <button onClick="{{restart}}" style="border:1px solid #242424;background:#111;color:#8d8d8d;border-radius:10px;padding:9px 16px;font-size:13px;min-height:38px">Watch it again</button>
+    <span style="font-size:12px;color:#5c5c5c">A block every {{secondsLabel}}. On mainnet it is about five minutes.</span>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{
+  "blockSeconds": {"editor": "range", "default": 2, "min": 1, "max": 10, "step": 1, "unit": "s", "section": "Timing"}
+}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { confirmations: 0 };
+  }
+
+  componentDidMount() {
+    this.tick();
+  }
+
+  componentWillUnmount() {
+    if (this.timer) clearInterval(this.timer);
+  }
+
+  // One interval, restarted whenever the pace changes or the viewer replays,
+  // so a tweak edit takes effect without stacking a second timer behind it.
+  tick() {
+    if (this.timer) clearInterval(this.timer);
+    const seconds = this.props.blockSeconds ?? 2;
+    this.timer = setInterval(() => {
+      const next = this.state.confirmations + 1;
+      if (next >= 6) {
+        clearInterval(this.timer);
+        this.timer = null;
+        this.setState({ confirmations: 6 });
+      } else {
+        this.setState({ confirmations: next });
+      }
+    }, seconds * 1000);
+  }
+
+  renderVals() {
+    const seconds = this.props.blockSeconds ?? 2;
+    const done = this.state.confirmations;
+    const settled = done >= 6;
+    const remaining = 6 - done;
+
+    const blocks = [];
+    for (let i = 0; i < 6; i += 1) {
+      blocks.push({ fill: i < done ? '#f5a623' : '#242424' });
+    }
+
+    return {
+      blocks,
+      settled,
+      waiting: !settled,
+      currentHeight: String(777933 + done),
+      blockLabel: settled ? 'All 6 blocks are in' : `${done} of 6 blocks`,
+      timeLeftLabel: settled ? 'settled' : `about ${remaining * seconds} seconds left`,
+      stepLabel: settled ? 'Step 3 of 4 - done' : 'Step 3 of 4',
+      heading: settled ? 'Your money is settled' : 'Your money is on the chain',
+      subheading: settled
+        ? 'The channel is open and the Hub can sign your way out.'
+        : 'Waiting for the chain to settle before your way out can be issued. This is normal and it takes about half an hour.',
+      secondsLabel: `${seconds}s`,
+      restart: () => {
+        this.setState({ confirmations: 0 });
+        this.tick();
+      },
+    };
+  }
+}
+</script>
+</body>
+</html>

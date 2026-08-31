@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, "Segoe UI", system-ui, sans-serif; background: #000; }
+    a { color: #f5a623; } a:hover { color: #ffb43c; }
+    .mono { font-family: ui-monospace, Consolas, monospace; }
+    button { font-family: inherit; cursor: pointer; transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease; }
+    button:hover { border-color: rgba(245, 166, 35, 0.34); }
+  </style>
+</helmet>
+
+<div style="background:#000;color:#edf2f7;min-height:100%;padding:36px 40px;box-sizing:border-box">
+
+  <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:22px">
+    <span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#8d8d8d;font-weight:600">When it says no</span>
+    <h1 style="margin:0;font-size:26px;font-weight:600;letter-spacing:-.01em">A refusal has to name its cause</h1>
+    <p style="margin:0;font-size:14px;line-height:1.55;color:#8d8d8d;max-width:64ch">
+      Every refusal here is real. Pick one and see what a person was shown, beside what
+      the wallet already knew.
+    </p>
+  </div>
+
+  <div style="display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap">
+    <sc-for list="{{cases}}" as="row" hint-placeholder-count="4">
+      <button onClick="{{row.pick}}" style="border:1px solid {{row.chipBorder}};background:{{row.chipBg}};color:{{row.chipColor}};border-radius:999px;padding:8px 16px;font-size:13px;min-height:38px">{{row.chip}}</button>
+    </sc-for>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:18px;margin-bottom:24px">
+
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#8d8d8d;font-weight:600">What it said</div>
+      <div style="border:1px solid #242424;border-radius:14px;background:#0d0d0d;padding:20px;min-height:150px;box-sizing:border-box">
+        <div class="mono" style="font-size:13px;color:#8d8d8d;line-height:1.7">{{saidText}}</div>
+        <div style="font-size:12px;color:#5c5c5c;margin-top:12px;line-height:1.6">{{saidNote}}</div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#f5a623;font-weight:600">What it should say</div>
+      <div style="border:1px solid rgba(245,166,35,.34);border-radius:14px;background:rgba(245,166,35,.06);padding:20px;min-height:150px;box-sizing:border-box">
+        <div style="font-size:14px;color:#edf2f7;line-height:1.6;font-weight:500">{{shouldTitle}}</div>
+        <div style="font-size:13px;color:#8d8d8d;line-height:1.6;margin-top:8px">{{shouldBody}}</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="border:1px solid #1f1f1f;border-radius:16px;background:#0a0a0a;padding:18px 20px;margin-bottom:24px">
+    <div style="font-size:12px;color:#8d8d8d;margin-bottom:6px">What it cost</div>
+    <div style="font-size:13px;color:#edf2f7;line-height:1.6">{{costLine}}</div>
+  </div>
+
+  <!--
+    The rule the four share, and the one worth keeping on the wall: say what is
+    true, say what it cost, say what to do next. Never name a control that is
+    not on the screen, and never claim something the code cannot know.
+  -->
+  <div style="border-top:1px solid #1f1f1f;padding-top:20px">
+    <div style="display:flex;gap:32px">
+      <div style="flex-grow:1">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">Say what is true</div>
+        <div style="font-size:13px;color:#8d8d8d;line-height:1.55">Never claim what the screen cannot know. It has not asked the chain.</div>
+      </div>
+      <div style="flex-grow:1">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">Say what it cost</div>
+        <div style="font-size:13px;color:#8d8d8d;line-height:1.55">Whether money moved is the first thing a person needs.</div>
+      </div>
+      <div style="flex-grow:1">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">Say what to do</div>
+        <div style="font-size:13px;color:#8d8d8d;line-height:1.55">And never name a button that is not on this screen.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { picked: 0 };
+  }
+
+  cases() {
+    return [
+      {
+        chip: 'The Hub was full',
+        said: 'Agent Wallet state requires manual recovery',
+        saidNote: 'The Hub had said exactly why. The wallet mapped the answer to Err(_) and threw it away.',
+        shouldTitle: 'This Hub has no room for another channel.',
+        shouldBody: 'It is holding 0.2 HAC of a 0.2 HAC limit, reserved by a channel from five days ago that never made it onto the chain.',
+        cost: 'Eight hours, and five attempts that each looked like a different problem.',
+      },
+      {
+        chip: 'A comma',
+        said: 'payment amount is invalid',
+        saidNote: 'One sentence for an empty field, a comma, four decimals, and a missing leading digit.',
+        shouldTitle: 'Use a full stop, not a comma.',
+        shouldBody: 'Type 0.2 rather than 0,2. The amount takes at most three decimals.',
+        cost: 'A round trip to the core to learn something the screen could see as it was typed.',
+      },
+      {
+        chip: 'Signing blocked',
+        said: 'transaction signing is blocked',
+        saidNote: 'At least eight different causes reach this one sentence, including three you can fix in a second.',
+        shouldTitle: 'The amount is above what this Hub takes.',
+        shouldBody: 'It takes at most 0.2 HAC per channel, and the field was pre-filled with 1.',
+        cost: 'A refusal that reads like a fault in the wallet when it was a number in a box.',
+      },
+      {
+        chip: 'The review expired',
+        said: 'transaction signing is blocked',
+        saidNote: 'The same seven words again, this time because a five minute window had closed unseen.',
+        shouldTitle: 'These numbers expired before they were confirmed.',
+        shouldBody: 'Nothing was signed and nothing was spent. Check them again and confirm within five minutes.',
+        cost: 'A wallet that could never open a channel again, because nothing could clear the stale review.',
+      },
+    ];
+  }
+
+  renderVals() {
+    const all = this.cases();
+    const picked = this.state.picked;
+    const current = all[picked];
+
+    return {
+      cases: all.map((row, index) => ({
+        chip: row.chip,
+        chipBorder: index === picked ? 'rgba(245,166,35,.34)' : '#242424',
+        chipBg: index === picked ? 'rgba(245,166,35,.10)' : '#111',
+        chipColor: index === picked ? '#f5a623' : '#8d8d8d',
+        pick: () => this.setState({ picked: index }),
+      })),
+      saidText: current.said,
+      saidNote: current.saidNote,
+      shouldTitle: current.shouldTitle,
+      shouldBody: current.shouldBody,
+      costLine: current.cost,
+    };
+  }
+}
+</script>
+</body>
+</html>
