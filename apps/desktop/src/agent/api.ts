@@ -574,7 +574,14 @@ export type StrandedWitness = {
   transaction_id: string | null;
   anchor_issued: boolean;
   anchor_expires_at: number | null;
+  /** Asking the phone again would succeed right now. */
   retryable: boolean;
+  /**
+   * This wallet can open a fresh confirmation window on its network at all.
+   * Separate from `retryable` because the two reasons a retry is withheld have
+   * different remedies, and the panel has to print the right sentence.
+   */
+  network_supports_witness_retry: boolean;
   abandonable: boolean;
   /** `releaseDeadWitnessAnchor` would succeed right now. */
   anchor_releasable: boolean;

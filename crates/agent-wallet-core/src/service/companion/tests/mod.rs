@@ -36,6 +36,10 @@ mod durable_write_probe;
 mod fast_pay_decisions;
 mod fixtures;
 mod lifecycle;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod mainnet_witness_exit;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod mainnet_witness_exit_attack;
 mod pairing;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod pilot_node;

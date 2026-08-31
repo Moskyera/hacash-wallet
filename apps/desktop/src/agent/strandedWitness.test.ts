@@ -20,6 +20,7 @@ const waiting: StrandedWitness = {
   anchor_issued: false,
   anchor_expires_at: null,
   retryable: true,
+  network_supports_witness_retry: true,
   abandonable: true,
   anchor_releasable: false,
   phone_replacement_unblocked: true,
@@ -75,6 +76,30 @@ const reconciled: StrandedWitness = {
 };
 
 const everySubmitted = [submittedLive, submittedExpired, uncertain, reconciled];
+
+/**
+ * THE SAME STRANDED PAYMENT, ON A NETWORK THIS WALLET WILL NOT OPEN A
+ * CONFIRMATION WINDOW ON.
+ *
+ * The core refuses the retry here, so the panel must not invite one. This is
+ * the exact shape a mainnet owner sees, and it is the shape that used to print
+ * "it is safe to try more than once" over a control that answered "configured
+ * node does not match the Agent Wallet network".
+ */
+const retryUnavailable: StrandedWitness = {
+  ...waiting,
+  retryable: false,
+  network_supports_witness_retry: false,
+};
+
+/** A confirmation is already in hand; the lifecycle owns it from here. */
+const confirmationAlreadyIn: StrandedWitness = {
+  ...waiting,
+  anchor_issued: true,
+  anchor_expires_at: 1_700_000_300,
+  retryable: false,
+  abandonable: false,
+};
 
 const everySentence = (input: StrandedWitness): string[] => {
   const view = strandedWitnessView(input, units);
@@ -152,6 +177,26 @@ describe("the phone is always offered first", () => {
       // And is careful not to suggest confirming pays a second time.
       expect(view?.phoneInstruction).toContain("cannot move money twice");
     }
+  });
+
+  it("does not offer a retry the core would refuse, and says which reason it is", () => {
+    // A wallet that cannot open a window at all: the phone is not the answer,
+    // and the owner is pointed at the one thing that does work.
+    const blocked = strandedWitnessView(retryUnavailable, units);
+    expect(blocked?.canRetryPhone).toBe(false);
+    expect(blocked?.phoneInstruction).toContain("cannot ask your phone");
+    expect(blocked?.phoneInstruction).not.toContain("safe to try more than once");
+    expect(blocked?.phoneInstruction).toContain(
+      "Nothing has been sent to the network and no money has moved",
+    );
+    expect(blocked?.canAbandon).toBe(true);
+
+    // A confirmation already on its way in is the opposite situation and gets
+    // the opposite sentence: nothing is wrong and nothing needs pressing.
+    const settled = strandedWitnessView(confirmationAlreadyIn, units);
+    expect(settled?.canRetryPhone).toBe(false);
+    expect(settled?.phoneInstruction).toContain("already sent a confirmation");
+    expect(settled?.phoneInstruction).not.toContain("cannot ask your phone");
   });
 
   it("says a dead window is restarted by opening the payment again", () => {
@@ -368,5 +413,54 @@ describe("the recovery panel is reachable where the owner is stuck", () => {
     // than a panel with an enabled danger button.
     expect(security).toContain("catch { setStranded(null); }");
     expect(strandedWitnessView(null, units)).toBeNull();
+  });
+});
+
+describe("what a mainnet owner reads when the witness rail is not on their network", () => {
+  // Both of these sentences were live and false on the exact path the mainnet
+  // exit opens. Neither the builder nor its skeptic found them; they were
+  // caught by reading what the panel actually renders, which is unconditional.
+  const strandedOnMainnet = {
+    operation_id: "op-1",
+    transaction_id: "tx-1",
+    amount_units: 1_000,
+    recipient: "1Recipient",
+    submitted: false,
+    anchor_issued: false,
+    anchor_releasable: false,
+    retryable: false,
+    abandonable: true,
+    phone_replacement_unblocked: false,
+    network_supports_witness_retry: false,
+  };
+
+  it("never says a confirmation window is open when none can exist", () => {
+    // The old fallback said "Your phone still has an open confirmation window,
+    // so replacing it is not offered yet." On mainnet no window was ever
+    // opened and none can be: the anchor is testnet only.
+    const view = strandedWitnessView(strandedOnMainnet as never, units);
+    if (!view) throw new Error("expected a view");
+    expect(view.replacePhoneGuidance).not.toMatch(/still has an open confirmation window/i);
+    expect(view.replacePhoneGuidance).toMatch(/not available on this network/i);
+  });
+
+  it("does not send the owner to a control that refuses on their network", () => {
+    // afterAbandon named Replace the paired phone as "the only thing that
+    // clears that". On mainnet that control answers
+    // WitnessRotationNetworkUnsupported.
+    const view = strandedWitnessView(strandedOnMainnet as never, units);
+    if (!view) throw new Error("expected a view");
+    expect(view.afterAbandon).not.toMatch(/the only thing that clears that is/i);
+    expect(view.afterAbandon).toMatch(/not available on this network/i);
+  });
+
+  it("still names the control where it does work", () => {
+    // The fix must not remove the guidance from the rail that has it.
+    const view = strandedWitnessView(
+      { ...strandedOnMainnet, network_supports_witness_retry: true } as never,
+      units,
+    );
+    if (!view) throw new Error("expected a view");
+    expect(view.afterAbandon).toMatch(/the only thing that clears that is/i);
   });
 });

@@ -431,7 +431,7 @@ async fn without_the_recovery_the_broadcast_write_crash_has_no_exit_at_all() {
         manager
             .abandon_stranded_witness_operation(&wallet_id, &operation_id, 62_057)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState
+        AgentWalletError::NotWaitingOnWitnessPhone
     );
 
     // 6. RELEASE THE ANCHOR. Refused twice over: `BroadcastSubmitted` is not a
@@ -441,7 +441,7 @@ async fn without_the_recovery_the_broadcast_write_crash_has_no_exit_at_all() {
         manager
             .release_dead_witness_anchor(&wallet_id, &operation_id, 62_058)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState
+        AgentWalletError::NotWaitingOnWitnessPhone
     );
 
     // 7. REPLACE THE PHONE. Refused while the slot is occupied.

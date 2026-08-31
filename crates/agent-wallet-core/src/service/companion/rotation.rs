@@ -471,8 +471,16 @@ impl AgentWalletManager {
         let session = self.session(wallet_id)?;
         let mut state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        // Kept, unlike the two exits in `witness.rs`, and not for the same
+        // reason they lost theirs. A rotation revokes the owner's current phone
+        // and burns a witness epoch partway through, so it is a device change
+        // this build has never run on mainnet rather than a way out of a stuck
+        // payment. It is also unreachable there today: `rollback_witness` is
+        // only ever created inside `pending_rollback_anchor`, which mainnet does
+        // not admit, so a mainnet wallet has no witness state for a rotation to
+        // move. The refusal is honest now instead of blaming the node.
         if state.network_mode != "testnet" {
-            return Err(AgentWalletError::NodeNetworkMismatch);
+            return Err(AgentWalletError::WitnessRotationNetworkUnsupported);
         }
         let rotation = state
             .witness_rotation
@@ -645,8 +653,10 @@ impl AgentWalletManager {
         let session = self.session(wallet_id)?;
         let mut state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        // See `retarget_witness_rotation` for why this one stays while the two
+        // exits lost theirs.
         if state.network_mode != "testnet" {
-            return Err(AgentWalletError::NodeNetworkMismatch);
+            return Err(AgentWalletError::WitnessRotationNetworkUnsupported);
         }
         if let Some(existing) = &state.witness_rotation {
             if existing.record.rotation_id == rotation_id

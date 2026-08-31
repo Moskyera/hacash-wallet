@@ -717,7 +717,7 @@ async fn without_the_recovery_the_post_submit_crash_has_no_exit_at_all() {
         manager
             .abandon_stranded_witness_operation(&wallet_id, &operation_id, dead)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState
+        AgentWalletError::StrandedPaymentAlreadySent
     );
 
     // 4. REPLACE THE PHONE. Refused while the slot is occupied.

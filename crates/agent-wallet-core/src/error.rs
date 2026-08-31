@@ -309,10 +309,57 @@ pub enum AgentWalletError {
     NodeCapabilityMismatch,
     #[error("mobile rollback witness receipt is required before broadcast")]
     RollbackWitnessRequired,
+    // The two ways out of a payment stranded on the phone used to answer every
+    // refusal with `NodeNetworkMismatch` - "configured node does not match the
+    // Agent Wallet network" - because both began by comparing the network name
+    // before they had even looked the payment up. The node was fine. What was
+    // true was that this build had no exit from that state, and the sentence
+    // sent the owner to check a setting that was already correct.
+    //
+    // These say what is actually true instead. Every one of them is shown to
+    // the owner verbatim, so each one also says what did NOT happen: a refusal
+    // on this family of controls never signs, never sends and never spends, and
+    // an owner reading a refusal on the screen that holds their stuck money is
+    // entitled to be told that in the same breath.
     #[error(
-        "this payment can still be witnessed by the paired phone, so it cannot be abandoned yet"
+        "This payment can still be confirmed by your paired phone, so it cannot be given up or cleared away yet. Either the confirmation window is still open or a confirmation has already come back. Nothing was changed and nothing was spent."
     )]
     WitnessRecoveryNotAvailable,
+    // Reached when the payment is past the pre-broadcast phase. The reservation
+    // is deliberately NOT handed back here: doing so is the whole content of
+    // giving a payment up, and it would assert that a transaction which is on
+    // the chain never happened.
+    #[error(
+        "This payment was already sent to the network, so it cannot be given up. Giving it up would return the reserved funds and mark it cancelled, and that would be false: the transaction is on the chain. Look it up with the transaction id shown, and let your phone finish confirming it. Nothing was changed and nothing was spent."
+    )]
+    StrandedPaymentAlreadySent,
+    #[error(
+        "This payment is not waiting on your phone, so there is nothing here to give up or clear away. Nothing was changed and nothing was spent."
+    )]
+    NotWaitingOnWitnessPhone,
+    #[error(
+        "There is no confirmation window recorded for this payment, so there is nothing to clear away. Nothing was changed and nothing was spent."
+    )]
+    WitnessConfirmationWindowNotFound,
+    #[error(
+        "The confirmation window on this wallet belongs to a different payment, so it cannot be cleared from here. Clearing it would leave that payment with nothing to resolve it. Nothing was changed and nothing was spent."
+    )]
+    WitnessConfirmationWindowBelongsToAnotherPayment,
+    // The forward step - minting the anchor the phone signs - is still testnet
+    // only, and this pass did not widen it: opening it moves real money on
+    // mainnet, which is a different decision from giving a stranded payment a
+    // way out. So it refuses, and now it refuses with the truth and with the
+    // remedy, rather than with `InvalidOperationState` - "operation cannot
+    // transition from its current state" - which reads as though the payment
+    // were the thing that was wrong.
+    #[error(
+        "This wallet cannot ask your phone to confirm a payment on mainnet, so this payment cannot be carried any further here. Nothing was sent to the network and no money has moved. Giving the payment up returns the reserved funds to your spendable balance."
+    )]
+    WitnessAnchorNetworkUnsupported,
+    #[error(
+        "This wallet cannot replace the paired phone on mainnet. Nothing was changed, your current phone is still paired, and nothing was spent."
+    )]
+    WitnessRotationNetworkUnsupported,
     #[error("Agent Wallet rollback or witness chain mismatch detected")]
     RollbackDetected,
     // The counterparty rollback-anchor ratchet found that this Hub has stopped
