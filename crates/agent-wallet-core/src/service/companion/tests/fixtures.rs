@@ -136,6 +136,10 @@ pub(super) fn prepare_pending(
             expires_at: now + 300,
         },
         now,
+        // Every companion fixture is a wallet whose owner opted IN. Pinning it
+        // explicitly is what keeps the witness suite testing the witness after
+        // the requirement stopped being a build flag.
+        true,
     )
     .unwrap();
     operation.reserve(HacUnits::MIN_NETWORK_FEE).unwrap();

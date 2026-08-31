@@ -113,7 +113,7 @@ pub struct StrandedWitnessRecovery {
 /// The two ways OUT deliberately do not consult it. Neither of them signs,
 /// sends or spends anything, so neither has any business asking which chain the
 /// wallet is pointed at.
-pub(super) fn witness_anchor_available_on_network(network_mode: &str) -> bool {
+pub(crate) fn witness_anchor_available_on_network(network_mode: &str) -> bool {
     network_mode == "testnet"
 }
 

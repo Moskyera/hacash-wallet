@@ -40,6 +40,9 @@ fn deterministic_overview(
         payments_suspended: state.payments_suspended,
         mainnet_spending_ready: state.network_mode != "mainnet",
         trusted_mainnet_fast_pay_pilot: state.trusted_mainnet_fast_pay_pilot,
+        rollback_witness_required: state
+            .rollback_witness_required
+            .unwrap_or(state.rollback_witness.is_some()),
         l2_binding: state.l2_binding.clone(),
         l2_channel_setup: state
             .l2_channel_setup

@@ -583,6 +583,81 @@ describe("mobile Agent Wallet companion boundary", () => {
     ).toThrow(/exact fee or scope invariants/i);
   });
 
+  // THE MAINNET BINDING, WHICH THIS PHONE USED TO REJECT OUTRIGHT.
+  //
+  // The desktop stamps `node.network_kind()` and `node.chain_id()`, which is
+  // "mainnet" with chain id 0 on mainnet and "local_pilot_v1" with chain id 7
+  // on the pilot rail. The old check was `networkId === "testnet" && chainId >
+  // 0`, which matched NEITHER, and on mainnet failed on both halves at once, so
+  // a paired phone could never approve a mainnet payment.
+  //
+  // It survived because the only test of it fed the hand-written value
+  // "testnet", which no producer emits. These cases use the values the Rust
+  // producer actually writes.
+  it("approves the network and chain pairs the desktop really stamps", () => {
+    const pilotState = storedState({ pilotEnabled: true });
+    for (const [network_id, chain_id] of [
+      ["mainnet", 0],
+      ["local_pilot_v1", 7],
+      // The legacy alias, kept so older desktops still work.
+      ["testnet", 1],
+    ] as const) {
+      const snapshot = validateCompanionStatusSnapshot(
+        nativeSnapshot({
+          approvals: [
+            pilotApproval({ network_binding: pilotBinding({ network_id, chain_id }) }),
+          ],
+        }),
+        session(),
+        pilotState,
+        NOW_MILLISECONDS,
+      );
+      expect(snapshot.pendingApprovals[0].networkBinding).toEqual({
+        networkId: network_id,
+        chainId: chain_id,
+        genesisIdentifier: "11".repeat(32),
+        nodeProfileId: "22".repeat(32),
+        transactionFormatVersion: "2",
+      });
+      expect(
+        verifiedAgentApprovalFacts(
+          snapshot.pendingApprovals[0],
+          snapshot,
+          NOW_MILLISECONDS,
+        ),
+      ).not.toBeNull();
+    }
+  });
+
+  // The pair is what is checked. Listing "mainnet" without pinning its chain id
+  // would let a mainnet claim arrive carrying a pilot chain, and a binding is a
+  // claim about one chain.
+  it("refuses a network id carrying the other rail's chain id", () => {
+    const pilotState = storedState({ pilotEnabled: true });
+    for (const [network_id, chain_id] of [
+      ["mainnet", 7],
+      ["local_pilot_v1", 0],
+      ["testnet", 0],
+      ["some_other_chain", 0],
+      ["some_other_chain", 7],
+    ] as const) {
+      expect(() =>
+        validateCompanionStatusSnapshot(
+          nativeSnapshot({
+            approvals: [
+              pilotApproval({
+                network_binding: pilotBinding({ network_id, chain_id }),
+              }),
+            ],
+          }),
+          session(),
+          pilotState,
+          NOW_MILLISECONDS,
+        ),
+      ).toThrow(/exact fee or scope invariants/i);
+    }
+  });
+
   it("accepts only exact V3 testnet bindings in pilot builds and preserves V2 outside pilot", () => {
     const pilotState = storedState({ pilotEnabled: true });
     const pilotSnapshot = validateCompanionStatusSnapshot(

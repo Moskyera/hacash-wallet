@@ -13,6 +13,7 @@ import MobileCompanionPanel, {
   type CompanionActions,
   type CompanionSnapshot,
 } from "./MobileCompanionPanel";
+import RollbackWitnessSetting from "./RollbackWitnessSetting";
 import AgentAdminPages from "./AgentAdminPages";
 import {
   agentWalletApi,
@@ -1079,8 +1080,8 @@ function AgentPageContent(props: PageContentProps) {
         );
       case "phone":
         return (
+          <div key={id}>
           <MobileCompanionPanel
-            key={id}
             walletId={overview.wallet_id}
             busy={busy}
             run={run}
@@ -1092,6 +1093,15 @@ function AgentPageContent(props: PageContentProps) {
             actionsRef={companionActions}
             onLockAndSwitch={onLockAndSwitch}
           />
+          {/* Beside the phone, because that is where a person goes to ask what
+              the phone is for. The trade is spelled out on the panel itself. */}
+          <RollbackWitnessSetting
+            overview={overview}
+            busy={busy}
+            run={run}
+            onInfo={onInfo}
+          />
+          </div>
         );
       case "connector":
         return (
@@ -1975,7 +1985,9 @@ function NodeHealthPanel({
         <div><dt>Network</dt><dd>{node?.network_kind ?? "Identity unavailable"}</dd></div>
         <div><dt>Node identity</dt><dd>{overview.node_status === "verified" ? "Verified" : "Failed closed"}</dd></div>
         <div><dt>Agent payments</dt><dd>{paymentBlockers.length === 0 ? "Ready" : "Blocked"}</dd></div>
-        <div><dt>Mobile companion</dt><dd>{overview.mobile_witness_ready ? "Read-only rollback witness paired" : "Read-only rollback witness required"}</dd></div>
+        {/* "Required" is only true when the owner asked for it. Saying it
+            otherwise reported a wallet as missing something it does not use. */}
+        <div><dt>Mobile companion</dt><dd>{overview.mobile_witness_ready ? "Read-only rollback witness paired" : overview.rollback_witness_required ? "Read-only rollback witness required" : "Not used by this wallet"}</dd></div>
       </dl>
       <details className="agent-advanced-details">
         <summary>Node details</summary>

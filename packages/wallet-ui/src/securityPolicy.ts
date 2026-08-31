@@ -403,20 +403,30 @@ export function plainSendBlockedButtonLabel(
 }
 
 /**
- * The requirement that stops every Agent Wallet payment, said before funding
- * rather than at the first approval.
+ * What a phone is for on an Agent Wallet, said at creation, now that it is
+ * optional.
  *
- * `approve` refuses with `WitnessPhoneRequiredForApproval` unless a witness
- * capable phone is paired, and that gate is compiled into shipped builds. The
- * gate is right and stays: a completed approval signs into
- * `SignedAwaitingWitness`, which only a phone holding the rollback anchor can
- * advance. No sweep expires it, it holds its reservation, and it blocks every
- * later payment from getting an anchor, so approving without a witness phone
- * strands the payment in a state with no exit.
+ * THIS SENTENCE USED TO BE FALSE AT THE MOMENT IT WAS SHOWN. It told the person
+ * creating a wallet that they had to pair a phone before the wallet could
+ * approve anything, which was true while the rollback witness was a build flag.
+ * The requirement is now the owner's own setting and it is OFF by default, so
+ * the sentence has to describe a choice rather than announce a prerequisite.
  *
- * What was wrong is only when a person learned about it: after creating the
- * wallet and after funding it, at the moment of their first payment. Saying it
- * at creation costs nothing and removes the whole surprise.
+ * WHAT IT MUST NOT SAY, in either direction. It must not imply that a phone is
+ * what stops an AI agent spending on its own: an unlocked vault and an explicit
+ * press in the wallet's own window do that, and they are unconditional. And it
+ * must not imply that turning the witness off costs nothing: it costs one real
+ * thing, stated here in the same words the code uses beside the setting.
  */
 export const AGENT_WITNESS_PHONE_REQUIREMENT =
-  "Before this wallet can approve any payment, you have to pair a phone as its witness. Approving signs the transaction and then waits for that phone to confirm it, so an Agent Wallet with no witness phone can hold funds and spend nothing. Pair one from the Security page after you create the wallet, and before you fund it.";
+  "This wallet does not need a phone. Every payment already needs your passphrase and a press in this window, whoever asked for it. You can pair a phone later as a rollback witness, from the Security page: it countersigns each payment against what it last saw, which is the one way this wallet can notice that your computer was restored from an older backup with its spending limits reset. Without it, a computer someone has taken over while it is unlocked loses that second check, and nothing else changes.";
+
+/**
+ * The trade the owner is making, shown beside the switch itself.
+ *
+ * Deliberately the same two facts as `AGENT_WITNESS_PHONE_REQUIREMENT`, in the
+ * same order, so a person who reads one and then the other is not told two
+ * different stories about what this control does.
+ */
+export const AGENT_ROLLBACK_WITNESS_TRADE =
+  "On: every payment waits for your paired phone to countersign it. Off: payments complete on this computer alone. The one thing you give up is the wallet being able to tell that this computer was put back to an older backup. Restoring the whole machine puts the wallet's own records back with it, agreeing with each other, so from here it looks normal: money you already spent today is spendable again, and a device you revoked since is allowed again. Your phone is the one part a restore cannot reach. It is not what stops an agent spending on its own; your passphrase and this window do that either way.";

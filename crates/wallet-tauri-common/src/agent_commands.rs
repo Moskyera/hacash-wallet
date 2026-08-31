@@ -25,6 +25,7 @@ use hpay_companion_protocol::{WitnessRotationMode, WitnessRotationReason};
 use serde_json::{Value, json};
 use tauri::Webview;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 use crate::agent_runtime::phase_name;
 use crate::state::AgentAppState;
@@ -3315,6 +3316,50 @@ pub async fn agent_wallet_pending_approval(
         .map_err(public_error)
 }
 
+/// Turn the rollback witness requirement on or off for this Agent Wallet.
+///
+/// THE OWNER'S SWITCH, AND ONLY THE OWNER'S. Three things make that true rather
+/// than merely intended, and they are independent of one another:
+///
+/// 1. `require_wallet_shell` below. It admits only webview label `main` on a
+///    `tauri:` or `tauri.localhost` origin, which is the owner's own window and
+///    nothing else. Every one of this file's `agent_wallet_*` commands has this
+///    call and a guard test asserts the counts match.
+/// 2. The passphrase, re-verified against the vault inside
+///    `set_rollback_witness_requirement`. Reaching the command is not enough.
+/// 3. There is no other route to the setting at all. A companion device's entire
+///    write vocabulary is `SuspendAgentPayments`, `RevokeAgent` and
+///    `RevokeMobileDevice` - three verbs that all NARROW authority - and an
+///    agent's vocabulary is `AgentPermission`, which has no settings verb. So no
+///    phone and no agent can turn this off, or on, whatever they are told to
+///    send.
+///
+/// WHAT THE OWNER IS TRADING. Off is the default: a payment completes with no
+/// phone paired and no witness record. What that gives up is exactly one thing -
+/// a desktop compromised WHILE UNLOCKED loses a second barrier - and nothing
+/// else changes. On costs a paired phone on every payment and buys detection of
+/// a machine restore, which is the one attack an approval in this window cannot
+/// see. Neither direction touches what stops an agent spending on its own.
+#[tauri::command]
+pub async fn agent_wallet_set_rollback_witness_requirement(
+    wallet_id: String,
+    required: bool,
+    current_passphrase: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<(), String> {
+    require_wallet_shell(&webview)?;
+    let current_passphrase = Zeroizing::new(current_passphrase);
+    let wallet_id = parse_wallet_id(wallet_id)?;
+    let _transition = state.transition.lock().await;
+    let manager = require_manager(&state)?;
+    manager
+        .lock()
+        .await
+        .set_rollback_witness_requirement(&wallet_id, &current_passphrase, required, unix_now()?)
+        .map_err(public_error)
+}
+
 #[tauri::command]
 pub async fn agent_wallet_approve_desktop(
     wallet_id: String,
@@ -3819,6 +3864,90 @@ mod tests {
         assert!(source.contains("url.port() == Some(TRUSTED_DESKTOP_DEBUG_PORT)"));
         assert!(config.contains("http://127.0.0.1:1420"));
     }
+    /// NOTHING BUT THE OWNER'S WINDOW CAN MOVE THE ROLLBACK WITNESS SETTING.
+    ///
+    /// Three independent claims, each asserted against the source rather than
+    /// against a comment:
+    ///
+    /// 1. The command is behind `require_wallet_shell`, so only webview `main`
+    ///    on a trusted local origin reaches it.
+    /// 2. It takes the passphrase and hands it to the manager, which re-verifies
+    ///    it against the vault. Reaching the command is not sufficient.
+    /// 3. It is the ONLY route. No other command in this file sets it, and a
+    ///    companion device's whole write vocabulary - three verbs that all
+    ///    narrow authority - has nothing that could.
+    ///
+    /// Fails without the change because the command does not exist.
+    #[test]
+    fn only_the_owner_window_with_the_passphrase_can_move_the_witness_setting() {
+        let source = include_str!("agent_commands.rs");
+        let body = source
+            .split("pub async fn agent_wallet_set_rollback_witness_requirement")
+            .nth(1)
+            .expect("the setting command exists")
+            .split("#[tauri::command]")
+            .next()
+            .expect("its body");
+        assert!(
+            body.contains("require_wallet_shell(&webview)?;"),
+            "the setting is restricted to the owner's own window"
+        );
+        assert!(
+            body.contains("current_passphrase: String"),
+            "and it asks for the passphrase"
+        );
+        assert!(
+            // Asserted on the ARGUMENTS, not on their line breaks. The first
+            // version pinned a three-line call and cargo fmt collapsed it to
+            // one, so the test whose whole job is proving this setting belongs
+            // to the owner went red over whitespace while the behaviour it
+            // guards was correct the entire time.
+            body.contains("set_rollback_witness_requirement(")
+                && body.contains("&current_passphrase"),
+            "which is handed to the manager, where it is checked against the vault"
+        );
+
+        let shipped = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source before the test module");
+        assert_eq!(
+            shipped
+                .matches(".set_rollback_witness_requirement(")
+                .count(),
+            1,
+            "the manager method is called from exactly one place in the whole              Tauri surface: there is no second route to the setting"
+        );
+
+        // A phone cannot ask for it, whatever it is told to send. This is the
+        // complete companion write vocabulary, and all three narrow authority.
+        let admin = include_str!("../../companion-protocol/src/admin.rs");
+        let vocabulary = admin
+            .split("pub enum AdminCommandKind {")
+            .nth(1)
+            .expect("the companion write vocabulary")
+            .split(
+                "
+}",
+            )
+            .next()
+            .expect("its variants");
+        assert!(vocabulary.contains("SuspendAgentPayments"));
+        assert!(vocabulary.contains("RevokeAgent"));
+        assert!(vocabulary.contains("RevokeMobileDevice"));
+        assert_eq!(
+            vocabulary.matches(',').count(),
+            3,
+            "a fourth companion verb would need this test's argument re-made \
+             before it could be trusted not to widen authority"
+        );
+        assert!(
+            !vocabulary.to_lowercase().contains("witness")
+                && !vocabulary.to_lowercase().contains("setting"),
+            "no companion command touches the rollback witness setting"
+        );
+    }
+
     #[test]
     fn every_tauri_agent_command_has_a_trusted_shell_guard() {
         let source = include_str!("agent_commands.rs");

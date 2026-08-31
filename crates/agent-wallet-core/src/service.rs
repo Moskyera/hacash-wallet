@@ -125,6 +125,54 @@ const ZERO_HASH_HEX: &str = "000000000000000000000000000000000000000000000000000
 /// comes out only if the provider co-signs.
 pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand that this provider holds my channel funds. This channel can only be closed if the provider co-signs it: the chain requires both signatures and no unilateral exit exists on this rail, so if it stops answering, refuses to sign, or disappears, what is in this channel stays locked and nobody can release it for me. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
 
+/// The owner's rollback-witness setting, as every money-path site must read it.
+///
+/// DEFAULT OFF. A wallet whose owner has never touched this pays with no phone
+/// paired and no witness record, and `WitnessPhoneRequiredForApproval` is not
+/// reachable for them.
+///
+/// Two things this deliberately is not:
+///
+/// It is not a build flag. Off a pilot build the whole witness lifecycle is not
+/// compiled, so the setting has nothing to turn on and this returns false
+/// whatever is stored - which keeps a non-pilot build byte-for-byte the
+/// behaviour it had before the setting existed.
+///
+/// It is not readable as consent when nobody consented. `None` is "no owner has
+/// decided", and what then stands in for a decision is what the wallet can see
+/// the owner already did: a witness record, or a paired witness phone. A wallet
+/// showing either was using a phone under the build flag and keeps it; a wallet
+/// showing neither never was.
+///
+/// WHAT IT ACTUALLY GUARDS, so no screen has to guess. Not a stolen unlocked
+/// computer - every payment needs the passphrase and a press either way. It is
+/// a WHOLE-MACHINE RESTORE: put the disk back to last week and the vault and
+/// the journal go back together, mutually consistent, so nothing here can tell.
+/// Today's spend is spendable again and a device revoked since is live again.
+/// The phone is the one party the restore cannot reach, which is the whole of
+/// what turning this on buys and the whole of what turning it off costs.
+fn rollback_witness_required(state: &AgentWalletState) -> bool {
+    if !cfg!(feature = "agent-wallet-testnet-pilot") {
+        return false;
+    }
+    match state.rollback_witness_required {
+        Some(decided) => decided,
+        // `rollback_witness` is written by the FIRST anchor, not by pairing, so
+        // reading it alone silently disarmed a control for an owner whose only
+        // visible action was pairing a witness phone: on the previous build
+        // that wallet required the phone, through the same registry question
+        // `pinned_witness_phone_can_sign` falls back to. Ask both, so an
+        // undecided wallet keeps exactly the behaviour it had.
+        None => {
+            state.rollback_witness.is_some()
+                || state
+                    .companion_security
+                    .as_ref()
+                    .is_some_and(companion::CompanionSecurityState::has_active_witness_device)
+        }
+    }
+}
+
 const fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -200,6 +248,13 @@ pub struct AgentWalletOverview {
     pub authorized_agents: u32,
     pub pending_approvals: u32,
     pub pilot_enabled: bool,
+    /// Whether the owner asked for the rollback witness on this wallet.
+    ///
+    /// Distinct from `pilot_enabled`, which is the BUILD, and which still
+    /// decides the approval wire format the phone expects. This one is the
+    /// owner's setting, and it is what the UI must consult before it tells
+    /// anyone a phone is needed.
+    pub rollback_witness_required: bool,
     pub mobile_witness_ready: bool,
     pub mobile_witness_synchronized: bool,
     pub latest_anchor_sequence: u64,
@@ -252,6 +307,41 @@ struct AgentWalletState {
     external_rollback_anchor_ready: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     trusted_mainnet_fast_pay_pilot: bool,
+    /// THE OWNER'S ROLLBACK-WITNESS SETTING. Default off.
+    ///
+    /// WHAT TURNING IT ON BUYS, exactly and only: detection of a machine
+    /// RESTORE. A desktop rolled back to an earlier snapshot - a VM image, a
+    /// disk backup, a ransomware rollback - comes up with a vault and a journal
+    /// that are mutually consistent at that earlier point, so every local
+    /// integrity check passes while the daily and monthly spend counters have
+    /// silently reset, revoked agents are active again, the policy epoch is
+    /// back where it was and completed payments are missing from history. The
+    /// owner presses Approve on a payment that looks entirely correct, in a
+    /// wallet whose accounting was reset underneath them, and nothing on this
+    /// machine can tell them. The phone can, because it holds the last anchor
+    /// sequence, anchor hash, journal sequence and journal head on hardware the
+    /// restore did not touch, and refuses to countersign anything older.
+    ///
+    /// WHAT TURNING IT OFF COSTS, exactly and only: that. A desktop compromised
+    /// WHILE UNLOCKED loses a second barrier, and nothing else changes.
+    ///
+    /// WHAT IT NEVER WAS, so this setting is not read as one: it is not what
+    /// stops an agent spending on its own. `ApprovalMode::requires_explicit_
+    /// user_action` is always true and `require_wallet_shell` guards every
+    /// approval command, so every payment still needs an unlocked vault and an
+    /// explicit press in the owner's own trusted window whatever this says. It
+    /// is also not a second display of what is being signed: the phone renders
+    /// the amount and recipient the desktop sent it and holds the signed bytes
+    /// only as an opaque commitment, so a compromised unlocked desktop shows it
+    /// whatever it likes. It caps no amount and allowlists no recipient.
+    ///
+    /// `None` means no owner has decided, which is every wallet written before
+    /// this field existed. `rollback_witness_required` reads that case off the
+    /// durable witness record instead, so a wallet that was already using a
+    /// phone keeps using it across the upgrade, and a wallet that never paired
+    /// one gets the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_witness_required: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     l2_binding: Option<AgentL2Binding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -750,6 +840,10 @@ impl AgentWalletManager {
             payments_suspended: true,
             external_rollback_anchor_ready: false,
             trusted_mainnet_fast_pay_pilot,
+            // A new wallet pays with no phone anywhere in the picture. Someone
+            // who wants the restore detection turns it on afterwards, from the
+            // wallet window, with their passphrase.
+            rollback_witness_required: Some(false),
             l2_binding: None,
             l2_channel_setup: None,
             l2_channel_close: None,
@@ -1047,6 +1141,7 @@ impl AgentWalletManager {
                     authorized_agents: 0,
                     pending_approvals: 0,
                     pilot_enabled: cfg!(feature = "agent-wallet-testnet-pilot"),
+                    rollback_witness_required: false,
                     mobile_witness_ready: false,
                     mobile_witness_synchronized: false,
                     latest_anchor_sequence: 0,
@@ -1180,6 +1275,7 @@ impl AgentWalletManager {
                 .try_into()
                 .map_err(|_| AgentWalletError::IntegerOverflow)?,
             pilot_enabled: cfg!(feature = "agent-wallet-testnet-pilot"),
+            rollback_witness_required: rollback_witness_required(&state),
             mobile_witness_ready: state.rollback_witness.is_some(),
             mobile_witness_synchronized: state
                 .rollback_witness
@@ -1283,6 +1379,120 @@ impl AgentWalletManager {
         // persist_event reload-verifies the authenticated state. Only now may
         // the independent marker and in-memory latch be cleared.
         emergency.clear_after_authenticated_enable(enable_permit, false)
+    }
+
+    /// Turn the rollback witness requirement on or off for this wallet.
+    ///
+    /// WHAT THE OWNER IS TRADING, and the same sentence is on the screen this
+    /// is called from: turning it OFF means a desktop compromised WHILE UNLOCKED
+    /// loses a second barrier, and nothing else changes. Turning it ON means
+    /// every payment waits for a receipt from the pinned phone, which is what
+    /// makes a machine restore detectable. Neither direction touches what stops
+    /// an agent spending alone - an unlocked vault and an explicit press in the
+    /// owner's own window - because that was never the phone's job.
+    ///
+    /// WHO MAY CALL IT. The passphrase is the authority, and it is checked
+    /// against the vault here rather than accepted from the caller's word, so
+    /// this method is safe even if its transport were not. Above it,
+    /// `agent_wallet_set_rollback_witness_requirement` is behind
+    /// `require_wallet_shell`, so it can only be reached from webview `main` on
+    /// a `tauri:` origin. Neither an agent nor a companion device has a verb for
+    /// it at all: an agent's vocabulary is `AgentPermission`, which has no
+    /// settings verb, and a companion's entire write vocabulary is
+    /// `SuspendAgentPayments`, `RevokeAgent` and `RevokeMobileDevice`, all three
+    /// of which narrow authority and none of which widens it.
+    ///
+    /// WHEN IT REFUSES, and why each refusal is the safe answer rather than a
+    /// nuisance. The requirement is pinned into each payment, so a change only
+    /// decides what NEW payments get - but a payment that is mid-flight has
+    /// already been pinned, and the surfaces around it have not. So:
+    ///
+    /// - Any non-terminal payment: refuse. Turning the requirement ON while a
+    ///   payment sits `Signed` would be the worst state this wallet can reach.
+    ///   `Signed` is not pre-signing so it cannot be cancelled, it does not
+    ///   await a witness so it cannot be abandoned, it retains its reservation
+    ///   and it is not terminal, and every later intent is refused while it
+    ///   exists. Refusing here is what keeps that state unreachable.
+    /// - A live pending anchor: refuse. Neither exit out of a stranded witness
+    ///   operation works while an anchor is still inside its five minute life,
+    ///   so a flip during that window can leave a payment with no exit until it
+    ///   expires. This is covered by the rule above and stated separately so a
+    ///   later loosening of that rule cannot silently take this with it.
+    /// - An unfinished rotation: refuse. A rotation is moving the witness pin
+    ///   itself and only the new phone's completion anchor can finish it.
+    /// - Turning it ON where no anchor can be minted: refuse. `pending_rollback_
+    ///   anchor` refuses off the local pilot rail with
+    ///   `WitnessAnchorNetworkUnsupported`, so on mainnet a payment would sign
+    ///   into `SignedAwaitingWitness` and then find no door out except
+    ///   `abandon_stranded_witness_operation`. Saying so is honest; letting the
+    ///   owner switch it on and discover it at their next payment is not.
+    pub fn set_rollback_witness_requirement(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        passphrase: &str,
+        required: bool,
+        now: u64,
+    ) -> AgentWalletResult<()> {
+        self.ensure_session_active(wallet_id, now)?;
+        let registry = self.storage.load_registry()?;
+        let entry = registry
+            .wallet(wallet_id)
+            .ok_or(AgentWalletError::AgentWalletNotFound)?;
+        let paths = self.storage.paths(wallet_id)?;
+        let vault = AgentEncryptedVault::load(&paths.vault_path())?;
+        if vault.wallet_id() != wallet_id || vault.address() != entry.address {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        // The passphrase is verified against the vault, not taken on trust.
+        drop(vault.unlock(passphrase)?);
+
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        if rollback_witness_required(&state) == required
+            && state.rollback_witness_required == Some(required)
+        {
+            return Ok(());
+        }
+        if !cfg!(feature = "agent-wallet-testnet-pilot") && required {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        if state
+            .operations
+            .values()
+            .any(|operation| !operation.status().is_terminal())
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        if state
+            .rollback_witness
+            .as_ref()
+            .is_some_and(|witness| witness.pending.is_some())
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        if state
+            .witness_rotation
+            .as_ref()
+            .is_some_and(|rotation| rotation.phase != WitnessRotationPhase::Completed)
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        if required && !companion::witness_anchor_available_on_network(&state.network_mode) {
+            return Err(AgentWalletError::WitnessAnchorNetworkUnsupported);
+        }
+        state.rollback_witness_required = Some(required);
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            AgentJournalEventKind::RollbackWitnessRequirementChanged,
+            None,
+            None,
+            now,
+        )
     }
 
     pub fn revoke_agent(

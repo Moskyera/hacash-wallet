@@ -54,7 +54,7 @@ export type SignedRotationPairingTicket = {
     desktop_device_id: string;
     expected_candidate_device_id: string;
     expected_candidate_identity_fingerprint: string;
-    network_id: "testnet";
+    network_id: string;
     expires_at: string;
   };
   desktop_signature_hex: string;
@@ -70,7 +70,7 @@ export type SignedRotationCandidateAcceptance = {
     desktop_device_id: string;
     candidate_device_id: string;
     candidate_identity_fingerprint: string;
-    network_id: "testnet";
+    network_id: string;
     accepted_at: string;
   };
   candidate_signature_hex: string;
@@ -552,7 +552,12 @@ export type AgentCompanionActivity = {
 };
 
 export type AgentCompanionApprovalNetworkBinding = {
-  networkId: "testnet";
+  // The desktop stamps `node.network_kind()` here, which is "local_pilot_v1"
+  // on the pilot rail and "mainnet" on mainnet. It was declared as the literal
+  // "testnet", a value no producer emits, and a cast in companionView.ts made
+  // the compiler agree. The type is now what the wire actually carries, and
+  // `networkBindingValid` is the thing that decides which values are accepted.
+  networkId: string;
   chainId: number;
   genesisIdentifier: string;
   nodeProfileId: string;

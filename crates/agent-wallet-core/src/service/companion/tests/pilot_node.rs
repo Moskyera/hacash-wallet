@@ -312,7 +312,28 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
     }
 }
 
+/// A pilot wallet whose owner ASKED FOR THE ROLLBACK WITNESS.
+///
+/// Every test built on this helper predates the setting, was written for a
+/// wallet in which the witness was mandatory, and asserts the witness path. So
+/// the helper opts in explicitly rather than relying on a default, and those
+/// tests keep testing exactly what they always tested.
+///
+/// A wallet with the witness off - the shipped default - is
+/// [`create_manager_for_node_without_witness`].
 pub(super) fn create_manager_for_node(
+    node_url: &str,
+    now: u64,
+) -> (tempfile::TempDir, AgentWalletManager, AgentWalletId) {
+    let (root, mut manager, wallet_id) = create_manager_for_node_without_witness(node_url, now);
+    manager
+        .set_rollback_witness_requirement(&wallet_id, PASSPHRASE, true, now + 2)
+        .unwrap();
+    (root, manager, wallet_id)
+}
+
+/// The shipped default: a pilot wallet that needs no phone.
+pub(super) fn create_manager_for_node_without_witness(
     node_url: &str,
     now: u64,
 ) -> (tempfile::TempDir, AgentWalletManager, AgentWalletId) {

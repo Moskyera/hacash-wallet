@@ -177,7 +177,7 @@ impl RotationPairingTicket {
             || self.desktop_device_id == self.expected_candidate_device_id
             || self.old_mobile_device_id == self.expected_candidate_device_id
             || !is_hash(&self.expected_candidate_identity_fingerprint)
-            || !crate::is_supported_pilot_network_id(&self.network_id)
+            || !crate::is_supported_network_id(&self.network_id)
             || !is_hash(&self.genesis_identifier)
             || self.genesis_identifier == ZERO_HASH
             || self.current_witness_epoch == 0
@@ -347,7 +347,7 @@ impl RotationCandidateAcceptance {
             || self.agent_wallet_id.is_empty()
             || self.desktop_device_id == self.candidate_device_id
             || !is_hash(&self.candidate_identity_fingerprint)
-            || !crate::is_supported_pilot_network_id(&self.network_id)
+            || !crate::is_supported_network_id(&self.network_id)
             || self.next_witness_epoch == 0
             || self.single_use_nonce.len() != 64
             || self.accepted_at == 0
@@ -566,7 +566,7 @@ impl WitnessRotationRecord {
             || self.desktop_device_id == self.old_mobile_device_id
             || self.desktop_device_id == self.new_mobile_device_id
             || self.old_mobile_device_id == self.new_mobile_device_id
-            || !crate::is_supported_pilot_network_id(&self.network_id)
+            || !crate::is_supported_network_id(&self.network_id)
             || !is_hash(&self.genesis_identifier)
             || self.genesis_identifier == ZERO_HASH
             || self.signer_epoch == 0

@@ -437,6 +437,10 @@ export type AgentWalletOverview = {
   authorized_agents: number;
   pending_approvals: number;
   pilot_enabled: boolean;
+  // Whether the owner asked for the rollback witness on THIS wallet. Default
+  // off. Distinct from `pilot_enabled`, which is the build and still decides
+  // the approval wire format the phone expects.
+  rollback_witness_required: boolean;
   mobile_witness_ready: boolean;
   mobile_witness_synchronized: boolean;
   latest_anchor_sequence: number;
@@ -999,6 +1003,19 @@ export const agentWalletApi = {
     invoke<PaymentOperation>("agent_wallet_release_dead_witness_anchor", {
       walletId,
       operationId,
+    }),
+  // The owner's rollback witness switch. It takes the passphrase because the
+  // Rust side re-verifies it against the vault: reaching the command from the
+  // wallet window is necessary but deliberately not sufficient.
+  setRollbackWitnessRequirement: (
+    walletId: string,
+    required: boolean,
+    currentPassphrase: string,
+  ) =>
+    invoke<void>("agent_wallet_set_rollback_witness_requirement", {
+      walletId,
+      required,
+      currentPassphrase,
     }),
   witnessRotationStatus: (walletId: string) =>
     invoke<WitnessRotationRecord | null>("agent_wallet_witness_rotation_status", {

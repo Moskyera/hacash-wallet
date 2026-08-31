@@ -211,6 +211,10 @@ pub(crate) enum AgentJournalEventKind {
     ChannelCloseVoucherSigned,
     ChannelCloseVoucherHeld,
     ChannelCloseVoucherBroadcast,
+    /// The owner turned the rollback witness requirement on or off for this
+    /// wallet. It moves no money and changes no permission; it decides whether
+    /// later payments will wait for a phone receipt.
+    RollbackWitnessRequirementChanged,
 }
 
 impl AgentJournalEventKind {
@@ -300,6 +304,7 @@ impl AgentJournalEventKind {
             Self::ChannelCloseVoucherHeld => 91,
             Self::ChannelCloseVoucherBroadcast => 92,
             Self::ChannelSetupDiscarded => 93,
+            Self::RollbackWitnessRequirementChanged => 94,
         }
     }
 }

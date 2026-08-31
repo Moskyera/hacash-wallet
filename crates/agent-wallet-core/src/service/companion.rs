@@ -50,6 +50,11 @@ pub use session::AgentDesktopSessionAttempt;
 pub use snapshot::WITNESS_PENDING_OPERATION_STATUS_NAMES;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 pub use witness::StrandedWitnessRecovery;
+// Re-exported so the owner's witness setting refuses to turn ON where no anchor
+// could ever be minted, using the one statement of that rule rather than a
+// second copy of it.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub(super) use witness::witness_anchor_available_on_network;
 
 /// Optional state extension. Keeping the whole extension absent preserves the
 /// exact serialized bytes and journal commitment of legacy Agent Wallets.

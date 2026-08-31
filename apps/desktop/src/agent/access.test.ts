@@ -67,6 +67,10 @@ const overview = (overrides: Partial<AgentWalletOverview> = {}): AgentWalletOver
   authorized_agents: 0,
   pending_approvals: 0,
   pilot_enabled: true,
+  // The existing blocker cases were all written for a wallet that uses the
+  // witness, so the shared fixture keeps saying so and every one of them still
+  // asserts exactly what it asserted before the setting existed.
+  rollback_witness_required: true,
   mobile_witness_ready: true,
   mobile_witness_synchronized: true,
   latest_anchor_sequence: 1,
@@ -242,6 +246,45 @@ describe("the payment gate keeps every prerequisite it has today", () => {
 
   it("reports nothing when every payment prerequisite is satisfied", () => {
     expect(agentWalletPaymentBlockers(runtime(), overview())).toEqual([]);
+  });
+
+  // A WALLET THAT NEVER ASKED FOR A PHONE IS NOT MISSING ONE.
+  //
+  // These two blockers are the mirror of the Rust witness gate, and that gate
+  // is now the owner's setting rather than the build. With the setting off,
+  // pushing them would render the payment path as permanently blocked, with a
+  // phone to pair that the wallet does not use and a Rust side that would have
+  // approved the payment anyway. The mirror has to reflect what is actually
+  // enforced or it is a false report.
+  //
+  // Fails without the change: both blockers are pushed unconditionally, so the
+  // list is ["mobile_not_paired", "witness_not_initialized"].
+  it("asks for no phone at all when the owner did not ask for the witness", () => {
+    expect(
+      agentWalletPaymentBlockers(
+        runtime(),
+        overview({
+          rollback_witness_required: false,
+          mobile_witness_ready: false,
+          mobile_witness_synchronized: false,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  // And the other direction, so turning the setting off cannot be mistaken for
+  // deleting the requirement: an owner who opted in still gets both.
+  it("still demands the phone from an owner who asked for the witness", () => {
+    expect(
+      agentWalletPaymentBlockers(
+        runtime(),
+        overview({
+          rollback_witness_required: true,
+          mobile_witness_ready: false,
+          mobile_witness_synchronized: false,
+        }),
+      ),
+    ).toEqual(["mobile_not_paired", "witness_not_initialized"]);
   });
 });
 

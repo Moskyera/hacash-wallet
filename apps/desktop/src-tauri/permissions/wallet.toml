@@ -39,6 +39,7 @@ commands.allow = [
   "agent_wallet_abandon_stranded_witness",
   "agent_wallet_release_dead_witness_anchor",
   "agent_wallet_enable_payments",
+  "agent_wallet_set_rollback_witness_requirement",
   "agent_wallet_emergency_stop",
   "agent_wallet_list_agents",
   "agent_wallet_get_policy",

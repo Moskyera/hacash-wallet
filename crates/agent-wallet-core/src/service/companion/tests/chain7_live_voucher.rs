@@ -293,6 +293,23 @@ async fn start_hub_at(
     tag: &str,
     listen: &str,
 ) -> LiveHub {
+    let upstream = node_url();
+    start_hub_at_node(work, account, tag, listen, &upstream).await
+}
+
+/// The same Hub, reading the chain through a node URL the caller names.
+///
+/// Every Hub above talks straight to the pilot fullnode. The stale-reservation
+/// run below needs one whose submit route can be taken away without taking the
+/// chain away, so the Hub's own node client is the thing that has to be
+/// pointed somewhere else. The wallet keeps the real node throughout.
+async fn start_hub_at_node(
+    work: &std::path::Path,
+    account: &WalletAccount,
+    tag: &str,
+    listen: &str,
+    hub_node_url: &str,
+) -> LiveHub {
     let listener = tokio::net::TcpListener::bind(listen).await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let address = account.address();
@@ -300,7 +317,7 @@ async fn start_hub_at(
         HubState::new_secure_with_policy(
             "HPAY chain-7 live voucher Hub",
             address.clone(),
-            node_url(),
+            hub_node_url.to_owned(),
             None,
             work.join(format!("hub-{tag}.sealed.json")),
             account.secret_hex().to_string(),
@@ -1856,4 +1873,1795 @@ async fn the_amounts_the_panel_names_are_the_amounts_the_core_refuses() {
         )
         .expect("the control review is unsigned and discardable");
     hub.task.abort();
+}
+
+// =====================================================================
+// THE STALE RESERVATION THAT COULD BRICK A WALLET, AND THE SWEEP THAT
+// RETIRES IT.
+// =====================================================================
+
+/// A reverse proxy in front of the pilot fullnode whose submit routes can be
+/// taken away without taking the chain away.
+///
+/// This is what a broadcast that never lands looks like from the Hub: the node
+/// answers every query normally, accepts the bytes, and the chain never
+/// includes them. Nothing here fakes a chain fact. Capabilities, balances,
+/// channel and transaction queries all pass straight through to the real node
+/// and come back untouched, so every height, balance and absence the Hub reads
+/// during this run is the real chain's answer. The only thing withheld is the
+/// forwarding of the submit itself.
+struct SubmitBlackhole {
+    url: String,
+    swallow: Arc<std::sync::atomic::AtomicBool>,
+    swallowed: Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SubmitBlackhole {
+    fn swallow_submits(&self) {
+        self.swallow
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn forward_submits(&self) {
+        self.swallow
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn swallowed_count(&self) -> usize {
+        self.swallowed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone)]
+struct BlackholeProxy {
+    upstream: String,
+    swallow: Arc<std::sync::atomic::AtomicBool>,
+    swallowed: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn blackhole_or_forward(
+    axum::extract::State(proxy): axum::extract::State<BlackholeProxy>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    if proxy.swallow.load(std::sync::atomic::Ordering::SeqCst)
+        && uri.path().starts_with("/submit/transaction")
+    {
+        proxy
+            .swallowed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // The node's own acknowledgement for an accepted submission, including
+        // the transaction hash the bound submit route echoes. It is computed
+        // from the bytes that were actually posted, by the same consensus
+        // decoder the node uses, so the Hub is answered exactly as a node that
+        // took the transaction into its mempool would answer, and it records
+        // `Submitted`. Nothing else about it is true: the bytes go no further
+        // than this process, and no chain will ever include them.
+        let hash = hex::decode(
+            std::str::from_utf8(&body)
+                .unwrap_or_default()
+                .trim()
+                .trim_start_matches("0x"),
+        )
+        .ok()
+        .and_then(|raw| {
+            protocol::transaction::transaction_create(&raw)
+                .ok()
+                .map(|(transaction, _)| {
+                    hex::encode(basis::interface::TransactionRead::hash(&*transaction).as_bytes())
+                })
+        })
+        .unwrap_or_default();
+        return (
+            axum::http::StatusCode::OK,
+            format!("{{\"ret\":0,\"hash\":\"{hash}\"}}"),
+        )
+            .into_response();
+    }
+    let target = format!("{}{}", proxy.upstream, path_and_query);
+    let sent = reqwest::Client::new()
+        .request(method, target)
+        .header("content-type", "text/plain")
+        .body(body.to_vec())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await;
+    match sent {
+        Ok(response) => {
+            let status = axum::http::StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+            let bytes = response.bytes().await.unwrap_or_default();
+            (status, bytes.to_vec()).into_response()
+        }
+        Err(error) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            format!("{{\"error\":\"upstream: {error}\"}}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn start_submit_blackhole(upstream: &str, listen: &str) -> SubmitBlackhole {
+    let listener = tokio::net::TcpListener::bind(listen).await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let swallow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let swallowed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let router = axum::Router::new()
+        .fallback(axum::routing::any(blackhole_or_forward))
+        .with_state(BlackholeProxy {
+            upstream: upstream.to_owned(),
+            swallow: swallow.clone(),
+            swallowed: swallowed.clone(),
+        });
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    println!("[prox] node blackhole {url} in front of {upstream}");
+    SubmitBlackhole {
+        url,
+        swallow,
+        swallowed,
+        task,
+    }
+}
+
+/// Prove the blackhole really is a working node view apart from the submit,
+/// rather than assuming it.
+async fn assert_blackhole_reads_the_real_chain(url: &str, label: &str) {
+    let through: serde_json::Value = reqwest::get(format!("{url}/query/capabilities"))
+        .await
+        .expect("the proxied node answers")
+        .json()
+        .await
+        .expect("capability document");
+    let direct = chain_height().await;
+    let proxied = through["chain"]["height"].as_u64().expect("proxied height");
+    assert_eq!(through["chain"]["id"].as_u64(), Some(7));
+    assert_eq!(through["chain"]["mainnet"].as_bool(), Some(false));
+    assert!(
+        proxied.abs_diff(direct) <= 2,
+        "[{label}] the proxied node is not reading the same chain: {proxied} vs {direct}"
+    );
+    println!("[neg ] {label}: the proxy reads the real chain at height {proxied}");
+}
+
+/// A copy of this wallet that has forgotten its channel setup.
+///
+/// Nothing production does this. It exists because a stale reservation lives in
+/// the HUB, and the only way to present the Hub with a second, genuinely new
+/// open request for the SAME owner address is a wallet that will build one. An
+/// owner who restored from a backup taken before the stuck open, or who wiped a
+/// half-written store, arrives at the Hub in exactly this state.
+async fn a_copy_that_forgot_its_setup(
+    manager: &mut AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    work: &std::path::Path,
+    tag: &str,
+) -> AgentWalletManager {
+    // A copy taken after a long wait would otherwise be refused by the idle
+    // auto-lock, which an owner sitting through the same wait would clear the
+    // same way.
+    let _ = manager.unlock(wallet_id, AWAY_PASSPHRASE, unix_now());
+    let backup = manager
+        .create_agent_wallet_backup(
+            wallet_id,
+            AWAY_PASSPHRASE,
+            crate::service::AgentWalletBackupAcknowledgement::complete(),
+            unix_now(),
+        )
+        .unwrap();
+    let root = work.join(tag);
+    // Each copy is a store this run has never used. A re-run that inherited
+    // one would be restoring over a wallet that already exists.
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut copy = AgentWalletManager::open(&root).unwrap();
+    copy.restore_agent_wallet_backup(
+        &backup,
+        AWAY_PASSPHRASE,
+        crate::service::AgentWalletBackupAcknowledgement::complete(),
+        unix_now(),
+    )
+    .unwrap();
+    copy.unlock(wallet_id, AWAY_PASSPHRASE, unix_now()).unwrap();
+    let (state_master, journal_key) = fixtures::keys(&copy, wallet_id);
+    let mut state = copy
+        .load_verified_state(wallet_id, &state_master, &journal_key)
+        .unwrap();
+    state.l2_channel_setup = None;
+    state.updated_at = unix_now();
+    copy.persist_event(
+        &mut state,
+        &state_master,
+        &journal_key,
+        AgentJournalEventKind::RecoveryRequired,
+        None,
+        None,
+        unix_now(),
+    )
+    .unwrap();
+    copy
+}
+
+/// Ask this Hub to open a channel for this owner, all the way through the
+/// shipped prepare / confirm path, and report what came back.
+async fn open_attempt(
+    copy: &mut AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    hub_url: &str,
+    deposit_hac: &str,
+) -> Result<crate::service::l2::AgentChannelSetupReview, String> {
+    let _ = copy.unlock(wallet_id, AWAY_PASSPHRASE, unix_now());
+    let review = copy
+        .prepare_l2_channel_setup(wallet_id, hub_url, deposit_hac, unix_now())
+        .await
+        .map_err(|error| format!("prepare refused: {error:?}"))?;
+    let _ = copy.unlock(wallet_id, AWAY_PASSPHRASE, unix_now());
+    match copy
+        .confirm_l2_channel_setup(
+            wallet_id,
+            &review.operation_id,
+            &review.review_commitment,
+            unix_now(),
+        )
+        .await
+    {
+        Ok(done) => {
+            println!(
+                "[chan] confirm on {} returned phase {:?}",
+                review.operation_id, done.phase
+            );
+            Ok(review)
+        }
+        Err(error) => {
+            let stored = stored_setup(copy, wallet_id);
+            let detail = stored
+                .as_ref()
+                .map(|setup| {
+                    format!(
+                        "phase {:?} signed {} tx {:?} hub said {:?}",
+                        setup.review.phase,
+                        setup.signed_request.is_some(),
+                        setup.transaction_hash,
+                        setup.review.last_hub_refusal
+                    )
+                })
+                .unwrap_or_else(|| "no setup stored".to_owned());
+            Err(format!("confirm refused: {error:?}; stored: {detail}"))
+        }
+    }
+}
+
+/// Present the exact open request a wallet copy just built to the Hub over real
+/// HTTP, so the Hub's own sentence is on the record rather than the wallet's
+/// collapsed error.
+async fn hub_channel_open_refusal(
+    copy: &AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    hub_url: &str,
+) -> String {
+    let (state_master, journal_key) = fixtures::keys(copy, wallet_id);
+    let stored = copy
+        .load_verified_state(wallet_id, &state_master, &journal_key)
+        .unwrap()
+        .l2_channel_setup
+        .as_ref()
+        .and_then(|operation| operation.signed_request.clone());
+    match stored {
+        Some(request) => match reqwest::Client::new()
+            .post(format!("{hub_url}/v1/l1/channel/open"))
+            .json(&request)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                format!("HTTP {status} {body}")
+            }
+            Err(error) => format!("transport error {error}"),
+        },
+        None => "the copy kept no signed open request to present".to_owned(),
+    }
+}
+
+/// THE DEFECT THAT COST A NIGHT, PROVED AND THEN UNPROVED ON A REAL CHAIN.
+///
+/// A channel-open reserves Hub admission for its owner address from the moment
+/// it is created until it confirms, and `MAX_ACTIVE_OPENS_PER_ADDRESS` is one.
+/// A broadcast that never reached a block therefore held that single slot for
+/// the life of the Hub's durable state: the owner's wallet could never open a
+/// channel again, and the Hub reported itself perfectly healthy the whole time.
+///
+/// `retire_unmined_channel_opens` is the fix. Three claims, in one run because
+/// they are one story:
+///
+/// 1. an open whose bytes the chain never took keeps reserving admission, and
+///    the chain itself says the channel does not exist;
+/// 2. while that reservation stands, the next open for the same owner is
+///    REFUSED by the Hub, over real HTTP, in the Hub's own words;
+/// 3. once the chain has produced 288 blocks without it, the sweep that runs on
+///    the next open retires the stale record and the same owner opens a real
+///    channel on the real chain.
+///
+/// The wait in claim 3 is 288 real mined blocks. Nothing here shortens it and
+/// nothing here tells the Hub a height it did not read from the node itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only, and waits out 288 real mined blocks"]
+async fn a_stale_reservation_blocks_the_next_open_until_the_sweep_retires_it() {
+    let work = workdir().join("stale");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+    let sweep_budget = Duration::from_secs(
+        optional_env("HPAY_LIVE_SWEEP_WAIT_SECS", "10800")
+            .parse()
+            .unwrap(),
+    );
+    // The Hub's own retirement rule, read from the Hub crate rather than
+    // written down again here.
+    let retirement_blocks: u64 = optional_env("HPAY_LIVE_RETIREMENT_BLOCKS", "288")
+        .parse()
+        .unwrap();
+
+    require_chain_seven("stale").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "owner", &anchor, 2.5, wait_budget).await;
+
+    let hub_account = persistent_hub_account(&work, "stale");
+    let listen = optional_env("HPAY_LIVE_HUB_STALE_LISTEN", "127.0.0.1:8897");
+    let blackhole_listen = optional_env("HPAY_LIVE_NODE_BLACKHOLE_LISTEN", "127.0.0.1:8898");
+    let blackhole = start_submit_blackhole(&node_url(), &blackhole_listen).await;
+    assert_blackhole_reads_the_real_chain(&blackhole.url, "before the stuck open").await;
+    let hub = start_hub_at_node(&work, &hub_account, "stale", &listen, &blackhole.url).await;
+
+    // ---- 1. AN OPEN WHOSE BYTES THE CHAIN NEVER TAKES ----
+    blackhole.swallow_submits();
+    let mut stuck_wallet =
+        a_copy_that_forgot_its_setup(&mut manager, &wallet_id, &work, "stuck").await;
+    let height_at_confirm = chain_height().await;
+    let stuck = match open_attempt(&mut stuck_wallet, &wallet_id, &hub.url, "1").await {
+        Ok(review) => {
+            // The Hub took the bytes and is now waiting for a block that will
+            // never come. That is the state the defect lives in.
+            println!("[neg ] the Hub accepted the open and believes it broadcast");
+            review
+        }
+        // What matters for this run is that the HUB is holding a reservation
+        // for this owner that the chain will never confirm. The wallet side
+        // reaching `RecoveryRequired` is the honest wallet-side answer to a
+        // broadcast it cannot see, and it is what an owner in this state has.
+        // Report it and carry on with the setup the wallet did store.
+        Err(refusal) => {
+            println!("[neg ] the wallet's own answer to the stuck open: {refusal}");
+            stored_setup(&stuck_wallet, &wallet_id)
+                .expect("the wallet stored the setup it signed")
+                .review
+        }
+    };
+    println!(
+        "[neg ] stuck open {} on channel {} at height {height_at_confirm}",
+        stuck.operation_id, stuck.channel_id
+    );
+    assert!(
+        blackhole.swallowed_count() >= 1,
+        "the submit never reached the blackhole, so nothing is stuck"
+    );
+    println!(
+        "[neg ] {} submission(s) swallowed; the bytes went no further than this process",
+        blackhole.swallowed_count()
+    );
+
+    // The chain's own answer, queried directly and not through the proxy.
+    let absent = channel_document(&stuck.channel_id).await;
+    println!("[chan] the real chain on that channel ID: {absent}");
+    assert_ne!(
+        absent["ret"].as_i64(),
+        Some(0),
+        "the stuck channel must not exist on chain"
+    );
+
+    // ---- 2. THE NEXT OPEN FOR THE SAME OWNER IS REFUSED ----
+    let mut blocked_wallet =
+        a_copy_that_forgot_its_setup(&mut manager, &wallet_id, &work, "blocked").await;
+    let refusal = open_attempt(&mut blocked_wallet, &wallet_id, &hub.url, "1")
+        .await
+        .expect_err("a stale reservation must block the next open");
+    println!("[neg ] the next open while the reservation stands: {refusal}");
+    // The Hub's own words, presented over real HTTP rather than through the
+    // wallet's collapsed error.
+    let hub_said = hub_channel_open_refusal(&blocked_wallet, &wallet_id, &hub.url).await;
+    println!("[neg ] the Hub's own words: {hub_said}");
+    // WHAT THE OWNER IS ACTUALLY TOLD. `require_new_open_admission` refuses
+    // with "this wallet already has an active channel-open operation", and the
+    // HTTP layer flattens every `HubError::Admission` to one 429 sentence, so
+    // the reason never leaves the Hub process. What a wallet can see is the
+    // 429 and the generic line; that is asserted here because it is what is
+    // true, not because it is enough.
+    assert!(
+        hub_said.contains("429") && hub_said.contains("admission limit reached"),
+        "the refusal must be the Hub's admission gate, not something else: {hub_said}"
+    );
+
+    // ---- 3. 288 BLOCKS LATER, THE SWEEP RETIRES IT AND THE OPEN GOES ----
+    let sweep_height = height_at_confirm + retirement_blocks + 2;
+    println!("[neg ] waiting for the chain to reach height {sweep_height}");
+    let deadline = Instant::now() + sweep_budget;
+    loop {
+        let now = chain_height().await;
+        if now >= sweep_height {
+            println!("[neg ] the chain reached {now}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the chain never reached {sweep_height}; it is at {now}"
+        );
+        tokio::time::sleep(Duration::from_secs(20)).await;
+    }
+    // Nothing about the stuck transaction changed while we waited: still no
+    // channel on the chain.
+    let still_absent = channel_document(&stuck.channel_id).await;
+    assert_ne!(still_absent["ret"].as_i64(), Some(0));
+    println!("[chan] still absent after the wait: {still_absent}");
+
+    blackhole.forward_submits();
+    assert_blackhole_reads_the_real_chain(&blackhole.url, "before the retry").await;
+    // The Hub counts from the height IT captured when it put the bytes on the
+    // wire, which is at or just past the height read above. If the sweep has
+    // not armed yet the refusal is the same admission sentence, so give the
+    // chain a few more blocks and ask again rather than reading a near miss as
+    // a broken fix.
+    let mut freed_wallet = None;
+    let mut opened = None;
+    let mut last_refusal = String::new();
+    for attempt in 1..=4usize {
+        let mut copy = a_copy_that_forgot_its_setup(
+            &mut manager,
+            &wallet_id,
+            &work,
+            &format!("freed-{attempt}"),
+        )
+        .await;
+        match open_attempt(&mut copy, &wallet_id, &hub.url, "1").await {
+            Ok(review) => {
+                opened = Some(review);
+                freed_wallet = Some(copy);
+                break;
+            }
+            Err(refusal) => {
+                println!(
+                    "[neg ] attempt {attempt} at height {}: {refusal}",
+                    chain_height().await
+                );
+                last_refusal = refusal;
+                tokio::time::sleep(Duration::from_secs(90)).await;
+            }
+        }
+    }
+    let opened = opened.unwrap_or_else(|| {
+        panic!("the sweep never released the slot the stuck open was holding: {last_refusal}")
+    });
+    let mut freed_wallet = freed_wallet.expect("the wallet that got through");
+    println!(
+        "[exit] the open after the sweep: operation {} channel {}",
+        opened.operation_id, opened.channel_id
+    );
+
+    let deadline = Instant::now() + wait_budget;
+    let on_chain = loop {
+        let document = channel_document(&opened.channel_id).await;
+        if document["ret"].as_i64() == Some(0) {
+            break document;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the freed open never reached the chain: {document}"
+        );
+        let _ = freed_wallet.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now());
+        let _ = freed_wallet
+            .recover_l2_channel_setup(&wallet_id, unix_now())
+            .await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    };
+    println!("[chan] the channel the sweep made room for: {on_chain}");
+    assert_eq!(
+        on_chain["left"]["address"].as_str(),
+        Some(owner_address.as_str())
+    );
+    assert_eq!(
+        on_chain["right"]["address"].as_str(),
+        Some(hub.address.as_str())
+    );
+    assert_eq!(
+        on_chain["status"].as_u64(),
+        Some(u64::from(
+            hacash_wallet_core::channel::CHANNEL_STATUS_OPENING
+        ))
+    );
+    blackhole.task.abort();
+    hub.task.abort();
+}
+
+// =====================================================================
+// THE PHONE WITNESS, ON A REAL CHAIN.
+// =====================================================================
+
+/// THE WITNESS LOOP THE OWNER HAS NEVER RUN, RUN AGAINST REAL BLOCKS.
+///
+/// `desktop_witness_flow.rs` executes this whole sequence, but against the mock
+/// Local Pilot node in `pilot_node.rs`: the balance is a constant, the unsigned
+/// body is built by a test router, and `submit_count` is an integer rather than
+/// a block. Everything about the wallet and the phone is real there and nothing
+/// about the chain is.
+///
+/// This is the same sequence with the real pilot fullnode underneath it. The
+/// balance that lets the intent past its affordability check is the owner's real
+/// chain-7 balance, the unsigned Type 2 body is built by the real node, the
+/// signature is the wallet's own, and the submission is a transaction that a
+/// miner puts in a block. Five claims:
+///
+/// 1. an agent proposal stops at the owner and carries no transaction;
+/// 2. the desktop's yes SIGNS and does not send - the chain has never heard of
+///    the transaction while the payment waits for the phone;
+/// 3. a payment waiting on a phone that is not there is reported as waiting,
+///    with the truth that nothing has been sent;
+/// 4. the phone's anchor and its signed receipt are what release it, and the
+///    transaction reaches the node exactly once;
+/// 5. it lands in a block and the recipient's balance on the chain moves by
+///    exactly the amount the agent asked for.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only"]
+async fn the_phone_witnesses_a_payment_that_really_lands_in_a_block() {
+    use crate::operation::OperationStatus;
+
+    let work = workdir().join("witness");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("witness").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "witness-owner", &anchor, 0.5, wait_budget).await;
+
+    // The phone. Registered with the permissions the pilot gives a companion,
+    // which include `WitnessRollbackAnchor`; without that permission the
+    // approval below is refused unsigned, which is its own test.
+    let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let _record = fixtures::register_mobile(&mut manager, &wallet_id, &mobile, unix_now());
+    let authorization = super::desktop_witness_flow::pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        unix_now(),
+    );
+    println!(
+        "[wit ] owner {owner_address} phone {:?}",
+        mobile.device_id()
+    );
+
+    let recipient = fixtures::RECIPIENT;
+    let recipient_before = balance_zhu(recipient).await;
+    let owner_before = balance_zhu(&owner_address).await;
+    println!("[coin] recipient {recipient} starts at {recipient_before} Zhu, owner {owner_before}");
+
+    // ---- 1. THE AGENT PROPOSES AND STOPS ----
+    let created = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-witness-0001",
+                unix_now() + 900,
+            ),
+            unix_now(),
+        )
+        .await
+        .expect("the agent's proposal is accepted");
+    let operation_id = created.operation_id.clone();
+    assert_eq!(
+        created.status,
+        OperationStatus::ApprovalRequested,
+        "an agent proposal must stop at the owner"
+    );
+    assert_eq!(created.tx_hash, None, "a proposal carries no transaction");
+    println!("[wit ] intent {operation_id} awaiting the owner");
+
+    // ---- 2. THE DESKTOP SIGNS, AND DOES NOT SEND ----
+    let _ = manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now());
+    let approval = manager
+        .pending_approval(&wallet_id, &operation_id, unix_now())
+        .expect("the exact-transaction review");
+    let approved = manager
+        .approve_desktop_and_broadcast(&wallet_id, approval, unix_now())
+        .await
+        .expect("the owner's yes");
+    assert_eq!(
+        approved.status,
+        OperationStatus::SignedAwaitingWitness,
+        "a desktop approval in the pilot signs and then stops for the phone"
+    );
+    let tx_hash = approved
+        .tx_hash
+        .clone()
+        .expect("the signer produced a real transaction hash");
+    println!("[wit ] signed {tx_hash}, waiting for the phone");
+
+    // Asked of the chain, not of the wallet.
+    let url = node_url();
+    let unseen: serde_json::Value = reqwest::get(format!("{url}/query/transaction?hash={tx_hash}"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(
+        unseen["ret"].as_i64(),
+        Some(0),
+        "signing is not broadcasting: the chain must not hold this transaction yet, got {unseen}"
+    );
+    assert_eq!(
+        balance_zhu(recipient).await,
+        recipient_before,
+        "nothing may reach the recipient before the phone witnesses it"
+    );
+    println!("[wit ] the chain has never heard of {tx_hash}: {unseen}");
+
+    // ---- 3. THE PHONE IS NOT THERE, AND THE DESKTOP SAYS SO ----
+    let waiting = manager
+        .stranded_witness_recovery(&wallet_id, unix_now())
+        .unwrap()
+        .expect("a payment waiting on a phone is reported");
+    assert_eq!(waiting.status, OperationStatus::SignedAwaitingWitness);
+    assert!(!waiting.submitted, "nothing was sent, and it says so");
+    assert!(!waiting.anchor_issued, "no anchor has been handed out yet");
+    assert!(waiting.retryable, "asking the phone again must be offered");
+    assert!(
+        waiting.abandonable,
+        "a phone lost before it was ever asked strands the payment just as hard"
+    );
+    println!(
+        "[wit ] stranded view: status {:?} submitted {} anchor_issued {} retryable {} abandonable {}",
+        waiting.status,
+        waiting.submitted,
+        waiting.anchor_issued,
+        waiting.retryable,
+        waiting.abandonable
+    );
+
+    // ---- 4. THE PHONE TAKES THE ANCHOR AND SIGNS THE RECEIPT ----
+    let proposal = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), unix_now())
+        .await
+        .expect("the phone is handed a rollback anchor");
+    println!(
+        "[wit ] anchor {} expires {}",
+        proposal.anchor.anchor_id, proposal.anchor.expires_at
+    );
+    let receipt = super::pilot_node::signed_receipt(&proposal, &mobile, unix_now()).await;
+    let submitted = manager
+        .apply_mobile_witness_and_broadcast(&wallet_id, receipt, unix_now())
+        .await
+        .expect("the receipt releases the payment");
+    assert_eq!(
+        submitted.status,
+        OperationStatus::SubmittedAwaitingFinalWitness,
+        "the receipt is what puts the bytes on the wire"
+    );
+    println!("[wit ] submitted after the receipt: {:?}", submitted.status);
+
+    let after_submit = manager
+        .stranded_witness_recovery(&wallet_id, unix_now())
+        .unwrap()
+        .expect("a submitted payment is still reported");
+    assert!(
+        after_submit.submitted,
+        "the money moved and the desktop must say so"
+    );
+    assert!(
+        !after_submit.abandonable,
+        "giving it up would assert a payment that happened did not"
+    );
+
+    // ---- 5. IT LANDS IN A BLOCK ----
+    let deadline = Instant::now() + wait_budget;
+    let mined = loop {
+        let found: serde_json::Value =
+            reqwest::get(format!("{url}/query/transaction?hash={tx_hash}"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        if found["ret"].as_i64() == Some(0) && found["block"]["height"].as_u64().is_some() {
+            break found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the witnessed payment never made it into a block: {found}"
+        );
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    };
+    println!("[wit ] mined: {mined}");
+
+    let recipient_after = balance_zhu(recipient).await;
+    let owner_after = balance_zhu(&owner_address).await;
+    let amount_zhu = u128::from(super::desktop_witness_flow::AMOUNT_UNITS) * 100;
+    println!(
+        "[coin] recipient {recipient_before} -> {recipient_after} Zhu, owner {owner_before} -> {owner_after} Zhu"
+    );
+    assert_eq!(
+        recipient_after,
+        recipient_before + amount_zhu,
+        "the recipient must be paid exactly what the agent asked for"
+    );
+    assert!(
+        owner_after < owner_before,
+        "the owner paid the amount and the network fee"
+    );
+}
+
+// =====================================================================
+// THE PHONE, PAIRED FOR REAL, ON A REAL CHAIN.
+//
+// Everything above that involves a phone registers it with
+// `register_verified_companion_device`, which is the last line of the pairing
+// handshake and not the handshake. The tests below run the whole five step
+// exchange - offer, signed request, confirmation, encrypted acknowledgement,
+// locally displayed code - the way an Android handset would, and then drive the
+// witness lifecycle to its end and break it four different ways.
+// =====================================================================
+
+/// The five step pairing handshake, run in full, against a live wallet.
+///
+/// `MobilePairingAttempt` is the mobile half of the protocol and it is the same
+/// type the companion app links. What is simulated here is the handset and the
+/// transport between them, nothing else: the desktop side is every shipped
+/// method in order, the mobile side signs with a real device key, and the
+/// permissions the paired record carries are the ones
+/// `default_mobile_permissions` grants rather than a set this test chose.
+async fn pair_a_real_phone(
+    manager: &mut AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    mobile: &SoftwareDeviceIdentity,
+    label: &str,
+) -> hpay_companion_protocol::DevicePublicRecord {
+    use hpay_companion_protocol::{LanEndpoint, MobilePairingAttempt};
+
+    // The handshake is driven a little behind the clock on purpose. The record
+    // it writes carries `paired_at = now + 4`, and `DeviceRegistry::revoke`
+    // refuses any `revoked_at` earlier than that, so a phone paired at the
+    // current second cannot be revoked for four seconds afterwards. Backdating
+    // the exchange keeps the whole handshake real and puts `paired_at` behind
+    // the wall clock, which is where a phone paired in a previous sitting would
+    // be anyway.
+    let now = unix_now().saturating_sub(30);
+    let mut attempt = manager
+        .start_companion_pairing(
+            wallet_id,
+            vec![LanEndpoint::parse("hpay-lan://192.168.1.7:7443").unwrap()],
+            now,
+            120,
+        )
+        .expect("the desktop offers a pairing");
+    let mobile_attempt = MobilePairingAttempt::start(attempt.offer().clone(), mobile, now + 1)
+        .await
+        .expect("the handset builds a signed pairing request");
+    let confirmation = manager
+        .accept_companion_pairing_request(
+            wallet_id,
+            &mut attempt,
+            mobile_attempt.request().clone(),
+            now + 2,
+        )
+        .await
+        .expect("the desktop accepts the signed request");
+    let code = confirmation.verification_code.clone();
+    let (ack, mobile_result) = mobile_attempt
+        .confirm(&confirmation, &code, mobile, now + 3)
+        .await
+        .expect("the handset confirms the code it was shown");
+    drop(mobile_result.into_mobile_cipher().unwrap());
+    manager
+        .accept_companion_pairing_ack(wallet_id, &mut attempt, &ack, now + 3)
+        .expect("the desktop accepts the encrypted acknowledgement");
+    let completed = manager
+        .complete_companion_pairing_code(wallet_id, &mut attempt, &code, now + 4)
+        .expect("the owner types the code the two screens agree on");
+    let record = completed.mobile_device_record().clone();
+    drop(completed);
+    println!(
+        "[pair] {label}: paired {} with {:?}",
+        record.device_id.as_str(),
+        record.permissions
+    );
+    assert!(
+        record
+            .permissions
+            .contains(&hpay_companion_protocol::DevicePermission::WitnessRollbackAnchor),
+        "a phone paired by the shipped handshake must be able to witness"
+    );
+    record
+}
+
+/// The exact view of one operation, read the way the desktop reads it.
+fn live_view(
+    manager: &mut AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    operation_id: &OperationId,
+) -> PaymentOperationView {
+    manager
+        .list_operations_admin(wallet_id, unix_now())
+        .unwrap()
+        .into_iter()
+        .find(|view| &view.operation_id == operation_id)
+        .expect("the operation is still on file")
+}
+
+/// Ask the chain, never the wallet, whether a transaction exists.
+async fn chain_knows_transaction(tx_hash: &str) -> serde_json::Value {
+    let url = node_url();
+    reqwest::get(format!("{url}/query/transaction?hash={tx_hash}"))
+        .await
+        .expect("transaction query")
+        .json()
+        .await
+        .expect("transaction document")
+}
+
+/// Block until the chain holds this transaction, and hand back what it says.
+async fn wait_for_transaction(tx_hash: &str, budget: Duration) -> serde_json::Value {
+    let deadline = Instant::now() + budget;
+    loop {
+        let found = chain_knows_transaction(tx_hash).await;
+        if found["ret"].as_i64() == Some(0) && found["block"]["height"].as_u64().is_some() {
+            return found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the transaction never reached a block: {found}"
+        );
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// Move a live wallet onto the mainnet network name, changing nothing else.
+///
+/// The node stays the chain-7 pilot node, because the node is not what the
+/// deleted gates read. They read `state.network_mode`, before the operation was
+/// looked up, and that string is the whole difference between an owner who can
+/// free a stranded payment and one who cannot. Anything that does reach the
+/// node from here refuses on the anchor, which is its own assertion below.
+fn move_live_wallet_to_mainnet(manager: &mut AgentWalletManager, wallet_id: &AgentWalletId) {
+    let (state_master, journal_key) = fixtures::keys(manager, wallet_id);
+    let mut state = manager
+        .load_verified_state(wallet_id, &state_master, &journal_key)
+        .unwrap();
+    state.network_mode = "mainnet".to_owned();
+    state.block_one_fingerprint =
+        crate::node_binding::anchor_for_new_wallet("mainnet", None).unwrap();
+    state.trusted_mainnet_fast_pay_pilot = true;
+    state.updated_at = unix_now();
+    manager
+        .persist_event(
+            &mut state,
+            &state_master,
+            &journal_key,
+            AgentJournalEventKind::PolicyChanged,
+            None,
+            None,
+            unix_now(),
+        )
+        .unwrap();
+    let reread = manager
+        .load_verified_state(wallet_id, &state_master, &journal_key)
+        .unwrap();
+    assert_eq!(reread.network_mode, "mainnet");
+    println!(
+        "[main] wallet moved to network_mode {} anchor {}",
+        reread.network_mode, reread.block_one_fingerprint
+    );
+}
+
+/// THE WHOLE WITNESS LIFECYCLE, ON REAL BLOCKS, TO `Committed`.
+///
+/// The live run that exists already stops at `SubmittedAwaitingFinalWitness`:
+/// the transaction is in a block and the payment is not finished. Three phones
+/// signatures are required to finish it, not one, and the last two have never
+/// been executed against a chain.
+///
+/// Seven claims:
+///
+/// 1. a phone paired by the real handshake carries `WitnessRollbackAnchor`;
+/// 2. a wallet with a freshly paired phone still reports `mobile_witness_ready`
+///    FALSE, because the witness record does not exist until the first anchor
+///    is asked for - the finding this run exists to nail down;
+/// 3. the owner's yes signs and does not send;
+/// 4. the first receipt is what broadcasts, and the bytes reach a block;
+/// 5. the post-submit anchor moves the payment to `ReconciliationRequired`;
+/// 6. `confirm_broadcast` is fed the hash the CHAIN confirmed, not the wallet's;
+/// 7. the final receipt commits it, the reservation is returned, and the
+///    recipient's on-chain balance moved by exactly what the agent asked for.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only"]
+async fn a_really_paired_phone_carries_a_payment_from_intent_to_committed() {
+    use crate::operation::OperationStatus;
+    use hpay_companion_protocol::RollbackOperationPhase;
+
+    let work = workdir().join("wit-full");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("wit-full").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "full-owner", &anchor, 0.5, wait_budget).await;
+
+    // ---- 1. THE PHONE IS PAIRED BY THE REAL HANDSHAKE ----
+    let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let record = pair_a_real_phone(&mut manager, &wallet_id, &mobile, "full").await;
+    assert_eq!(record.device_id, *mobile.device_id());
+    assert_eq!(
+        manager
+            .list_companion_devices(&wallet_id, unix_now())
+            .unwrap()
+            .len(),
+        1,
+        "exactly one phone is on file"
+    );
+
+    // ---- 2. AND THE WALLET STILL SAYS NO PHONE IS PAIRED ----
+    let overview = manager.overview(&wallet_id, unix_now()).await.unwrap();
+    println!(
+        "[zero] right after pairing: mobile_witness_ready {} mobile_witness_synchronized {} latest_anchor_sequence {}",
+        overview.mobile_witness_ready,
+        overview.mobile_witness_synchronized,
+        overview.latest_anchor_sequence
+    );
+    assert!(
+        !overview.mobile_witness_ready,
+        "this is the from-zero finding: a real paired phone does not make mobile_witness_ready true"
+    );
+    assert!(!overview.mobile_witness_synchronized);
+
+    let recipient = fixtures::RECIPIENT;
+    let recipient_before = balance_zhu(recipient).await;
+    let owner_before = balance_zhu(&owner_address).await;
+    println!("[coin] recipient {recipient_before} Zhu, owner {owner_before} Zhu");
+
+    // ---- 3. THE AGENT PROPOSES, THE OWNER SIGNS, NOTHING IS SENT ----
+    let authorization = super::desktop_witness_flow::pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        unix_now(),
+    );
+    let created = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-full-witness-0001",
+                unix_now() + 1_200,
+            ),
+            unix_now(),
+        )
+        .await
+        .expect("the agent's proposal is accepted");
+    let operation_id = created.operation_id.clone();
+    assert_eq!(created.status, OperationStatus::ApprovalRequested);
+
+    let approval = manager
+        .pending_approval(&wallet_id, &operation_id, unix_now())
+        .expect("the exact-transaction review");
+    let approved = manager
+        .approve_desktop_and_broadcast(&wallet_id, approval, unix_now())
+        .await
+        .expect("the owner's yes");
+    assert_eq!(approved.status, OperationStatus::SignedAwaitingWitness);
+    let tx_hash = approved.tx_hash.clone().expect("a real transaction hash");
+    let unseen = chain_knows_transaction(&tx_hash).await;
+    assert_ne!(
+        unseen["ret"].as_i64(),
+        Some(0),
+        "signing is not broadcasting, got {unseen}"
+    );
+    println!("[full] signed {tx_hash}; the chain answers {unseen}");
+
+    // ---- 4. THE FIRST ANCHOR, THE FIRST RECEIPT, AND A BLOCK ----
+    let first = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), unix_now())
+        .await
+        .expect("the phone is handed a pre-broadcast anchor");
+    assert_eq!(
+        first.anchor.operation_phase,
+        RollbackOperationPhase::SignedPreBroadcast,
+        "the pre-broadcast phase is what the first anchor names"
+    );
+    // WHAT THE DESKTOP ACTUALLY WRITES INTO THE ANCHOR, quoted rather than
+    // assumed. `witness.rs` sets `network_id: node.network_kind()`, and for any
+    // wallet the pilot will sign for that string is the node's capability
+    // `network.kind` - `local_pilot_v1`, pinned by
+    // `supports_agent_local_pilot_payment`. It is never `testnet`.
+    //
+    // The Android companion that receives this anchor refuses it unless the
+    // string is exactly `testnet`:
+    // `apps/mobile/src-tauri/src/agent_companion/pilot.rs`, `sign_pilot_witness`,
+    // `|| anchor.network_id != "testnet"` -> "Rollback anchor does not match
+    // this paired testnet wallet". The same literal guards the rotation
+    // completion anchor and the stored approval binding. Recorded here because
+    // a software mobile signs the anchor object directly and never runs that
+    // check, so no test on either side can see the disagreement.
+    println!(
+        "[full] the anchor carries network_id {:?}; the Android companion admits only \"testnet\"",
+        first.anchor.network_id
+    );
+    assert_eq!(
+        first.anchor.network_id, "local_pilot_v1",
+        "recorded as found: the desktop mints local_pilot_v1, the phone demands testnet"
+    );
+    let binding_network_id = approval_binding_network_id(&mut manager, &wallet_id, &operation_id);
+    println!("[full] the approval binding carries network_id {binding_network_id:?}");
+    assert_eq!(binding_network_id.as_deref(), Some("local_pilot_v1"));
+    let after_init = manager.overview(&wallet_id, unix_now()).await.unwrap();
+    assert!(
+        after_init.mobile_witness_ready,
+        "asking for the first anchor is what initialises the witness"
+    );
+    let receipt = super::pilot_node::signed_receipt(&first, &mobile, unix_now()).await;
+    let submitted = manager
+        .apply_mobile_witness_and_broadcast(&wallet_id, receipt, unix_now())
+        .await
+        .expect("the receipt releases the payment");
+    assert_eq!(
+        submitted.status,
+        OperationStatus::SubmittedAwaitingFinalWitness
+    );
+    let mined = wait_for_transaction(&tx_hash, wait_budget).await;
+    println!("[full] mined: {mined}");
+    let mined_hash = mined["hash"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| tx_hash.clone());
+
+    // ---- 5. THE POST-SUBMIT ANCHOR ----
+    let second = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), unix_now())
+        .await
+        .expect("the phone is handed the post-submit anchor");
+    assert_eq!(
+        second.anchor.operation_phase,
+        RollbackOperationPhase::Submitted,
+        "the second anchor is a different phase, not a repeat of the first"
+    );
+    let receipt = super::pilot_node::signed_receipt(&second, &mobile, unix_now()).await;
+    let reconciling = manager
+        .apply_mobile_witness_and_broadcast(&wallet_id, receipt, unix_now())
+        .await
+        .expect("the post-submit receipt is accepted");
+    assert_eq!(reconciling.status, OperationStatus::ReconciliationRequired);
+
+    // ---- 6. RECONCILED AGAINST THE HASH THE CHAIN CONFIRMED ----
+    assert_eq!(
+        mined_hash, tx_hash,
+        "the chain confirmed the exact transaction this wallet signed"
+    );
+    let reconciled = manager
+        .confirm_broadcast(&wallet_id, &operation_id, &mined_hash, unix_now())
+        .expect("the confirmed hash reconciles the payment");
+    assert_eq!(
+        reconciled.status,
+        OperationStatus::ReconciledAwaitingFinalWitness
+    );
+
+    // ---- 7. THE FINAL WITNESS COMMITS IT ----
+    let third = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), unix_now())
+        .await
+        .expect("the phone is handed the final anchor");
+    assert_eq!(
+        third.anchor.operation_phase,
+        RollbackOperationPhase::ReconciledFinal
+    );
+    let receipt = super::pilot_node::signed_receipt(&third, &mobile, unix_now()).await;
+    let committed = manager
+        .apply_mobile_witness_and_broadcast(&wallet_id, receipt, unix_now())
+        .await
+        .expect("the final receipt commits the payment");
+    assert_eq!(
+        committed.status,
+        OperationStatus::Committed,
+        "three phone signatures finish a payment, not one"
+    );
+    assert_eq!(
+        committed.reserved_units,
+        HacUnits::ZERO,
+        "the reservation is returned once the payment is committed"
+    );
+    assert!(
+        manager
+            .stranded_witness_recovery(&wallet_id, unix_now())
+            .unwrap()
+            .is_none(),
+        "nothing is stranded once the payment is committed"
+    );
+    let synchronized = manager.overview(&wallet_id, unix_now()).await.unwrap();
+    assert!(synchronized.mobile_witness_ready);
+    assert!(synchronized.mobile_witness_synchronized);
+    println!(
+        "[full] anchor sequence reached {}",
+        synchronized.latest_anchor_sequence
+    );
+
+    let recipient_after = balance_zhu(recipient).await;
+    let owner_after = balance_zhu(&owner_address).await;
+    let amount_zhu = u128::from(super::desktop_witness_flow::AMOUNT_UNITS) * 100;
+    println!(
+        "[coin] recipient {recipient_before} -> {recipient_after} Zhu, owner {owner_before} -> {owner_after} Zhu"
+    );
+    assert_eq!(
+        recipient_after,
+        recipient_before + amount_zhu,
+        "the recipient must be paid exactly what the agent asked for"
+    );
+    assert!(owner_after < owner_before);
+}
+
+/// THE PHONE NEVER ANSWERS, ON MAINNET, AND THE EXIT ADDED IN 0c8d525 FREES IT.
+///
+/// The signature here is real: a real agent proposal, a real owner approval, a
+/// real consensus Type 2 transaction signed with the wallet's own key against a
+/// real node, holding real chain-7 coin. Only the network NAME is moved, and it
+/// is moved because that string, compared before the operation was looked up,
+/// was the whole of both refusals.
+///
+/// Six claims:
+///
+/// 1. on mainnet the forward step is refused BY NAME - `WitnessAnchorNetworkUnsupported`,
+///    not `NodeNetworkMismatch` and not `InvalidOperationState`;
+/// 2. the owner-facing view says a retry is NOT available rather than
+///    advertising one that will be refused;
+/// 3. the whole wallet is wedged while it sits: a second payment, a channel
+///    open and a phone replacement are all refused;
+/// 4. `abandon_stranded_witness_operation` succeeds on mainnet and marks the
+///    payment `Cancelled`;
+/// 5. the CHAIN never heard of the transaction, before or after, and the
+///    owner's on-chain balance is identical to the Zhu;
+/// 6. the wallet works again: a fresh intent is accepted.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only"]
+async fn a_phone_that_never_answers_strands_a_mainnet_payment_and_the_exit_frees_it() {
+    use crate::operation::OperationStatus;
+
+    let work = workdir().join("wit-main");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("wit-main").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "main-owner", &anchor, 0.5, wait_budget).await;
+    let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    pair_a_real_phone(&mut manager, &wallet_id, &mobile, "main").await;
+
+    let authorization = super::desktop_witness_flow::pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        unix_now(),
+    );
+    let created = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-mainnet-strand-0001",
+                unix_now() + 1_200,
+            ),
+            unix_now(),
+        )
+        .await
+        .expect("the agent's proposal is accepted");
+    let operation_id = created.operation_id.clone();
+    let approval = manager
+        .pending_approval(&wallet_id, &operation_id, unix_now())
+        .unwrap();
+    let approved = manager
+        .approve_desktop_and_broadcast(&wallet_id, approval, unix_now())
+        .await
+        .expect("the owner's yes");
+    assert_eq!(approved.status, OperationStatus::SignedAwaitingWitness);
+    let tx_hash = approved.tx_hash.clone().expect("a real transaction hash");
+    let owner_at_strand = balance_zhu(&owner_address).await;
+    let before = chain_knows_transaction(&tx_hash).await;
+    assert_ne!(before["ret"].as_i64(), Some(0));
+    println!("[main] stranded {tx_hash}; chain says {before}; owner {owner_at_strand} Zhu");
+
+    // The phone is never asked and never answers. The wallet is then the
+    // owner's real wallet: mainnet.
+    move_live_wallet_to_mainnet(&mut manager, &wallet_id);
+    manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now()).ok();
+
+    // ---- 1. THE FORWARD STEP IS REFUSED, BY NAME ----
+    let refused = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), unix_now())
+        .await
+        .expect_err("mainnet does not mint anchors");
+    assert_eq!(
+        refused,
+        AgentWalletError::WitnessAnchorNetworkUnsupported,
+        "the refusal must name the window, not the node"
+    );
+
+    // ---- 2. AND THE OWNER-FACING VIEW SAYS SO ----
+    let stranded = manager
+        .stranded_witness_recovery(&wallet_id, unix_now())
+        .unwrap()
+        .expect("a stranded mainnet payment is reported");
+    println!(
+        "[main] stranded view: status {:?} submitted {} tx {:?} anchor_issued {} retryable {} network_supports_witness_retry {} abandonable {} anchor_releasable {} phone_replacement_unblocked {}",
+        stranded.status,
+        stranded.submitted,
+        stranded.transaction_id,
+        stranded.anchor_issued,
+        stranded.retryable,
+        stranded.network_supports_witness_retry,
+        stranded.abandonable,
+        stranded.anchor_releasable,
+        stranded.phone_replacement_unblocked
+    );
+    assert_eq!(stranded.status, OperationStatus::SignedAwaitingWitness);
+    assert!(!stranded.submitted);
+    assert_eq!(stranded.transaction_id.as_deref(), Some(tx_hash.as_str()));
+    assert!(!stranded.retryable, "no retry may be advertised on mainnet");
+    assert!(!stranded.network_supports_witness_retry);
+    assert!(stranded.abandonable, "the exit must be offered");
+
+    // ---- 3. THE WHOLE WALLET IS WEDGED ----
+    //
+    // The pair of facts every wedging guard in this crate reads, quoted rather
+    // than described: a reservation is outstanding and an operation is not
+    // terminal. `prepare_l2_channel_close` reads exactly this, which is how one
+    // payment that never left the desktop locks a channel deposit in.
+    assert!(
+        live_wallet_is_wedged(&mut manager, &wallet_id),
+        "a stranded payment holds a reservation and is not terminal"
+    );
+    let second = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-mainnet-strand-0002",
+                unix_now() + 1_200,
+            ),
+            unix_now(),
+        )
+        .await
+        .expect_err("a second payment while one is stranded is refused");
+    // NOT `RecoveryRequired`. On mainnet at the shipped pilot feature set the
+    // agent-spending network gate is reached first, so the agent is told
+    // signing is blocked and the stranded payment is never named. On testnet
+    // the same call answers `RecoveryRequired`, which is asserted in the
+    // revoked-phone run below. Neither sentence names the payment.
+    assert_eq!(second, AgentWalletError::SigningBlocked);
+    let rotation = manager
+        .prepare_witness_rotation(
+            &wallet_id,
+            "live-mainnet-rotation-1".to_owned(),
+            SoftwareDeviceIdentity::generate(DeviceRole::Mobile).device_id(),
+            hpay_companion_protocol::WitnessRotationMode::Normal,
+            hpay_companion_protocol::WitnessRotationReason::LostPhone,
+            unix_now(),
+        )
+        .await
+        .expect_err("replacing the phone is refused on mainnet");
+    assert_eq!(
+        rotation,
+        AgentWalletError::WitnessRotationNetworkUnsupported
+    );
+    println!("[main] second payment {second:?}, replacement {rotation:?}");
+
+    // ---- 4. THE EXIT ----
+    let freed = manager
+        .abandon_stranded_witness_operation(&wallet_id, &operation_id, unix_now())
+        .expect("the mainnet exit frees the payment");
+    assert_eq!(
+        freed.status,
+        OperationStatus::Cancelled,
+        "the payment is given up, and says so"
+    );
+    assert_eq!(freed.reserved_units, HacUnits::ZERO);
+    assert!(
+        manager
+            .stranded_witness_recovery(&wallet_id, unix_now())
+            .unwrap()
+            .is_none(),
+        "nothing is stranded any more"
+    );
+    assert!(
+        !live_wallet_is_wedged(&mut manager, &wallet_id),
+        "the reservation is returned and nothing non-terminal is left"
+    );
+
+    // ---- 5. THE MONEY NEVER MOVED, ASKED OF THE CHAIN ----
+    let after = chain_knows_transaction(&tx_hash).await;
+    assert_ne!(
+        after["ret"].as_i64(),
+        Some(0),
+        "the abandoned transaction must never appear on chain: {after}"
+    );
+    let owner_after = balance_zhu(&owner_address).await;
+    assert_eq!(
+        owner_after, owner_at_strand,
+        "abandoning a payment that was never sent costs nothing"
+    );
+    println!("[main] after the exit: chain {after}, owner {owner_after} Zhu");
+
+    // ---- 6. THE WALLET WORKS AGAIN ----
+    //
+    // Back on the network the pilot signs for, because the mainnet refusal
+    // above is a build gate and not the wedge. What is being shown is that the
+    // wedge is gone: the same call that answered `RecoveryRequired` while the
+    // payment sat now goes through.
+    let (state_master, journal_key) = fixtures::keys(&manager, &wallet_id);
+    let mut back = manager
+        .load_verified_state(&wallet_id, &state_master, &journal_key)
+        .unwrap();
+    back.network_mode = "testnet".to_owned();
+    back.block_one_fingerprint = anchor.clone();
+    back.trusted_mainnet_fast_pay_pilot = false;
+    back.updated_at = unix_now();
+    manager
+        .persist_event(
+            &mut back,
+            &state_master,
+            &journal_key,
+            AgentJournalEventKind::PolicyChanged,
+            None,
+            None,
+            unix_now(),
+        )
+        .unwrap();
+    let again = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-mainnet-strand-0003",
+                unix_now() + 1_200,
+            ),
+            unix_now(),
+        )
+        .await
+        .expect("the wallet takes work again once the stranded payment is given up");
+    assert_eq!(again.status, OperationStatus::ApprovalRequested);
+    println!(
+        "[main] the wallet accepted a fresh intent {}",
+        again.operation_id
+    );
+}
+
+/// The `network_id` the desktop stamped into the approval the phone is asked to
+/// sign, read out of authenticated state rather than rebuilt.
+fn approval_binding_network_id(
+    manager: &mut AgentWalletManager,
+    wallet_id: &AgentWalletId,
+    operation_id: &OperationId,
+) -> Option<String> {
+    let (state_master, journal_key) = fixtures::keys(manager, wallet_id);
+    let state = manager
+        .load_verified_state(wallet_id, &state_master, &journal_key)
+        .unwrap();
+    state
+        .operations
+        .get(operation_id.as_str())?
+        .stored_approval()
+        .ok()?
+        .network_binding
+        .as_ref()
+        .map(|binding| binding.network_id.clone())
+}
+
+/// The pair of facts every wedging guard in this crate reads, on a live wallet.
+fn live_wallet_is_wedged(manager: &mut AgentWalletManager, wallet_id: &AgentWalletId) -> bool {
+    let (state_master, journal_key) = fixtures::keys(manager, wallet_id);
+    let state = manager
+        .load_verified_state(wallet_id, &state_master, &journal_key)
+        .unwrap();
+    crate::service::state::active_reservations(&state).unwrap() != HacUnits::ZERO
+        || state
+            .operations
+            .values()
+            .any(|operation| !operation.status().is_terminal())
+}
+
+/// THE PHONE IS REVOKED MID FLIGHT, WITH A LIVE ANCHOR OUTSTANDING.
+///
+/// The owner asks the phone for the window, the phone goes into a river, and the
+/// owner revokes it from the desktop. The anchor is still live at that instant,
+/// so every exit is shut until it dies. Five claims, all live:
+///
+/// 1. a revoked phone's receipt is refused, so the payment cannot be released;
+/// 2. while the anchor lives, BOTH exits refuse with
+///    `WitnessRecoveryNotAvailable` - the wallet will not race a phone that may
+///    be signing this second;
+/// 3. once the anchor is genuinely dead, `release_dead_witness_anchor` drops it
+///    and leaves the payment untouched;
+/// 4. the escape the panel names, replacing the phone, is itself refused here:
+///    the old device is revoked, so `prepare_witness_rotation` answers
+///    `RotationOldDeviceNotAuthorized`. Giving the payment up is the only exit
+///    left, and it works;
+/// 5. the chain never saw the transaction and the owner's balance is unchanged.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only; waits out a real 300 second anchor"]
+async fn a_phone_revoked_mid_flight_leaves_one_exit_and_it_works() {
+    use crate::operation::OperationStatus;
+
+    let work = workdir().join("wit-revoke");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("wit-revoke").await;
+    let anchor = block_one_hash().await;
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "revoke-owner", &anchor, 0.5, wait_budget).await;
+    let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    pair_a_real_phone(&mut manager, &wallet_id, &mobile, "revoke").await;
+
+    let authorization = super::desktop_witness_flow::pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        unix_now(),
+    );
+    let created = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-revoke-0001",
+                unix_now() + 1_800,
+            ),
+            unix_now(),
+        )
+        .await
+        .unwrap();
+    let operation_id = created.operation_id.clone();
+    let approval = manager
+        .pending_approval(&wallet_id, &operation_id, unix_now())
+        .unwrap();
+    let approved = manager
+        .approve_desktop_and_broadcast(&wallet_id, approval, unix_now())
+        .await
+        .unwrap();
+    let tx_hash = approved.tx_hash.clone().expect("a real transaction hash");
+    let owner_at_strand = balance_zhu(&owner_address).await;
+
+    // The window is opened, and THEN the phone is lost.
+    let proposal = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), unix_now())
+        .await
+        .expect("the phone is handed an anchor");
+    let issued_at = unix_now();
+    println!(
+        "[revk] anchor {} expires {} (now {issued_at})",
+        proposal.anchor.anchor_id, proposal.anchor.expires_at
+    );
+    let revoked = manager
+        .revoke_companion_device_locally(&wallet_id, mobile.device_id(), unix_now())
+        .expect("the owner revokes the lost phone");
+    assert!(revoked.is_revoked());
+
+    // ---- 1. THE REVOKED PHONE CANNOT RELEASE THE PAYMENT ----
+    let receipt = super::pilot_node::signed_receipt(&proposal, &mobile, unix_now()).await;
+    let refused = manager
+        .apply_mobile_witness_and_broadcast(&wallet_id, receipt, unix_now())
+        .await
+        .expect_err("a revoked phone must not be able to move money");
+    println!("[revk] the revoked phone's receipt: {refused:?}");
+    assert_eq!(
+        live_view(&mut manager, &wallet_id, &operation_id).status,
+        OperationStatus::SignedAwaitingWitness
+    );
+
+    // A SECOND PAYMENT WHILE THE FIRST IS STRANDED, on the network the pilot
+    // signs for. One stranded payment refuses every new one, and the sentence
+    // the agent gets back does not name it.
+    let second = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-revoke-0002",
+                unix_now() + 1_800,
+            ),
+            unix_now(),
+        )
+        .await
+        .expect_err("a second payment while one is stranded is refused");
+    assert_eq!(
+        second,
+        AgentWalletError::RecoveryRequired,
+        "the agent is told the wallet needs recovery, with nothing naming the payment"
+    );
+    println!("[revk] a second payment answered {second:?}");
+
+    // ---- 2. WHILE THE ANCHOR LIVES, BOTH EXITS REFUSE ----
+    let live_view_now = manager
+        .stranded_witness_recovery(&wallet_id, unix_now())
+        .unwrap()
+        .expect("the stranded payment is reported");
+    assert!(live_view_now.anchor_issued);
+    assert!(
+        !live_view_now.abandonable,
+        "the wallet will not race a phone that may be signing"
+    );
+    assert!(!live_view_now.anchor_releasable);
+    // WHAT THE DESKTOP ADVERTISES HERE, recorded rather than approved of.
+    // `retryable` is `!outstanding_receipt && network supports it`; it does not
+    // consult the device registry. The phone was revoked three lines ago and
+    // its receipt was just refused with `RollbackDetected`, and the desktop
+    // still says a retry is available - which renders as "Open the AI Agent
+    // Wallet on your paired phone and confirm this payment."
+    assert!(
+        live_view_now.retryable,
+        "recorded as found: the stranded view offers a retry a revoked phone can never satisfy"
+    );
+    println!(
+        "[revk] with the phone revoked the desktop still reports retryable {}",
+        live_view_now.retryable
+    );
+    assert_eq!(
+        manager
+            .abandon_stranded_witness_operation(&wallet_id, &operation_id, unix_now())
+            .expect_err("refused while the anchor lives"),
+        AgentWalletError::WitnessRecoveryNotAvailable
+    );
+    assert_eq!(
+        manager
+            .release_dead_witness_anchor(&wallet_id, &operation_id, unix_now())
+            .expect_err("refused while the anchor lives"),
+        AgentWalletError::WitnessRecoveryNotAvailable
+    );
+
+    // ---- 3. WAIT THE ANCHOR OUT, FOR REAL, AND DROP IT ----
+    let dies_at = proposal.anchor.expires_at;
+    println!("[revk] waiting out the real anchor until {dies_at}");
+    while unix_now() <= dies_at {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+    manager.unlock(&wallet_id, AWAY_PASSPHRASE, unix_now()).ok();
+    let dead = manager
+        .stranded_witness_recovery(&wallet_id, unix_now())
+        .unwrap()
+        .expect("still reported");
+    assert!(dead.anchor_releasable, "a dead anchor can be dropped");
+    assert!(dead.abandonable, "and the payment can be given up");
+    let untouched = manager
+        .release_dead_witness_anchor(&wallet_id, &operation_id, unix_now())
+        .expect("the dead anchor is dropped");
+    assert_eq!(
+        untouched.status,
+        OperationStatus::SignedAwaitingWitness,
+        "dropping an anchor must not touch the payment"
+    );
+    assert_eq!(untouched.tx_hash.as_deref(), Some(tx_hash.as_str()));
+
+    // ---- 4. THE REPLACEMENT THE PANEL NAMES IS REFUSED HERE ----
+    //
+    // With the dead anchor dropped, `witness_dead_end` is satisfied and the
+    // stranded view turns `phone_replacement_unblocked` on. That is the flag
+    // the Security page reads to print "Replace the paired phone keeps this
+    // payment: the new phone confirms it and it goes through." The flag does
+    // not ask whether the OLD phone is still an authorized witness, and
+    // `prepare_witness_rotation` does, so the sentence is offered over a
+    // control that refuses. Recorded rather than approved of.
+    let offered = manager
+        .stranded_witness_recovery(&wallet_id, unix_now())
+        .unwrap()
+        .expect("still reported");
+    assert!(
+        offered.phone_replacement_unblocked,
+        "recorded as found: the desktop offers the replacement here"
+    );
+    let replacement = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    let rotation_refusal = manager
+        .prepare_witness_rotation(
+            &wallet_id,
+            "live-revoke-rotation-1".to_owned(),
+            replacement.device_id(),
+            hpay_companion_protocol::WitnessRotationMode::Normal,
+            hpay_companion_protocol::WitnessRotationReason::LostPhone,
+            unix_now(),
+        )
+        .await
+        .expect_err("a revoked old phone cannot authorize its own replacement");
+    assert_eq!(
+        rotation_refusal,
+        AgentWalletError::RotationOldDeviceNotAuthorized,
+        "this is the escape the desktop names, and here it is shut"
+    );
+    println!("[revk] replacement refused: {rotation_refusal:?}");
+
+    let freed = manager
+        .abandon_stranded_witness_operation(&wallet_id, &operation_id, unix_now())
+        .expect("the only exit left works");
+    assert_eq!(freed.status, OperationStatus::Cancelled);
+
+    // ---- 5. THE MONEY NEVER MOVED ----
+    let chain = chain_knows_transaction(&tx_hash).await;
+    assert_ne!(chain["ret"].as_i64(), Some(0), "{chain}");
+    assert_eq!(balance_zhu(&owner_address).await, owner_at_strand);
+    println!("[revk] chain {chain}; owner still {owner_at_strand} Zhu");
+}
+
+/// THE DESKTOP DIES BETWEEN THE PHONE'S RECEIPT AND THE BROADCAST.
+///
+/// Two crashes, at the two durable boundaries, with a real chain underneath and
+/// a real transaction in flight. The claim under test is exactly-once: a
+/// desktop that dies after accepting a receipt must, when it is reopened, put
+/// the bytes on the wire once and only once, and the chain is what is asked.
+///
+/// 1. crash after the receipt is durable and before the broadcast: reopening
+///    the wallet from that disk and calling `resume_interrupted_witness` submits
+///    it, and the transaction lands in a block;
+/// 2. the recipient's on-chain balance moved by the amount ONCE - a second
+///    submission would either be rejected or double-pay, and neither happened;
+/// 3. calling the resume again afterwards is a no-op that submits nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "live private pilot chain only"]
+async fn a_desktop_that_dies_between_the_receipt_and_the_broadcast_submits_exactly_once() {
+    use crate::operation::OperationStatus;
+
+    let work = workdir().join("wit-crash");
+    std::fs::create_dir_all(&work).unwrap();
+    // SAFETY: nothing else in this process has started yet.
+    unsafe {
+        std::env::set_var("HACASH_WALLET_DATA", work.join("fund"));
+        std::env::set_var("HACASH_WALLET_NETWORK", "testnet");
+    }
+    std::fs::create_dir_all(work.join("fund")).unwrap();
+    let wait_budget =
+        Duration::from_secs(optional_env("HPAY_LIVE_WAIT_SECS", "2400").parse().unwrap());
+
+    require_chain_seven("wit-crash").await;
+    let anchor = block_one_hash().await;
+    let root = work.join("crash-owner");
+    let (mut manager, wallet_id, owner_address) =
+        funded_owner(&work, "crash-owner", &anchor, 0.5, wait_budget).await;
+    let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    pair_a_real_phone(&mut manager, &wallet_id, &mobile, "crash").await;
+
+    let recipient = fixtures::RECIPIENT;
+    let recipient_before = balance_zhu(recipient).await;
+    let owner_before = balance_zhu(&owner_address).await;
+
+    let authorization = super::desktop_witness_flow::pair_desktop_agent(
+        &mut manager,
+        &wallet_id,
+        ApprovalMode::DesktopManual,
+        unix_now(),
+    );
+    let created = manager
+        .create_payment_intent(
+            &authorization,
+            super::desktop_witness_flow::payment_request(
+                "chain7-live-crash-0001",
+                unix_now() + 1_200,
+            ),
+            unix_now(),
+        )
+        .await
+        .unwrap();
+    let operation_id = created.operation_id.clone();
+    let approval = manager
+        .pending_approval(&wallet_id, &operation_id, unix_now())
+        .unwrap();
+    let approved = manager
+        .approve_desktop_and_broadcast(&wallet_id, approval, unix_now())
+        .await
+        .unwrap();
+    assert_eq!(approved.status, OperationStatus::SignedAwaitingWitness);
+    let tx_hash = approved.tx_hash.clone().expect("a real transaction hash");
+
+    let proposal = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), unix_now())
+        .await
+        .unwrap();
+    let receipt = super::pilot_node::signed_receipt(&proposal, &mobile, unix_now()).await;
+
+    // ---- 1. THE CRASH ----
+    manager.crash_after_witness_accepted = true;
+    let crashed = manager
+        .apply_mobile_witness_and_broadcast(&wallet_id, receipt, unix_now())
+        .await
+        .expect_err("the injected crash stops the call dead");
+    assert_eq!(crashed, AgentWalletError::RecoveryRequired);
+    drop(manager);
+
+    // The chain is asked BEFORE the recovery, so "it was already on the wire"
+    // is ruled out rather than assumed.
+    let before_recovery = chain_knows_transaction(&tx_hash).await;
+    assert_ne!(
+        before_recovery["ret"].as_i64(),
+        Some(0),
+        "a desktop that died before the broadcast must not have broadcast: {before_recovery}"
+    );
+    println!("[crsh] after the crash the chain says {before_recovery}");
+
+    // ---- 2. REOPENED FROM THAT DISK ----
+    let mut reopened = AgentWalletManager::open(&root).unwrap();
+    reopened
+        .unlock(&wallet_id, AWAY_PASSPHRASE, unix_now())
+        .unwrap();
+    let resumed = reopened
+        .resume_interrupted_witness(&wallet_id, unix_now())
+        .await
+        .expect("the reopened wallet finishes what the dead one started")
+        .expect("there was something to finish");
+    println!("[crsh] resumed to {:?}", resumed.status);
+    assert!(
+        matches!(
+            resumed.status,
+            OperationStatus::SubmittedAwaitingFinalWitness
+                | OperationStatus::BroadcastSubmitted
+                | OperationStatus::BroadcastUncertain
+        ),
+        "unexpected status after resume: {:?}",
+        resumed.status
+    );
+    let mined = wait_for_transaction(&tx_hash, wait_budget).await;
+    println!("[crsh] mined: {mined}");
+
+    // ---- 3. EXACTLY ONCE, ASKED OF THE CHAIN ----
+    let again = reopened
+        .resume_interrupted_witness(&wallet_id, unix_now())
+        .await;
+    println!("[crsh] resuming again answered {again:?}");
+    let amount_zhu = u128::from(super::desktop_witness_flow::AMOUNT_UNITS) * 100;
+    let recipient_after = balance_zhu(recipient).await;
+    let owner_after = balance_zhu(&owner_address).await;
+    println!(
+        "[coin] recipient {recipient_before} -> {recipient_after} Zhu, owner {owner_before} -> {owner_after} Zhu"
+    );
+    assert_eq!(
+        recipient_after,
+        recipient_before + amount_zhu,
+        "the interrupted payment must be paid exactly once"
+    );
 }

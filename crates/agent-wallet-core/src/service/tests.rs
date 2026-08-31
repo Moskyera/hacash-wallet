@@ -39,6 +39,7 @@ fn insert_indexed_operation(
             expires_at,
         },
         created_at,
+        false,
     )
     .unwrap();
     match status {
@@ -868,6 +869,7 @@ fn daily_policy_counts_total_debit_of_pending_reservations() {
             expires_at: 2_000,
         },
         1_000,
+        false,
     )
     .unwrap();
     existing.reserve(HacUnits::MIN_NETWORK_FEE).unwrap();
@@ -885,6 +887,7 @@ fn daily_policy_counts_total_debit_of_pending_reservations() {
         emergency_epoch: 1,
         payments_suspended: false,
         external_rollback_anchor_ready: false,
+        rollback_witness_required: Some(false),
         trusted_mainnet_fast_pay_pilot: false,
         l2_binding: None,
         l2_channel_setup: None,

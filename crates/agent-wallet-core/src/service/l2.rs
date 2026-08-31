@@ -2422,6 +2422,7 @@ mod tests {
             wallet_id.clone(),
             l1_request,
             now + 3,
+            false,
         )
         .unwrap();
         let l1_operation_id = l1_operation.operation_id().clone();

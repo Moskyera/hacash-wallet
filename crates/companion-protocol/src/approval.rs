@@ -25,8 +25,7 @@ pub struct ApprovalNetworkBinding {
 
 impl ApprovalNetworkBinding {
     fn validate(&self) -> CompanionResult<()> {
-        if !crate::is_supported_pilot_network_id(&self.network_id)
-            || self.chain_id == 0
+        if !crate::is_supported_network_binding(&self.network_id, self.chain_id)
             || !is_hex_len(&self.genesis_identifier, 32)
             || !is_hex_len(&self.node_profile_id, 32)
             || self.transaction_format_version == 0
@@ -545,6 +544,89 @@ mod tests {
             101,
         );
         (mobile, registry, commitment, decision)
+    }
+
+    /// The exact pairs the desktop stamps, on both rails this wallet runs on.
+    ///
+    /// Read off the Rust producer rather than guessed: `network_id` is
+    /// `node.network_kind()` and `chain_id` is `node.chain_id()`, and the two
+    /// node identity predicates in `hacash-wallet-core::node_capabilities` pin
+    /// the pilot rail to `local_pilot_v1` with chain id 7 and mainnet to
+    /// `mainnet` with chain id 0.
+    fn binding(network_id: &str, chain_id: u32) -> ApprovalNetworkBinding {
+        ApprovalNetworkBinding {
+            network_id: network_id.to_owned(),
+            chain_id,
+            genesis_identifier: "ef".repeat(32),
+            node_profile_id: "12".repeat(32),
+            transaction_format_version: 2,
+        }
+    }
+
+    /// A MAINNET APPROVAL BINDING IS VALID, AND THAT IS THE WHOLE MAINNET BUG.
+    ///
+    /// This used to be `is_supported_pilot_network_id(..) || chain_id == 0`,
+    /// which rejected mainnet on BOTH halves at once: `mainnet` was not a listed
+    /// id, and mainnet's chain id is 0. The consequence was not a blocked
+    /// approval, it was a failure to ENCODE - `encode_canonical` validates the
+    /// binding - so the whole status snapshot failed `validate_for_wallet` and a
+    /// paired phone received nothing at all on mainnet.
+    ///
+    /// Fails without the change with `MalformedMessage` on the first assertion.
+    #[test]
+    fn both_rails_this_wallet_runs_on_produce_a_valid_network_binding() {
+        binding(crate::HPAY_MAINNET_NETWORK_ID, 0)
+            .validate()
+            .expect("mainnet is chain id 0 and the desktop stamps it");
+        binding(crate::HPAY_LOCAL_PILOT_NETWORK_ID, 7)
+            .validate()
+            .expect("the local pilot rail is chain id 7");
+        // The legacy alias older builds wrote, kept so their records decode.
+        binding("testnet", 7).validate().unwrap();
+    }
+
+    /// THE PAIR IS WHAT IS CHECKED, NOT EITHER HALF ALONE.
+    ///
+    /// Widening the id list on its own would have let a mainnet id arrive with a
+    /// pilot chain id, or the reverse, and a binding is a claim about one chain.
+    #[test]
+    fn a_network_id_may_not_arrive_with_the_other_rails_chain_id() {
+        for (network_id, chain_id) in [
+            (crate::HPAY_MAINNET_NETWORK_ID, 7),
+            (crate::HPAY_LOCAL_PILOT_NETWORK_ID, 0),
+            ("testnet", 0),
+            ("some_other_chain", 0),
+            ("some_other_chain", 7),
+        ] {
+            assert_eq!(
+                binding(network_id, chain_id).validate(),
+                Err(CompanionError::MalformedMessage),
+                "{network_id} with chain {chain_id} is not a rail this wallet runs on"
+            );
+        }
+    }
+
+    /// A MAINNET APPROVAL SURVIVES THE ROUND TRIP THE PHONE ACTUALLY USES.
+    ///
+    /// `validate` alone is not the evidence: the failure was in
+    /// `encode_canonical`, which is what the desktop calls to put an approval on
+    /// the wire and what the phone re-derives to check a decision against.
+    #[test]
+    fn a_mainnet_approval_commitment_encodes_and_validates() {
+        let (_mobile, _registry, mut commitment, _decision) = fixture();
+        commitment.approval_version = 3;
+        commitment.network_binding = Some(binding(crate::HPAY_MAINNET_NETWORK_ID, 0));
+        commitment
+            .validate_at(150)
+            .expect("a mainnet approval is a well formed approval");
+        let bytes = commitment
+            .canonical_bytes()
+            .expect("a mainnet approval can be put on the wire at all");
+        assert_eq!(
+            ApprovalCommitment::from_canonical_bytes(&bytes).unwrap(),
+            commitment,
+            "and the phone decodes back exactly what the desktop encoded"
+        );
     }
 
     #[tokio::test]

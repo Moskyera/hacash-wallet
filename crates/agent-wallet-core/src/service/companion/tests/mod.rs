@@ -57,4 +57,6 @@ mod witness;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod witness_crash_recovery;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
+mod witness_optional;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
 mod witness_phase_expiry;

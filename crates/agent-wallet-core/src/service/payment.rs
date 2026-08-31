@@ -127,12 +127,15 @@ impl AgentWalletManager {
         ensure_agent_request_rate(&state, &agent.agent_id, now)?;
         validate_policy_for_payment(&state, &agent, &request.recipient, total_debit, now)?;
 
+        // Pinned here, at intent, and never asked again for this payment. See
+        // `AgentOperation::witness_required`.
         let mut operation = AgentOperation::new(
             OperationId::new(),
             agent.agent_id.clone(),
             wallet_id.clone(),
             request,
             now,
+            super::rollback_witness_required(&state),
         )?;
         operation.reserve(network_fee)?;
         let total = operation.view().total_debit_units;
@@ -442,7 +445,17 @@ impl AgentWalletManager {
             // expires it, `prepare_witness_rotation` refuses while it exists,
             // and no further intent can be created. So ask about the exact
             // device that would have to produce the anchor.
-            if !pinned_witness_phone_can_sign(&state) {
+            //
+            // ASKED ONLY OF A PAYMENT THAT ASKED FOR A WITNESS. The refusal
+            // below exists to stop a payment signing into a status whose only
+            // exit is a phone that cannot sign. A payment the owner never asked
+            // a phone to countersign signs into `Signed` instead, which
+            // broadcasts on its own, so there is nothing here to protect it
+            // from and this line must not be reachable for an owner who has not
+            // asked for a phone.
+            if probe.witness_required(super::rollback_witness_required(&state))
+                && !pinned_witness_phone_can_sign(&state)
+            {
                 return Err(AgentWalletError::WitnessPhoneRequiredForApproval);
             }
         }
@@ -570,8 +583,14 @@ impl AgentWalletManager {
             return Ok(None);
         }
         let operation_id = operation.operation_id().clone();
+        // The same question `approve_desktop_and_broadcast` asks, asked of the
+        // same payment, so the two cannot drift: a payment that wants no witness
+        // is resumed, and one that wants a witness is resumed only if the pinned
+        // phone could still sign the anchor it will need.
         #[cfg(feature = "agent-wallet-testnet-pilot")]
-        if !pinned_witness_phone_can_sign(&state) {
+        if operation.witness_required(super::rollback_witness_required(&state))
+            && !pinned_witness_phone_can_sign(&state)
+        {
             return Ok(None);
         }
         drop(state);
@@ -637,6 +656,16 @@ impl AgentWalletManager {
             }
         }
 
+        // Read once, from the operation's own pinned answer, and used for every
+        // branch below. Asking twice is how a payment gets signed under one
+        // answer and resumed under the other.
+        let wallet_witness_required = super::rollback_witness_required(&state);
+        let witness_required = state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .witness_required(wallet_witness_required);
+
         match state
             .operations
             .get(operation_id.as_str())
@@ -669,7 +698,7 @@ impl AgentWalletManager {
                     .operations
                     .get_mut(operation_id.as_str())
                     .ok_or(AgentWalletError::OperationNotFound)?
-                    .record_signed(&signed.transaction, tx_hash)?;
+                    .record_signed(&signed.transaction, tx_hash, wallet_witness_required)?;
                 safety_permit.checkpoint(state.payments_suspended)?;
                 state.updated_at = now;
                 self.persist_event(
@@ -697,7 +726,7 @@ impl AgentWalletManager {
                     &session.journal_key,
                 )?;
             }
-            OperationStatus::Signed if !cfg!(feature = "agent-wallet-testnet-pilot") => {}
+            OperationStatus::Signed if !witness_required => {}
             OperationStatus::SignedAwaitingWitness => {
                 return Err(AgentWalletError::RollbackWitnessRequired);
             }
@@ -712,12 +741,10 @@ impl AgentWalletManager {
             .operations
             .get(operation_id.as_str())
             .ok_or(AgentWalletError::OperationNotFound)?;
-        if cfg!(feature = "agent-wallet-testnet-pilot")
-            && operation.status() == OperationStatus::SignedAwaitingWitness
-        {
+        if operation.status() == OperationStatus::SignedAwaitingWitness {
             return Ok(operation.view());
         }
-        let expected_broadcast_state = if cfg!(feature = "agent-wallet-testnet-pilot") {
+        let expected_broadcast_state = if witness_required {
             OperationStatus::WitnessedAwaitingBroadcast
         } else {
             OperationStatus::Signed
@@ -825,7 +852,7 @@ impl AgentWalletManager {
             }
         }
         #[cfg(feature = "agent-wallet-testnet-pilot")]
-        {
+        if witness_required {
             state
                 .operations
                 .get_mut(operation_id.as_str())
@@ -863,12 +890,14 @@ impl AgentWalletManager {
         let mut state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
         require_agent_spending_network(&state.network_mode, state.trusted_mainnet_fast_pay_pilot)?;
+        let wallet_witness_required = super::rollback_witness_required(&state);
         let operation = state
             .operations
             .get_mut(operation_id.as_str())
             .ok_or(AgentWalletError::OperationNotFound)?;
         let view = operation.view();
-        let reconcilable = if cfg!(feature = "agent-wallet-testnet-pilot") {
+        let witness_required = operation.witness_required(wallet_witness_required);
+        let reconcilable = if witness_required {
             view.status == OperationStatus::ReconciliationRequired
         } else {
             matches!(
@@ -879,16 +908,22 @@ impl AgentWalletManager {
         if !reconcilable || view.tx_hash.as_deref() != Some(confirmed_tx_hash) {
             return Err(AgentWalletError::ApprovalCommitmentMismatch);
         }
-        #[cfg(feature = "agent-wallet-testnet-pilot")]
-        operation.mark_reconciled_awaiting_final_witness(confirmed_tx_hash.to_owned(), now)?;
-        #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
-        operation.mark_committed(confirmed_tx_hash.to_owned(), "confirmed".to_owned(), now)?;
+        if witness_required {
+            // Unreachable off the pilot build: nothing there can pin a witness
+            // requirement, so nothing there can ask for a final receipt.
+            #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+            return Err(AgentWalletError::InvalidOperationState);
+            #[cfg(feature = "agent-wallet-testnet-pilot")]
+            operation.mark_reconciled_awaiting_final_witness(confirmed_tx_hash.to_owned(), now)?;
+        } else {
+            operation.mark_committed(confirmed_tx_hash.to_owned(), "confirmed".to_owned(), now)?;
+        }
         state.updated_at = now;
         self.persist_event(
             &mut state,
             &session.state_master,
             &session.journal_key,
-            if cfg!(feature = "agent-wallet-testnet-pilot") {
+            if witness_required {
                 AgentJournalEventKind::TransactionReconciled
             } else {
                 AgentJournalEventKind::PaymentCommitted

@@ -153,9 +153,18 @@ export function agentWalletPaymentBlockers(
   ) {
     blockers.push("wallet_not_funded");
   }
-  if (!overview.mobile_witness_ready) blockers.push("mobile_not_paired");
-  if (!overview.mobile_witness_synchronized) {
-    blockers.push("witness_not_initialized");
+  // Only for an owner who ASKED for the rollback witness. These two are the
+  // mirror of the Rust gate, and the Rust gate is now per wallet rather than
+  // per build: a wallet whose owner never asked for a phone signs into
+  // `Signed` and broadcasts on its own, so nothing about a missing phone
+  // blocks it. Pushing these unconditionally would show that owner a payment
+  // path reported as permanently blocked, with a phone to pair that their
+  // wallet does not use.
+  if (overview.rollback_witness_required) {
+    if (!overview.mobile_witness_ready) blockers.push("mobile_not_paired");
+    if (!overview.mobile_witness_synchronized) {
+      blockers.push("witness_not_initialized");
+    }
   }
   if (overview.payments_suspended) blockers.push("payments_suspended");
   if (overview.unresolved_signed_operations > 0) {

@@ -755,6 +755,7 @@ fn pending_unlisted_approval(
         wallet_id.clone(),
         unlisted_request(&format!("ceremony-{}", operation_id.as_str()), now + 300),
         now,
+        true,
     )
     .unwrap();
     operation.reserve(HacUnits::MIN_NETWORK_FEE).unwrap();

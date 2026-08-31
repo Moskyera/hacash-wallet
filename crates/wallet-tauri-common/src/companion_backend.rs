@@ -184,19 +184,33 @@ impl DesktopSessionBackend for AgentCompanionBackend {
                                 detail: "payment_rejected".to_owned(),
                             })
                         } else {
-                            if view.status != OperationStatus::SignedAwaitingWitness {
-                                return Err(LanRuntimeError::Backend);
+                            match view.status {
+                                OperationStatus::SignedAwaitingWitness => {
+                                    let proposal = manager
+                                        .pending_rollback_anchor(
+                                            &self.wallet_id,
+                                            &operation_id,
+                                            &connection.remote_device_id,
+                                            now,
+                                        )
+                                        .await
+                                        .map_err(|_| LanRuntimeError::Backend)?;
+                                    Some(CompanionPayload::RollbackAnchorProposal(proposal))
+                                }
+                                // The owner did not ask for a rollback witness
+                                // on this wallet, so the approval this phone
+                                // just gave finished the payment by itself.
+                                // There is no anchor to hand back, and treating
+                                // its absence as a transport failure would show
+                                // the owner an error on a payment that worked.
+                                OperationStatus::BroadcastSubmitted
+                                | OperationStatus::Committed => Some(CompanionPayload::AdminAck {
+                                    command_id: approval_id,
+                                    accepted: true,
+                                    detail: "payment_submitted".to_owned(),
+                                }),
+                                _ => return Err(LanRuntimeError::Backend),
                             }
-                            let proposal = manager
-                                .pending_rollback_anchor(
-                                    &self.wallet_id,
-                                    &operation_id,
-                                    &connection.remote_device_id,
-                                    now,
-                                )
-                                .await
-                                .map_err(|_| LanRuntimeError::Backend)?;
-                            Some(CompanionPayload::RollbackAnchorProposal(proposal))
                         }
                     }
                     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]

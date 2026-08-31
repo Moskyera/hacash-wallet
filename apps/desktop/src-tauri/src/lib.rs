@@ -165,6 +165,7 @@ pub fn run() {
             wallet_tauri_common::agent_commands::agent_wallet_revoke_agent,
             wallet_tauri_common::agent_commands::agent_wallet_pending_approval,
             wallet_tauri_common::agent_commands::agent_wallet_approve_desktop,
+            wallet_tauri_common::agent_commands::agent_wallet_set_rollback_witness_requirement,
             wallet_tauri_common::agent_commands::agent_wallet_reject,
             wallet_tauri_common::agent_commands::agent_wallet_companion_pairing_status,
             wallet_tauri_common::agent_commands::agent_wallet_companion_devices,
