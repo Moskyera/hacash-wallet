@@ -94,6 +94,15 @@ jobs:
           cargo clippy --workspace --all-targets --all-features --exclude hacash-wallet --locked -- -D warnings
           cargo clippy -p hacash-wallet --all-targets --locked -- -D warnings
 
+      # Every other Rust step here builds with the pilot feature on, so the
+      # shape the code claims to preserve - a build where the witness lifecycle
+      # is not compiled at all - was never compiled anywhere. A call into a
+      # cfg-gated accessor from a `cfg!` branch broke exactly this and reached
+      # a desktop release build before anything noticed. It is a check, not a
+      # test run: the promise being kept is that it still builds.
+      - name: Compile the agent wallet with the pilot lifecycle absent
+        run: cargo check -p agent-wallet-core --all-targets --no-default-features --locked
+
       - name: Test Rust workspace with the supported Linux feature set
         run: |
           cargo test --workspace --all-targets --all-features --exclude hacash-wallet --exclude agent-wallet-core --locked -- --test-threads=1

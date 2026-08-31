@@ -163,14 +163,28 @@ fn rollback_witness_required(state: &AgentWalletState) -> bool {
         // that wallet required the phone, through the same registry question
         // `pinned_witness_phone_can_sign` falls back to. Ask both, so an
         // undecided wallet keeps exactly the behaviour it had.
-        None => {
-            state.rollback_witness.is_some()
-                || state
-                    .companion_security
-                    .as_ref()
-                    .is_some_and(companion::CompanionSecurityState::has_active_witness_device)
-        }
+        None => state.rollback_witness.is_some() || has_paired_witness_phone(state),
     }
+}
+
+/// Whether a phone that MAY witness is paired right now.
+///
+/// Split out and cfg-gated rather than inlined above because `cfg!` evaluates
+/// to false without removing the code around it: the accessor it reaches for
+/// does not exist off a pilot build, so an inline call compiled there at all
+/// only by accident. This pair compiles both ways and answers false where the
+/// witness lifecycle is not built.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn has_paired_witness_phone(state: &AgentWalletState) -> bool {
+    state
+        .companion_security
+        .as_ref()
+        .is_some_and(companion::CompanionSecurityState::has_active_witness_device)
+}
+
+#[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+fn has_paired_witness_phone(_state: &AgentWalletState) -> bool {
+    false
 }
 
 const fn is_false(value: &bool) -> bool {
