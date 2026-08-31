@@ -156,13 +156,25 @@ jobs:
         working-directory: apps/${{ matrix.app }}
         run: yarn install --frozen-lockfile --non-interactive
 
+      # The style gate reads the BUILT stylesheet of BOTH apps, because "styled
+      # on desktop, bare on the phone" is one defect wearing two hats. This job
+      # is a matrix over one app at a time, so on a clean runner that gate could
+      # never pass: it failed on missing dist rather than on a missing rule, in
+      # every run, while reading green locally where both dists happened to
+      # exist. Install and build both, and build BEFORE testing, so the gate
+      # reads what actually ships instead of reporting the build order.
+      - name: Install dependencies for the other app
+        working-directory: apps/${{ matrix.app == 'desktop' && 'mobile' || 'desktop' }}
+        run: yarn install --frozen-lockfile --non-interactive
+
+      - name: Type-check and build both frontends
+        run: |
+          yarn --cwd apps/desktop build
+          yarn --cwd apps/mobile build
+
       - name: Run frontend unit tests
         working-directory: apps/${{ matrix.app }}
         run: yarn test
-
-      - name: Type-check and build frontend
-        working-directory: apps/${{ matrix.app }}
-        run: yarn build
 
   desktop-compile:
     name: Desktop compile (${{ matrix.os }})
