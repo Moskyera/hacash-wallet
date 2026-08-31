@@ -36,6 +36,11 @@ import {
   emergencyStopControl,
   type AgentWalletWriteReadiness,
 } from "./access";
+import {
+  channelOpenProgress,
+  reviewCountdown,
+  type ChannelOpenProgress,
+} from "./channelWaitingView";
 import { connectorStatusForWallet } from "./controlSafety";
 import { DESKTOP_CONTROLS, type DesktopControlId } from "./desktopControls";
 import {
@@ -1273,7 +1278,52 @@ export function AgentFastPayChannelPanel({
   // for it and a wallet that forgets a signature can fund the same channel
   // twice.
   const discardable = setup?.phase === "prepared";
-  const reviewExpired = Boolean(setup && setup.expires_at * 1000 <= Date.now());
+  /*
+    A per-second tick, display only, and nothing is fetched by it.
+
+    The panel already knew when the review dies and never drew it. Worse, the
+    two booleans below were computed from a bare `Date.now()` at render time,
+    and the only thing that re-renders this panel is the 15 second overview
+    poll, so an expired review could sit on the screen looking live for another
+    fifteen seconds with a confirm button on it that could only refuse.
+
+    Placed inside this component on purpose. The overview poll is the FIRST
+    `window.setInterval` in this file and desktopControls.test.ts identifies it
+    by that position; this one is a thousand lines below it and stays below it.
+    Shape copied from MobileCompanionPanel's pairing countdown.
+  */
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      setNowSeconds(Math.floor(Date.now() / 1000));
+    }, 1_000);
+    return () => window.clearInterval(tick);
+  }, []);
+
+  const countdown = reviewCountdown({
+    expiresAt: setup?.expires_at,
+    nowSeconds,
+  });
+  /*
+    How far the chain has come, and whether it is honest to say so at all.
+
+    The open height only exists on the binding, and the binding only exists once
+    the core has already agreed the open is settled, so during the wait this is
+    deliberately a shape with no count in it. See channelWaitingView.ts.
+  */
+  const progress = channelOpenProgress({
+    currentHeight: overview.node?.current_height,
+    openHeight: binding?.channel_open_height,
+    confirmedAtHeight: binding?.confirmed_at_height,
+  });
+  /*
+    The stretch that rendered nothing: the deposit is on the chain, the channel
+    is not settled, and the exit panel below cannot render because it is gated
+    on a binding that cannot exist yet.
+  */
+  const awaitingChain =
+    setup?.phase === "submitted" || setup?.phase === "awaiting_confirmations";
+  const reviewExpired = Boolean(setup && countdown.kind === "expired");
   // A setup that holds a signature the Hub will never accept again.
   //
   // The core decides this, not the screen; this only decides whether to offer
@@ -1284,7 +1334,7 @@ export function AgentFastPayChannelPanel({
   // re-checks the clock, its durable store and the live chain before it agrees.
   const signedSetup = setup?.phase === "signed" || setup?.phase === "recovery_required";
   const requestIsDead = Boolean(
-    setup && signedSetup && (setup.expires_at + 300) * 1000 <= Date.now(),
+    setup && signedSetup && setup.expires_at + 300 <= nowSeconds,
   );
 
   const finish = async (message: string) => {
@@ -1300,6 +1350,29 @@ export function AgentFastPayChannelPanel({
         This channel belongs only to the Agent Wallet. It never uses the Personal Wallet channel
         and it adds no HPAY wallet fee.
       </p>
+
+      {/*
+        READINESS WHERE THE DECISION IS.
+
+        `payments_suspended` has always been on this overview and this panel
+        said nothing about it, while sitting ABOVE the one control that clears
+        it. So the owner pressed a channel button, met a refusal, and was given
+        no cause for it. The cause was two screens of scrolling below the
+        refusal.
+
+        Deliberately says only what is true and points at where the control
+        already is, on this same page. It does not restate the alerts line,
+        which overviewLayout.ts owns, and it does not name a second refusal
+        string: whether the clear itself is available is that module's sentence
+        to write, not this one's.
+      */}
+      {overview.payments_suspended ? (
+        <p className="agent-readiness" role="status">
+          <strong>Payments are off.</strong> Nothing can be opened, sent or
+          closed until you turn them back on, in Payment control further down
+          this page.
+        </p>
+      ) : null}
 
       {!binding && !setup && (
         <>
@@ -1347,6 +1420,86 @@ export function AgentFastPayChannelPanel({
             <span>Wallet fee <strong>{formatUnits(setup.wallet_fee_units)}</strong></span>
             <span>Status <strong>{setup.phase.replace(/_/g, " ")}</strong></span>
           </div>
+          {/*
+            THE DEADLINE THE OWNER WAS HELD TO AND NEVER SHOWN.
+
+            `expires_at` was on this review from the first version and was read
+            only to compute two booleans. The owner's first attempt expired
+            unseen while the wallet had crashed, and the refusal afterwards said
+            only that signing was blocked, which is what eight other causes say.
+
+            DIVERGENCE FROM design/Review.dc.html, on purpose: the design's
+            expired line reads "Nothing was signed and nothing was spent." This
+            screen cannot know that. Whether a signature could exist is decided
+            by the durable ChannelOpenSafety store, which is never sent here,
+            and there is one crash interleaving where it says a signature may
+            exist while the phase still reads prepared. So the countdown states
+            only that the window closed, and the notice below carries the rest.
+          */}
+          {setup.phase === "prepared" && countdown.kind === "live" ? (
+            <p className="agent-countdown" role="status">
+              These numbers are good for <strong>{countdown.label}</strong> more.
+              After that, prepare them again; nothing is lost by letting it run out.
+            </p>
+          ) : null}
+          {setup.phase === "prepared" && countdown.kind === "expired" ? (
+            <p className="agent-countdown" role="status">
+              <strong>These numbers have expired.</strong> Discard this review to
+              work them out again.
+            </p>
+          ) : null}
+          {/*
+            BLOCK PROGRESS DURING THE WAIT, AND WHY THERE IS NO BAR IN IT.
+
+            This is the half hour that broke people. The deposit is on the chain
+            and this panel rendered nothing for it, because ChannelExit is gated
+            on `binding && !binding.closed` and the binding cannot exist until
+            the core has already agreed the open is settled.
+
+            DIVERGENCE FROM design/Waiting.dc.html, on purpose: that artboard
+            draws six filling pips and "Opened at block 777933". The open height
+            is a hardcoded demo value there and has no source in the overview.
+            `AgentChannelSetupReview` carries no open height, no confirmed
+            height and no transaction hash, and `l2_binding` is null throughout
+            this window, so a 0..6 count here would be invented. The words are
+            kept, the count is not drawn until the data supports it, and the
+            real bar lives on the binding row below where the numbers are true.
+          */}
+          {awaitingChain ? (
+            <div className="agent-subpanel">
+              <h3>Why there is no exit button yet</h3>
+              <p>
+                Your deposit is on the chain and the channel is not settled yet.
+                The Hub cannot sign a way out of a channel the chain has not
+                settled, so this wallet does not offer one. The exit appears here
+                on its own once the open has six confirmations, which is about
+                half an hour on mainnet. Leave this window open.
+              </p>
+              {progress.kind === "chain_height_unknown" ? (
+                <p className="agent-wait-count">
+                  <span>
+                    Chain height <strong>not known</strong>
+                  </span>
+                  <span>This wallet cannot reach a node right now.</span>
+                </p>
+              ) : (
+                <>
+                  <p className="agent-wait-count">
+                    <span>
+                      Chain is at <strong>{progress.currentHeight}</strong>
+                    </span>
+                    <span>
+                      Open block <strong>not known yet</strong>
+                    </span>
+                  </p>
+                  <p>
+                    The block your open landed in is not known to this wallet yet,
+                    so there is no count to show rather than a made up one.
+                  </p>
+                </>
+              )}
+            </div>
+          ) : null}
           {setup.fee_estimate_degraded ? (
             <p className="agent-warning" role="status">
               {setup.fee_estimate_degraded}
@@ -1502,11 +1655,14 @@ export function AgentFastPayChannelPanel({
       )}
 
       {binding && (
-        <div className="agent-stats-row">
-          <span>Channel <strong>{binding.channel_id}</strong></span>
-          <span>Deposit <strong>{formatUnits(binding.deposit_units)}</strong></span>
-          <span>Status <strong>{active ? "ready" : "closed"}</strong></span>
-        </div>
+        <>
+          <div className="agent-stats-row">
+            <span>Channel <strong>{binding.channel_id}</strong></span>
+            <span>Deposit <strong>{formatUnits(binding.deposit_units)}</strong></span>
+            <span>Status <strong>{active ? "ready" : "closed"}</strong></span>
+          </div>
+          <ChannelOpenConfirmations progress={progress} />
+        </>
       )}
 
       {active && (
@@ -1585,6 +1741,62 @@ export function AgentFastPayChannelPanel({
         </>
       )}
     </section>
+  );
+}
+
+/**
+ * How far the chain has come against the count that actually gates the exit.
+ *
+ * Six confirmations, counted inclusively, the open block being the first. That
+ * is the same rule three times over in the core: the constant at
+ * service/l2.rs:50 is only ever used as `REQUIRED_OPEN_CONFIRMATIONS - 1`, at
+ * l2.rs:1058 where a binding is made and l2.rs:1108 where it is re-validated on
+ * every load, and the bare `open_height.saturating_add(5)` at
+ * channel_setup.rs:634 is that same arithmetic with the subtraction already
+ * done. The voucher the exit button takes cannot be issued without an active
+ * binding (channel_voucher.rs:125), and the only producer of one sits past that
+ * check. So the bar fills at open_height + 5 and nowhere else.
+ *
+ * It draws nothing at all when the chain height is not known. `overview.node`
+ * is null whenever the probe returned no snapshot, and a bar that treats an
+ * absent height as zero would report a channel sliding backwards.
+ */
+function ChannelOpenConfirmations({ progress }: { progress: ChannelOpenProgress }) {
+  if (progress.kind !== "counting") {
+    return (
+      <p className="agent-wait-count">
+        <span>
+          Confirmations <strong>not known</strong>
+        </span>
+        <span>This wallet cannot reach a node right now.</span>
+      </p>
+    );
+  }
+  return (
+    <div className="agent-wait">
+      <p className="agent-wait-count">
+        <span>
+          <strong>
+            {progress.confirmations} of {progress.required}
+          </strong>{" "}
+          confirmations
+        </span>
+        <span>
+          Chain is at <strong>{progress.currentHeight}</strong>, opened at{" "}
+          <strong>{progress.openHeight}</strong>
+        </span>
+      </p>
+      <div
+        className="agent-wait-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={progress.required}
+        aria-valuenow={progress.confirmations}
+        aria-label="Confirmations on the channel open"
+      >
+        <div className="agent-wait-fill" style={{ width: `${progress.percent}%` }} />
+      </div>
+    </div>
   );
 }
 

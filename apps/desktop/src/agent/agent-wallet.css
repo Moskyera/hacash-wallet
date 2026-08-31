@@ -957,3 +957,97 @@
   align-self: start;
   overflow-y: auto;
 }
+
+/*
+ * THE HALF HOUR THE WALLET SHOWED NOTHING.
+ *
+ * An owner opened the first mainnet Fast Pay channel on this rail. Between the
+ * confirm and the settle their money was on the chain and this screen drew
+ * nothing for it, because the exit panel is gated on a binding that provably
+ * cannot exist until the wait is over. An ordinary wait and a dead app looked
+ * identical.
+ *
+ * Every class below is rendered by AgentFastPayChannelPanel. They are written
+ * here rather than borrowed from dashboard.css, which the agent screen does not
+ * import: .node-sync-* only looks reusable, and it is built on custom
+ * properties this sheet does not define.
+ */
+
+/*
+ * Quieter than .agent-warning on purpose. Payments being off is a state the
+ * owner chose, not a refusal, and it must not read as one; the amber is spent
+ * on the three words that name the state.
+ */
+.agent-readiness {
+  padding: 11px 14px;
+  border: 1px solid #2d210f;
+  border-radius: 10px;
+  background: #0b0a08;
+  color: #ccc;
+  line-height: 1.55;
+}
+
+.agent-readiness strong {
+  color: #ffad24;
+}
+
+.agent-wait {
+  display: grid;
+  gap: 8px;
+}
+
+/*
+ * tabular-nums is load bearing, not decoration. A block height and a mm:ss
+ * countdown both change on a timer, and proportional digits make the whole line
+ * shuffle sideways every tick, which reads as the screen redrawing itself
+ * rather than as a number moving.
+ */
+.agent-wait-count,
+.agent-countdown {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: #aaa;
+  line-height: 1.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-wait-count strong,
+.agent-countdown strong {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-wait-track {
+  height: 8px;
+  border: 1px solid #2d210f;
+  border-radius: 999px;
+  background: #150f06;
+  overflow: hidden;
+}
+
+/*
+ * Determinate only. There is no indeterminate variant of this track and there
+ * must never be one: a bar that moves while nothing is known is the exact
+ * screen this work exists to remove. The only motion is a transition on a width
+ * that a real confirmation count changed, so movement always means a block
+ * arrived.
+ */
+.agent-wait-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #ffad24;
+  transition: width 240ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * The fill still lands on the correct width. Only the slide is dropped, so
+   * somebody who asked for no motion loses the animation and not the number.
+   */
+  .agent-wait-fill {
+    transition: none;
+  }
+}
