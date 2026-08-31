@@ -428,8 +428,20 @@ jobs:
           body: |
             ### HPAY Desktop ${{ github.ref_name }}
 
-            The AI Agent Wallet testnet pilot is enabled on Windows only and charges no HPAY wallet fee.
-            Linux includes the complete Personal Wallet while the Agent pilot remains fail-closed.
+            The AI Agent Wallet ships as a BOUNDED MAINNET pilot on Windows AND Linux.
+            It spends real HAC. Both platforms are built with
+            `--features agent-wallet-bounded-mainnet-pilot`; neither is testnet-only
+            and neither is fail-closed.
+
+            It is off until you turn it on, every payment needs your passphrase and
+            an explicit press in the wallet window, and no payment is ever made
+            without one. The bound is per channel: at most 10 HAC is at risk in any
+            one channel. A Fast Pay channel can only be closed if the Hub co-signs -
+            the chain requires both signatures and this rail has no unilateral exit -
+            so if the Hub stops answering, what is in that channel stays locked.
+            Do not put in more than you can afford to lose.
+
+            The wallet charges no HPAY fee; you pay only the network fee.
 
             Windows x64:
             - Authenticode-signed NSIS setup executable
@@ -454,8 +466,20 @@ jobs:
           body: |
             ### HPAY Desktop ${{ github.ref_name }}
 
-            The AI Agent Wallet testnet pilot is enabled on Windows only and charges no HPAY wallet fee.
-            Linux includes the complete Personal Wallet while the Agent pilot remains fail-closed.
+            The AI Agent Wallet ships as a BOUNDED MAINNET pilot on Windows AND Linux.
+            It spends real HAC. Both platforms are built with
+            `--features agent-wallet-bounded-mainnet-pilot`; neither is testnet-only
+            and neither is fail-closed.
+
+            It is off until you turn it on, every payment needs your passphrase and
+            an explicit press in the wallet window, and no payment is ever made
+            without one. The bound is per channel: at most 10 HAC is at risk in any
+            one channel. A Fast Pay channel can only be closed if the Hub co-signs -
+            the chain requires both signatures and this rail has no unilateral exit -
+            so if the Hub stops answering, what is in that channel stays locked.
+            Do not put in more than you can afford to lose.
+
+            The wallet charges no HPAY fee; you pay only the network fee.
 
             > **Windows signing notice:** The Windows files in this release are not
             > Authenticode signed. Windows may show an Unknown publisher or SmartScreen

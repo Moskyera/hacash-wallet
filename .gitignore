@@ -42,3 +42,14 @@ test-*.txt
 # .dc.html artboards beside it. The artboards are the source and are tracked;
 # this is build output and does not belong in the history.
 design/fast-pay-channel-flow.html
+
+# Local build and download scratch, never part of the source. 2,854 files and
+# ~210 MB sat here untracked with no rule covering them, which is one `git add
+# -A` away from permanent in a public repository - and 21 of the build logs
+# carry the owner's home path. `*.log` and `*.log.err` were listed; the bare
+# `*.err` the logs actually use was not.
+#
+# This ignores UNTRACKED files only. Everything already tracked under releases/
+# stays tracked, and its pending deletions stay exactly as they are.
+releases/
+*.err
