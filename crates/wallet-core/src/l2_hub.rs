@@ -103,11 +103,95 @@ struct ConfirmFastPayRequest<'a> {
     bill_hex: &'a str,
 }
 
+pub const OFFICIAL_CHANNELPAY_PRODUCTION_PROFILE: &str = "official_channelpay_production";
+
+/// Local wallet capability, not a value supplied by the remote provider.
+///
+/// The checked-in codec fixtures prove selected wire compatibility only. The
+/// authenticated Official ChannelPay WebSocket session, reconnect lifecycle and
+/// testnet-proven dispute broadcaster are not implemented yet. A hub must never
+/// be able to turn mainnet Fast Pay on by returning optimistic health booleans.
+const OFFICIAL_CHANNELPAY_MAINNET_TRANSPORT_IMPLEMENTED: bool = false;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HubMainnetReadinessBlocker {
+    WalletTransportUnavailable,
+    HealthCheckFailed,
+    ApiVersionMismatch,
+    DeploymentProfileMismatch,
+    HubAddressMissing,
+    HubAddressInvalid,
+    SettlementUnavailable,
+    CrossChannelUnavailable,
+    NonZeroOrInvalidHubFee,
+    ExternalRollbackAnchorUnavailable,
+    L1DisputePathUnavailable,
+    OfficialChannelpayUnavailable,
+    ProviderNotProductionReady,
+}
+
+/// Classifies every independent mainnet Fast Pay gate.
+///
+/// Remote health is evidence about a provider, never proof that this wallet
+/// contains the corresponding authenticated transport or recovery machinery.
+/// The first blocker is therefore controlled only by compiled wallet code.
+pub fn hub_mainnet_readiness_blockers(health: &HubHealth) -> Vec<HubMainnetReadinessBlocker> {
+    classify_hub_mainnet_readiness(health, OFFICIAL_CHANNELPAY_MAINNET_TRANSPORT_IMPLEMENTED)
+}
+
+fn classify_hub_mainnet_readiness(
+    health: &HubHealth,
+    wallet_transport_implemented: bool,
+) -> Vec<HubMainnetReadinessBlocker> {
+    let mut blockers = Vec::new();
+    if !wallet_transport_implemented {
+        blockers.push(HubMainnetReadinessBlocker::WalletTransportUnavailable);
+    }
+    if !health.ok {
+        blockers.push(HubMainnetReadinessBlocker::HealthCheckFailed);
+    }
+    if health.version != 4 {
+        blockers.push(HubMainnetReadinessBlocker::ApiVersionMismatch);
+    }
+    if health.deployment_profile.as_deref() != Some(OFFICIAL_CHANNELPAY_PRODUCTION_PROFILE) {
+        blockers.push(HubMainnetReadinessBlocker::DeploymentProfileMismatch);
+    }
+    match health.hub_address.as_deref() {
+        None | Some("") => blockers.push(HubMainnetReadinessBlocker::HubAddressMissing),
+        Some(address) => {
+            match crate::address::require_address_for_network(address, crate::address::MAINNET) {
+                Ok(parsed) if parsed.fast_pay_eligible => {}
+                _ => blockers.push(HubMainnetReadinessBlocker::HubAddressInvalid),
+            }
+        }
+    }
+    if !health.settlement_ready {
+        blockers.push(HubMainnetReadinessBlocker::SettlementUnavailable);
+    }
+    if !health.cross_channel_ready {
+        blockers.push(HubMainnetReadinessBlocker::CrossChannelUnavailable);
+    }
+    if health.hub_fee_mei.is_none() || !hub_fee_is_zero(health) {
+        blockers.push(HubMainnetReadinessBlocker::NonZeroOrInvalidHubFee);
+    }
+    if !health.external_rollback_anchor_ready {
+        blockers.push(HubMainnetReadinessBlocker::ExternalRollbackAnchorUnavailable);
+    }
+    if !health.l1_dispute_path_ready {
+        blockers.push(HubMainnetReadinessBlocker::L1DisputePathUnavailable);
+    }
+    if !health.official_channelpay_ready {
+        blockers.push(HubMainnetReadinessBlocker::OfficialChannelpayUnavailable);
+    }
+    if !health.production_mainnet_ready {
+        blockers.push(HubMainnetReadinessBlocker::ProviderNotProductionReady);
+    }
+    blockers
+}
+
 pub fn hub_mainnet_safety_ready(health: &HubHealth) -> bool {
-    health.production_mainnet_ready
-        && health.external_rollback_anchor_ready
-        && health.l1_dispute_path_ready
-        && health.official_channelpay_ready
+    hub_mainnet_readiness_blockers(health).is_empty()
 }
 
 pub fn hub_fee_is_zero(health: &HubHealth) -> bool {
@@ -539,13 +623,12 @@ mod transport_tests {
         assert!(!hub_fee_is_zero(&health));
     }
 
-    #[test]
-    fn mainnet_readiness_requires_every_independent_safety_gate() {
-        let mut health = HubHealth {
+    fn production_health() -> HubHealth {
+        HubHealth {
             ok: true,
             version: 4,
-            name: None,
-            hub_address: None,
+            name: Some("Pinned CSP".into()),
+            hub_address: Some("1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW".into()),
             hub_fee_mei: Some(serde_json::json!("0")),
             settlement_ready: true,
             cross_channel_ready: true,
@@ -553,11 +636,81 @@ mod transport_tests {
             l1_dispute_path_ready: true,
             official_channelpay_ready: true,
             production_mainnet_ready: true,
-            deployment_profile: Some("official_channelpay_production".into()),
-        };
-        assert!(hub_mainnet_safety_ready(&health));
-        health.external_rollback_anchor_ready = false;
+            deployment_profile: Some(OFFICIAL_CHANNELPAY_PRODUCTION_PROFILE.into()),
+        }
+    }
+
+    #[test]
+    fn remote_health_cannot_enable_an_unimplemented_local_transport() {
+        let health = production_health();
+        assert_eq!(
+            hub_mainnet_readiness_blockers(&health),
+            vec![HubMainnetReadinessBlocker::WalletTransportUnavailable]
+        );
         assert!(!hub_mainnet_safety_ready(&health));
+    }
+
+    #[test]
+    fn remote_readiness_requires_every_independent_provider_gate() {
+        let baseline = production_health();
+        assert!(classify_hub_mainnet_readiness(&baseline, true).is_empty());
+
+        let mut cases = Vec::new();
+        let mut health = baseline.clone();
+        health.ok = false;
+        cases.push((HubMainnetReadinessBlocker::HealthCheckFailed, health));
+        let mut health = baseline.clone();
+        health.version = 3;
+        cases.push((HubMainnetReadinessBlocker::ApiVersionMismatch, health));
+        let mut health = baseline.clone();
+        health.deployment_profile = Some("legacy_wallet_hub_v4_development".into());
+        cases.push((
+            HubMainnetReadinessBlocker::DeploymentProfileMismatch,
+            health,
+        ));
+        let mut health = baseline.clone();
+        health.hub_address = None;
+        cases.push((HubMainnetReadinessBlocker::HubAddressMissing, health));
+        let mut health = baseline.clone();
+        health.hub_address = Some("not-an-address".into());
+        cases.push((HubMainnetReadinessBlocker::HubAddressInvalid, health));
+        let mut health = baseline.clone();
+        health.settlement_ready = false;
+        cases.push((HubMainnetReadinessBlocker::SettlementUnavailable, health));
+        let mut health = baseline.clone();
+        health.cross_channel_ready = false;
+        cases.push((HubMainnetReadinessBlocker::CrossChannelUnavailable, health));
+        let mut health = baseline.clone();
+        health.hub_fee_mei = None;
+        cases.push((HubMainnetReadinessBlocker::NonZeroOrInvalidHubFee, health));
+        let mut health = baseline.clone();
+        health.external_rollback_anchor_ready = false;
+        cases.push((
+            HubMainnetReadinessBlocker::ExternalRollbackAnchorUnavailable,
+            health,
+        ));
+        let mut health = baseline.clone();
+        health.l1_dispute_path_ready = false;
+        cases.push((HubMainnetReadinessBlocker::L1DisputePathUnavailable, health));
+        let mut health = baseline.clone();
+        health.official_channelpay_ready = false;
+        cases.push((
+            HubMainnetReadinessBlocker::OfficialChannelpayUnavailable,
+            health,
+        ));
+        let mut health = baseline;
+        health.production_mainnet_ready = false;
+        cases.push((
+            HubMainnetReadinessBlocker::ProviderNotProductionReady,
+            health,
+        ));
+
+        for (expected, health) in cases {
+            assert!(
+                classify_hub_mainnet_readiness(&health, true).contains(&expected),
+                "missing blocker {expected:?}"
+            );
+        }
     }
 
     #[tokio::test]

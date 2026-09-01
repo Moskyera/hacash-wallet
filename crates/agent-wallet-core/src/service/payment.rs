@@ -18,6 +18,16 @@ use super::{
     MAX_APPROVAL_SECONDS, MAX_OPERATIONS_PER_WALLET, MAX_REQUESTS_PER_AGENT_PER_MINUTE,
 };
 
+fn requires_node_reconciliation(status: OperationStatus) -> bool {
+    if cfg!(feature = "agent-wallet-testnet-pilot") {
+        status == OperationStatus::ReconciliationRequired
+    } else {
+        matches!(
+            status,
+            OperationStatus::BroadcastSubmitted | OperationStatus::BroadcastUncertain
+        )
+    }
+}
 impl AgentWalletManager {
     pub(super) async fn create_payment_intent(
         &mut self,
@@ -815,6 +825,68 @@ impl AgentWalletManager {
             .get(operation_id.as_str())
             .ok_or(AgentWalletError::OperationNotFound)?
             .view())
+    }
+
+    /// Returns the one operation whose network outcome still needs an exact
+    /// hash lookup. More than one is an invariant violation and fails closed.
+    pub fn reconciliation_required_operation(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Option<PaymentOperationView>> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let mut matches = state
+            .operations
+            .values()
+            .filter(|operation| requires_node_reconciliation(operation.status()));
+        let Some(operation) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Err(AgentWalletError::RecoveryRequired);
+        }
+        Ok(Some(operation.view()))
+    }
+
+    /// Reconciles an uncertain broadcast against the wallet's pinned,
+    /// capability-verified node. A mempool result is deliberately insufficient:
+    /// durable state advances only when the exact local hash is block-backed.
+    pub async fn reconcile_broadcast_from_node(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        operation_id: &OperationId,
+        now: u64,
+    ) -> AgentWalletResult<PaymentOperationView> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        let operation = state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?;
+        if !requires_node_reconciliation(operation.status()) {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        let tx_hash = operation
+            .view()
+            .tx_hash
+            .ok_or(AgentWalletError::RecoveryRequired)?;
+        let node_url = state.node_url.clone();
+        let network_mode = state.network_mode.clone();
+        let block_one_fingerprint = state.block_one_fingerprint.clone();
+        let node = verified_agent_node(&node_url, &network_mode, &block_one_fingerprint).await?;
+        let response = node
+            .query_transaction(&tx_hash)
+            .await
+            .map_err(|_| AgentWalletError::BroadcastNotConfirmed)?;
+        if !response.is_confirmed() {
+            return Err(AgentWalletError::BroadcastNotConfirmed);
+        }
+        self.confirm_broadcast(wallet_id, operation_id, &tx_hash, now)
     }
 
     /// Finalizes accounting only after an external reconciliation source has

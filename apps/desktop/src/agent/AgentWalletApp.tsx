@@ -13,6 +13,7 @@ import {
   type AgentConnectorStatus,
   type AgentPermission,
   type AgentRuntimeStatus,
+  type AgentMainnetReadinessBlocker,
   type AgentWalletOverview,
   type AgentWalletRegistryEntry,
   type PairingActivation,
@@ -578,8 +579,9 @@ function CreateAgentWallet({
       {/* A before-the-fact warning. It stays visible; only the background list
           moved behind a disclosure. */}
       <div className="agent-warning">
-        Mainnet creation, funding and payments remain blocked until Agent Wallet
-        backup and recovery has been independently verified.
+        Mainnet creation, funding and payments remain blocked until the authenticated Hacash L2
+        protocol transport, dispute recovery and external rollback protection
+        have been implemented, tested on a real compatible provider and audited.
       </div>
       <details className="agent-advanced-details">
         <summary>What this wallet can and cannot do</summary>
@@ -598,7 +600,11 @@ function CreateAgentWallet({
             yet. Requesting, reviewing and rejecting all work.
           </li>
           <li>Agents never receive a private key or raw signing access.</li>
-          <li>Agent L2 Fast Pay is not enabled in this release.</li>
+          <li>
+            Agent Fast Pay is intentionally disabled. A provider cannot enable
+            it remotely; HPAY must first contain and verify its own mainnet
+            transport and recovery path.
+          </li>
           <li>
             Network kind: {HPAY_LOCAL_PILOT.networkKind}. Profile:{" "}
             {HPAY_LOCAL_PILOT.profileId}. This private chain is not the official
@@ -611,11 +617,10 @@ function CreateAgentWallet({
           The only place this release stated it was inside Local Pilot health,
           which an owner reaches long after creating the wallet. */}
       <div className="agent-warning">
-        This release has no Agent Wallet backup and no recovery path. This
-        passphrase is the only thing that opens this wallet. If it is lost, the
-        wallet and anything ever sent to its address are lost for good, and
-        nothing on this desktop or on a paired phone can recover them. Write it
-        down somewhere you will still have in a year before continuing.
+        HPAY cannot recover this passphrase. Write it down before continuing,
+        then create an encrypted Agent Wallet backup under Security before you
+        fund the wallet. Restoring that backup also restores its spending state,
+        so read the restore warning every time.
       </div>
       <label>
         Agent Wallet passphrase
@@ -1080,6 +1085,22 @@ function OverviewAlerts({
   );
 }
 
+const MAINNET_READINESS_LABELS: Record<AgentMainnetReadinessBlocker, string> = {
+  mainnet_account_creation_disabled: "Mainnet Agent Wallet creation is disabled.",
+  hacash_l2_protocol_transport_unavailable:
+    "The authenticated hacash-agent-pay/1 transport is read-only; payment and signing are not enabled.",
+  authenticated_provider_session_unavailable:
+    "Provider identity and replay-protected sessions are not implemented.",
+  external_rollback_anchor_unavailable:
+    "A production external rollback anchor is not available.",
+  l1_dispute_recovery_unverified:
+    "L1 dispute monitoring and recovery are not proven on testnet.",
+  real_provider_interoperability_unverified:
+    "A complete reconnect test with a real compatible provider is still required.",
+  independent_security_audit_required:
+    "An independent security audit is still required.",
+};
+
 /**
  * The Local Pilot health rows.
  *
@@ -1125,6 +1146,26 @@ function NodeHealthPanel({
               check failed was discarded and the strip guessed at it instead. */}
           <div className="wide"><dt>Last node check</dt><dd>{overview.node_error ?? "No failure reported"}</dd></div>
         </dl>
+      </details>
+      <details className="agent-advanced-details">
+        <summary>
+          Mainnet readiness: {overview.mainnet_readiness.ready
+            ? "ready"
+            : `${overview.mainnet_readiness.blockers.length} safety gates remaining`}
+        </summary>
+        {overview.mainnet_readiness.ready ? (
+          <Status ok text="Every compiled mainnet safety gate is satisfied" />
+        ) : (
+          <ul>
+            {overview.mainnet_readiness.blockers.map((blocker) => (
+              <li key={blocker}>{MAINNET_READINESS_LABELS[blocker]}</li>
+            ))}
+          </ul>
+        )}
+        <p>
+          Agent Wallet fee: 0 HAC. Future provider or routing charges must be
+          shown separately and included in the owner's exact approval.
+        </p>
       </details>
       {!overview.mainnet_spending_ready && (
         <div className="agent-warning">

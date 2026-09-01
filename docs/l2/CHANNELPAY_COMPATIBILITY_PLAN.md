@@ -3,6 +3,39 @@
 Status: protocol research and local implementation audit complete. No official
 ChannelPay interoperability claim is made by this document.
 
+## Architecture decision: `hacash-l2-protocol`
+
+HPAY's target network transport is the standalone `hacash-l2-protocol` repository, using its human
+`/v1/wallet/*` API and its agent `hacash-agent-pay/1` (`/v1/agent/v1/*`) API.
+The Official ChannelPay WebSocket material below remains compatibility research;
+it is not the selected HPAY transport and its fixtures must not be presented as
+an implemented network client.
+
+One protocol does not mean one wallet context:
+
+- Personal Fast Pay owns only Personal keys, channel bindings, journal,
+  receipts, provider identity pins, and recovery state.
+- Agent Fast Pay owns only the exact Agent Wallet address and the per-wallet
+  `agent/wallets/<AgentWalletId>/l2/` namespace.
+- The Agent API has no Personal selector, no generic signing operation, and no
+  access to Personal settings or L2 files.
+- A model proposes a payment. The deterministic Agent Wallet policy and signing
+  service verifies the exact recipient, amount, asset, provider/routing fee,
+  expiry, nonce, route commitment, and idempotency key.
+- HPAY's Agent Wallet fee remains exactly `0 HAC`. Any CSP or routing fee is a
+  separate quoted value and must be included in the owner's exact approval.
+
+The first client slice is intentionally read-only: it validates HTTPS/root URL,
+no redirects, bounded manifest and identity responses, exact
+`hacash-agent-pay/1`, same manifest origin, required endpoints, the exact
+SHA3-256/secp256k1/97-byte signing contract, and honest
+`hub_coordinated_not_l1` finality. It exposes no pay or sign method. Provider
+identity comes only from a fresh, verified protocol-2.x signed hello and an
+owner-confirmed fingerprint stored in that Agent Wallet's authenticated state.
+Silent first-use trust and silent identity rotation are both forbidden.
+Unilateral L1 exit, real-provider recovery testing, explicit key-rotation UX,
+and an independent audit remain mainnet gates.
+
 ## Non-negotiable compatibility rules
 
 1. The existing Personal Wallet remains unchanged outside its Fast Pay transport
@@ -334,4 +367,6 @@ closed:
 
 Until then, existing Wallet Hub API v4 remains available only under its truthful
 legacy/development compatibility label, with all current safety extensions
-preserved.
+preserved. Remote health flags cannot activate mainnet Fast Pay: HPAY also
+requires its own compiled authenticated `hacash-agent-pay/1` payment and signing
+transport, which is currently unavailable and therefore fails closed.

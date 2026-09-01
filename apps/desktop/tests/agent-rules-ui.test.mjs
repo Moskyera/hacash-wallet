@@ -113,7 +113,7 @@ test("expired mobile pairing offers cannot remain actionable", () => {
 });
 
 
-test("new Agent Wallet creation remains testnet-only until backup exists", () => {
+test("new Agent Wallet creation remains testnet-only until every mainnet safety gate is verified", () => {
   assert.doesNotMatch(agentAppSource, /<option value="mainnet"/);
   assert.match(agentAppSource, /networkMode: "testnet"/);
   assert.match(agentAppSource, /Mainnet creation, funding and payments remain blocked/);

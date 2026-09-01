@@ -121,7 +121,7 @@ describe("desktop pairing waiting state", () => {
       ),
       "utf8",
     );
-    expect(mobileStatus).toContain(
+    expect(mobileStatus.replace(/\r\n/g, "\n")).toContain(
       `COMPANION_SEND_CONFIRMATION_ACTION =\n  "${companionPhoneConfirmationAction}"`,
     );
     // Both phone screens that can send the confirmation use that one constant,

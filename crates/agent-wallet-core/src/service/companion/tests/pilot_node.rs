@@ -56,6 +56,7 @@ pub(super) struct MockPilotNode {
     /// route into `BroadcastUncertain`: the bytes went out, the acknowledgement
     /// cannot be tied to them.
     pub(super) submit_hash_mismatch: Arc<AtomicBool>,
+    pub(super) transaction_query: Arc<RwLock<Value>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -68,6 +69,10 @@ impl Drop for MockPilotNode {
 impl MockPilotNode {
     pub(super) async fn set_capabilities(&self, capabilities: Value) {
         *self.capabilities.write().await = capabilities;
+    }
+
+    pub(super) async fn set_transaction_query(&self, response: Value) {
+        *self.transaction_query.write().await = response;
     }
 }
 
@@ -152,9 +157,14 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
     let capabilities = Arc::new(RwLock::new(official_capabilities()));
     let submit_count = Arc::new(AtomicUsize::new(0));
     let submit_hash_mismatch = Arc::new(AtomicBool::new(false));
+    let transaction_query = Arc::new(RwLock::new(json!({
+        "ret": 1,
+        "err": "transaction not found"
+    })));
     let capability_state = capabilities.clone();
     let submit_state = submit_count.clone();
     let mismatch_state = submit_hash_mismatch.clone();
+    let transaction_query_state = transaction_query.clone();
     let app = Router::new()
         .route(
             "/query/block/intro",
@@ -171,6 +181,13 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
             get(move || {
                 let capability_state = capability_state.clone();
                 async move { Json(capability_state.read().await.clone()) }
+            }),
+        )
+        .route(
+            "/query/transaction",
+            get(move || {
+                let transaction_query_state = transaction_query_state.clone();
+                async move { Json(transaction_query_state.read().await.clone()) }
             }),
         )
         .route(
@@ -219,6 +236,7 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
         capabilities,
         submit_count,
         submit_hash_mismatch,
+        transaction_query,
         task,
     }
 }

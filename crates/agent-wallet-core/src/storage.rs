@@ -43,6 +43,7 @@ const WALLET_DIRECTORY_FILES: [&str; 5] = [
     ".emergency-stop-v1",
 ];
 const WALLET_DIRECTORY_SUBDIRECTORIES: [&str; 2] = ["sessions", "l2"];
+const L2_DIRECTORY_SUBDIRECTORIES: [&str; 2] = ["receipts", "channels"];
 const MAX_REGISTRY_BYTES: u64 = 1024 * 1024;
 const MAX_ENCRYPTED_STATE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PLAINTEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -153,9 +154,44 @@ impl AgentWalletPaths {
         self.wallet_root.join("l2")
     }
 
+    /// Agent-owned L2 namespace. It cannot select or derive a Personal Wallet
+    /// path because it is constructed only from this Agent Wallet root.
+    pub fn l2_paths(&self) -> AgentL2Paths {
+        AgentL2Paths {
+            root: self.l2_dir(),
+        }
+    }
+
     pub fn encrypted_state_path(&self, state_name: &str) -> AgentWalletResult<PathBuf> {
         validate_state_name(state_name)?;
         Ok(self.wallet_root.join(format!("{state_name}.enc.json")))
+    }
+}
+
+/// Paths reserved exclusively for one Agent Wallet's Hacash L2 client state.
+///
+/// Personal Fast Pay settings, channel journals, receipts, and credentials are
+/// never accepted by this type and cannot be reached through its API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentL2Paths {
+    root: PathBuf,
+}
+
+impl AgentL2Paths {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join("client.json")
+    }
+    pub fn journal_path(&self) -> PathBuf {
+        self.root.join("journal.jsonl")
+    }
+    pub fn receipts_dir(&self) -> PathBuf {
+        self.root.join("receipts")
+    }
+    pub fn channels_dir(&self) -> PathBuf {
+        self.root.join("channels")
     }
 }
 
@@ -269,10 +305,13 @@ impl AgentStorage {
         wallet_id: &AgentWalletId,
     ) -> AgentWalletResult<AgentWalletPaths> {
         let paths = self.paths(wallet_id)?;
+        let l2 = paths.l2_paths();
         let directories = [
             paths.wallet_root().to_path_buf(),
             paths.sessions_dir(),
             paths.l2_dir(),
+            l2.receipts_dir(),
+            l2.channels_dir(),
         ];
         for directory in &directories {
             reject_symlink(directory)?;
@@ -416,7 +455,7 @@ impl AgentStorage {
             .canonicalize()
             .map_err(|_| AgentWalletError::PersistenceFailed)?;
         ensure_path_is_within(&canonical_wallets, &wallet_root)?;
-        if prune_wallet_directory(&wallet_root, true)? {
+        if prune_wallet_directory(&wallet_root, WalletDirectoryKind::Root)? {
             let _ = fs::remove_dir(&wallet_root);
             // And the shared parent, if this was the only thing in it. Both
             // removals only ever succeed on an empty directory, and the store
@@ -725,7 +764,38 @@ struct AgentRestoreJournal {
 /// A symlink, a foreign file or a foreign subdirectory is never followed and
 /// never deleted: it is simply left behind, and its presence is reported by the
 /// `false` return so the wallet directory itself survives.
-fn prune_wallet_directory(directory: &Path, is_wallet_root: bool) -> AgentWalletResult<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletDirectoryKind {
+    Root,
+    Sessions,
+    L2,
+    L2Receipts,
+    L2Channels,
+}
+
+impl WalletDirectoryKind {
+    fn known_child(self, name: &str) -> Option<Self> {
+        match (self, name) {
+            (Self::Root, name) if WALLET_DIRECTORY_SUBDIRECTORIES.contains(&name) => {
+                Some(if name == "sessions" {
+                    Self::Sessions
+                } else {
+                    Self::L2
+                })
+            }
+            (Self::L2, name) if L2_DIRECTORY_SUBDIRECTORIES.contains(&name) => {
+                Some(if name == "receipts" {
+                    Self::L2Receipts
+                } else {
+                    Self::L2Channels
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+fn prune_wallet_directory(directory: &Path, kind: WalletDirectoryKind) -> AgentWalletResult<bool> {
     reject_symlink(directory)?;
     let entries = fs::read_dir(directory).map_err(|_| AgentWalletError::PersistenceFailed)?;
     let mut emptied = true;
@@ -743,9 +813,8 @@ fn prune_wallet_directory(directory: &Path, is_wallet_root: bool) -> AgentWallet
             continue;
         };
         if metadata.is_dir() {
-            if is_wallet_root
-                && WALLET_DIRECTORY_SUBDIRECTORIES.contains(&name)
-                && prune_wallet_directory(&path, false)?
+            if let Some(child_kind) = kind.known_child(name)
+                && prune_wallet_directory(&path, child_kind)?
                 && fs::remove_dir(&path).is_ok()
             {
                 continue;
@@ -753,7 +822,7 @@ fn prune_wallet_directory(directory: &Path, is_wallet_root: bool) -> AgentWallet
             emptied = false;
             continue;
         }
-        if !is_wallet_directory_file(name, is_wallet_root) || fs::remove_file(&path).is_err() {
+        if !is_wallet_directory_file(name, kind) || fs::remove_file(&path).is_err() {
             emptied = false;
         }
     }
@@ -761,14 +830,13 @@ fn prune_wallet_directory(directory: &Path, is_wallet_root: bool) -> AgentWallet
 }
 
 /// True when this crate is the only thing that could have written this name.
-fn is_wallet_directory_file(name: &str, is_wallet_root: bool) -> bool {
+fn is_wallet_directory_file(name: &str, kind: WalletDirectoryKind) -> bool {
     let is_target = |candidate: &str| {
         candidate == ROOT_MARKER_FILE
-            || (is_wallet_root && WALLET_DIRECTORY_FILES.contains(&candidate))
+            || (kind == WalletDirectoryKind::Root && WALLET_DIRECTORY_FILES.contains(&candidate))
     };
     is_target(name) || is_secure_write_temporary(name, is_target)
 }
-
 /// True for `secure_write`'s own half-written temporary of one of those names.
 ///
 /// `secure_write` writes `.<target>.<uuid simple>.tmp` next to its target and
@@ -969,6 +1037,20 @@ mod tests {
         assert!(paths.wallet_root().starts_with(temp.path()));
         assert!(paths.vault_path().starts_with(paths.wallet_root()));
         assert!(paths.l2_dir().starts_with(paths.wallet_root()));
+        let l2 = paths.l2_paths();
+        for scoped in [
+            l2.config_path(),
+            l2.journal_path(),
+            l2.receipts_dir(),
+            l2.channels_dir(),
+        ] {
+            assert!(scoped.starts_with(l2.root()));
+            assert!(scoped.starts_with(paths.wallet_root()));
+        }
+
+        let other = AgentWalletPaths::new(temp.path(), &AgentWalletId::new()).unwrap();
+        assert_ne!(l2.root(), other.l2_paths().root());
+        assert!(!l2.root().starts_with(temp.path().join("personal")));
 
         // The current opaque-ID serde representation cannot itself validate.
         // Storage revalidates it before the value can become a path component.

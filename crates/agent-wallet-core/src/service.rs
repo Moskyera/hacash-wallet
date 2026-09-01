@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+use hacash_wallet_core::hacash_l2_protocol::{
+    HacashL2ProviderIdentity, provider_identity_matches, validate_provider_identity,
+};
 use hacash_wallet_core::settings::validate_node_url;
 use hpay_companion_protocol::{
     DesktopChallengeSequence, DeviceId, DevicePublicRecord, SignedRollbackAnchor,
@@ -26,7 +29,7 @@ use crate::operation::{
 use crate::pairing_outbox::PairingCompletionOutboxEntry;
 use crate::policy::{AgentPermission, AgentPolicy, AgentRecord, AgentStatus};
 use crate::signer::AgentTransactionSigner;
-use crate::storage::{AgentStorage, AgentWalletRegistryEntry};
+use crate::storage::{AgentL2Paths, AgentStorage, AgentWalletRegistryEntry};
 use crate::types::{AgentId, AgentWalletId, OperationId, WalletScope};
 use crate::vault::{AgentEncryptedVault, derive_domain_key};
 mod admin;
@@ -35,6 +38,7 @@ mod companion;
 mod connector;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod diagnostics;
+mod mainnet;
 mod payment;
 mod state;
 
@@ -60,6 +64,7 @@ pub use companion::{
 };
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 pub use companion::{StrandedWitnessRecovery, WitnessRotationControls};
+pub use mainnet::{AgentMainnetReadiness, AgentMainnetReadinessBlocker};
 
 const STATE_SCHEMA_VERSION: u32 = 1;
 const STATE_NAME: &str = "wallet_state";
@@ -119,6 +124,7 @@ pub struct AgentWalletOverview {
     pub unlocked: bool,
     pub payments_suspended: bool,
     pub mainnet_spending_ready: bool,
+    pub mainnet_readiness: AgentMainnetReadiness,
     pub confirmed_balance_units: Option<HacUnits>,
     pub reserved_units: HacUnits,
     pub available_units: Option<HacUnits>,
@@ -183,6 +189,10 @@ struct AgentWalletState {
     witness_rotation: Option<AuthenticatedWitnessRotationState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     witness_rotation_history: Vec<AuthenticatedWitnessRotationState>,
+    /// Owner-approved Hacash L2 provider identity. It is inside the encrypted,
+    /// journal-committed state rather than the public l2/client.json path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_provider_identity: Option<HacashL2ProviderIdentity>,
     operations: BTreeMap<String, AgentOperation>,
     idempotency: BTreeMap<String, IdempotencyRecord>,
     // Legacy V1 fields remain parseable only for authenticated state compatibility.
@@ -536,6 +546,91 @@ impl AgentWalletManager {
         self.storage.root()
     }
 
+    /// Return the isolated L2 namespace for an existing Agent Wallet.
+    ///
+    /// This trusted application API has no Personal-wallet selector and does
+    /// not expose a generic path supplied by an agent or an LLM.
+    pub fn agent_l2_paths(&self, wallet_id: &AgentWalletId) -> AgentWalletResult<AgentL2Paths> {
+        if self.storage.load_registry()?.wallet(wallet_id).is_none() {
+            return Err(AgentWalletError::AgentWalletNotFound);
+        }
+        Ok(self.storage.paths(wallet_id)?.l2_paths())
+    }
+
+    /// Return the authenticated provider pin for this exact Agent Wallet.
+    ///
+    /// This performs disk/crypto work only. Tauri releases the manager lock
+    /// before any Hacash L2 network request starts.
+    pub fn agent_l2_provider_pin(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Option<HacashL2ProviderIdentity>> {
+        let _paths = self.agent_l2_paths(wallet_id)?;
+        self.ensure_session_active(wallet_id, now)?;
+        let (state_master, journal_key) = {
+            let session = self.session(wallet_id)?;
+            (
+                Zeroizing::new(*session.state_master),
+                Zeroizing::new(*session.journal_key),
+            )
+        };
+        let state = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        Ok(state.l2_provider_identity)
+    }
+
+    /// Commit a provider identity already verified by the typed HAP client.
+    ///
+    /// The full fingerprint must match the owner's confirmation. An existing
+    /// identity can be repeated but never replaced here; rotation is a separate
+    /// recovery ceremony.
+    pub fn pin_verified_agent_l2_provider(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        identity: HacashL2ProviderIdentity,
+        expected_fingerprint_sha3_hex: &str,
+        now: u64,
+    ) -> AgentWalletResult<()> {
+        let _paths = self.agent_l2_paths(wallet_id)?;
+        self.ensure_session_active(wallet_id, now)?;
+        if !validate_provider_identity(&identity) {
+            return Err(AgentWalletError::L2ProviderIdentityUnverified);
+        }
+        let expected = expected_fingerprint_sha3_hex.trim();
+        if expected.len() != 64
+            || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !expected.eq_ignore_ascii_case(&identity.fingerprint_sha3_hex)
+        {
+            return Err(AgentWalletError::L2ProviderFingerprintMismatch);
+        }
+        let (state_master, journal_key) = {
+            let session = self.session(wallet_id)?;
+            (
+                Zeroizing::new(*session.state_master),
+                Zeroizing::new(*session.journal_key),
+            )
+        };
+        let mut state = self.load_verified_state(wallet_id, &state_master, &journal_key)?;
+        if let Some(existing) = &state.l2_provider_identity {
+            return if provider_identity_matches(existing, &identity) {
+                Ok(())
+            } else {
+                Err(AgentWalletError::L2ProviderIdentityChanged)
+            };
+        }
+        state.l2_provider_identity = Some(identity);
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &state_master,
+            &journal_key,
+            AgentJournalEventKind::L2ProviderIdentityPinned,
+            None,
+            None,
+            now,
+        )
+    }
+
     /// Return the shared, lock-independent emergency interlock for this exact
     /// Agent Wallet. Supervisors must retain a clone so marker-first stop does
     /// not wait for the manager mutex or a node request.
@@ -630,6 +725,7 @@ impl AgentWalletManager {
             rollback_witness: None,
             witness_rotation: None,
             witness_rotation_history: Vec::new(),
+            l2_provider_identity: None,
             operations: BTreeMap::new(),
             idempotency: BTreeMap::new(),
             authentication_challenges: BTreeMap::new(),
@@ -893,6 +989,7 @@ impl AgentWalletManager {
                     unlocked: false,
                     payments_suspended: true,
                     mainnet_spending_ready: agent_spending_ready(vault.network_mode()),
+                    mainnet_readiness: mainnet::current_agent_mainnet_readiness(),
                     confirmed_balance_units: None,
                     reserved_units: HacUnits::ZERO,
                     available_units: None,
@@ -972,6 +1069,7 @@ impl AgentWalletManager {
             unlocked: true,
             payments_suspended,
             mainnet_spending_ready: agent_spending_ready(&state.network_mode),
+            mainnet_readiness: mainnet::current_agent_mainnet_readiness(),
             confirmed_balance_units: confirmed,
             reserved_units: reserved,
             available_units: available,

@@ -13,6 +13,7 @@ import {
 import { AgentBackupPanel } from "./AgentBackupPanel";
 import { PilotDiagnosticsPanel } from "./PilotDiagnosticsPanel";
 import { WitnessRotationPanel } from "./WitnessRotationPanel";
+import { L2ProviderPanel } from "./L2ProviderPanel";
 import {
   APPROVE_OUTCOME_NOTICE,
   approvalOutcome,
@@ -29,6 +30,7 @@ import {
   REVOKE_AGENT_WARNING,
 } from "./irreversibleActions";
 import { strandedWitnessView } from "./strandedWitness";
+import { broadcastReconciliationView } from "./broadcastReconciliation";
 
 export type AgentAdminPage = "agents" | "rules" | "activity" | "providers" | "security";
 /** Where a page can send the owner when the control they need lives elsewhere. */
@@ -72,7 +74,7 @@ export default function AgentAdminPages(props: AdminPageProps) {
   if (props.page === "rules") return <RulesPage {...props} />;
   if (props.page === "activity") return <ActivityPage {...props} />;
   if (props.page === "security") return <SecurityPage {...props} />;
-  return <ProvidersPage />;
+  return <L2ProviderPanel overview={props.overview} busy={props.busy} run={props.run} onInfo={props.onInfo} />;
 }
 
 function AgentsPage({ overview, busy, run, onInfo, onRefreshOverview, onOpenPage }: AdminPageProps) {
@@ -376,6 +378,7 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
   // still has an open confirmation window, and that is what decides whether the
   // give-up control may be offered at all.
   const [stranded, setStranded] = useState<StrandedWitness | null>(null);
+  const [reconciliation, setReconciliation] = useState<PaymentOperation | null>(null);
   const [confirmGiveUp, setConfirmGiveUp] = useState<string | null>(null);
   const load = useCallback(async () => {
     setError("");
@@ -383,6 +386,7 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
     // A failure to read this must never invent a stranded payment, and must
     // never hide the approvals that did load.
     try { setStranded(await agentWalletApi.strandedWitness(overview.wallet_id)); } catch { setStranded(null); }
+    try { setReconciliation(await agentWalletApi.reconciliationRequired(overview.wallet_id)); } catch { setReconciliation(null); }
   }, [overview.wallet_id]);
   useEffect(() => { void load(); }, [load]);
   // Same predicate and same view helper as the Overview page. Before this,
@@ -406,6 +410,7 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
     ? pending?.find((operation) => operation.operation_id === approval.operation_id) ?? null
     : null;
   const strandedView = strandedWitnessView(stranded, formatUnits);
+  const reconciliationView = broadcastReconciliationView(reconciliation, formatUnits);
   const rotationPhase = overview.witness_rotation_phase;
   const rotationNeedsAttention = Boolean(rotationPhase && rotationPhase !== "stable");
   return (
@@ -488,6 +493,21 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
           ) : (
             <p role="status">{strandedView.abandonWithheldReason}</p>
           )}
+        </section>
+      )}
+      {reconciliationView && reconciliation && (
+        <section className="agent-panel" aria-label="Transaction confirmation recovery">
+          <span className="agent-eyebrow">Network recovery</span>
+          <h2>{reconciliationView.heading}</h2>
+          <p className="agent-exact-address">{reconciliationView.summary}</p>
+          <p>{reconciliationView.explanation}</p>
+          <p className="agent-exact-address">{reconciliationView.transactionId}</p>
+          <p role="status">If the exact transaction is not confirmed in a block, nothing changes and HPAY will never rebroadcast it automatically.</p>
+          <button type="button" className="agent-primary-action" disabled={busy} onClick={() => void run(async () => {
+            await agentWalletApi.reconcileBroadcast(overview.wallet_id, reconciliation.operation_id);
+            onInfo("The exact transaction is confirmed on the verified node. Open the paired phone once more to record the final confirmation.");
+            await Promise.all([load(), onRefreshOverview()]);
+          })}>{reconciliationView.action}</button>
         </section>
       )}
       {/* Deciding a payment is the job of this page. It used to render below a
@@ -582,7 +602,6 @@ function SecurityPage({ overview, busy, run, onInfo, onRefreshOverview, onEmerge
   );
 }
 
-function ProvidersPage() { return <section className="agent-panel agent-info-page"><span className="agent-eyebrow">Not enabled</span><h1>Providers</h1><p>Provider discovery and marketplace payments are intentionally unavailable in this release.</p><div className="agent-safe-note">No provider can connect or receive payment through this screen.</div></section>; }
 function PageHead({ eyebrow, title, onRefresh, busy }: { eyebrow: string; title: string; onRefresh: () => void; busy: boolean }) { return <div className="agent-page-head"><div><span className="agent-eyebrow">{eyebrow}</span><h1>{title}</h1></div><button type="button" onClick={onRefresh} disabled={busy}>{DESKTOP_CONTROLS.refresh}</button></div>; }
 function PolicyInput({ label, value, onChange, type = "text", disabled = false }: { label: string; value: string; onChange: (value: string) => void; type?: "text" | "number"; disabled?: boolean }) { return <label className="agent-field">{label}<input type={type} inputMode="decimal" min={type === "number" ? 0 : undefined} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} /></label>; }
 function PolicyArea({ label, value, onChange, disabled = false }: { label: string; value: string; onChange: (value: string) => void; disabled?: boolean }) { return <label className="agent-field">{label}<textarea rows={5} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} spellCheck={false} /></label>; }

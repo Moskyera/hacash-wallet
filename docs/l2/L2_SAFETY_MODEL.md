@@ -14,7 +14,8 @@ The safety layer applies only to Fast Pay state transitions. It does not change:
 - the pinned Hacash full-node revision;
 - the custom same-channel and cross-channel payment behavior;
 - the zero wallet-fee policy for Fast Pay;
-- Harbor or a future Agent Wallet.
+- Harbor;
+- the isolated Agent Wallet L2 namespace and HAP client described below.
 
 ## Durable state
 
@@ -126,12 +127,16 @@ verified signature from the exact local wallet address.
 
 ## Mainnet fail-closed gate
 
-Wallet Hub API v4 now advertises explicit readiness fields for the external
-rollback anchor, L1 dispute path, authenticated Official ChannelPay session, and
-aggregate production readiness. This legacy implementation sets all four to
-`false`. On mainnet the wallet requires every field before selecting Fast Pay;
-otherwise it remains on L1. Testnet and local development retain the existing
-custom transport and all HPAY safety extensions.
+Wallet Hub API v4 advertises explicit readiness fields for the external rollback
+anchor, L1 dispute path, authenticated Official ChannelPay session, and aggregate
+production readiness. These values are provider declarations, not proof of a
+wallet capability. Mainnet selection now also requires an exact API version and
+production profile, a valid passive CSP address, explicit zero hub fee,
+settlement and cross-channel readiness, and a locally compiled authenticated
+Official ChannelPay transport. That local transport gate is currently `false`,
+so no remote response can enable Fast Pay on mainnet. The wallet remains on L1.
+Testnet and local development retain the existing custom transport and all HPAY
+safety extensions.
 
 ## Remaining limits
 
@@ -155,3 +160,49 @@ by the Rust test, upstream revisions must match, and every binary vector passes
 its own SHA-256 and format validation. The official Go complete-document bytes
 are parsed and re-serialized by the Rust wire codec. This proves selected codec
 parity only; it does not enable a network transport or prove CSP interoperability.
+
+## Agent Wallet Hacash L2 boundary
+
+The Agent Wallet uses the same `hacash-l2-protocol` ecosystem, but never the
+Personal Wallet's L2 account or files. Each Agent Wallet has a distinct
+namespace derived only from its validated `AgentWalletId`:
+
+```text
+agent/wallets/<AgentWalletId>/l2/
+  client.json
+  journal.jsonl
+  receipts/
+  channels/
+```
+
+Two Agent Wallet IDs produce different namespaces. Unknown or traversal-shaped
+IDs fail before path construction, and the trusted manager refuses an ID that
+is not present in the Agent registry. The agent/LLM-facing connector is not
+given these paths.
+
+The current `HacashL2ProtocolClient` is read-only. It probes the HAP manifest
+and fails closed on a protocol, origin, endpoint, or signing-contract mismatch.
+It also fetches `/v1/net/self` and verifies the fresh protocol-2.x
+`HACASH_L2_HELLO_V1` commitment: provider and origin, complete channel-ad hash,
+Hacash address derivation, compressed secp256k1 key, SHA3-256 signature, replay
+window, and clock skew. Unsigned, stale, cross-origin, substituted-key and
+protocol-1.x hellos never establish provider identity.
+
+First contact is deliberately not trusted automatically. The owner must confirm
+the full 64-hex HPAY provider fingerprint. The accepted identity is stored in
+the encrypted, journal-committed state of that exact Agent Wallet, not in the
+public `l2/client.json` path. Every later probe compares the new signed hello to
+that pin; a changed key, address, provider ID or origin fails closed. Existing
+pins cannot be overwritten through the first-contact API, so rotation still
+requires a separate explicit recovery ceremony.
+
+The client still has no payment, inbox-signing, receipt-acceptance, or generic
+signature method. A remote hub cannot turn on mainnet spending through
+optimistic capabilities. Hub `settled` is recorded only as
+`hub_coordinated_not_l1`.
+
+Before Agent L2 payments can be enabled, HPAY still needs a reviewed provider
+rotation ceremony, durable content-bound idempotency/reconnect recovery, exact
+quote-to-approval binding, signed receipt verification, testnet-proven L1
+dispute recovery, unilateral exit compatibility, real multi-hub fault tests,
+and an independent security audit.

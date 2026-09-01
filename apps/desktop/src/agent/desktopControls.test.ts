@@ -323,9 +323,18 @@ describe("every control that cancels pending payment requests says so first", ()
   });
 });
 
-describe("a passphrase with no recovery path is warned about beforehand", () => {
+describe("mainnet readiness is fail-closed and owner-readable", () => {
+  it("renders the core blockers and keeps the Agent Wallet fee at zero", () => {
+    expect(APP).toContain("overview.mainnet_readiness.blockers.map");
+    expect(APP).toContain("The authenticated hacash-agent-pay/1 transport is read-only");
+    expect(APP).toContain("An independent security audit is still required");
+    expect(APP).toContain("Agent Wallet fee: 0 HAC");
+  });
+});
+
+describe("the backup boundary is explained before a passphrase is chosen", () => {
   it("puts the warning above the field, outside any disclosure", () => {
-    const warning = APP.indexOf("no Agent Wallet backup and no recovery path");
+    const warning = APP.indexOf("HPAY cannot recover this passphrase");
     const field = APP.indexOf("Agent Wallet passphrase");
     expect(warning).toBeGreaterThan(0);
     expect(warning).toBeLessThan(field);
@@ -444,8 +453,8 @@ describe("a rotation past the point of no cancel admits it", () => {
     expect(cheap).toContain("No money moves");
     expect(cheap).not.toContain("can never serve this wallet again");
     // The expensive one is shown only where it is true.
-    expect(ROTATION).toContain(
-      'phase === "awaiting_completion_anchor"\n              ? ROTATION_RETARGET_WARNING',
+    expect(ROTATION).toMatch(
+      /phase === "awaiting_completion_anchor"\s+\? ROTATION_RETARGET_WARNING/,
     );
   });
 

@@ -104,11 +104,11 @@ const NOW_SECONDS = 1_100;
 const NOW_MILLISECONDS = NOW_SECONDS * 1_000;
 
 function read(relative: string): string {
-  return readFileSync(join(MOBILE_SRC, relative), "utf8");
+  return readFileSync(join(MOBILE_SRC, relative), "utf8").replace(/\r\n/g, "\n");
 }
 
 function readWorkspace(relative: string): string {
-  return readFileSync(join(WORKSPACE_ROOT, relative), "utf8");
+  return readFileSync(join(WORKSPACE_ROOT, relative), "utf8").replace(/\r\n/g, "\n");
 }
 
 /**

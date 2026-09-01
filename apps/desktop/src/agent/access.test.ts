@@ -52,6 +52,7 @@ const overview = (overrides: Partial<AgentWalletOverview> = {}): AgentWalletOver
   unlocked: true,
   payments_suspended: false,
   mainnet_spending_ready: true,
+  mainnet_readiness: { ready: false, blockers: ["mainnet_account_creation_disabled"] },
   confirmed_balance_units: "1000000",
   reserved_units: "0",
   available_units: "1000000",

@@ -99,6 +99,137 @@ fn create_rejects_missing_testnet_anchor_before_publishing_a_wallet() {
 }
 
 #[test]
+fn agent_l2_namespace_requires_an_existing_agent_wallet_and_never_overlaps() {
+    let root = tempfile::tempdir().unwrap();
+    let mut manager = AgentWalletManager::open(root.path()).unwrap();
+    let unknown = AgentWalletId::new();
+    assert_eq!(
+        manager.agent_l2_paths(&unknown),
+        Err(AgentWalletError::AgentWalletNotFound)
+    );
+
+    let first = manager.create_wallet(create_request(), 100).unwrap();
+    let second = manager.create_wallet(create_request(), 101).unwrap();
+    let first_l2 = manager.agent_l2_paths(&first.wallet_id).unwrap();
+    let second_l2 = manager.agent_l2_paths(&second.wallet_id).unwrap();
+    assert_ne!(first_l2.root(), second_l2.root());
+    assert!(first_l2.root().starts_with(manager.storage_root()));
+    assert!(second_l2.root().starts_with(manager.storage_root()));
+}
+
+#[test]
+fn l2_provider_pin_is_authenticated_per_agent_wallet_and_survives_restart() {
+    use hacash_wallet_core::hacash_l2_protocol::{
+        HacashL2ProviderIdentity, provider_identity_fingerprint,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let mut manager = AgentWalletManager::open(root.path()).unwrap();
+    let created = manager.create_wallet(create_request(), 100).unwrap();
+    let other = manager.create_wallet(create_request(), 101).unwrap();
+    manager.unlock(&created.wallet_id, PASSPHRASE, 102).unwrap();
+    manager.unlock(&other.wallet_id, PASSPHRASE, 102).unwrap();
+    let account = sys::Account::create_by_secret_key_value([12; 32]).unwrap();
+    let provider_id = "AgentHubA";
+    let base_url = "https://hub.example";
+    let address = account.readable().to_owned();
+    let public_key = hex::encode(account.public_key().serialize_compressed());
+    let identity = HacashL2ProviderIdentity {
+        provider_id: provider_id.into(),
+        base_url: base_url.into(),
+        mesh_protocol_version: "2.0".into(),
+        identity_address: address.clone(),
+        identity_pubkey_hex: public_key.clone(),
+        fingerprint_sha3_hex: provider_identity_fingerprint(
+            provider_id,
+            base_url,
+            &address,
+            &public_key,
+        ),
+        verified_at_unix: 102,
+    };
+    assert_eq!(
+        manager.pin_verified_agent_l2_provider(
+            &created.wallet_id,
+            identity.clone(),
+            &"00".repeat(32),
+            102,
+        ),
+        Err(AgentWalletError::L2ProviderFingerprintMismatch)
+    );
+    assert_eq!(
+        manager
+            .agent_l2_provider_pin(&created.wallet_id, 102)
+            .unwrap(),
+        None
+    );
+    manager
+        .pin_verified_agent_l2_provider(
+            &created.wallet_id,
+            identity.clone(),
+            &identity.fingerprint_sha3_hex,
+            102,
+        )
+        .unwrap();
+    // Re-confirming the same observed identity is idempotent.
+    manager
+        .pin_verified_agent_l2_provider(
+            &created.wallet_id,
+            identity.clone(),
+            &identity.fingerprint_sha3_hex,
+            102,
+        )
+        .unwrap();
+    let mut changed_identity = identity.clone();
+    changed_identity.provider_id = "AgentHubB".into();
+    changed_identity.fingerprint_sha3_hex = provider_identity_fingerprint(
+        &changed_identity.provider_id,
+        &changed_identity.base_url,
+        &changed_identity.identity_address,
+        &changed_identity.identity_pubkey_hex,
+    );
+    let changed_fingerprint = changed_identity.fingerprint_sha3_hex.clone();
+    assert_eq!(
+        manager.pin_verified_agent_l2_provider(
+            &created.wallet_id,
+            changed_identity,
+            &changed_fingerprint,
+            102,
+        ),
+        Err(AgentWalletError::L2ProviderIdentityChanged)
+    );
+    assert_eq!(
+        manager
+            .agent_l2_provider_pin(&other.wallet_id, 102)
+            .unwrap(),
+        None
+    );
+    manager.lock(&created.wallet_id, 103).unwrap();
+    drop(manager);
+
+    let mut reopened = AgentWalletManager::open(root.path()).unwrap();
+    reopened
+        .unlock(&created.wallet_id, PASSPHRASE, 104)
+        .unwrap();
+    reopened.unlock(&other.wallet_id, PASSPHRASE, 104).unwrap();
+    let (loaded, _, _) = wallet_state(&reopened, &created.wallet_id);
+    let (other_state, _, _) = wallet_state(&reopened, &other.wallet_id);
+    assert_eq!(loaded.l2_provider_identity, Some(identity));
+    assert_eq!(other_state.l2_provider_identity, None);
+
+    let mut tampered = loaded;
+    tampered
+        .l2_provider_identity
+        .as_mut()
+        .unwrap()
+        .fingerprint_sha3_hex = "00".repeat(32);
+    assert_eq!(
+        super::state::validate_state(&tampered, &created.wallet_id),
+        Err(AgentWalletError::RecoveryRequired)
+    );
+}
+
+#[test]
 fn mainnet_create_fails_before_registry_or_filesystem_mutation() {
     let root = tempfile::tempdir().unwrap();
     let mut manager = AgentWalletManager::open(root.path()).unwrap();
@@ -845,6 +976,7 @@ fn daily_policy_counts_total_debit_of_pending_reservations() {
         rollback_witness: None,
         witness_rotation: None,
         witness_rotation_history: Vec::new(),
+        l2_provider_identity: None,
         operations: BTreeMap::from([(existing.operation_id().as_str().to_owned(), existing)]),
         idempotency: BTreeMap::new(),
         authentication_challenges: BTreeMap::new(),

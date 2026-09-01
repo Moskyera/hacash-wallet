@@ -1,0 +1,50 @@
+.l2-provider-connect {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.l2-provider-result,
+.l2-provider-pin {
+  display: grid;
+  gap: 16px;
+}
+
+.l2-provider-result {
+  margin-top: 16px;
+}
+
+.l2-provider-fingerprint dd {
+  color: #ffc04d;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+  letter-spacing: .04em;
+}
+
+.l2-provider-blockers {
+  padding: 14px;
+  border: 1px solid #3d2b0f;
+  border-radius: 10px;
+  background: #020202;
+}
+
+.l2-provider-blockers h3 {
+  margin: 0 0 8px;
+  color: #ffb22e;
+  font-size: 13px;
+}
+
+.l2-provider-blockers ul {
+  margin: 0;
+  padding-left: 20px;
+  color: #aaa;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 720px) {
+  .l2-provider-connect {
+    grid-template-columns: 1fr;
+  }
+}

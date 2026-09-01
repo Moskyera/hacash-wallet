@@ -162,6 +162,7 @@ pub(crate) enum AgentJournalEventKind {
     EmergencyStopDisabled,
     OperationsExpired,
     OperationsCompacted,
+    L2ProviderIdentityPinned,
     RecoveryRequired,
 }
 
@@ -220,6 +221,7 @@ impl AgentJournalEventKind {
             Self::EmergencyStopDisabled => 41,
             Self::OperationsExpired => 42,
             Self::OperationsCompacted => 43,
+            Self::L2ProviderIdentityPinned => 74,
             Self::RecoveryRequired => 50,
         }
     }

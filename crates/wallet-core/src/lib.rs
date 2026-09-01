@@ -12,6 +12,8 @@ pub mod dapp;
 pub mod dust_whisper;
 pub mod error;
 pub mod fast_pay;
+mod hacash_l2_identity;
+pub mod hacash_l2_protocol;
 pub mod hacd_send;
 pub mod hardware;
 pub mod hip23;

@@ -39,6 +39,7 @@ use hpay_companion_protocol::{
     WitnessReconciliationStatus, WitnessRotationMode, WitnessRotationReason,
     WitnessSubmissionStatus,
 };
+use serde_json::json;
 
 use super::desktop_witness_flow::{
     desktop_approved_operation, pair_desktop_agent, payment_request,
@@ -1194,4 +1195,75 @@ async fn the_three_remaining_boundaries_strand_nothing() {
     );
     assert_eq!(node.submit_count.load(Ordering::SeqCst), 1);
     drop(root);
+}
+#[tokio::test]
+async fn uncertain_broadcast_reconciliation_requires_the_exact_hash_in_a_block() {
+    let (root, wallet_id, mobile, operation_id, node, _authorization, tx_hash) =
+        crash_between_the_broadcast_write_and_the_node(80_000).await;
+    let mut manager = AgentWalletManager::open(root.path()).unwrap();
+    manager.unlock(&wallet_id, PASSPHRASE, 80_050).unwrap();
+
+    let anchor = manager
+        .pending_rollback_anchor(&wallet_id, &operation_id, mobile.device_id(), 80_060)
+        .await
+        .unwrap();
+    let receipt = signed_receipt(&anchor, &mobile, 80_070).await;
+    assert_eq!(
+        manager
+            .apply_mobile_witness_and_broadcast(&wallet_id, receipt, 80_080)
+            .await
+            .unwrap()
+            .status,
+        OperationStatus::ReconciliationRequired
+    );
+    assert_eq!(
+        manager
+            .reconciliation_required_operation(&wallet_id, 80_081)
+            .unwrap()
+            .unwrap()
+            .operation_id,
+        operation_id
+    );
+
+    assert_eq!(
+        manager
+            .reconcile_broadcast_from_node(&wallet_id, &operation_id, 80_082)
+            .await
+            .unwrap_err(),
+        AgentWalletError::BroadcastNotConfirmed
+    );
+    node.set_transaction_query(json!({
+        "ret": 0,
+        "hash": tx_hash,
+        "pending": true
+    }))
+    .await;
+    assert_eq!(
+        manager
+            .reconcile_broadcast_from_node(&wallet_id, &operation_id, 80_083)
+            .await
+            .unwrap_err(),
+        AgentWalletError::BroadcastNotConfirmed
+    );
+
+    node.set_transaction_query(json!({
+        "ret": 0,
+        "hash": tx_hash,
+        "block": { "height": 11, "timestamp": 80_084 }
+    }))
+    .await;
+    assert_eq!(
+        manager
+            .reconcile_broadcast_from_node(&wallet_id, &operation_id, 80_085)
+            .await
+            .unwrap()
+            .status,
+        OperationStatus::ReconciledAwaitingFinalWitness
+    );
+    assert!(
+        manager
+            .reconciliation_required_operation(&wallet_id, 80_086)
+            .unwrap()
+            .is_none()
+    );
 }

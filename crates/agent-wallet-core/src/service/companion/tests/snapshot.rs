@@ -39,6 +39,7 @@ fn deterministic_overview(
         unlocked: true,
         payments_suspended: state.payments_suspended,
         mainnet_spending_ready: state.network_mode != "mainnet",
+        mainnet_readiness: crate::service::mainnet::current_agent_mainnet_readiness(),
         confirmed_balance_units: available_units.map(|available| {
             available
                 .checked_add(reserved_units)

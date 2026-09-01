@@ -220,8 +220,18 @@ pub enum AgentWalletError {
     SigningBlocked,
     #[error("transaction broadcast result is uncertain")]
     BroadcastUncertain,
+    #[error("the exact transaction is not confirmed on the verified node yet")]
+    BroadcastNotConfirmed,
     #[error("node or network rejected the operation")]
     NodeRejected,
+    #[error("Hacash L2 protocol endpoint is unavailable or incompatible")]
+    L2Unavailable,
+    #[error("Hacash L2 provider identity is not cryptographically verified")]
+    L2ProviderIdentityUnverified,
+    #[error("Hacash L2 provider fingerprint does not match the owner confirmation")]
+    L2ProviderFingerprintMismatch,
+    #[error("Hacash L2 provider identity changed; explicit recovery or rotation is required")]
+    L2ProviderIdentityChanged,
     #[error("configured node does not match the Agent Wallet network")]
     NodeNetworkMismatch,
     #[error("pinned Agent Wallet node capability contract is not satisfied")]
@@ -285,6 +295,7 @@ impl From<hacash_wallet_core::WalletError> for AgentWalletError {
             hacash_wallet_core::WalletError::Vault(_)
             | hacash_wallet_core::WalletError::InvalidPassphrase => Self::Vault,
             hacash_wallet_core::WalletError::Policy(_) => Self::SigningBlocked,
+            hacash_wallet_core::WalletError::L2(_) => Self::L2Unavailable,
             _ => Self::NodeRejected,
         }
     }

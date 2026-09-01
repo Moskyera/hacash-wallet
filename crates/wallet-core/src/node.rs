@@ -589,6 +589,20 @@ impl NodeClient {
         Ok(body)
     }
 
+    /// Looks up one exact transaction hash without treating a mempool entry as
+    /// a confirmed payment. Callers performing crash recovery must still check
+    /// `is_confirmed()` before changing durable wallet state.
+    pub async fn query_transaction(&self, tx_hash: &str) -> WalletResult<TransactionQueryResponse> {
+        if tx_hash.len() != 64 || !tx_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(WalletError::Transaction(
+                "transaction hash must be exactly 64 hexadecimal characters".into(),
+            ));
+        }
+        let expected_hash = tx_hash.to_ascii_lowercase();
+        let url = format!("{}/query/transaction?hash={expected_hash}", self.base_url);
+        let body: TransactionQueryResponse = http_get_json(url).await?;
+        validate_transaction_query_response(body, &expected_hash)
+    }
     pub async fn query_metrics(&self) -> WalletResult<serde_json::Value> {
         self.ping().await
     }
@@ -629,6 +643,54 @@ pub struct FeeAverageResponse {
     pub purity: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct TransactionQueryBlock {
+    pub height: u64,
+    #[serde(default)]
+    pub timestamp: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct TransactionQueryResponse {
+    ret: i32,
+    #[serde(default)]
+    err: Option<String>,
+    pub hash: Option<String>,
+    #[serde(default)]
+    pub pending: bool,
+    #[serde(default)]
+    pub block: Option<TransactionQueryBlock>,
+}
+
+impl TransactionQueryResponse {
+    /// A txpool result proves that the node knows the hash, but not that the
+    /// payment is in the chain. Recovery finalizes only a block-backed result.
+    pub fn is_confirmed(&self) -> bool {
+        !self.pending && self.block.as_ref().is_some_and(|block| block.height > 0)
+    }
+}
+
+fn validate_transaction_query_response(
+    response: TransactionQueryResponse,
+    expected_hash: &str,
+) -> WalletResult<TransactionQueryResponse> {
+    if response.ret != 0 {
+        return Err(WalletError::Node(response.err.clone().unwrap_or_else(
+            || format!("transaction query failed (ret={})", response.ret),
+        )));
+    }
+    let Some(returned_hash) = response.hash.as_deref() else {
+        return Err(WalletError::Node(
+            "transaction query response is missing the transaction hash".into(),
+        ));
+    };
+    if !returned_hash.eq_ignore_ascii_case(expected_hash) {
+        return Err(WalletError::Node(
+            "transaction query returned a different transaction hash".into(),
+        ));
+    }
+    Ok(response)
+}
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct DiamondBornInfo {
     pub height: u64,
@@ -1211,5 +1273,56 @@ mod diamond_metadata_tests {
                 }
             );
         }
+    }
+}
+#[cfg(test)]
+mod transaction_query_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_matching_block_backed_transaction_is_confirmed() {
+        let hash = "ab".repeat(32);
+        let pending: TransactionQueryResponse = serde_json::from_value(json!({
+            "ret": 0,
+            "hash": hash,
+            "pending": true
+        }))
+        .unwrap();
+        assert!(
+            !validate_transaction_query_response(pending, &hash)
+                .unwrap()
+                .is_confirmed()
+        );
+
+        let confirmed: TransactionQueryResponse = serde_json::from_value(json!({
+            "ret": 0,
+            "hash": hash,
+            "block": { "height": 42, "timestamp": 100 }
+        }))
+        .unwrap();
+        assert!(
+            validate_transaction_query_response(confirmed, &hash)
+                .unwrap()
+                .is_confirmed()
+        );
+    }
+
+    #[test]
+    fn a_different_or_missing_hash_fails_closed() {
+        let hash = "ab".repeat(32);
+        let mismatch: TransactionQueryResponse = serde_json::from_value(json!({
+            "ret": 0,
+            "hash": "cd".repeat(32),
+            "block": { "height": 42 }
+        }))
+        .unwrap();
+        assert!(validate_transaction_query_response(mismatch, &hash).is_err());
+
+        let missing: TransactionQueryResponse = serde_json::from_value(json!({
+            "ret": 0,
+            "block": { "height": 42 }
+        }))
+        .unwrap();
+        assert!(validate_transaction_query_response(missing, &hash).is_err());
     }
 }

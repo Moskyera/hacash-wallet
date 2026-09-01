@@ -16,6 +16,9 @@ use agent_wallet_core::{
     ApprovalMode, CreateAgentWallet, OperationId, PaymentOperationView,
 };
 use agent_wallet_runtime::RuntimeStatus;
+use hacash_wallet_core::hacash_l2_protocol::{
+    HacashL2ProtocolClient, HacashL2ProviderPinStatus, HacashL2ReadinessBlocker,
+};
 use hpay_companion_protocol::{
     DeviceId, DeviceRole, EncryptedCompanionFrame, LanEndpoint, PairingRequest,
     SignedRotationCandidateAcceptance,
@@ -259,6 +262,46 @@ pub async fn agent_wallet_stranded_witness(
     }
 }
 
+/// The payment whose exact hash still needs to be found in a block, or null.
+#[tauri::command]
+pub async fn agent_wallet_reconciliation_required(
+    wallet_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    let wallet_id = parse_wallet_id(wallet_id)?;
+    let operation = require_manager(&state)?
+        .lock()
+        .await
+        .reconciliation_required_operation(&wallet_id, unix_now()?)
+        .map_err(public_error)?;
+    serde_json::to_value(operation)
+        .map_err(|_| "reconciliation operation encoding failed".to_owned())
+}
+
+/// Checks the exact locally signed hash on the pinned verified node. It never
+/// rebroadcasts. A txpool-only or missing result leaves durable state unchanged.
+#[tauri::command]
+pub async fn agent_wallet_reconcile_broadcast(
+    wallet_id: String,
+    operation_id: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    let wallet_id = parse_wallet_id(wallet_id)?;
+    let operation_id =
+        OperationId::parse(operation_id).map_err(|_| "operation id is invalid".to_owned())?;
+    let _transition = state.transition.lock().await;
+    let operation = require_manager(&state)?
+        .lock()
+        .await
+        .reconcile_broadcast_from_node(&wallet_id, &operation_id, unix_now()?)
+        .await
+        .map_err(public_error)?;
+    serde_json::to_value(operation).map_err(|_| "operation encoding failed".to_owned())
+}
 /// Gives up a signed payment that no phone can witness any more.
 ///
 /// It releases the reservation and moves no money: a payment in
@@ -741,6 +784,85 @@ pub async fn agent_wallet_overview(
         .await
         .map_err(public_error)?;
     serde_json::to_value(overview).map_err(|_| "Agent Wallet response encoding failed".into())
+}
+
+#[tauri::command]
+pub async fn agent_wallet_l2_probe(
+    wallet_id: String,
+    base_url: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    let wallet_id = parse_wallet_id(wallet_id)?;
+    let manager = require_manager(&state)?;
+    let pin = {
+        let mut guard = manager.lock().await;
+        guard
+            .agent_l2_provider_pin(&wallet_id, unix_now()?)
+            .map_err(public_error)?
+    };
+
+    // Never hold the Agent Wallet manager while waiting on an untrusted hub.
+    let client = HacashL2ProtocolClient::new(&base_url).map_err(|error| error.to_string())?;
+    let probe = client
+        .probe_agent_protocol_with_pin(pin.as_ref())
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(probe).map_err(|_| "Hacash L2 probe encoding failed".into())
+}
+
+#[tauri::command]
+pub async fn agent_wallet_l2_pin(
+    wallet_id: String,
+    base_url: String,
+    expected_fingerprint_sha3_hex: String,
+    webview: Webview,
+    state: tauri::State<'_, AgentAppState>,
+) -> Result<Value, String> {
+    require_wallet_shell(&webview)?;
+    let wallet_id = parse_wallet_id(wallet_id)?;
+    let manager = require_manager(&state)?;
+    let existing_pin = {
+        let mut guard = manager.lock().await;
+        guard
+            .agent_l2_provider_pin(&wallet_id, unix_now()?)
+            .map_err(public_error)?
+    };
+
+    // Observe and cryptographically verify the provider before entering the
+    // short persistence transition. No payment or signing method is called.
+    let client = HacashL2ProtocolClient::new(&base_url).map_err(|error| error.to_string())?;
+    let mut probe = client
+        .probe_agent_protocol_with_pin(existing_pin.as_ref())
+        .await
+        .map_err(|error| error.to_string())?;
+    if probe.provider_pin_status == HacashL2ProviderPinStatus::Mismatch {
+        return Err("Hacash L2 provider identity changed; pin replacement requires a separate recovery ceremony".into());
+    }
+    let identity = probe.provider_identity.clone().ok_or_else(|| {
+        "Hacash L2 provider identity was not cryptographically verified; nothing was pinned"
+            .to_owned()
+    })?;
+
+    let _transition = state.transition.lock().await;
+    manager
+        .lock()
+        .await
+        .pin_verified_agent_l2_provider(
+            &wallet_id,
+            identity,
+            &expected_fingerprint_sha3_hex,
+            unix_now()?,
+        )
+        .map_err(public_error)?;
+
+    probe.provider_pin_status = HacashL2ProviderPinStatus::Matched;
+    probe
+        .blockers
+        .retain(|blocker| *blocker != HacashL2ReadinessBlocker::ProviderIdentityUnpinned);
+    probe.mainnet_spending_ready = probe.blockers.is_empty();
+    serde_json::to_value(probe).map_err(|_| "Hacash L2 pin response encoding failed".into())
 }
 
 #[tauri::command]
@@ -1390,6 +1512,7 @@ mod tests {
             "agent_wallet_create",
             "agent_wallet_unlock",
             "agent_wallet_lock",
+            "agent_wallet_l2_pin",
             "agent_wallet_enable_payments",
             "agent_wallet_emergency_stop",
             "agent_wallet_companion_pairing_start",

@@ -153,6 +153,61 @@ export type AgentWalletStatus = {
   payments_suspended: boolean;
 };
 
+export type AgentMainnetReadinessBlocker =
+  | "mainnet_account_creation_disabled"
+  | "hacash_l2_protocol_transport_unavailable"
+  | "authenticated_provider_session_unavailable"
+  | "external_rollback_anchor_unavailable"
+  | "l1_dispute_recovery_unverified"
+  | "real_provider_interoperability_unverified"
+  | "independent_security_audit_required";
+
+export type AgentMainnetReadiness = {
+  ready: boolean;
+  blockers: AgentMainnetReadinessBlocker[];
+};
+
+export type HacashL2ProviderPinStatus =
+  | "unverified"
+  | "unpinned"
+  | "matched"
+  | "mismatch";
+
+export type HacashL2ReadinessBlocker =
+  | "protocol_mismatch"
+  | "manifest_origin_mismatch"
+  | "provider_identity_missing"
+  | "provider_identity_unverified"
+  | "provider_identity_unpinned"
+  | "provider_identity_changed"
+  | "required_endpoint_missing"
+  | "signing_contract_mismatch"
+  | "unilateral_l1_exit_unverified"
+  | "independent_protocol_audit_required";
+
+export type HacashL2ProviderIdentity = {
+  provider_id: string;
+  base_url: string;
+  mesh_protocol_version: string;
+  identity_address: string;
+  identity_pubkey_hex: string;
+  fingerprint_sha3_hex: string;
+  verified_at_unix: number;
+};
+
+export type HacashL2ProtocolProbe = {
+  protocol: string;
+  version: string;
+  provider_id: string;
+  base_url: string;
+  read_only_compatible: boolean;
+  mainnet_spending_ready: boolean;
+  finality: string;
+  provider_pin_status: HacashL2ProviderPinStatus;
+  provider_identity?: HacashL2ProviderIdentity;
+  blockers: HacashL2ReadinessBlocker[];
+};
+
 export type AgentWalletOverview = {
   wallet_id: string;
   address: string;
@@ -184,6 +239,7 @@ export type AgentWalletOverview = {
   unlocked: boolean;
   payments_suspended: boolean;
   mainnet_spending_ready: boolean;
+  mainnet_readiness: AgentMainnetReadiness;
   confirmed_balance_units: string | null;
   reserved_units: string;
   available_units: string | null;
@@ -594,6 +650,17 @@ export const agentWalletApi = {
     invoke<StrandedWitness | null>("agent_wallet_stranded_witness", {
       walletId,
     }),
+  /** The one payment awaiting an exact, block-backed node lookup. */
+  reconciliationRequired: (walletId: string) =>
+    invoke<PaymentOperation | null>("agent_wallet_reconciliation_required", {
+      walletId,
+    }),
+  /** Queries the pinned node for the exact local hash. Never rebroadcasts. */
+  reconcileBroadcast: (walletId: string, operationId: string) =>
+    invoke<PaymentOperation>("agent_wallet_reconcile_broadcast", {
+      walletId,
+      operationId,
+    }),
   /**
    * Gives up a signed payment that no phone can witness any more.
    *
@@ -772,6 +839,14 @@ export const agentWalletApi = {
     invoke<void>("agent_wallet_lock", { walletId }),
   overview: (walletId: string) =>
     invoke<AgentWalletOverview>("agent_wallet_overview", { walletId }),
+  probeL2Provider: (walletId: string, baseUrl: string) =>
+    invoke<HacashL2ProtocolProbe>("agent_wallet_l2_probe", { walletId, baseUrl }),
+  pinL2Provider: (walletId: string, baseUrl: string, expectedFingerprintSha3Hex: string) =>
+    invoke<HacashL2ProtocolProbe>("agent_wallet_l2_pin", {
+      walletId,
+      baseUrl,
+      expectedFingerprintSha3Hex,
+    }),
   diagnosticsPreview: (walletId: string) =>
     invoke<AgentPilotDiagnosticsPreview>("agent_wallet_pilot_diagnostics_preview", { walletId }),
   diagnosticsExport: (

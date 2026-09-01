@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use hacash_wallet_core::hacash_l2_protocol::validate_provider_identity;
 use hacash_wallet_core::settings::validate_node_url;
 
 use crate::amount::HacUnits;
@@ -282,6 +283,13 @@ pub(super) fn validate_state(
     }
     validate_node_url(&state.node_url).map_err(|_| AgentWalletError::RecoveryRequired)?;
     validate_stored_anchor(&state.network_mode, &state.block_one_fingerprint)?;
+    if state
+        .l2_provider_identity
+        .as_ref()
+        .is_some_and(|identity| !validate_provider_identity(identity))
+    {
+        return Err(AgentWalletError::RecoveryRequired);
+    }
     for (key, operation) in &state.operations {
         if key != operation.operation_id().as_str()
             || operation.agent_wallet_id() != expected_wallet_id
