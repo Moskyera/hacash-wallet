@@ -38,6 +38,28 @@ export default function RollbackWitnessSetting({
   const [passphrase, setPassphrase] = useState("");
   const required = overview.rollback_witness_required;
   const target = !required;
+  // Anchors are minted on the pilot rail only - `pending_rollback_anchor`
+  // refuses every other network, and `set_rollback_witness_requirement` refuses
+  // to switch this ON there. Rendering the button anyway offered a control that
+  // could only ever fail, and failed with payment-flavoured text about giving up
+  // a protection this network never had. Say what is true instead.
+  if (overview.network_mode === "mainnet") {
+    return (
+      <section className="agent-panel" aria-label="Rollback witness">
+        <h2>Rollback witness</h2>
+        <p className="agent-note">
+          Payments complete on this computer. Each one needs your wallet
+          passphrase and a press in this window, and none is ever made without
+          both. No phone is involved and none is needed.
+        </p>
+        <p className="agent-note">
+          There is nothing to switch on here. The rollback witness adds one
+          extra countersignature from a second device, and this wallet does not
+          use it.
+        </p>
+      </section>
+    );
+  }
   return (
     <section className="agent-panel" aria-label="Rollback witness">
       <h2>Rollback witness</h2>

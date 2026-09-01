@@ -113,7 +113,7 @@ export function fastPayEnableRefusals(
       id: "mainnet_consent_withheld",
       title: "The bounded mainnet pilot has not been accepted",
       detail:
-        'Tick the consent box near the top of this screen and press "Confirm this choice" with your wallet passphrase. Without it this wallet asks the Hub for trustless settlement, which no bounded pilot Hub can offer, and the channel open is refused.',
+        'Tick the consent box near the top of this screen and confirm it with your wallet passphrase, using the button beside it. Without it this wallet asks the Hub for trustless settlement, which no bounded pilot Hub can offer, and the channel open is refused.',
     });
   }
 

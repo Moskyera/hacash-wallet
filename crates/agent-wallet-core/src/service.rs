@@ -155,6 +155,21 @@ fn rollback_witness_required(state: &AgentWalletState) -> bool {
     if !cfg!(feature = "agent-wallet-testnet-pilot") {
         return false;
     }
+    // ASKED BEFORE THE OWNER'S ANSWER, because on a network that cannot carry
+    // an anchor no answer can be honoured. `pending_rollback_anchor` refuses
+    // every non-testnet wallet outright (companion/witness.rs), so deriving
+    // "required" there does not buy a check - it signs a payment into
+    // `SignedAwaitingWitness` whose only remaining door is the stranded-witness
+    // exit. `set_rollback_witness_requirement` already refuses to switch it ON
+    // off testnet; this is the derived reading agreeing with it.
+    //
+    // It also repairs the second arm below. Reading `rollback_witness` alone
+    // was accidentally safe here - a mainnet wallet can hold no witness record,
+    // because minting one is the very thing refused - and asking about a paired
+    // phone instead took that accident away without replacing it.
+    if !witness_anchor_reachable(state) {
+        return false;
+    }
     match state.rollback_witness_required {
         Some(decided) => decided,
         // `rollback_witness` is written by the FIRST anchor, not by pairing, so
@@ -184,6 +199,17 @@ fn has_paired_witness_phone(state: &AgentWalletState) -> bool {
 
 #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
 fn has_paired_witness_phone(_state: &AgentWalletState) -> bool {
+    false
+}
+
+/// Whether this wallet's network can carry a rollback anchor at all.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn witness_anchor_reachable(state: &AgentWalletState) -> bool {
+    companion::witness_anchor_available_on_network(&state.network_mode)
+}
+
+#[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+fn witness_anchor_reachable(_state: &AgentWalletState) -> bool {
     false
 }
 

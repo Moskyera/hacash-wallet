@@ -462,3 +462,80 @@ async fn a_legacy_wallet_with_a_paired_phone_keeps_its_witness() {
     );
     drop(root);
 }
+
+/// A MAINNET WALLET IS NEVER ASKED FOR A WITNESS IT CANNOT GET.
+///
+/// The regression the paired-phone fallback nearly shipped, and the house
+/// defect: a predicate written for the pilot rail applied unchanged to a
+/// mainnet path.
+///
+/// Anchors exist on testnet only - `pending_rollback_anchor` refuses every
+/// other network with `WitnessAnchorNetworkUnsupported`. Reading
+/// `rollback_witness.is_some()` was accidentally safe because of that: a
+/// mainnet wallet can hold no witness record, since minting one is the very
+/// thing refused. Asking "is a witness phone paired" instead removed the
+/// accident, and a mainnet wallet with a phone and no stored decision would
+/// have derived "required", signed into `SignedAwaitingWitness`, and found the
+/// anchor refused for the network - leaving the stranded-witness exit as the
+/// only door out of a payment that should never have gone through it.
+///
+/// Fails without the network check: the overview reports true and the approval
+/// stops at `SignedAwaitingWitness` instead of submitting.
+#[tokio::test]
+async fn a_mainnet_wallet_with_a_paired_phone_is_not_asked_for_an_anchor() {
+    let now = 7_000;
+    let node = spawn_pilot_node().await;
+    let (root, mut manager, wallet_id) = create_manager_for_node_without_witness(&node.url, now);
+
+    let mobile = SoftwareDeviceIdentity::generate(DeviceRole::Mobile);
+    register_witness_mobile(&mut manager, &wallet_id, &mobile, now + 2);
+
+    // The legacy shape, on mainnet: nobody ever answered, and the network
+    // cannot carry an anchor whatever the answer would have been.
+    let (state_master, journal_key) = keys(&manager, &wallet_id);
+    let mut state = manager
+        .load_verified_state(&wallet_id, &state_master, &journal_key)
+        .unwrap();
+    state.rollback_witness_required = None;
+    // Moved the way `move_live_wallet_to_mainnet` does it in the live-chain
+    // tests: the anchor has to move with the network, or the state stops
+    // agreeing with itself and the reload refuses.
+    state.network_mode = "mainnet".to_owned();
+    state.block_one_fingerprint =
+        crate::node_binding::anchor_for_new_wallet("mainnet", None).unwrap();
+    state.trusted_mainnet_fast_pay_pilot = true;
+    state.updated_at = now + 3;
+    manager
+        .persist_event(
+            &mut state,
+            &state_master,
+            &journal_key,
+            AgentJournalEventKind::PolicyChanged,
+            None,
+            None,
+            now + 3,
+        )
+        .unwrap();
+    assert!(
+        !super::super::witness_anchor_available_on_network(&state.network_mode),
+        "the premise: this network mints no anchors"
+    );
+
+    assert!(
+        !manager
+            .overview(&wallet_id, now + 4)
+            .await
+            .unwrap()
+            .rollback_witness_required,
+        "a wallet that cannot mint an anchor must not be told it needs one"
+    );
+
+    // STOPS HERE, DELIBERATELY. Carrying this to a submitted payment would need
+    // a node that reports mainnet, and this harness runs a private pilot chain -
+    // `create_payment_intent` refuses it with `NodeNetworkMismatch`, correctly.
+    // Asserting a mainnet submission against a node that is not on mainnet would
+    // be a fiction, and the derived answer above is the whole of what regressed.
+    // The submitting half is covered on the pilot rail by
+    // `a_payment_completes_end_to_end_with_no_phone_paired`.
+    drop(root);
+}
