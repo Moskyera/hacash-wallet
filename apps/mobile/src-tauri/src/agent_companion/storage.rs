@@ -4,15 +4,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use hpay_companion_protocol::{
-    DeviceId, DevicePublicRecord, DeviceRegistry, DeviceRole, EncryptedCompanionFrame,
+    AgentFastPayApprovalDecision, AgentHvmApprovalDecision, ApprovalDecision, DeviceId,
+    DevicePermission, DevicePublicRecord, DeviceRegistry, DeviceRole, EncryptedCompanionFrame,
     FRAME_VERSION, LanEndpoint, MobileApprovalDecision, MobileWitnessState, ReplayGuard,
-    ReplayGuardSnapshot, ReplayHighWaterMark, ReplayNonceRecord, SignedRotationCandidateAcceptance,
-    SignedRotationPairingTicket, SignedWitnessRotationAuthorization,
-    SignedWitnessRotationBaselineReceipt, WitnessReconciliationStatus, WitnessRotationPhase,
+    ReplayGuardSnapshot, ReplayHighWaterMark, ReplayNonceRecord,
+    SignedAgentFastPayApprovalDecision, SignedAgentHvmApprovalDecision,
+    SignedRotationCandidateAcceptance, SignedRotationPairingTicket,
+    SignedWitnessRotationAuthorization, SignedWitnessRotationBaselineReceipt,
+    WitnessReconciliationStatus, WitnessRotationPhase,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use super::network::agent_fast_pay_network_allowed;
 use super::{MAX_STATE_BYTES, STATE_VERSION, unix_now};
 
 const RESET_MARKER: &[u8] = br#"{"stateVersion":"reset"}"#;
@@ -120,6 +124,93 @@ impl MobilePendingApproval {
     }
 }
 
+/// One exact Agent Fast Pay owner decision retained for crash-safe delivery.
+///
+/// The unsigned decision is persisted before Android opens the biometric
+/// prompt, consuming its monotonic sequence once. The exact signed object is
+/// then persisted before transport. A response-loss retry therefore sends the
+/// same signature bytes instead of creating a second authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MobilePendingAgentFastPayApproval {
+    pub(super) state_version: String,
+    pub(super) commitment_hash: String,
+    pub(super) decision: AgentFastPayApprovalDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) signed_decision: Option<SignedAgentFastPayApprovalDecision>,
+}
+
+impl MobilePendingAgentFastPayApproval {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        let canonical_hash = self
+            .decision
+            .commitment
+            .canonical_sha256_hex()
+            .map_err(|error| error.to_string())?;
+        self.decision
+            .canonical_bytes()
+            .map_err(|error| error.to_string())?;
+        if self.state_version != "1"
+            || self.commitment_hash != canonical_hash
+            || self.decision.commitment_sha256 != canonical_hash
+            || !agent_fast_pay_network_allowed(&self.decision.commitment.network_binding)
+            || self.decision.commitment.network_fee_units != 0
+            || self.decision.commitment.wallet_fee_units != 0
+            || self.decision.commitment.hub_fee_units != 0
+            || self.decision.commitment.total_debit_units != self.decision.commitment.amount_units
+            || self.signed_decision.as_ref().is_some_and(|signed| {
+                signed.decision != self.decision || !is_signature(&signed.signature_hex)
+            })
+        {
+            return Err("Pending Agent Fast Pay approval is invalid".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// One exact Agent HVM owner decision retained for crash-safe delivery.
+///
+/// This is a distinct rail from native ChannelPay. The durable record binds
+/// the exact deployment, all lease evidence, previous bill, next unsigned bill
+/// and zero-fee decision before Android may use its biometric key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MobilePendingAgentHvmApproval {
+    pub(super) state_version: String,
+    pub(super) commitment_hash: String,
+    pub(super) decision: AgentHvmApprovalDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) signed_decision: Option<SignedAgentHvmApprovalDecision>,
+}
+
+impl MobilePendingAgentHvmApproval {
+    pub(super) fn validate(&self) -> Result<(), String> {
+        let canonical_hash = self
+            .decision
+            .commitment
+            .canonical_sha256_hex()
+            .map_err(|error| error.to_string())?;
+        self.decision
+            .canonical_bytes()
+            .map_err(|error| error.to_string())?;
+        if self.state_version != "1"
+            || self.commitment_hash != canonical_hash
+            || self.decision.commitment_sha256 != canonical_hash
+            || !agent_fast_pay_network_allowed(&self.decision.commitment.network_binding)
+            || self.decision.commitment.network_fee_zhu != 0
+            || self.decision.commitment.wallet_fee_zhu != 0
+            || self.decision.commitment.hub_fee_zhu != 0
+            || self.decision.commitment.total_debit_zhu != self.decision.commitment.amount_zhu
+            || self.signed_decision.as_ref().is_some_and(|signed| {
+                signed.decision != self.decision || !is_signature(&signed.signature_hex)
+            })
+        {
+            return Err("Pending Agent HVM approval is invalid".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// The owner's consent, on this handset, to witness one exact operation they
 /// did not approve here.
 ///
@@ -192,6 +283,8 @@ const CONSENT_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
 pub(super) const DISCARDED_WITNESS_CONFIRMATION: &str = "witness_confirmation";
 pub(super) const DISCARDED_PILOT_APPROVAL: &str = "pilot_approval";
+pub(super) const DISCARDED_AGENT_FAST_PAY_APPROVAL: &str = "agent_fast_pay_approval";
+pub(super) const DISCARDED_AGENT_HVM_APPROVAL: &str = "agent_hvm_approval";
 
 #[cfg(any(target_os = "android", test))]
 pub(super) const DISCARD_DESKTOP_NO_LONGER_AWAITING: &str = "desktop_no_longer_awaits_this_phone";
@@ -253,7 +346,10 @@ impl MobileDiscardedConsent {
         if self.state_version != "1"
             || !matches!(
                 self.kind.as_str(),
-                DISCARDED_WITNESS_CONFIRMATION | DISCARDED_PILOT_APPROVAL
+                DISCARDED_WITNESS_CONFIRMATION
+                    | DISCARDED_PILOT_APPROVAL
+                    | DISCARDED_AGENT_FAST_PAY_APPROVAL
+                    | DISCARDED_AGENT_HVM_APPROVAL
             )
             || self.operation_id.is_empty()
             // Deliberately looser than the 128 a witness confirmation allows.
@@ -294,6 +390,42 @@ impl MobileDiscardedConsent {
             amount_units: pending.decision.amount_units.to_string(),
             recipient: pending.decision.recipient.clone(),
             confirmed_at: pending.decision.issued_at.to_string(),
+            discarded_at: now.to_string(),
+            reason: reason.to_owned(),
+        }
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    fn from_agent_fast_pay_approval(
+        pending: &MobilePendingAgentFastPayApproval,
+        reason: &str,
+        now: u64,
+    ) -> Self {
+        Self {
+            state_version: "1".to_owned(),
+            kind: DISCARDED_AGENT_FAST_PAY_APPROVAL.to_owned(),
+            operation_id: pending.decision.commitment.operation_id.clone(),
+            amount_units: pending.decision.commitment.amount_units.to_string(),
+            recipient: pending.decision.commitment.payee.clone(),
+            confirmed_at: pending.decision.decision_issued_at.to_string(),
+            discarded_at: now.to_string(),
+            reason: reason.to_owned(),
+        }
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    fn from_agent_hvm_approval(
+        pending: &MobilePendingAgentHvmApproval,
+        reason: &str,
+        now: u64,
+    ) -> Self {
+        Self {
+            state_version: "1".to_owned(),
+            kind: DISCARDED_AGENT_HVM_APPROVAL.to_owned(),
+            operation_id: pending.decision.commitment.operation_id.clone(),
+            amount_units: pending.decision.commitment.amount_zhu.to_string(),
+            recipient: pending.decision.commitment.payee.clone(),
+            confirmed_at: pending.decision.decision_issued_at.to_string(),
             discarded_at: now.to_string(),
             reason: reason.to_owned(),
         }
@@ -343,6 +475,8 @@ pub(super) struct MobileCompanionDurableState {
     pub(super) approval_sequence: u64,
     pub(super) pending_pairing_ack: Option<EncryptedCompanionFrame>,
     pub(super) pending_approval: Option<MobilePendingApproval>,
+    pub(super) pending_agent_fast_pay_approval: Option<MobilePendingAgentFastPayApproval>,
+    pub(super) pending_agent_hvm_approval: Option<MobilePendingAgentHvmApproval>,
     pub(super) pending_witness: Option<MobilePendingWitness>,
     /// Every consent record this phone stopped holding, oldest first, capped
     /// at [`MAX_DISCARDED_CONSENTS`].
@@ -427,6 +561,75 @@ impl MobileCompanionDurableState {
                     "Pending pilot approval scope does not match companion state".to_owned(),
                 );
             }
+        }
+        if let Some(pending) = &self.pending_agent_fast_pay_approval {
+            pending.validate()?;
+            if pending.decision.commitment.agent_wallet_id != self.agent_wallet_id
+                || pending.decision.commitment.desktop_device_id != self.desktop_device_id
+                || pending.decision.mobile_device_id != self.mobile_device_id
+                || pending.decision.approval_sequence != self.approval_sequence
+            {
+                return Err(
+                    "Pending Agent Fast Pay approval scope does not match companion state"
+                        .to_owned(),
+                );
+            }
+            let permission = match pending.decision.decision {
+                ApprovalDecision::Approve => DevicePermission::ApprovePayment,
+                ApprovalDecision::Reject => DevicePermission::RejectPayment,
+            };
+            let record = self
+                .registry
+                .require(
+                    &self.mobile_device_id,
+                    &self.agent_wallet_id,
+                    DeviceRole::Mobile,
+                    permission,
+                )
+                .map_err(|error| error.to_string())?;
+            if record.authorization_epoch != pending.decision.device_authorization_epoch {
+                return Err(
+                    "Pending Agent Fast Pay approval authorization epoch is stale".to_owned(),
+                );
+            }
+        }
+        if let Some(pending) = &self.pending_agent_hvm_approval {
+            pending.validate()?;
+            if pending.decision.commitment.agent_wallet_id != self.agent_wallet_id
+                || pending.decision.commitment.desktop_device_id != self.desktop_device_id
+                || pending.decision.mobile_device_id != self.mobile_device_id
+                || pending.decision.approval_sequence != self.approval_sequence
+            {
+                return Err(
+                    "Pending Agent HVM approval scope does not match companion state".to_owned(),
+                );
+            }
+            let permission = match pending.decision.decision {
+                ApprovalDecision::Approve => DevicePermission::ApprovePayment,
+                ApprovalDecision::Reject => DevicePermission::RejectPayment,
+            };
+            let record = self
+                .registry
+                .require(
+                    &self.mobile_device_id,
+                    &self.agent_wallet_id,
+                    DeviceRole::Mobile,
+                    permission,
+                )
+                .map_err(|error| error.to_string())?;
+            if record.authorization_epoch != pending.decision.device_authorization_epoch {
+                return Err("Pending Agent HVM approval authorization epoch is stale".to_owned());
+            }
+        }
+        let consent_count = usize::from(self.pending_approval.is_some())
+            + usize::from(self.pending_agent_fast_pay_approval.is_some())
+            + usize::from(self.pending_agent_hvm_approval.is_some())
+            + usize::from(self.pending_witness.is_some());
+        if consent_count > 1
+            && (self.pending_agent_fast_pay_approval.is_some()
+                || self.pending_agent_hvm_approval.is_some())
+        {
+            return Err("Only one mobile payment consent may be pending".to_owned());
         }
         if let Some(pending) = &self.pending_witness {
             pending.validate()?;
@@ -551,7 +754,10 @@ impl MobileCompanionDurableState {
     /// permanently replaced the reset section. The screen must be able to see
     /// the predicate the storage layer actually enforces.
     pub(super) fn rotation_blocking_phase(&self) -> Option<WitnessRotationPhase> {
-        if self.pending_approval.is_some() {
+        if self.pending_approval.is_some()
+            || self.pending_agent_fast_pay_approval.is_some()
+            || self.pending_agent_hvm_approval.is_some()
+        {
             return Some(WitnessRotationPhase::BlockedByPendingApproval);
         }
         // A confirmed-but-unfinished witness is an unresolved signed operation
@@ -614,6 +820,42 @@ impl MobileCompanionDurableState {
             return Err("Pilot approval completion scope mismatch".to_owned());
         }
         self.pending_approval = None;
+        self.rewind_reset_refusal_marker();
+        Ok(())
+    }
+
+    /// Forgets the exact Agent Fast Pay decision only after a matching desktop
+    /// acknowledgement or an explicit owner discard.
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn clear_pending_agent_fast_pay_approval_for(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        let pending = self
+            .pending_agent_fast_pay_approval
+            .as_ref()
+            .ok_or_else(|| "No Agent Fast Pay approval is pending".to_owned())?;
+        if pending.decision.commitment.operation_id != operation_id {
+            return Err("Agent Fast Pay approval completion scope mismatch".to_owned());
+        }
+        self.pending_agent_fast_pay_approval = None;
+        self.rewind_reset_refusal_marker();
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub(super) fn clear_pending_agent_hvm_approval_for(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        let pending = self
+            .pending_agent_hvm_approval
+            .as_ref()
+            .ok_or_else(|| "No Agent HVM approval is pending".to_owned())?;
+        if pending.decision.commitment.operation_id != operation_id {
+            return Err("Agent HVM approval completion scope mismatch".to_owned());
+        }
+        self.pending_agent_hvm_approval = None;
         self.rewind_reset_refusal_marker();
         Ok(())
     }
@@ -704,6 +946,30 @@ impl MobileCompanionDurableState {
         {
             return Some(MobileDiscardedConsent::from_approval(pending, reason, now));
         }
+        if let Some(pending) = &self.pending_agent_fast_pay_approval
+            && let Some(reason) = retired(
+                &pending.decision.commitment.operation_id,
+                pending.decision.decision_issued_at,
+                None,
+                now,
+            )
+        {
+            return Some(MobileDiscardedConsent::from_agent_fast_pay_approval(
+                pending, reason, now,
+            ));
+        }
+        if let Some(pending) = &self.pending_agent_hvm_approval
+            && let Some(reason) = retired(
+                &pending.decision.commitment.operation_id,
+                pending.decision.decision_issued_at,
+                None,
+                now,
+            )
+        {
+            return Some(MobileDiscardedConsent::from_agent_hvm_approval(
+                pending, reason, now,
+            ));
+        }
         None
     }
 
@@ -733,6 +999,12 @@ impl MobileCompanionDurableState {
             }
             DISCARDED_PILOT_APPROVAL => {
                 self.clear_pending_approval_for(&discard.operation_id)?;
+            }
+            DISCARDED_AGENT_FAST_PAY_APPROVAL => {
+                self.clear_pending_agent_fast_pay_approval_for(&discard.operation_id)?;
+            }
+            DISCARDED_AGENT_HVM_APPROVAL => {
+                self.clear_pending_agent_hvm_approval_for(&discard.operation_id)?;
             }
             _ => return Err("Discarded consent record is invalid".to_owned()),
         }
@@ -776,6 +1048,30 @@ impl MobileCompanionDurableState {
                 DISCARD_OWNER,
                 now,
             )
+        } else if self
+            .pending_agent_fast_pay_approval
+            .as_ref()
+            .is_some_and(|pending| pending.decision.commitment.operation_id == operation_id)
+        {
+            MobileDiscardedConsent::from_agent_fast_pay_approval(
+                self.pending_agent_fast_pay_approval
+                    .as_ref()
+                    .expect("checked above"),
+                DISCARD_OWNER,
+                now,
+            )
+        } else if self
+            .pending_agent_hvm_approval
+            .as_ref()
+            .is_some_and(|pending| pending.decision.commitment.operation_id == operation_id)
+        {
+            MobileDiscardedConsent::from_agent_hvm_approval(
+                self.pending_agent_hvm_approval
+                    .as_ref()
+                    .expect("checked above"),
+                DISCARD_OWNER,
+                now,
+            )
         } else {
             return Err("This phone is not holding a confirmation for that payment".to_owned());
         };
@@ -799,6 +1095,14 @@ fn reset_refusal_message(state: &MobileCompanionDurableState) -> String {
     }
     if state.pending_approval.is_some() {
         return "Companion reset is blocked because this phone is still holding one pilot approval. Finish that payment, or discard the approval on this screen, and try again. Running a witness rotation does not clear it."
+            .to_owned();
+    }
+    if state.pending_agent_fast_pay_approval.is_some() {
+        return "Companion reset is blocked because this phone is still holding one Agent Fast Pay approval. Finish that approval, or discard it on this screen, and try again. Running a witness rotation does not clear it."
+            .to_owned();
+    }
+    if state.pending_agent_hvm_approval.is_some() {
+        return "Companion reset is blocked because this phone is still holding one Agent HVM Fast Pay approval. Finish that approval, or discard it on this screen, and try again. Running a witness rotation does not clear it."
             .to_owned();
     }
     "Companion reset is blocked after pilot approval or witness initialization; controlled desktop/mobile witness rotation is required"
@@ -843,6 +1147,10 @@ struct DurableStateDocument {
     pending_pairing_ack: Option<EncryptedCompanionFrame>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_approval: Option<MobilePendingApproval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_agent_fast_pay_approval: Option<MobilePendingAgentFastPayApproval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_agent_hvm_approval: Option<MobilePendingAgentHvmApproval>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_witness: Option<MobilePendingWitness>,
     /// The single receipt the previous build wrote, read and never written.
@@ -938,6 +1246,8 @@ impl From<&MobileCompanionDurableState> for DurableStateDocument {
             approval_sequence: state.approval_sequence.to_string(),
             pending_pairing_ack: state.pending_pairing_ack.clone(),
             pending_approval: state.pending_approval.clone(),
+            pending_agent_fast_pay_approval: state.pending_agent_fast_pay_approval.clone(),
+            pending_agent_hvm_approval: state.pending_agent_hvm_approval.clone(),
             pending_witness: state.pending_witness.clone(),
             // Never written again: the history below replaces it.
             discarded_consent: None,
@@ -1013,6 +1323,8 @@ impl TryFrom<DurableStateDocument> for MobileCompanionDurableState {
             approval_sequence: parse_decimal_u64(&document.approval_sequence)?,
             pending_pairing_ack: document.pending_pairing_ack,
             pending_approval: document.pending_approval,
+            pending_agent_fast_pay_approval: document.pending_agent_fast_pay_approval,
+            pending_agent_hvm_approval: document.pending_agent_hvm_approval,
             pending_witness: document.pending_witness,
             discarded_consents,
             discarded_consents_dropped,
@@ -1306,7 +1618,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use hpay_companion_protocol::{
-        CompanionError, DevicePermission, ReplayMetadata, SoftwareDeviceIdentity,
+        AGENT_FAST_PAY_APPROVAL_VERSION, AGENT_HVM_APPROVAL_VERSION,
+        AgentFastPayApprovalCommitment, AgentFastPayNetworkBinding, AgentHvmApprovalCommitment,
+        CompanionError, ReplayMetadata, SoftwareDeviceIdentity,
     };
 
     use super::*;
@@ -1356,7 +1670,11 @@ mod tests {
                 mobile
                     .public_record(
                         "wallet_one",
-                        BTreeSet::from([DevicePermission::ViewAgentWalletStatus]),
+                        BTreeSet::from([
+                            DevicePermission::ViewAgentWalletStatus,
+                            DevicePermission::ApprovePayment,
+                            DevicePermission::RejectPayment,
+                        ]),
                         now - 1,
                     )
                     .unwrap(),
@@ -1374,6 +1692,8 @@ mod tests {
             approval_sequence: 0,
             pending_pairing_ack: None,
             pending_approval: None,
+            pending_agent_fast_pay_approval: None,
+            pending_agent_hvm_approval: None,
             pending_witness: None,
             discarded_consents: Vec::new(),
             discarded_consents_dropped: 0,
@@ -1384,6 +1704,284 @@ mod tests {
             rotation_ticket: None,
             rotation_candidate_acceptance: None,
         }
+    }
+
+    fn pending_agent_fast_pay(
+        state: &MobileCompanionDurableState,
+        now: u64,
+    ) -> MobilePendingAgentFastPayApproval {
+        let commitment = AgentFastPayApprovalCommitment {
+            approval_version: AGENT_FAST_PAY_APPROVAL_VERSION,
+            approval_id: "fast_pay_approval_mobile_storage".to_owned(),
+            challenge_nonce: "ab".repeat(16),
+            operation_id: "operation_fast_pay_mobile_storage".to_owned(),
+            hub_operation_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            public_idempotency_key: "agent-mobile-storage-key".to_owned(),
+            hub_idempotency_key: "hpay-agent:550e8400-e29b-41d4-a716-446655440001".to_owned(),
+            agent_wallet_id: state.agent_wallet_id.clone(),
+            wallet_scope: format!("agent_wallet:{}", state.agent_wallet_id),
+            agent_id: "agent_mobile_storage".to_owned(),
+            desktop_device_id: state.desktop_device_id.clone(),
+            request_commitment: "aa".repeat(32),
+            binding_commitment: "bb".repeat(32),
+            route_commitment: "cc".repeat(32),
+            payer: "1Payer".to_owned(),
+            payee: "1Payee".to_owned(),
+            amount_hac: "0.012".to_owned(),
+            amount_units: 12_000,
+            amount_millimeis: 12,
+            hub_url: "https://hub.example".to_owned(),
+            hub_address: "1Hub".to_owned(),
+            channel_id: "dd".repeat(16),
+            channel_reuse_version: 7,
+            channel_open_height: 900_000,
+            fee_payer: "sender".to_owned(),
+            network_fee_units: 0,
+            wallet_fee_units: 0,
+            hub_fee_units: 0,
+            total_debit_units: 12_000,
+            policy_epoch: 3,
+            signer_epoch: 4,
+            emergency_epoch: 5,
+            issued_at: now,
+            expires_at: now + 300,
+            network_binding: AgentFastPayNetworkBinding {
+                network_mode: "testnet".to_owned(),
+                chain_id: 7,
+                genesis_identifier: "ee".repeat(32),
+                node_profile_id: "fa".repeat(32),
+                network_instance_id: "testnet:mobile-storage".to_owned(),
+                transaction_format_version: 2,
+            },
+        };
+        let authorization_epoch = state
+            .registry
+            .require(
+                &state.mobile_device_id,
+                &state.agent_wallet_id,
+                DeviceRole::Mobile,
+                DevicePermission::ApprovePayment,
+            )
+            .unwrap()
+            .authorization_epoch;
+        let decision = AgentFastPayApprovalDecision::from_commitment(
+            commitment,
+            ApprovalDecision::Approve,
+            state.mobile_device_id.clone(),
+            authorization_epoch,
+            1,
+            now + 1,
+        )
+        .unwrap();
+        MobilePendingAgentFastPayApproval {
+            state_version: "1".to_owned(),
+            commitment_hash: decision.commitment_sha256.clone(),
+            decision,
+            signed_decision: None,
+        }
+    }
+
+    fn pending_agent_hvm(
+        state: &MobileCompanionDurableState,
+        now: u64,
+    ) -> MobilePendingAgentHvmApproval {
+        let commitment = AgentHvmApprovalCommitment {
+            approval_version: AGENT_HVM_APPROVAL_VERSION,
+            approval_id: "hvm_approval_mobile_storage".to_owned(),
+            challenge_nonce: "11".repeat(16),
+            operation_id: "operation_hvm_mobile_storage".to_owned(),
+            hub_operation_id: "550e8400-e29b-41d4-a716-446655440010".to_owned(),
+            public_idempotency_key: "agent-hvm-mobile-storage-key".to_owned(),
+            hub_idempotency_key: "hpay-agent-hvm:550e8400-e29b-41d4-a716-446655440011".to_owned(),
+            agent_wallet_id: state.agent_wallet_id.clone(),
+            wallet_scope: format!("agent_wallet:{}", state.agent_wallet_id),
+            agent_id: "agent_hvm_mobile_storage".to_owned(),
+            agent_authorization_epoch: 2,
+            desktop_device_id: state.desktop_device_id.clone(),
+            hub_url: "https://hub.example".to_owned(),
+            hub_address: "1Hub".to_owned(),
+            settlement_profile: "hpay-hvm-channel-v1".to_owned(),
+            contract_address: "3Contract".to_owned(),
+            deployment_tx_hash: "22".repeat(32),
+            deployment_height: 900_000,
+            bytecode_sha3: "11a2efc27a0c951bbc6977186eb58bd076dd331a785f3c57242cf54a72238349"
+                .to_owned(),
+            channel_id: "33".repeat(16),
+            channel_reuse_version: 1,
+            challenge_blocks: 12,
+            binding_commitment: "44".repeat(32),
+            lease_snapshot_commitment: "55".repeat(32),
+            previous_bill_commitment: "66".repeat(32),
+            unsigned_request_commitment: "77".repeat(32),
+            payer: "1Payer".to_owned(),
+            payee: "provider:compute".to_owned(),
+            amount_hac: "0.01".to_owned(),
+            amount_zhu: 1_000_000,
+            fee_payer: "sender".to_owned(),
+            network_fee_zhu: 0,
+            wallet_fee_zhu: 0,
+            hub_fee_zhu: 0,
+            total_debit_zhu: 1_000_000,
+            policy_epoch: 3,
+            signer_epoch: 4,
+            emergency_epoch: 5,
+            issued_at: now,
+            expires_at: now + 300,
+            network_binding: AgentFastPayNetworkBinding {
+                network_mode: "testnet".to_owned(),
+                chain_id: 7,
+                genesis_identifier: "88".repeat(32),
+                node_profile_id: "hpay-local-pilot-chain-v1".to_owned(),
+                network_instance_id: "testnet:hvm-mobile-storage".to_owned(),
+                transaction_format_version: 2,
+            },
+        };
+        let authorization_epoch = state
+            .registry
+            .require(
+                &state.mobile_device_id,
+                &state.agent_wallet_id,
+                DeviceRole::Mobile,
+                DevicePermission::ApprovePayment,
+            )
+            .unwrap()
+            .authorization_epoch;
+        let decision = AgentHvmApprovalDecision::from_commitment(
+            commitment,
+            ApprovalDecision::Approve,
+            state.mobile_device_id.clone(),
+            authorization_epoch,
+            1,
+            now + 1,
+        )
+        .unwrap();
+        MobilePendingAgentHvmApproval {
+            state_version: "1".to_owned(),
+            commitment_hash: decision.commitment_sha256.clone(),
+            decision,
+            signed_decision: None,
+        }
+    }
+
+    #[test]
+    fn agent_fast_pay_consent_roundtrips_blocks_reset_and_has_an_owner_exit() {
+        let now = 10_000;
+        let mut state = state_fixture(now);
+        state.approval_sequence = 1;
+        state.pending_agent_fast_pay_approval = Some(pending_agent_fast_pay(&state, now));
+        let encoded = encode_state(&state).unwrap();
+        let mut decoded = decode_state(&encoded, now + 2).unwrap();
+        assert_eq!(
+            decoded.pending_agent_fast_pay_approval,
+            state.pending_agent_fast_pay_approval
+        );
+        assert_eq!(
+            decoded.rotation_blocking_phase(),
+            Some(WitnessRotationPhase::BlockedByPendingApproval)
+        );
+        let operation_id = decoded
+            .pending_agent_fast_pay_approval
+            .as_ref()
+            .unwrap()
+            .decision
+            .commitment
+            .operation_id
+            .clone();
+        let receipt = decoded
+            .owner_discard_consent(&operation_id, now + 3)
+            .unwrap();
+        assert_eq!(receipt.kind, DISCARDED_AGENT_FAST_PAY_APPROVAL);
+        assert!(decoded.pending_agent_fast_pay_approval.is_none());
+        assert_eq!(decoded.discarded_consents.last(), Some(&receipt));
+    }
+
+    #[test]
+    fn agent_fast_pay_consent_cannot_coexist_or_use_a_stale_authorization_epoch() {
+        let now = 20_000;
+        let mut state = state_fixture(now);
+        state.approval_sequence = 1;
+        state.pending_agent_fast_pay_approval = Some(pending_agent_fast_pay(&state, now));
+        state.pending_witness = Some(MobilePendingWitness {
+            state_version: "1".to_owned(),
+            operation_id: "operation_other".to_owned(),
+            amount_units: "1".to_owned(),
+            recipient: "1Other".to_owned(),
+            status: hpay_companion_protocol::WITNESS_PENDING_ACTIVITY_STATUSES[0].to_owned(),
+            confirmed_at: now.to_string(),
+        });
+        assert!(state.validate_at(now + 2).is_err());
+
+        state.pending_witness = None;
+        state
+            .pending_agent_fast_pay_approval
+            .as_mut()
+            .unwrap()
+            .decision
+            .device_authorization_epoch += 1;
+        assert!(state.validate_at(now + 2).is_err());
+    }
+
+    #[test]
+    fn agent_hvm_consent_roundtrips_blocks_reset_and_has_an_owner_exit() {
+        let now = 30_000;
+        let mut state = state_fixture(now);
+        state.approval_sequence = 1;
+        state.pending_agent_hvm_approval = Some(pending_agent_hvm(&state, now));
+        let encoded = encode_state(&state).unwrap();
+        let mut decoded = decode_state(&encoded, now + 2).unwrap();
+        assert_eq!(
+            decoded.pending_agent_hvm_approval,
+            state.pending_agent_hvm_approval
+        );
+        assert_eq!(
+            decoded.rotation_blocking_phase(),
+            Some(WitnessRotationPhase::BlockedByPendingApproval)
+        );
+        let operation_id = decoded
+            .pending_agent_hvm_approval
+            .as_ref()
+            .unwrap()
+            .decision
+            .commitment
+            .operation_id
+            .clone();
+        let receipt = decoded
+            .owner_discard_consent(&operation_id, now + 3)
+            .unwrap();
+        assert_eq!(receipt.kind, DISCARDED_AGENT_HVM_APPROVAL);
+        assert!(decoded.pending_agent_hvm_approval.is_none());
+        assert_eq!(decoded.discarded_consents.last(), Some(&receipt));
+    }
+
+    #[test]
+    fn agent_hvm_consent_rejects_coexistence_fees_and_stale_authorization() {
+        let now = 40_000;
+        let mut state = state_fixture(now);
+        state.approval_sequence = 1;
+        state.pending_agent_hvm_approval = Some(pending_agent_hvm(&state, now));
+        state.pending_agent_fast_pay_approval = Some(pending_agent_fast_pay(&state, now));
+        assert!(state.validate_at(now + 2).is_err());
+
+        state.pending_agent_fast_pay_approval = None;
+        state
+            .pending_agent_hvm_approval
+            .as_mut()
+            .unwrap()
+            .decision
+            .device_authorization_epoch += 1;
+        assert!(state.validate_at(now + 2).is_err());
+
+        let mut state = state_fixture(now);
+        state.approval_sequence = 1;
+        state.pending_agent_hvm_approval = Some(pending_agent_hvm(&state, now));
+        state
+            .pending_agent_hvm_approval
+            .as_mut()
+            .unwrap()
+            .decision
+            .commitment
+            .wallet_fee_zhu = 1;
+        assert!(state.validate_at(now + 2).is_err());
     }
 
     #[test]
@@ -2455,6 +3053,8 @@ mod tests {
             approval_sequence: 0,
             pending_pairing_ack: None,
             pending_approval: None,
+            pending_agent_fast_pay_approval: None,
+            pending_agent_hvm_approval: None,
             pending_witness: Some(witness_confirmation("operation_one", now)),
             discarded_consents: Vec::new(),
             discarded_consents_dropped: 0,

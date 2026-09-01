@@ -73,6 +73,7 @@ impl PairingFixture {
                         "000008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff"
                             .to_owned(),
                     ),
+                    mainnet_pilot_acknowledgement: None,
                 },
                 now,
             )

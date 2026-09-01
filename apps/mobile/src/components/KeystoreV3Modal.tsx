@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { quantumApi, type QuantumAccountInfo, type QuantumAccountSummary } from "../api";
+import { handOffTextFile } from "@hacash/wallet-ui";
 import { formatInvokeError } from "../formatInvokeError";
 import { kindLabel, MIN_KEYSTORE_PASS, summaryFromAccountInfo } from "../quantumMeta";
 import AddressBadge from "./AddressBadge";
@@ -78,14 +79,23 @@ export default function KeystoreV3Modal({
     try {
       const json = await quantumApi.exportKeystore(pass);
       const meta = JSON.parse(json) as { kind?: string; address?: string };
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = exportFilename(meta.kind);
-      a.click();
-      URL.revokeObjectURL(url);
-      setMsg(`Exported ${meta.address ?? "keystore"}`);
+      /*
+       * The encrypted post-quantum keystore: Argon2id + AES-256-GCM around a key
+       * that holds real value. `setMsg("Exported ...")` used to run whatever
+       * happened, and on Android nothing ever happened - the shell installs no
+       * DownloadListener, so `<a download>` does nothing at all. The repo already
+       * knows the correct native route for a wallet backup
+       * (`wallet_export_backup_to_downloads`, whose Rust body stages into
+       * app_cache_dir and calls a MediaStore copy); there is no equivalent for
+       * this keystore, so the honest thing is to say no file was written rather
+       * than to claim one was.
+       */
+      const handoff = await handOffTextFile(exportFilename(meta.kind), json);
+      setMsg(
+        handoff.ok
+          ? handoff.message
+          : `${handoff.message} The keystore for ${meta.address ?? "this key"} was NOT saved to a file, and this screen has no copy control either, so there is no route off this phone for it yet. Your key is unharmed and still in this wallet. The same export on the desktop wallet does write a file, for a wallet that holds this key there.`,
+      );
     } catch (e) {
       setMsg(formatInvokeError(e));
     } finally {

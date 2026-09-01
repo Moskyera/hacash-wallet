@@ -7,6 +7,8 @@
 use std::collections::BTreeSet;
 
 use crate::error::{AgentWalletError, AgentWalletResult};
+#[cfg(any(test, feature = "agent-wallet-testnet-pilot"))]
+use crate::fast_pay_operation::AgentFastPayOperationView;
 use crate::journal::AgentJournalEventKind;
 use crate::operation::{OperationStatus, PaymentOperationView};
 use crate::policy::{AgentPolicy, AgentRecord, AgentStatus};
@@ -139,6 +141,41 @@ impl AgentWalletManager {
                 operation.status == OperationStatus::ApprovalRequested && operation.expires_at > now
             })
             .collect())
+    }
+
+    /// Lists the authenticated Agent Fast Pay journal for the trusted owner UI.
+    ///
+    /// This is deliberately separate from the L1 activity list: Fast Pay has
+    /// different post-sign recovery states and must never be presented as an
+    /// L1 transaction or inherit an L1 fallback control.
+    #[cfg(any(test, feature = "agent-wallet-testnet-pilot"))]
+    pub fn list_fast_pay_operations_admin(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        now: u64,
+    ) -> AgentWalletResult<Vec<AgentFastPayOperationView>> {
+        self.ensure_session_active(wallet_id, now)?;
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        self.sweep_expired_pre_signing_operations(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            now,
+        )?;
+        let mut operations: Vec<_> = state
+            .fast_pay_operations
+            .values()
+            .map(super::AgentFastPayOperation::view)
+            .collect();
+        operations.sort_by_key(|operation| {
+            (
+                std::cmp::Reverse(operation.created_at),
+                operation.operation_id.clone(),
+            )
+        });
+        Ok(operations)
     }
 }
 

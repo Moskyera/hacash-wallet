@@ -1,8 +1,24 @@
 #[cfg(all(
+    test,
+    feature = "agent-wallet-admin",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+mod agent_command_stack_budget;
+#[cfg(all(
     feature = "agent-wallet-admin",
     not(any(target_os = "android", target_os = "ios"))
 ))]
 pub mod agent_commands;
+#[cfg(all(
+    feature = "agent-wallet-testnet-pilot",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod agent_registry_exit;
+#[cfg(all(
+    feature = "agent-wallet-testnet-pilot",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub mod agent_registry_open;
 #[cfg(all(
     feature = "agent-wallet-admin",
     not(any(target_os = "android", target_os = "ios"))
@@ -40,6 +56,8 @@ pub mod update_android;
 pub mod dapp_approval;
 #[cfg(feature = "desktop")]
 pub mod desktop_commands;
+#[cfg(feature = "desktop")]
+pub mod desktop_node;
 #[cfg(feature = "desktop")]
 pub mod desktop_relay;
 

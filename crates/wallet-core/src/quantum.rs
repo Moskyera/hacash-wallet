@@ -290,9 +290,18 @@ impl WalletService {
             balance_mei,
             &fee_est.fee_wire,
         )?;
+        // A guessed fee is a warning about this transaction, so it travels
+        // with the other warnings rather than in a field nobody added a
+        // renderer for. `estimate_type4_fee` falls back to the wallet's own
+        // floor when the node will not answer; without this the fallback was
+        // computed, labelled, and then dropped one frame later.
+        let mut warnings = check.warnings;
+        if let Some(fee_warning) = fee_est.warning() {
+            warnings.push(fee_warning);
+        }
         Ok(QuantumPreflight {
             ok: check.ok,
-            warnings: check.warnings,
+            warnings,
             errors: check.errors,
             balance_mei,
             fee_wire: fee_est.fee_wire,
@@ -311,7 +320,8 @@ impl WalletService {
         keystore_pass: Option<&str>,
     ) -> WalletResult<crate::type4_fee::Type4FeeEstimate> {
         use crate::type4_fee::{
-            estimate_signed_wire_bytes, fee_from_node_average, local_fee_from_wire_bytes,
+            estimate_signed_wire_bytes, fee_from_node_average,
+            local_fee_from_wire_bytes_after_node_error,
         };
 
         let amount_mei = parse_decimal_hac_mei(amount_hacash)?;
@@ -347,10 +357,24 @@ impl WalletService {
             estimate_signed_wire_bytes(unsigned.len() / 2)
         };
 
-        match self.node_client().query_fee_average(wire_bytes, 4).await {
-            Ok(resp) => fee_from_node_average(&resp.feasible, wire_bytes, resp.purity),
-            Err(_) => Ok(local_fee_from_wire_bytes(wire_bytes)),
-        }
+        // The floor stays as the answer when the node will not give one,
+        // because quoting nothing is worse than quoting a minimum. What it no
+        // longer does is arrive looking like a rate the network quoted: the
+        // estimate carries the node's own error, and `Type4FeeEstimate::warning`
+        // turns it into a line for the person about to pay.
+        let node_error = match self.node_client().query_fee_average(wire_bytes, 4).await {
+            // A `ret == 0` carrying a fee that will not parse is a node that
+            // did not answer either, so it takes the same audible fallback.
+            Ok(resp) => match fee_from_node_average(&resp.feasible, wire_bytes, resp.purity) {
+                Ok(estimate) => return Ok(estimate),
+                Err(err) => err.to_string(),
+            },
+            Err(err) => err.to_string(),
+        };
+        Ok(local_fee_from_wire_bytes_after_node_error(
+            wire_bytes,
+            &node_error,
+        ))
     }
 
     pub fn set_quantum_mode(&mut self, enabled: bool) -> WalletResult<()> {

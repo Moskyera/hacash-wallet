@@ -12,7 +12,7 @@ The current implementation is suitable only for a controlled, low-value, disposa
 |---|---|---|
 | Windows desktop signer | Implemented and automated-test covered | Real Windows runtime evidence is still required. |
 | Android companion | Implemented and contract-test covered | Real Android, biometric, Keystore, and same-LAN evidence is still required. |
-| Linux desktop | Blocked | Pilot feature build fails intentionally because of the glib 0.18.5 blocker. |
+| Linux desktop | Build-gated | The bounded Agent feature must compile in Linux CI and the immutable patched glib source must pass the Rust advisory release gate. |
 | iOS companion | Unsupported | No Pilot approval/witness claim is allowed. |
 | Hacash testnet | Required | New Agent Wallet mainnet spending is blocked. |
 | Custom fullnode 1.0.10 | Required | No automatic fallback or discovery is allowed. |
@@ -20,14 +20,23 @@ The current implementation is suitable only for a controlled, low-value, disposa
 | HIP-20 | Disabled | No HIP-20/native-asset Agent Wallet send. |
 | L2/Fast Pay | Unsupported in Agent Wallet Pilot | Personal Wallet L2 remains separate and unchanged. |
 | Autonomous payments | Unsupported | Every decision requires explicit trusted-device action. |
-| Completing a payment approval | Implemented, desktop-approved and phone-witnessed | The owner approves on the desktop; the payment reaches the network only after the paired phone witnesses it. See "Completing a payment approval" below. |
+| Completing a payment approval | Implemented, desktop-approved; phone-witnessed only if the owner asks | The owner approves on the desktop. Whether a paired phone must then countersign is the owner's setting, off unless they turn it on. See "Completing a payment approval" below. |
 | Agent wallet fee | Zero | Only the network fee is included. |
 
 ## Completing a payment approval
 
-An agent proposes a payment, the owner reviews the exact transaction on the
-desktop and approves it, and the paired phone witnesses it. That path is
-implemented and executed end to end in
+An agent proposes a payment and the owner reviews the exact transaction on the
+desktop and approves it. Whether a paired phone must then countersign is the
+owner's setting - `rollback_witness_required`, off unless they turn it on from
+the Security page with their passphrase.
+
+WITH IT OFF, which is the default, the approval signs and submits in one step
+and no phone appears anywhere in the path. Executed end to end, with no
+companion device registered, no witness record and no anchor ever minted, in
+`crates/agent-wallet-core/src/service/companion/tests/witness_optional.rs`.
+
+WITH IT ON, the phone witnesses it, and everything below is unchanged. That path
+is implemented and executed end to end in
 `crates/agent-wallet-core/src/service/companion/tests/desktop_witness_flow.rs`:
 a real agent intent, a real node-built unsigned body, a real desktop approval, a
 real signature by the wallet's own signer, discovery through the least-privilege
@@ -42,7 +51,8 @@ operation existed. Both halves are closed - the phone can witness an operation
 it did not approve, and the snapshot discloses at most one witness-pending
 operation id to a phone holding `WitnessRollbackAnchor`.
 
-What still constrains it, and is enforced rather than documented:
+What still constrains it FOR A WALLET WHOSE OWNER TURNED THE WITNESS ON, and is
+enforced rather than documented. None of it is reachable with the setting off:
 
 - **A payment reaches the network only with a real witness.** No change here.
   `resume_payment` refuses a `SignedAwaitingWitness` operation, and
@@ -51,8 +61,8 @@ What still constrains it, and is enforced rather than documented:
   `a_desktop_approved_payment_still_reaches_no_node_without_a_real_phone_witness`.
 - **A desktop approval needs a phone that can witness, before it signs.**
   `approve_desktop_and_broadcast` refuses with
-  `WitnessPhoneRequiredForApproval` when no registered, unrevoked device holds
-  `WitnessRollbackAnchor`. Without that check a desktop approval on an unpaired
+  `WitnessPhoneRequiredForApproval` when the owner asked for a witness and no
+  registered, unrevoked device holds `WitnessRollbackAnchor`. Without that check a desktop approval on an unpaired
   wallet would sign into a status no sweep can expire, holding its reservation
   and refusing every later payment an anchor. The refusal happens before
   anything is written and names the control that resolves it. Pinned by

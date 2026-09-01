@@ -133,7 +133,7 @@ impl AgentEncryptedVault {
             &salt,
             &nonce,
             &kdf,
-            &vault.aad(),
+            &vault.aad()?,
             plaintext.as_slice(),
         )?;
         vault.ciphertext_hex = hex::encode(ciphertext);
@@ -200,7 +200,7 @@ impl AgentEncryptedVault {
             &salt,
             &nonce,
             &kdf,
-            &self.aad(),
+            &self.aad()?,
             &ciphertext,
         )?);
         let payload: VaultPayload =
@@ -254,19 +254,19 @@ impl AgentEncryptedVault {
         &self.store_uuid
     }
 
-    fn aad(&self) -> Vec<u8> {
+    fn aad(&self) -> AgentWalletResult<Vec<u8>> {
         let mut aad = Vec::with_capacity(256);
         aad.extend_from_slice(AAD_DOMAIN);
         aad.push(self.version);
-        push_field(&mut aad, self.wallet_id.as_str().as_bytes());
-        push_field(&mut aad, self.address.as_bytes());
-        push_field(&mut aad, self.network_mode.as_bytes());
-        push_field(&mut aad, self.primary_signing_device_id.as_bytes());
+        push_field(&mut aad, self.wallet_id.as_str().as_bytes())?;
+        push_field(&mut aad, self.address.as_bytes())?;
+        push_field(&mut aad, self.network_mode.as_bytes())?;
+        push_field(&mut aad, self.primary_signing_device_id.as_bytes())?;
         aad.extend_from_slice(&self.signer_epoch.to_be_bytes());
-        push_field(&mut aad, self.store_uuid.as_bytes());
+        push_field(&mut aad, self.store_uuid.as_bytes())?;
         aad.extend_from_slice(&self.created_at.to_be_bytes());
-        push_field(&mut aad, self.kdf.as_bytes());
-        aad
+        push_field(&mut aad, self.kdf.as_bytes())?;
+        Ok(aad)
     }
 
     fn validate_metadata(&self) -> AgentWalletResult<()> {
@@ -434,10 +434,11 @@ fn decode_array<const N: usize>(value: &str) -> AgentWalletResult<[u8; N]> {
     Ok(output)
 }
 
-fn push_field(output: &mut Vec<u8>, value: &[u8]) {
-    let len = u32::try_from(value.len()).expect("vault metadata fields are bounded");
+fn push_field(output: &mut Vec<u8>, value: &[u8]) -> AgentWalletResult<()> {
+    let len = u32::try_from(value.len()).map_err(|_| AgentWalletError::Vault)?;
     output.extend_from_slice(&len.to_be_bytes());
     output.extend_from_slice(value);
+    Ok(())
 }
 
 pub(crate) fn derive_domain_key(

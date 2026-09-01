@@ -20,6 +20,7 @@
 //! The node never signs and never has a key. It builds unsigned bodies only,
 //! which is exactly the trust boundary the production code assumes.
 
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -27,6 +28,7 @@ use std::sync::{
 
 use axum::{
     Json, Router,
+    extract::Query,
     routing::{get, post},
 };
 use basis::interface::Transaction as _;
@@ -35,6 +37,7 @@ use hpay_companion_protocol::{
     DevicePermission, SignedRollbackAnchor, SignedWitnessReceipt, SoftwareDeviceIdentity,
     WitnessReceipt,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sys::ToHex as _;
 use tokio::sync::RwLock;
@@ -51,11 +54,17 @@ pub(super) struct MockPilotNode {
     pub(super) url: String,
     pub(super) capabilities: Arc<RwLock<Value>>,
     pub(super) submit_count: Arc<AtomicUsize>,
+    pub(super) submitted_bodies: Arc<RwLock<Vec<String>>>,
+    /// Bodies that arrived on `/submit/transaction/hpay-bound`, the route the
+    /// owner's independent voucher broadcast uses.
+    pub(super) bound_submitted_bodies: Arc<RwLock<Vec<String>>>,
+    pub(super) bound_submit_count: Arc<AtomicUsize>,
     /// When set, the node acknowledges a submission with a transaction hash
     /// that is not the one the wallet signed. That is the real production
     /// route into `BroadcastUncertain`: the bytes went out, the acknowledgement
     /// cannot be tied to them.
     pub(super) submit_hash_mismatch: Arc<AtomicBool>,
+    channels: Arc<RwLock<HashMap<String, Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -69,9 +78,22 @@ impl MockPilotNode {
     pub(super) async fn set_capabilities(&self, capabilities: Value) {
         *self.capabilities.write().await = capabilities;
     }
+
+    pub(super) async fn set_channel(&self, channel_id: String, channel: Value) {
+        self.channels.write().await.insert(channel_id, channel);
+    }
+}
+
+#[derive(Deserialize)]
+struct ChannelQuery {
+    id: Option<String>,
 }
 
 pub(super) fn official_capabilities() -> Value {
+    let tip_timestamp_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test clock must be after the Unix epoch")
+        .as_secs();
     let instance_id = hacash_wallet_core::network_instance_id(
         hacash_wallet_core::HPAY_LOCAL_PILOT_NETWORK_KIND,
         hacash_wallet_core::HPAY_LOCAL_PILOT_CHAIN_ID,
@@ -96,9 +118,16 @@ pub(super) fn official_capabilities() -> Value {
             "current_height": 10,
             "transaction_format_version": 2
         },
+        "sync": {
+            "fresh": true,
+            "tip_timestamp_unix": tip_timestamp_unix,
+            "observed_unix": tip_timestamp_unix,
+            "tip_age_seconds": 0,
+            "max_tip_age_seconds": l2_fast_pay_hub::node::FULLNODE_MAX_TIP_AGE_SECONDS
+        },
         "istanbul": { "activation_height": 1, "evaluation_height": 11, "active": true },
         "transactions": { "registered": [2, 3], "enabled": [2, 3] },
-        "actions": { "registered": [1], "enabled": [1] },
+        "actions": { "registered": [1, 2, 3, 14, 1041], "enabled": [1, 2, 3, 14, 1041] },
         "features": {
             "action_guard": false, "tx_blob": false, "ast": false, "tex": false,
             "native_assets": false, "hip20": false, "hip20_primitives": false,
@@ -110,6 +139,7 @@ pub(super) fn official_capabilities() -> Value {
         "api": {
             "balance_query": true,
             "transaction_submit": true,
+            "transaction_submit_bound": true,
             "transaction_query": true,
             "reconciliation_by_tx_hash": true
         },
@@ -151,11 +181,35 @@ fn build_unsigned_type2_body(payload: &Value) -> Option<String> {
 pub(super) async fn spawn_pilot_node() -> MockPilotNode {
     let capabilities = Arc::new(RwLock::new(official_capabilities()));
     let submit_count = Arc::new(AtomicUsize::new(0));
+    let submitted_bodies = Arc::new(RwLock::new(Vec::new()));
+    let bound_submit_count = Arc::new(AtomicUsize::new(0));
+    let bound_submitted_bodies = Arc::new(RwLock::new(Vec::new()));
     let submit_hash_mismatch = Arc::new(AtomicBool::new(false));
+    let channels = Arc::new(RwLock::new(HashMap::<String, Value>::new()));
     let capability_state = capabilities.clone();
     let submit_state = submit_count.clone();
+    let submitted_body_state = submitted_bodies.clone();
+    let bound_submit_state = bound_submit_count.clone();
+    let bound_submitted_body_state = bound_submitted_bodies.clone();
     let mismatch_state = submit_hash_mismatch.clone();
+    let channel_state = channels.clone();
     let app = Router::new()
+        .route(
+            "/query/channel",
+            get(move |Query(query): Query<ChannelQuery>| {
+                let channel_state = channel_state.clone();
+                async move {
+                    let channel_id = query.id.unwrap_or_default();
+                    let channels = channel_state.read().await;
+                    Json(
+                        channels
+                            .get(&channel_id)
+                            .cloned()
+                            .unwrap_or_else(|| json!({ "ret": 1, "err": "channel not found" })),
+                    )
+                }
+            }),
+        )
         .route(
             "/query/block/intro",
             get(|| async {
@@ -194,10 +248,12 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
         )
         .route(
             "/submit/transaction",
-            post(move || {
+            post(move |body: String| {
                 let submit_state = submit_state.clone();
+                let submitted_body_state = submitted_body_state.clone();
                 let mismatch_state = mismatch_state.clone();
                 async move {
+                    submitted_body_state.write().await.push(body);
                     submit_state.fetch_add(1, Ordering::SeqCst);
                     if mismatch_state.load(Ordering::SeqCst) {
                         return Json(json!({
@@ -206,6 +262,35 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
                         }));
                     }
                     Json(json!({ "ret": 0 }))
+                }
+            }),
+        )
+        .route(
+            // The network-bound submit the owner's own voucher broadcast uses.
+            // It records the exact bytes so a test can prove the owner reached
+            // a chain without the Hub, and echoes back the hash the node would
+            // acknowledge.
+            "/submit/transaction/hpay-bound",
+            post(move |body: String| {
+                let submit_state = bound_submit_state.clone();
+                let submitted_body_state = bound_submitted_body_state.clone();
+                async move {
+                    submitted_body_state.write().await.push(body.clone());
+                    submit_state.fetch_add(1, Ordering::SeqCst);
+                    let hash = hex::decode(&body)
+                        .ok()
+                        .and_then(|raw| {
+                            protocol::transaction::transaction_create(&raw)
+                                .ok()
+                                .map(|(transaction, _)| {
+                                    hex::encode(
+                                        basis::interface::TransactionRead::hash(&*transaction)
+                                            .as_bytes(),
+                                    )
+                                })
+                        })
+                        .unwrap_or_default();
+                    Json(json!({ "ret": 0, "hash": hash }))
                 }
             }),
         );
@@ -218,12 +303,37 @@ pub(super) async fn spawn_pilot_node() -> MockPilotNode {
         url,
         capabilities,
         submit_count,
+        submitted_bodies,
+        bound_submitted_bodies,
+        bound_submit_count,
         submit_hash_mismatch,
+        channels,
         task,
     }
 }
 
+/// A pilot wallet whose owner ASKED FOR THE ROLLBACK WITNESS.
+///
+/// Every test built on this helper predates the setting, was written for a
+/// wallet in which the witness was mandatory, and asserts the witness path. So
+/// the helper opts in explicitly rather than relying on a default, and those
+/// tests keep testing exactly what they always tested.
+///
+/// A wallet with the witness off - the shipped default - is
+/// [`create_manager_for_node_without_witness`].
 pub(super) fn create_manager_for_node(
+    node_url: &str,
+    now: u64,
+) -> (tempfile::TempDir, AgentWalletManager, AgentWalletId) {
+    let (root, mut manager, wallet_id) = create_manager_for_node_without_witness(node_url, now);
+    manager
+        .set_rollback_witness_requirement(&wallet_id, PASSPHRASE, true, now + 2)
+        .unwrap();
+    (root, manager, wallet_id)
+}
+
+/// The shipped default: a pilot wallet that needs no phone.
+pub(super) fn create_manager_for_node_without_witness(
     node_url: &str,
     now: u64,
 ) -> (tempfile::TempDir, AgentWalletManager, AgentWalletId) {
@@ -236,6 +346,7 @@ pub(super) fn create_manager_for_node(
                 network_mode: "testnet".to_owned(),
                 node_url: node_url.to_owned(),
                 block_one_fingerprint: Some(TESTNET_ANCHOR.to_owned()),
+                mainnet_pilot_acknowledgement: None,
             },
             now,
         )

@@ -3,6 +3,10 @@ import { COMPANION_DISCARD_CONSENT_PHRASE } from "./companionHeldConsent";
 import type {
   AgentCompanionActivity,
   AgentCompanionIdentityStatus,
+  CompanionAgentFastPayDecisionView,
+  CompanionAgentFastPayPendingView,
+  CompanionAgentHvmDecisionView,
+  CompanionAgentHvmPendingView,
   CompanionDiscardConsentView,
   CompanionDisconnectView,
   CompanionLifecycleEvent,
@@ -27,6 +31,8 @@ import type {
 } from "./types";
 
 export const agentCompanionApi = {
+  closeActivity: () =>
+    invoke<{ closed: boolean }>("agent_wallet_companion_close_activity"),
   identityStatus: () =>
     invoke<AgentCompanionIdentityStatus>(
       "agent_wallet_companion_identity_status",
@@ -86,6 +92,32 @@ export const agentCompanionApi = {
     invoke<CompanionPilotDecisionView>(
       "agent_wallet_companion_decide_payment",
       { request: { commitment, decision } },
+    ),
+  pendingFastPay: (operationId?: string) =>
+    invoke<CompanionAgentFastPayPendingView>(
+      "agent_wallet_companion_pending_fast_pay",
+      { request: { operationId: operationId ?? null } },
+    ),
+  decideFastPay: (
+    decision: "approve" | "reject",
+    operationId?: string,
+  ) =>
+    invoke<CompanionAgentFastPayDecisionView>(
+      "agent_wallet_companion_decide_fast_pay",
+      { request: { operationId: operationId ?? null, decision } },
+    ),
+  pendingHvmFastPay: (operationId?: string) =>
+    invoke<CompanionAgentHvmPendingView>(
+      "agent_wallet_companion_pending_hvm_fast_pay",
+      { request: { operationId: operationId ?? null } },
+    ),
+  decideHvmFastPay: (
+    decision: "approve" | "reject",
+    operationId?: string,
+  ) =>
+    invoke<CompanionAgentHvmDecisionView>(
+      "agent_wallet_companion_decide_hvm_fast_pay",
+      { request: { operationId: operationId ?? null, decision } },
     ),
   /**
    * Signs the rollback witness for a payment the owner approved on HPAY Desktop.

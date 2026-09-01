@@ -1,6 +1,8 @@
 //! DUST Whisper + messenger IPC.
 
-use hacash_wallet_core::{ChatMessage, ChatThread, DustWhisperSettings};
+use hacash_wallet_core::{
+    ChatMessage, ChatThread, DustWhisperSettings, MessengerPeerSecurity, MessengerPollOutcome,
+};
 use tauri::State;
 
 use crate::state::AppState;
@@ -55,6 +57,20 @@ pub fn messenger_mark_read(peer: String, state: State<'_, AppState>) -> Result<(
     svc.messenger_mark_read(&peer).map_err(|e| e.to_string())
 }
 
+/// What the screen may say about one conversation: whether the next message is
+/// sealed with ECDH to the peer's own key, and how many messages already in the
+/// thread are not known to have been.
+#[tauri::command]
+pub fn messenger_peer_security(
+    peer: String,
+    state: State<'_, AppState>,
+) -> Result<MessengerPeerSecurity, String> {
+    let mut svc = state.inner.blocking_lock();
+    require_unlocked(&mut svc)?;
+    svc.messenger_peer_security(&peer)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn messenger_send(
     peer: String,
@@ -70,7 +86,9 @@ pub async fn messenger_send(
 }
 
 #[tauri::command]
-pub async fn messenger_poll_inbox(state: State<'_, AppState>) -> Result<u32, String> {
+pub async fn messenger_poll_inbox(
+    state: State<'_, AppState>,
+) -> Result<MessengerPollOutcome, String> {
     let mut svc = state.inner.lock().await;
     require_unlocked(&mut svc)?;
     svc.messenger_poll_inbox().await.map_err(|e| e.to_string())

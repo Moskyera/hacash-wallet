@@ -406,7 +406,7 @@ impl RollbackAnchor {
             || self.agent_wallet_id.is_empty()
             || self.desktop_authorization_epoch == 0
             || self.mobile_authorization_epoch == 0
-            || !crate::is_supported_pilot_network_id(&self.network_id)
+            || !crate::is_supported_network_id(&self.network_id)
             || !is_hash(&self.genesis_identifier)
             || self.genesis_identifier == ZERO_HASH
             || !is_hash(&self.node_profile_id)
@@ -872,7 +872,7 @@ impl MobileWitnessState {
             .collect::<std::collections::BTreeSet<_>>();
         if self.state_version != 1
             || self.agent_wallet_id.is_empty()
-            || !crate::is_supported_pilot_network_id(&self.network_id)
+            || !crate::is_supported_network_id(&self.network_id)
             || !is_hash(&self.genesis_identifier)
             || self.genesis_identifier == ZERO_HASH
             || self

@@ -2,16 +2,18 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { api, BillSummary } from "../api";
 import { copyWithPrivacyClear } from "../privacy";
 import { formatInvokeError } from "../formatInvokeError";
+import { handOffTextFile } from "@hacash/wallet-ui";
 
-function downloadText(filename: string, content: string, mime = "application/json") {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+/*
+ * The local `downloadText` that used to live here clicked a detached anchor and
+ * revoked the object URL in the same synchronous task, then both callers said
+ * "Exported" unconditionally, because `a.click()` returns void and nothing could
+ * ever reach their catch. These are signed dispute bills: the evidence needed to
+ * contest a channel. Being told they are safely off the device when no file was
+ * written is the whole problem.
+ *
+ * `handOffTextFile` revokes on a later task and reports what it actually did.
+ */
 
 type Props = {
   hideAddresses: boolean;
@@ -45,8 +47,12 @@ export default function BillsPanel({ hideAddresses, onError, onInfo }: Props) {
   const handleExportAll = async () => {
     try {
       const json = await api.exportAllBillsJson();
-      downloadText(`hacash-l2-bills-${Date.now()}.json`, json);
-      onInfo("Exported all bills as JSON.");
+      const handoff = await handOffTextFile(`hacash-l2-bills-${Date.now()}.json`, json);
+      if (handoff.ok) {
+        onInfo(handoff.message);
+      } else {
+        onError(`${handoff.message} Your dispute bills were NOT saved to a file.`);
+      }
     } catch (e) {
       onError(formatInvokeError(e));
     }
@@ -56,8 +62,15 @@ export default function BillsPanel({ hideAddresses, onError, onInfo }: Props) {
     setBusyId(paymentId);
     try {
       const json = await api.exportBillJson(paymentId);
-      downloadText(`hacash-bill-${paymentId.slice(0, 8)}.json`, json);
-      onInfo("Bill exported.");
+      const handoff = await handOffTextFile(
+        `hacash-bill-${paymentId.slice(0, 8)}.json`,
+        json,
+      );
+      if (handoff.ok) {
+        onInfo(handoff.message);
+      } else {
+        onError(`${handoff.message} This bill was NOT saved to a file.`);
+      }
     } catch (e) {
       onError(formatInvokeError(e));
     } finally {

@@ -983,6 +983,7 @@ mod tests {
                     network_mode: "testnet".to_owned(),
                     node_url: "http://127.0.0.1:18081".to_owned(),
                     block_one_fingerprint: Some(TESTNET_ANCHOR.to_owned()),
+                    mainnet_pilot_acknowledgement: None,
                 },
                 now,
             )

@@ -149,6 +149,28 @@ impl OperationStatus {
         )
     }
 
+    /// The statuses a payment can only have arrived in because a rollback
+    /// witness was required of it.
+    ///
+    /// `record_signed` writes `SignedAwaitingWitness` only for a payment whose
+    /// requirement was pinned true, and every status below is downstream of
+    /// that one. So a record written before the requirement was durably pinned,
+    /// by a build in which it was a compile-time flag, can still be read
+    /// correctly off the status it is sitting in.
+    ///
+    /// `BroadcastSubmitted` and `BroadcastUncertain` are deliberately absent:
+    /// both are reachable with the witness off, so neither is evidence.
+    pub const fn implies_witness_requirement(self) -> bool {
+        matches!(
+            self,
+            Self::SignedAwaitingWitness
+                | Self::WitnessedAwaitingBroadcast
+                | Self::SubmittedAwaitingFinalWitness
+                | Self::ReconciliationRequired
+                | Self::ReconciledAwaitingFinalWitness
+        )
+    }
+
     /// The statuses for which the desktop will hand the paired mobile witness a
     /// rollback anchor to sign.
     ///
@@ -221,6 +243,33 @@ pub(crate) struct AgentOperation {
     tx_hash: Option<String>,
     settled_at: Option<u64>,
     final_result: Option<String>,
+    /// Whether THIS payment must be countersigned by the paired rollback
+    /// witness phone, pinned at intent time from the owner's setting.
+    ///
+    /// `None` means the record was written before the setting existed, when the
+    /// requirement was a build flag. [`AgentOperation::witness_required`] reads
+    /// that case off the status the operation is already in.
+    ///
+    /// It is pinned rather than read live for the same reason `network_binding`
+    /// and `approval_version` are pinned: every later transition of this
+    /// operation has to agree with the one that came before it. `record_signed`
+    /// writes `SignedAwaitingWitness` when this is true and `Signed` when it is
+    /// false, and the exits out of those two statuses are disjoint. An
+    /// operation that were to consult a live setting could be signed under one
+    /// answer and then read the other, and there is one direction of that which
+    /// has no exit at all: a `Signed` payment re-read as witness-required
+    /// matches no arm of `resume_payment`, cannot be witnessed
+    /// (`mark_witnessed` admits only `SignedAwaitingWitness`), cannot be
+    /// abandoned (same admission), cannot be cancelled (`Signed` is not
+    /// pre-signing) and holds its reservation for ever. Pinning is what makes
+    /// the setting safe to change at all.
+    ///
+    /// `default` plus `skip_serializing_if` keeps the serialized bytes - and
+    /// therefore `state_commitment` - byte-identical for every operation
+    /// written before this field existed, so adding it cannot make an existing
+    /// wallet fail its own integrity check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    witness_required: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -244,6 +293,7 @@ impl AgentOperation {
         agent_wallet_id: AgentWalletId,
         request: AgentPaymentRequest,
         created_at: u64,
+        witness_required: bool,
     ) -> AgentWalletResult<Self> {
         request.validate(created_at)?;
         let request_commitment = request.commitment_hex()?;
@@ -269,7 +319,25 @@ impl AgentOperation {
             tx_hash: None,
             settled_at: None,
             final_result: None,
+            witness_required: Some(witness_required),
         })
+    }
+
+    /// Whether this payment must be countersigned by the paired witness phone.
+    ///
+    /// The pinned answer wins whenever there is one. `wallet_setting` is
+    /// consulted only for a record written before the pin existed, and only
+    /// while that record is still pre-signing - which is the only window in
+    /// which adopting the current setting cannot contradict a status that was
+    /// already written under the other answer.
+    pub(crate) fn witness_required(&self, wallet_setting: bool) -> bool {
+        match self.witness_required {
+            Some(pinned) => pinned,
+            None => {
+                self.status.implies_witness_requirement()
+                    || (self.status.is_pre_signing() && wallet_setting)
+            }
+        }
     }
 
     pub(crate) fn operation_id(&self) -> &OperationId {
@@ -436,13 +504,20 @@ impl AgentOperation {
         &mut self,
         signed: &SignedAgentTransaction,
         tx_hash: String,
+        wallet_witness_required: bool,
     ) -> AgentWalletResult<()> {
         self.require_status(OperationStatus::Approved)?;
         signed.require_same_operation(self)?;
         validate_tx_hash(&tx_hash)?;
+        // THE LOAD-BEARING BRANCH. `SignedAwaitingWitness` and `Signed` have
+        // disjoint exits, so the answer is pinned durably here, one line before
+        // the status that depends on it, and every later transition of this
+        // operation reads the pin rather than asking again.
+        let witness_required = self.witness_required(wallet_witness_required);
         self.signed_tx_hex = Some(signed.signed_tx_hex().to_owned());
         self.tx_hash = Some(tx_hash);
-        self.status = if cfg!(feature = "agent-wallet-testnet-pilot") {
+        self.witness_required = Some(witness_required);
+        self.status = if witness_required {
             OperationStatus::SignedAwaitingWitness
         } else {
             OperationStatus::Signed
@@ -458,7 +533,10 @@ impl AgentOperation {
     }
 
     pub(crate) fn mark_broadcast_submitted(&mut self, tx_hash: String) -> AgentWalletResult<()> {
-        let expected = if cfg!(feature = "agent-wallet-testnet-pilot") {
+        // `record_signed` has already run and pinned the answer, so `false` here
+        // is never the value actually used - it is the fallback for a legacy
+        // record, whose status carries the answer instead.
+        let expected = if self.witness_required(false) {
             OperationStatus::WitnessedAwaitingBroadcast
         } else {
             OperationStatus::Signed
@@ -534,7 +612,12 @@ impl AgentOperation {
         Ok(())
     }
 
-    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+    /// The one-step commit for a payment that needed no witness receipt.
+    ///
+    /// It used to be `#[cfg(not(feature = "agent-wallet-testnet-pilot"))]`, when
+    /// the requirement was a build flag and a pilot build had no such payment to
+    /// commit. The requirement is now per operation, so a pilot build reaches
+    /// this for every payment the owner did not ask a phone to countersign.
     pub(crate) fn mark_committed(
         &mut self,
         tx_hash: String,
@@ -976,6 +1059,10 @@ fn validate_nonempty_bounded(
 mod tests {
     use super::*;
 
+    /// What this build's wallets get by default when nobody has chosen, so the
+    /// assertions below keep describing the build they run in.
+    const PILOT: bool = cfg!(feature = "agent-wallet-testnet-pilot");
+
     const CREATED_AT: u64 = 1_000;
     const EXPIRES_AT: u64 = 2_000;
     const POLICY_EPOCH: u64 = 7;
@@ -1005,8 +1092,15 @@ mod tests {
 
     fn prepared_operation() -> AgentOperation {
         let (operation_id, agent_id, wallet_id) = ids();
-        let mut operation =
-            AgentOperation::new(operation_id, agent_id, wallet_id, request(), CREATED_AT).unwrap();
+        let mut operation = AgentOperation::new(
+            operation_id,
+            agent_id,
+            wallet_id,
+            request(),
+            CREATED_AT,
+            PILOT,
+        )
+        .unwrap();
         operation.reserve(HacUnits::MIN_NETWORK_FEE).unwrap();
         operation
             .persist_unsigned_transaction(unsigned_hex())
@@ -1124,7 +1218,9 @@ mod tests {
         let approved = persisted.into_approved(&operation, 1_300).unwrap();
         assert_eq!(approved.unsigned_tx_hex(), unsigned_hex());
         let signed = approved.into_signed("0201020304050607".to_owned()).unwrap();
-        operation.record_signed(&signed, "ab".repeat(32)).unwrap();
+        operation
+            .record_signed(&signed, "ab".repeat(32), PILOT)
+            .unwrap();
         assert_eq!(
             operation.status(),
             if cfg!(feature = "agent-wallet-testnet-pilot") {
@@ -1205,7 +1301,8 @@ mod tests {
                 agent_id,
                 wallet_id,
                 expired_request,
-                CREATED_AT
+                CREATED_AT,
+                PILOT
             ),
             Err(AgentWalletError::RequestExpired)
         );
@@ -1221,8 +1318,15 @@ mod tests {
     #[test]
     fn unsigned_build_failure_releases_the_reservation_without_signing() {
         let (operation_id, agent_id, wallet_id) = ids();
-        let mut operation =
-            AgentOperation::new(operation_id, agent_id, wallet_id, request(), CREATED_AT).unwrap();
+        let mut operation = AgentOperation::new(
+            operation_id,
+            agent_id,
+            wallet_id,
+            request(),
+            CREATED_AT,
+            PILOT,
+        )
+        .unwrap();
         operation.reserve(HacUnits::MIN_NETWORK_FEE).unwrap();
         assert!(operation.status().retains_reservation());
 

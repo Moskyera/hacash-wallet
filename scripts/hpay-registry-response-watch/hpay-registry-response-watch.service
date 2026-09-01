@@ -1,0 +1,39 @@
+[Unit]
+Description=HPAY registry response watch (answers an arbitration challenge for an absent user)
+Documentation=file:/opt/hpay-registry-response-watch/README.md
+Wants=network-online.target
+After=network-online.target hacash-node.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hpaywatch
+Group=hpaywatch
+WorkingDirectory=/var/lib/hpay-registry-response-watch
+EnvironmentFile=/etc/hpay-registry-response-watch/watch.env
+ExecStart=/opt/hpay-registry-response-watch/hpay-registry-response-watch watch
+# Restarting always, and quickly, because the whole value of this unit is
+# being up. A challenge window is measured in blocks and there is no
+# catch-up: every second this is down is a second of the guarantee missing.
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/hpay-registry-response-watch
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

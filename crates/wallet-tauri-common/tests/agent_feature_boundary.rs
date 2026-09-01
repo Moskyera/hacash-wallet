@@ -46,6 +46,13 @@ fn agent_core_is_optional_and_the_admin_surface_is_feature_gated() {
         .collect();
     let expected_dependencies = BTreeSet::from([
         "dep:agent-wallet-core",
+        // Read only, and only on the desktop admin surface: the fullnode query
+        // that reports a registry channel's remaining storage lease, and the
+        // measured readiness of the user side of the unilateral exit. No Hub
+        // is started and no Hub endpoint is called from this crate. It is
+        // listed here so that adding a *second* reason to depend on the Hub
+        // crate has to be a deliberate edit to this set.
+        "dep:l2-fast-pay-hub",
         "dep:agent-wallet-runtime",
         "dep:hpay-agent-connector",
         "dep:hpay-companion-protocol",
@@ -53,8 +60,29 @@ fn agent_core_is_optional_and_the_admin_surface_is_feature_gated() {
     ]);
     assert_eq!(actual_dependencies, expected_dependencies);
     let target_guard = "not(any(target_os = \"android\", target_os = \"ios\"))";
-    assert_eq!(library.matches(target_guard).count(), 5);
+    // Seven, not six: `agent_registry_exit` is the desktop-only view of a
+    // fullnode that the unilateral exit driver reads a channel through, and
+    // `agent_registry_open` is its twin for the other end of a channel's life.
+    // Both are guarded twice over - by this target guard and by the pilot
+    // feature - because a phone holds an approval identity rather than a
+    // Hacash key, so it can neither open a channel nor exit one.
+    //
+    // `agent_registry_open` shipped without any cfg at all and broke the
+    // Android build with four E0433s: this crate takes l2-fast-pay-hub as an
+    // optional dependency, so the module named a crate that was never linked.
+    // The count is asserted here precisely so adding a guard has to be a
+    // deliberate edit rather than a number that drifts.
+    //
+    // Eight, not seven: the eighth is `agent_command_stack_budget`, a
+    // `#[cfg(test)]` module that measures the byte size of every spawned agent
+    // command future and fails if one grows large enough to overflow the 1 MiB
+    // thread that dispatches IPC. It carries the same target guard as the
+    // module it measures, because it names `agent_commands`, which a phone
+    // does not compile. It adds no code to any shipped binary.
+    assert_eq!(library.matches(target_guard).count(), 8);
     assert!(library.contains("pub mod agent_commands;"));
+    assert!(library.contains("pub mod agent_registry_exit;"));
+    assert!(library.contains("pub mod agent_registry_open;"));
     assert!(library.contains("pub mod agent_runtime;"));
     assert!(library.contains("pub mod companion_backend;"));
     assert!(library.contains("pub mod companion_runtime;"));

@@ -2,6 +2,7 @@ export type Screen =
   | "welcome"
   | "unlock"
   | "home"
+  | "workspace"
   | "send"
   | "fastpay"
   | "receive"
@@ -12,6 +13,7 @@ export type Screen =
   | "privacy"
   | "airgap"
   | "hacd"
+  | "messages"
   | "quantum";
 
 export type WelcomeTab = "create" | "import" | "backup" | "watch";
@@ -26,6 +28,7 @@ export const NAV_GROUPS: { id: "wallet" | "tools" | "control"; items: NavItem[] 
     id: "wallet",
     items: [
       { id: "home", mark: "⌂" },
+      { id: "workspace", mark: "◫" },
       { id: "send", mark: "↑" },
       { id: "receive", mark: "↓" },
       { id: "hacd", mark: "◆" },
@@ -36,6 +39,7 @@ export const NAV_GROUPS: { id: "wallet" | "tools" | "control"; items: NavItem[] 
   {
     id: "tools",
     items: [
+      { id: "messages", mark: "✉" },
       { id: "quantum", mark: "◇" },
       { id: "airgap", mark: "▣" },
     ],

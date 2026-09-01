@@ -389,8 +389,8 @@ async fn the_post_submit_anchor_expiry_is_executed_with_the_payment_already_on_t
         manager
             .abandon_stranded_witness_operation(&wallet_id, &operation_id, dead + 3)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState,
-        "and abandoning is refused - correctly: the money already moved"
+        AgentWalletError::StrandedPaymentAlreadySent,
+        "and abandoning is refused - correctly: the money already moved, and the refusal now says that instead of naming a state machine"
     );
 
     // THE WALLET IS WEDGED WHILE THIS SITS. One pending slot, one lifecycle.
@@ -555,7 +555,7 @@ async fn the_reconciled_final_anchor_expiry_is_executed() {
         manager
             .abandon_stranded_witness_operation(&wallet_id, &operation_id, dead)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState
+        AgentWalletError::StrandedPaymentAlreadySent
     );
 
     let replacement = manager
@@ -675,7 +675,7 @@ async fn the_broadcast_uncertain_anchor_expiry_is_executed() {
         manager
             .abandon_stranded_witness_operation(&wallet_id, &operation_id, dead)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState,
+        AgentWalletError::StrandedPaymentAlreadySent,
         "abandoning an uncertain submission would be a lie about where the money is"
     );
 
@@ -877,7 +877,7 @@ async fn a_phone_that_already_accepted_the_dead_post_submit_anchor_refuses_the_r
         manager
             .abandon_stranded_witness_operation(&wallet_id, &operation_id, clear + 5)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState,
+        AgentWalletError::StrandedPaymentAlreadySent,
         "the pre-broadcast exit is refused, and must be: the money moved"
     );
     assert!(shown.anchor_releasable, "the dead anchor can be dropped");
@@ -1379,7 +1379,8 @@ async fn the_dead_anchor_release_refuses_everything_it_must() {
         manager
             .release_dead_witness_anchor(&wallet_id, &operation_id, 27_019)
             .unwrap_err(),
-        AgentWalletError::RollbackWitnessRequired
+        AgentWalletError::WitnessConfirmationWindowNotFound,
+        "and it says there is no window rather than asking for a witness receipt"
     );
 
     let anchor = manager
@@ -1476,7 +1477,7 @@ async fn the_dead_anchor_release_refuses_everything_it_must() {
         manager
             .release_dead_witness_anchor(&wallet_id, &operation_id, dead + 5)
             .unwrap_err(),
-        AgentWalletError::WitnessRecoveryNotAvailable
+        AgentWalletError::WitnessConfirmationWindowNotFound
     );
 
     // AND A COMMITTED PAYMENT IS NOT A WITNESS CANDIDATE AT ALL.
@@ -1493,7 +1494,7 @@ async fn the_dead_anchor_release_refuses_everything_it_must() {
         manager
             .release_dead_witness_anchor(&wallet_id, &operation_id, dead + 9)
             .unwrap_err(),
-        AgentWalletError::InvalidOperationState,
+        AgentWalletError::NotWaitingOnWitnessPhone,
         "ReconciliationRequired awaits no phone, so it has no anchor to release"
     );
     drop(root);

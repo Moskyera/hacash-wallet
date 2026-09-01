@@ -124,13 +124,13 @@ pub async fn wallet_execute_prepared_btc(
 #[tauri::command]
 pub async fn wallet_prepare_channel_open(
     hub_address: String,
-    user_deposit_mei: f64,
-    hub_deposit_mei: f64,
+    user_deposit_mei: String,
+    hub_deposit_mei: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let mut service = state.inner.lock().await;
     let prepared = service
-        .prepare_channel_open(&hub_address, user_deposit_mei, hub_deposit_mei)
+        .prepare_channel_open(&hub_address, &user_deposit_mei, &hub_deposit_mei)
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_value(prepared).map_err(|error| error.to_string())
@@ -148,6 +148,14 @@ pub async fn wallet_execute_prepared_channel_open(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub async fn wallet_recover_channel_open(state: State<'_, AppState>) -> Result<String, String> {
+    let mut service = state.inner.lock().await;
+    service
+        .recover_channel_open()
+        .await
+        .map_err(|error| error.to_string())
+}
 #[tauri::command]
 pub async fn wallet_prepare_channel_close(
     state: State<'_, AppState>,
@@ -168,6 +176,14 @@ pub async fn wallet_execute_prepared_channel_close(
     let mut service = state.inner.lock().await;
     service
         .execute_prepared_channel_close(&operation_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+#[tauri::command]
+pub async fn wallet_recover_channel_close(state: State<'_, AppState>) -> Result<String, String> {
+    let mut service = state.inner.lock().await;
+    service
+        .recover_channel_close()
         .await
         .map_err(|error| error.to_string())
 }

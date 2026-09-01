@@ -17,7 +17,7 @@ import {
 } from "../api";
 import { formatInvokeError } from "../formatInvokeError";
 import { useLocale } from "../locale";
-import { copyWithPrivacyClear } from "../privacy";
+import { copyAndReport, copyWithPrivacyClear } from "../privacy";
 import {
   accountSummaryFromSettings,
   canSendType4,
@@ -378,8 +378,12 @@ export default function QuantumScreen({
 
   async function copyQuantumAddress() {
     if (!account) return;
-    await copyWithPrivacyClear(account.address, clipboardClearSecs);
-    onToast(t("quantum.addressCopied"), "success");
+    await copyAndReport(
+      account.address,
+      clipboardClearSecs,
+      onToast,
+      t("quantum.addressCopied"),
+    );
   }
 
   if (!settings) {

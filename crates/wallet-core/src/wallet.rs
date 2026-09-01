@@ -19,9 +19,7 @@ use crate::airgap::{
 pub use crate::assets::AssetSummary;
 use crate::assets::{AssetService, DiamondMetadataReader};
 use crate::bills::{BillEntry, BillStore};
-use crate::channel::{
-    ChannelInfo, build_channel_close_tx, build_channel_open_tx, derive_channel_id, query_channel,
-};
+use crate::channel::{ChannelInfo, derive_channel_id, query_channel};
 use crate::error::{WalletError, WalletResult};
 use crate::hardware::{HardwareSigningMode, SigningContext, check_signing_allowed_in_context};
 use crate::hip23::{
@@ -276,6 +274,7 @@ pub struct SendResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChannelSetupPreview {
     pub channel_id: String,
+    pub reuse_version: u64,
     pub left_address: String,
     pub right_address: String,
     pub left_deposit: String,
@@ -303,9 +302,15 @@ impl WalletService {
             .ok()
             .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
             .unwrap_or_else(|| settings.network_mode.clone());
+        // Keep one authoritative in-memory network. A runtime override must
+        // reach the router and every signing boundary, not only status output.
+        settings.network_mode = network_mode.clone();
         let profile = SecurityProfile::from_name(&settings.security_profile);
         let node = NodeClient::new(settings.node_url.clone())?;
-        let bills = BillStore::load().unwrap_or_default();
+        // L2 bills are authoritative recovery/dispute evidence. A corrupt or
+        // unreadable store must stop wallet initialization instead of silently
+        // falling back to the on-chain funding distribution.
+        let bills = BillStore::load()?;
         let history = TxHistory::load().unwrap_or_default();
         let router = PaymentRouter::new(node.clone(), settings.clone(), bills.clone());
         Ok(Self {
@@ -471,16 +476,93 @@ impl WalletService {
             .iter()
             .find(|candidate| candidate.url == snapshot.active_node)
             .is_some_and(|candidate| candidate.online && candidate.network_match);
-        if current_ok || !snapshot.settings.auto_node_failover {
+        // "Online" was the wrong question to stop on, and stopping on it is
+        // what stranded every fresh install.
+        //
+        // The wallet ships pointed at the official node. That node is up, is
+        // on the right chain, and answers every balance query correctly, so
+        // `current_ok` is true and discovery used to return here having done
+        // nothing. But on mainnet it cannot sign, so the person could read
+        // their balance forever and never send a single payment - and if they
+        // had already gone and built a fullnode on this machine, discovery
+        // still would not move them onto it.
+        //
+        // A node that cannot sign on this network is not a node this scan is
+        // finished with. Nothing below lowers a bar: `failover_may_adopt` is
+        // still `validate_signing_node_url`, so the only move this unlocks is
+        // read-only to signing-capable. The reverse move stays refused.
+        let current_signable = crate::node_discovery::failover_may_adopt(
+            &snapshot.active_node,
+            &snapshot.network_mode,
+        );
+        if current_ok && current_signable {
+            return Ok(report);
+        }
+        if !snapshot.settings.auto_node_failover {
+            // Off still means off. Nothing below this line runs, nothing is
+            // switched, and the person's choice stands.
+            //
+            // What does not stand is the silence. Settings' last branch prints
+            // "The active node is healthy." whenever the active node is online
+            // and on the right chain, so this return handed a reassuring
+            // sentence to a wallet that cannot send. A refusal that looks like
+            // approval is the worst of the three outcomes here.
+            if current_ok && !current_signable {
+                report.failover_declined =
+                    Some(crate::node_discovery::signing_node_not_adopted_message(
+                        &snapshot.active_node,
+                        &snapshot.network_mode,
+                    ));
+            }
             return Ok(report);
         }
 
+        // Do not silently trade a signing-capable node for a read-only one.
+        //
+        // `candidate_urls` appends the plaintext official endpoint to every
+        // mainnet scan, and `auto_node_failover` defaults on. So a person who
+        // had correctly pointed the wallet at their own http://127.0.0.1:8080
+        // lost that setting to http://nodeapi.hacash.org the first time their
+        // local node was restarting - and their wallet silently became one
+        // that could not sign anything on mainnet, failing later with an
+        // unexplained security-policy refusal.
+        //
+        // This removes no check and lowers no bar. Every candidate is still
+        // probed and still listed; a person may still type any endpoint
+        // `validate_node_url` accepts. What narrows is only what an unattended
+        // switch is allowed to choose.
+        let signing_capable = |candidate: &crate::node_discovery::NodeCandidateStatus| {
+            crate::node_discovery::failover_may_adopt(&candidate.url, &snapshot.network_mode)
+        };
+        let working = |candidate: &&crate::node_discovery::NodeCandidateStatus| {
+            candidate.online && candidate.network_match
+        };
         let Some(next) = report
             .candidates
             .iter()
-            .find(|candidate| candidate.online && candidate.network_match)
+            .find(|candidate| working(candidate) && signing_capable(candidate))
             .map(|candidate| candidate.url.clone())
         else {
+            report.failover_declined = if current_ok {
+                // Nothing is broken and nothing is offline. The node this
+                // wallet is on works for reading and can never sign, and no
+                // node on this machine answered. That is the whole of a fresh
+                // install's situation, and saying it here is the only place
+                // the sentence has ever been said outside Fast Pay.
+                Some(crate::node_discovery::no_local_signing_node_message(
+                    &snapshot.active_node,
+                    &snapshot.network_mode,
+                ))
+            } else {
+                // Say so when a working node was found and refused, rather than
+                // reporting an indistinguishable "nothing to switch to".
+                report.candidates.iter().find(working).map(|read_only| {
+                    format!(
+                        "{} is online, but this wallet cannot sign {} transactions against it, so it was not adopted automatically. On {}, signing needs HTTPS or a node on this same machine. Your node stays as it is: bring it back, or set the node by hand in Settings if you only need to read balances.",
+                        read_only.url, snapshot.network_mode, snapshot.network_mode
+                    )
+                })
+            };
             return Ok(report);
         };
         if next == snapshot.active_node {
@@ -536,6 +618,16 @@ impl WalletService {
             || settings.biometric_unlock_enabled != current.biometric_unlock_enabled
             || settings.watch_only_address != current.watch_only_address
             || settings.channel_id_hex != current.channel_id_hex
+            // Turning the bounded mainnet pilot ON chooses a settlement model in
+            // which the money is only as safe as one Hub. That is the same class
+            // of decision as changing the security profile, and it was the only
+            // money-policy field on this struct that any unauthenticated caller
+            // could flip - while changing a channel id, which decides far less,
+            // already needed the authenticated path. Withdrawing consent is a
+            // strict tightening and stays available here, so a user can always
+            // step back out from a screen that cannot ask for a passphrase.
+            || (settings.trusted_mainnet_fast_pay_pilot
+                && !current.trusted_mainnet_fast_pay_pilot)
             || settings.quantum_mode != current.quantum_mode
             || settings.quantum_meta != current.quantum_meta;
         if sensitive_change {
@@ -556,6 +648,7 @@ impl WalletService {
         if std::env::var("HACASH_WALLET_NETWORK").is_err() {
             self.network_mode = settings.network_mode.clone();
         }
+        settings.network_mode = self.network_mode.clone();
         self.settings = settings;
         self.router
             .update_settings(self.node.clone(), self.settings.clone());
@@ -600,6 +693,7 @@ impl WalletService {
             .ok()
             .filter(|mode| matches!(mode.as_str(), "mainnet" | "testnet"))
             .unwrap_or_else(|| self.settings.network_mode.clone());
+        self.settings.network_mode = self.network_mode.clone();
         self.profile = SecurityProfile::from_name(&self.settings.security_profile);
         self.router =
             PaymentRouter::new(self.node.clone(), self.settings.clone(), self.bills.clone());
@@ -850,6 +944,49 @@ impl WalletService {
         // A ticket prepared a moment ago carries the requirement computed under the old
         // threshold. Tightening the policy must not leave an already-authorized, or
         // authorization-free, operation waiting to execute under the looser rule.
+        self.clear_prepared_operation();
+        Ok(())
+    }
+
+    /// Give or withdraw consent to the bounded mainnet Fast Pay pilot.
+    ///
+    /// Its own authenticated command, because `update_settings` refuses to turn
+    /// this on: it selects the settlement model every later mainnet payment and
+    /// channel open is judged under, and the wallet asks for at least as much
+    /// authority to change that as it does to change a channel id.
+    /// Remember which fullnode binary the owner picked.
+    ///
+    /// No passphrase, deliberately, because this is parity with the command
+    /// that already existed: `wallet_node_supervisor_set_binary` probes and
+    /// adopts a path with nothing more than the desktop shell behind it. What
+    /// changes is only that the answer now survives a restart, which is what
+    /// let the hardcoded `C:/hpay/fullnode.exe` fallback be deleted. The router
+    /// is not refreshed because it holds node URLs, not binaries.
+    pub fn set_node_binary_path(&mut self, path: Option<String>) -> WalletResult<()> {
+        self.settings.node_binary_path = path;
+        self.settings.save()
+    }
+
+    pub fn set_trusted_mainnet_fast_pay_pilot(
+        &mut self,
+        current_passphrase: &str,
+        consented: bool,
+    ) -> WalletResult<()> {
+        if !self.vault_path.exists() {
+            return Err(WalletError::NoWallet);
+        }
+        self.verify_wallet_passphrase(current_passphrase)?;
+        self.settings.trusted_mainnet_fast_pay_pilot = consented;
+        self.settings.save()?;
+        // The router holds its own copy of the settings and is what the Send
+        // screen asks for a rail. Saving the file without refreshing it here
+        // would leave the consent decided and unread until the next restart -
+        // the exact shape of the bug this release was written to fix.
+        self.router
+            .update_settings(self.node.clone(), self.settings.clone());
+        // A ticket prepared a moment ago was reviewed under the old settlement
+        // policy. Changing the policy must not leave an already-authorized
+        // operation waiting to execute under the other one.
         self.clear_prepared_operation();
         Ok(())
     }
@@ -1564,7 +1701,7 @@ impl WalletService {
                 &preview.fee_wire,
                 &transfers,
             )?;
-            let signed_hex = self.sign_tx_for_network(&body_hex).await?;
+            let signed_hex = self.sign_l1_payment_for_network(&body_hex).await?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
             let hash = submitted
@@ -1646,7 +1783,7 @@ impl WalletService {
                 &preview.diamond_names,
                 &service_fee,
             )?;
-            let signed_hex = self.sign_tx_for_network(&body_hex).await?;
+            let signed_hex = self.sign_l1_payment_for_network(&body_hex).await?;
             let submitted = self.submit_signed_tx(&signed_hex).await?;
             let summary = self.summary_with_whisper_notice(preview.summary.clone(), &submitted);
             let hash = submitted
@@ -1687,7 +1824,15 @@ impl WalletService {
             Some(u) => u.clone(),
             None => return Ok(None),
         };
-        Ok(Some(L2HubClient::new(hub_url).health().await?))
+        Ok(Some(
+            L2HubClient::new_for_wallet_policy(
+                hub_url,
+                &self.settings.network_mode,
+                self.settings.trusted_mainnet_fast_pay_pilot,
+            )
+            .health()
+            .await?,
+        ))
     }
 
     /// Discover a public CSP, persist hub settings, and open a channel when needed.
@@ -1696,7 +1841,7 @@ impl WalletService {
         deposit_mei: Option<f64>,
     ) -> WalletResult<FastPayStatus> {
         self.touch_auto_lock();
-        let deposit = deposit_mei.unwrap_or(DEFAULT_CHANNEL_DEPOSIT_MEI);
+        let mut deposit = deposit_mei.unwrap_or(DEFAULT_CHANNEL_DEPOSIT_MEI);
 
         if self.settings.l2_hub_url.is_none()
             && let Some(discovered) = discover_healthy_hub().await
@@ -1709,7 +1854,12 @@ impl WalletService {
             .l2_hub_url
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
-        let health = L2HubClient::new(hub_url).health().await?;
+        let client = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
+        let health = client.health().await?;
         if !health.ok
             || health.version < 3
             || !health.settlement_ready
@@ -1722,7 +1872,19 @@ impl WalletService {
             ));
         }
 
-        let hub_address = match self.settings.hub_right_address.clone() {
+        if self.settings.network_mode == "mainnet" {
+            // Opening a funded channel is irreversible L1 work. Bind its
+            // exposure to the same explicitly selected, capped mainnet policy as payments.
+            let readiness = client.require_mainnet_payment_ready(None).await?;
+            if deposit_mei.is_none() {
+                deposit = (readiness.max_channel_funding_millimeis() as f64 / 1_000.0)
+                    .min(DEFAULT_CHANNEL_DEPOSIT_MEI);
+            }
+            let deposit_wire = format_amount_mei(deposit);
+            client.require_channel_funding_ready(&readiness, &deposit_wire)?;
+        }
+
+        match self.settings.hub_right_address.clone() {
             Some(a) if !a.is_empty() => a,
             _ => health
                 .hub_address
@@ -1737,13 +1899,18 @@ impl WalletService {
                 })?,
         };
 
-        if self.settings.channel_id_hex.is_none() {
-            self.open_channel(&hub_address, deposit, 0.0).await?;
-        }
-
+        // Provider discovery and configuration are reversible. Opening a funded
+        // L1 channel is not, so it is only allowed through the exact prepared
+        // operation ceremony used by the mobile and desktop review screens.
         self.settings.save()?;
         self.router
             .update_settings(self.node.clone(), self.settings.clone());
+        if self.settings.channel_id_hex.is_none() {
+            return Ok(FastPayStatus::needs_channel(
+                health.name.unwrap_or_else(|| "your provider".into()),
+                deposit,
+            ));
+        }
         self.fast_pay_status().await
     }
 
@@ -1759,7 +1926,11 @@ impl WalletService {
             .l2_hub_url
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay provider is not configured".into()))?;
-        let client = L2HubClient::new(hub_url);
+        let client = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let health = client.health().await?;
         if !health.ok
             || health.version < 4
@@ -1866,7 +2037,11 @@ impl WalletService {
             .channel_id_hex
             .clone()
             .ok_or_else(|| WalletError::L2("Fast Pay channel is not configured".into()))?;
-        let client = L2HubClient::new(hub_url);
+        let client = L2HubClient::new_for_wallet_policy(
+            hub_url,
+            &self.settings.network_mode,
+            self.settings.trusted_mainnet_fast_pay_pilot,
+        );
         let health = client.health().await?;
         let hub_address = health.hub_address.clone().ok_or_else(|| {
             WalletError::L2("Fast Pay provider did not publish its hub address".into())
@@ -1948,14 +2123,94 @@ impl WalletService {
         Ok(result)
     }
 
-    pub async fn discover_hubs(&self) -> WalletResult<HubDiscoveryReport> {
-        let extra = self
+    /// Probe the preset list, the saved hub URL, and any URL the caller typed.
+    ///
+    /// `typed_urls` exists because the panel's own copy told people to paste
+    /// the address their provider gave them, and discovery then probed
+    /// everything except that: it read `settings.l2_hub_url`, the *saved*
+    /// value, so a URL typed and not yet saved was silently dropped and the
+    /// scan reported "no online hubs found" for a hub that was answering.
+    ///
+    /// Reading the saved setting stays, so this only ever widens what is
+    /// probed. Nothing typed is persisted here; adopting a hub is still a
+    /// separate, explicit act.
+    pub async fn discover_hubs(&self, typed_urls: &[String]) -> WalletResult<HubDiscoveryReport> {
+        let mut extra = self
             .settings
             .l2_hub_url
             .clone()
             .into_iter()
             .collect::<Vec<_>>();
+        for url in typed_urls {
+            let url = url.trim();
+            if url.is_empty() {
+                continue;
+            }
+            // Same rule the saved field is held to: HTTPS, or HTTP on this
+            // machine. A typed URL that could never be saved should not be
+            // probed either, and an invalid one is dropped rather than
+            // reported as an offline hub.
+            if let Ok(valid) = crate::settings::validate_service_url(url, "Fast Pay hub") {
+                extra.push(valid);
+            }
+        }
         Ok(discover_all_hubs(&extra).await)
+    }
+
+    /// What one Hub says about itself, from a URL the caller typed.
+    ///
+    /// Read-only: saves nothing, adopts nothing, grants nothing.
+    pub async fn hub_declaration(&self, hub_url: &str) -> crate::fast_pay::HubDeclaration {
+        crate::fast_pay::hub_declaration(hub_url, &self.settings.network_mode).await
+    }
+
+    /// The read-only mainnet preflight for the native ChannelPay rail with a
+    /// close voucher, run before any money moves.
+    ///
+    /// Every argument may be omitted, in which case it comes from what this
+    /// wallet already holds: the saved node URL, the saved Hub URL and
+    /// address, and this wallet's own address. A missing value is not an error
+    /// here - it produces a red item with a reason, which is the whole shape
+    /// of this thing: it answers with a report, never with an exception.
+    ///
+    /// It signs nothing, unlocks nothing, mutates nothing and broadcasts
+    /// nothing. It does not require an unlocked wallet, because the question
+    /// "is the infrastructure ready" is one a person should be able to ask
+    /// before they type a passphrase.
+    ///
+    /// It judges MAINNET. Pointed at a pilot chain it refuses, for the same
+    /// clauses it would refuse a node falsely claiming to be mainnet.
+    pub async fn native_rail_preflight(
+        &self,
+        node_url: Option<String>,
+        hub_url: Option<String>,
+        hub_address: Option<String>,
+        owner_address: Option<String>,
+        channel_deposit_hac: String,
+        payment_hac: String,
+    ) -> crate::hpay_native_rail_preflight::PreflightReport {
+        fn pick(supplied: Option<String>, saved: Option<String>) -> String {
+            supplied
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .or(saved)
+                .unwrap_or_default()
+        }
+        let request = crate::hpay_native_rail_preflight::PreflightRequest {
+            node_url: pick(node_url, Some(self.settings.node_url.clone())),
+            hub_url: pick(hub_url, self.settings.l2_hub_url.clone()),
+            hub_address: pick(hub_address, self.settings.hub_right_address.clone()),
+            owner_address: pick(
+                owner_address,
+                self.unlocked
+                    .as_ref()
+                    .map(|session| session.address.clone())
+                    .or_else(|| self.settings.watch_only_address.clone()),
+            ),
+            channel_deposit_hac,
+            payment_hac,
+        };
+        crate::hpay_native_rail_preflight::run_preflight(&request).await
     }
 
     async fn maybe_discover_hub(&mut self) -> WalletResult<()> {
@@ -2060,6 +2315,20 @@ impl WalletService {
         crate::messenger::messenger_mark_read(account, &my, peer)
     }
 
+    /// What is true about this conversation's privacy, for the screen to repeat.
+    ///
+    /// The messenger screen asks this before it tells the person anything about
+    /// privacy, so the sentence on screen matches both what the next send will
+    /// do and what the messages already on screen actually were.
+    pub fn messenger_peer_security(
+        &self,
+        peer: &str,
+    ) -> WalletResult<crate::messenger::MessengerPeerSecurity> {
+        let my = self.require_address()?;
+        let account = self.require_signing_account()?;
+        crate::messenger::messenger_peer_security(account, &my, peer)
+    }
+
     pub async fn messenger_send(
         &self,
         peer: &str,
@@ -2071,7 +2340,7 @@ impl WalletService {
         let relays = self.settings.dust_whisper.trimmed_relay_urls();
         if relays.is_empty() {
             return Err(WalletError::Other(
-                "configure at least one DUST Whisper relay URL for messenger".into(),
+                "configure at least one DUST Whisper relay URL for messenger. Somebody has to run a relay, and it can be you: docs/RUNNING-A-RELAY.md".into(),
             ));
         }
         crate::messenger::messenger_send(
@@ -2086,12 +2355,17 @@ impl WalletService {
         .await
     }
 
-    pub async fn messenger_poll_inbox(&self) -> WalletResult<u32> {
+    pub async fn messenger_poll_inbox(
+        &self,
+    ) -> WalletResult<crate::messenger::MessengerPollOutcome> {
         let my = self.require_address()?;
         let account = self.require_signing_account()?;
         let relays = self.settings.dust_whisper.trimmed_relay_urls();
         if relays.is_empty() {
-            return Ok(0);
+            // An all-zero outcome with nothing tried. The screen reads
+            // `relays_tried` and says no relay is configured, rather than
+            // reporting an empty inbox nobody looked in.
+            return Ok(crate::messenger::MessengerPollOutcome::default());
         }
         crate::messenger::messenger_poll_inbox(self.node.http(), account, &my, &relays).await
     }
@@ -2133,148 +2407,57 @@ impl WalletService {
         Ok(Some(query_channel(&self.node, &channel_id).await?))
     }
 
-    pub fn preview_channel_open(
+    pub async fn preview_channel_open(
         &mut self,
         hub_address: &str,
-        user_deposit_mei: f64,
-        hub_deposit_mei: f64,
+        user_deposit_mei: &str,
+        hub_deposit_mei: &str,
     ) -> WalletResult<ChannelSetupPreview> {
         self.touch_auto_lock();
-        crate::hip23::validate_hac_amount_mei(user_deposit_mei)?;
-        if !hub_deposit_mei.is_finite() || hub_deposit_mei < 0.0 {
-            return Err(WalletError::Policy(
-                "hub channel deposit must be a finite non-negative amount".into(),
-            ));
-        }
+        let user_deposit = exact_channel_deposit(user_deposit_mei, false)?;
+        let hub_deposit = exact_channel_deposit(hub_deposit_mei, true)?;
         if !crate::hip23::is_valid_hacash_address(hub_address) {
             return Err(WalletError::Policy("invalid Fast Pay hub address".into()));
         }
 
         let user = self.require_address()?;
+        // Hacash reuses the original deterministic ID and increments the
+        // on-chain incarnation counter after an agreement close.
         let channel_id = derive_channel_id(&user, hub_address, 1);
+        let reuse_version =
+            crate::channel::next_channel_reuse_version(&self.node, &channel_id, &user, hub_address)
+                .await?;
+        if reuse_version != 1 {
+            return Err(WalletError::Policy(
+                "Mainnet Fast Pay pilot channels are one-use only. This channel was already closed and cannot be reopened. Use a different approved Hub address."
+                    .into(),
+            ));
+        }
         Ok(ChannelSetupPreview {
             channel_id,
+            reuse_version,
             left_address: user,
             right_address: hub_address.to_owned(),
-            left_deposit: format_amount_mei(user_deposit_mei),
-            right_deposit: format_amount_mei(hub_deposit_mei),
+            left_deposit: user_deposit,
+            right_deposit: hub_deposit,
         })
     }
 
     pub async fn open_channel(
         &mut self,
-        hub_address: &str,
-        user_deposit_mei: f64,
-        hub_deposit_mei: f64,
+        _hub_address: &str,
+        _user_deposit_mei: f64,
+        _hub_deposit_mei: f64,
     ) -> WalletResult<String> {
-        self.touch_auto_lock();
-        self.protected_unprepared_signing_block(
-            "direct channel open",
-            crate::hip23::policy_amount_mei_ceil(user_deposit_mei)?,
-        )?;
-        let preview = self.preview_channel_open(hub_address, user_deposit_mei, hub_deposit_mei)?;
-        let fee = crate::hip23::wire_mei_for_node("1:244");
-        let encoded_channel_id = crate::channel::encoded_channel_id(&preview.channel_id)?;
-        let built = build_channel_open_tx(
-            &self.node,
-            &preview.left_address,
-            &preview.channel_id,
-            &preview.left_address,
-            &preview.left_deposit,
-            &preview.right_address,
-            &preview.right_deposit,
-            &fee,
-        )
-        .await?;
-        let body_hex = built
-            .body
-            .ok_or_else(|| WalletError::Transaction("missing channel open body".into()))?;
-        crate::tx_binding::verify_transaction_intent(
-            &body_hex,
-            &preview.left_address,
-            &fee,
-            &[serde_json::json!({
-                "kind": 2,
-                "channel_id": encoded_channel_id,
-                "left_bill": {
-                    "address": preview.left_address,
-                    "amount": preview.left_deposit
-                },
-                "right_bill": {
-                    "address": preview.right_address,
-                    "amount": preview.right_deposit
-                }
-            })],
-        )?;
-        let signed_hex = self.sign_tx_for_network(&body_hex).await?;
-        let submitted = self.submit_signed_tx(&signed_hex).await?;
-        let hash = submitted
-            .hash
-            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-
-        self.settings.hub_right_address = Some(hub_address.to_owned());
-        self.settings.channel_id_hex = Some(preview.channel_id);
-        self.settings.save()?;
-        self.router
-            .update_settings(self.node.clone(), self.settings.clone());
-        self.append_history_if_enabled(
-            PaymentRail::L1OnChain,
-            &hash,
-            &preview.left_address,
-            &preview.right_address,
-            user_deposit_mei,
-            "Channel open",
-        )?;
-        Ok(hash)
+        Err(WalletError::Policy(
+            "direct channel open is disabled; use the reviewed prepared Hub co-sign flow".into(),
+        ))
     }
-
     pub async fn close_channel(&mut self) -> WalletResult<String> {
-        self.touch_auto_lock();
-        self.protected_unprepared_signing_block(
-            "direct channel close",
-            self.second_factor_threshold_mei(),
-        )?;
-        let from = self.require_address()?;
-        let channel_id = self
-            .settings
-            .channel_id_hex
-            .clone()
-            .ok_or_else(|| WalletError::Transaction("no active channel configured".into()))?;
-        let fee = crate::hip23::wire_mei_for_node("1:244");
-        let encoded_channel_id = crate::channel::encoded_channel_id(&channel_id)?;
-        let built = build_channel_close_tx(&self.node, &from, &channel_id, &fee).await?;
-        let body_hex = built
-            .body
-            .ok_or_else(|| WalletError::Transaction("missing channel close body".into()))?;
-        crate::tx_binding::verify_transaction_intent(
-            &body_hex,
-            &from,
-            &fee,
-            &[serde_json::json!({
-                "kind": 3,
-                "channel_id": encoded_channel_id
-            })],
-        )?;
-        let signed_hex = self.sign_tx_for_network(&body_hex).await?;
-        let submitted = self.submit_signed_tx(&signed_hex).await?;
-        let hash = submitted
-            .hash
-            .ok_or_else(|| WalletError::Transaction("missing tx hash".into()))?;
-        self.settings.channel_id_hex = None;
-        self.settings.save()?;
-        self.router
-            .update_settings(self.node.clone(), self.settings.clone());
-        self.append_history_if_enabled(
-            PaymentRail::L1OnChain,
-            &hash,
-            &from,
-            &channel_id,
-            0.0,
-            "Channel close",
-        )?;
-        Ok(hash)
+        Err(WalletError::Policy(
+            "direct channel close is disabled; use the reviewed prepared Hub co-sign flow".into(),
+        ))
     }
-
     pub async fn preview_send(
         &mut self,
         to: &str,
@@ -2787,27 +2970,30 @@ impl WalletService {
         let pending_key = self.begin_pending_history(preview.plan.rail, &from, to, amount_mei)?;
 
         let send_result: WalletResult<SendResult> = match preview.plan.rail {
-            PaymentRail::L2Fast => match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
-                SessionKey::Signing(acc) => {
-                    let execution = self
-                        .router
-                        .execute_l2(&from, to, &preview.amount_wire, acc)
-                        .await?;
-                    self.bills = self.router.bills().clone();
-                    Ok(SendResult {
-                        rail: PaymentRail::L2Fast,
-                        tx_hash: execution.payment_id,
-                        summary: execution.summary,
-                        pending: execution.status != "settled",
-                    })
+            PaymentRail::L2Fast => {
+                self.require_online_signing_transport()?;
+                match &self.unlocked.as_ref().ok_or(WalletError::Locked)?.key {
+                    SessionKey::Signing(acc) => {
+                        let execution = self
+                            .router
+                            .execute_l2(&from, to, &preview.amount_wire, acc)
+                            .await?;
+                        self.bills = self.router.bills().clone();
+                        Ok(SendResult {
+                            rail: PaymentRail::L2Fast,
+                            tx_hash: execution.payment_id,
+                            summary: execution.summary,
+                            pending: execution.status != "settled",
+                        })
+                    }
+                    SessionKey::WatchOnly => Err(WalletError::Policy(
+                        "watch-only wallet cannot sign L2 bills".into(),
+                    )),
+                    SessionKey::Exhausted => Err(WalletError::Policy(
+                        "cold vault signing session is exhausted; unlock again".into(),
+                    )),
                 }
-                SessionKey::WatchOnly => Err(WalletError::Policy(
-                    "watch-only wallet cannot sign L2 bills".into(),
-                )),
-                SessionKey::Exhausted => Err(WalletError::Policy(
-                    "cold vault signing session is exhausted; unlock again".into(),
-                )),
-            },
+            }
             PaymentRail::L1OnChain => {
                 let transfer_pairs = crate::send_options::hac_send_transfer_pairs(
                     to,
@@ -2831,7 +3017,7 @@ impl WalletService {
                     &preview.fee,
                     &transfers,
                 )?;
-                let signed_hex = self.sign_tx_for_network(&body_hex).await?;
+                let signed_hex = self.sign_l1_payment_for_network(&body_hex).await?;
                 let submitted = self.submit_signed_tx(&signed_hex).await?;
                 let summary = self.summary_with_whisper_notice(preview.plan.summary, &submitted);
                 let hash = submitted
@@ -3303,6 +3489,36 @@ fn format_amount_mei(amount_mei: f64) -> String {
     crate::hip23::format_mei_for_node(amount_mei)
 }
 
+fn exact_channel_deposit(value: &str, allow_zero: bool) -> WalletResult<String> {
+    if value.trim() != value {
+        return Err(WalletError::Policy(
+            "channel deposit must not contain leading or trailing whitespace".into(),
+        ));
+    }
+    let amount = l2_fast_pay_hub::amount::parse_amount_mei(value)
+        .map_err(|error| WalletError::Policy(error.to_string()))?;
+    if !allow_zero && amount == l2_fast_pay_hub::amount::HacAmount::ZERO {
+        return Err(WalletError::Policy(
+            "your channel deposit must be greater than zero".into(),
+        ));
+    }
+    Ok(l2_fast_pay_hub::amount::format_amount_mei(amount))
+}
+
+#[cfg(test)]
+mod exact_channel_deposit_tests {
+    use super::exact_channel_deposit;
+
+    #[test]
+    fn canonical_channel_deposit_never_rounds_or_accepts_float_syntax() {
+        assert_eq!(exact_channel_deposit("1.230", false).unwrap(), "1.23");
+        assert_eq!(exact_channel_deposit("0", true).unwrap(), "0");
+        for invalid in ["0", " 1", "1 ", "1e3", "+1", "1.0004", "NaN"] {
+            assert!(exact_channel_deposit(invalid, false).is_err(), "{invalid}");
+        }
+    }
+}
+
 fn random_biometric_nonce() -> String {
     use rand::RngCore;
     let mut buf = [0u8; 16];
@@ -3772,6 +3988,56 @@ mod vault_migration_tests {
         assert!(wallet.update_settings(hardware).is_err());
     }
 
+    /// Consent to the bounded mainnet pilot is a money-policy decision, and the
+    /// generic settings command must not be able to make it.
+    ///
+    /// It was the only field on this struct that chose a mainnet settlement
+    /// model and that any unauthenticated caller on the IPC surface could flip,
+    /// while a channel id - which decides far less - already needed the
+    /// authenticated path. Withdrawal is the other half and is deliberately not
+    /// symmetric: turning the pilot off is a tightening, and a user who wants
+    /// out must never be held in by a screen that cannot ask for a passphrase.
+    #[test]
+    fn bounded_mainnet_pilot_consent_needs_its_own_authenticated_command() {
+        let _wallet_data = IsolatedWalletData::new();
+        let mut wallet = WalletService::new(None, None).unwrap();
+        wallet.create_wallet(OLD_PASS).unwrap();
+        assert!(!wallet.settings.trusted_mainnet_fast_pay_pilot);
+
+        let mut consented = wallet.get_settings();
+        consented.trusted_mainnet_fast_pay_pilot = true;
+        assert!(
+            wallet.update_settings(consented).is_err(),
+            "generic settings must not be able to turn the mainnet pilot on"
+        );
+        assert!(!wallet.settings.trusted_mainnet_fast_pay_pilot);
+
+        wallet
+            .set_trusted_mainnet_fast_pay_pilot(OLD_PASS, true)
+            .unwrap();
+        assert!(wallet.settings.trusted_mainnet_fast_pay_pilot);
+        // The router is what the Send screen asks for a rail, and it holds its
+        // own copy of the settings. A consent that never reaches it is a
+        // consent that does nothing until the wallet is restarted.
+        assert!(wallet.router.settings().trusted_mainnet_fast_pay_pilot);
+
+        assert!(
+            wallet
+                .set_trusted_mainnet_fast_pay_pilot("wrong-passphrase", false)
+                .is_err(),
+            "the authenticated command must still check the passphrase"
+        );
+        assert!(wallet.settings.trusted_mainnet_fast_pay_pilot);
+
+        let mut withdrawn = wallet.get_settings();
+        withdrawn.trusted_mainnet_fast_pay_pilot = false;
+        wallet
+            .update_settings(withdrawn)
+            .expect("withdrawing consent is a tightening and needs no ceremony");
+        assert!(!wallet.settings.trusted_mainnet_fast_pay_pilot);
+        assert!(!wallet.router.settings().trusted_mainnet_fast_pay_pilot);
+    }
+
     #[test]
     fn sensitive_passphrase_verification_uses_shared_backoff() {
         let _wallet_data = IsolatedWalletData::new();
@@ -3900,6 +4166,102 @@ mod asset_facade_tests {
 }
 
 #[cfg(test)]
+mod hub_discovery_typed_url_tests {
+    use axum::{Json, Router, routing::get};
+
+    use super::*;
+    use crate::test_support::IsolatedWalletData;
+
+    async fn spawn_hub() -> String {
+        let app = Router::new().route(
+            "/v1/health",
+            get(|| async {
+                Json(serde_json::json!({
+                    "ok": true,
+                    "version": 7,
+                    "name": "Typed Hub",
+                    "hub_address": "1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW",
+                    "hub_fee_mei": "0",
+                    "settlement_ready": true,
+                    "cross_channel_ready": true
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// The panel told people to paste the address their provider gave them,
+    /// and discovery then probed everything except that: it read the SAVED
+    /// `l2_hub_url`, so a URL typed and not yet saved was silently dropped and
+    /// the scan reported "no online hubs found" for a hub that was answering.
+    #[tokio::test]
+    async fn a_typed_hub_url_is_probed_without_being_saved_first() {
+        let _wallet_data = IsolatedWalletData::new();
+        let hub = spawn_hub().await;
+        let wallet = WalletService::new(Some("http://127.0.0.1:8080".into()), None).unwrap();
+        assert!(
+            wallet.settings.l2_hub_url.is_none(),
+            "nothing saved: this is the fresh-install case"
+        );
+
+        let report = wallet
+            .discover_hubs(std::slice::from_ref(&hub))
+            .await
+            .unwrap();
+
+        // Assert on the hub this test started, not on how many hubs happen to
+        // be answering. `discover_hubs` also probes the built-in presets, one
+        // of which is the loopback dev hub, so an operator running their own
+        // Hub on this machine made `online_count == 1` fail every time. A test
+        // that asserts on ambient state fails for the people most likely to be
+        // running the thing it tests.
+        let found = report
+            .hubs
+            .iter()
+            .find(|h| h.hub_url == hub)
+            .unwrap_or_else(|| panic!("the typed hub was not probed at all: {:?}", report.hubs));
+        assert!(found.online, "{:?}", found);
+        assert!(
+            report.online_count >= 1,
+            "the typed hub answered, so at least one is online: {:?}",
+            report.hubs
+        );
+        assert_eq!(
+            found.hub_address.as_deref(),
+            Some("1LFPqztfKhamVuzzV5WV6pHfykktGD5pMW")
+        );
+        // Probing is not adopting. Nothing was persisted.
+        assert!(wallet.settings.l2_hub_url.is_none());
+        assert!(wallet.settings.hub_right_address.is_none());
+    }
+
+    /// A typed URL is held to the same rule the saved field is held to -
+    /// HTTPS, or HTTP on this same machine - so a URL that could never be
+    /// saved is never probed either.
+    #[tokio::test]
+    async fn a_typed_remote_plaintext_url_is_not_probed() {
+        let _wallet_data = IsolatedWalletData::new();
+        let wallet = WalletService::new(Some("http://127.0.0.1:8080".into()), None).unwrap();
+        let report = wallet
+            .discover_hubs(&["http://hub.example.com".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            !report
+                .hubs
+                .iter()
+                .any(|hub| hub.hub_url.contains("hub.example.com")),
+            "a URL the settings layer would refuse must not be probed"
+        );
+    }
+}
+
+#[cfg(test)]
 mod node_discovery_commit_tests {
     use super::*;
     use crate::node_discovery::{NodeCandidateStatus, NodeDiscoveryReport};
@@ -3930,6 +4292,7 @@ mod node_discovery_commit_tests {
             switched: false,
             network_mode: snapshot.network_mode.clone(),
             candidates: vec![candidate(active, false), candidate(old_fallback, true)],
+            failover_declined: None,
         };
 
         // Simulate a settings update racing with the in-flight network probes.
@@ -3942,6 +4305,344 @@ mod node_discovery_commit_tests {
         assert_eq!(committed.active_node, active);
         assert_eq!(wallet.node.base_url(), active);
         assert_eq!(wallet.settings.node_fallback_urls, vec![new_fallback]);
+    }
+
+    /// The dead end this opens: a person who had correctly pointed the wallet
+    /// at their own loopback node pressed "Find active node" while it was
+    /// restarting, and silently ended up on the plaintext official endpoint -
+    /// a wallet that can no longer sign anything on mainnet, failing later
+    /// with an unexplained security-policy refusal.
+    #[test]
+    fn mainnet_failover_never_silently_lands_on_a_node_it_cannot_sign_against() {
+        let _wallet_data = IsolatedWalletData::new();
+        let local = "http://127.0.0.1:8080";
+        let mut wallet = WalletService::new(Some(local.into()), None).unwrap();
+        assert_eq!(wallet.network_mode, "mainnet");
+        wallet.settings.node_fallback_urls = vec![crate::settings::DEFAULT_NODE_URL.into()];
+        let snapshot = wallet.node_discovery_snapshot();
+        assert!(snapshot.settings.auto_node_failover);
+
+        let report = NodeDiscoveryReport {
+            active_node: local.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![
+                candidate(local, false),
+                candidate(crate::settings::DEFAULT_NODE_URL, true),
+            ],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched, "must not adopt a read-only endpoint");
+        assert_eq!(wallet.node.base_url(), local);
+        assert_eq!(wallet.settings.node_url, local);
+        // Declining silently was half the defect. Say which node was found and
+        // why it was not taken.
+        let declined = committed.failover_declined.expect("a stated reason");
+        assert!(
+            declined.contains(crate::settings::DEFAULT_NODE_URL),
+            "{declined}"
+        );
+        assert!(declined.contains("cannot sign"), "{declined}");
+    }
+
+    /// Narrowing automatic failover must not disable it. A working candidate
+    /// this wallet CAN sign against is still adopted exactly as before.
+    #[test]
+    fn failover_still_switches_to_a_signing_capable_node() {
+        let _wallet_data = IsolatedWalletData::new();
+        let local = "http://127.0.0.1:8080";
+        let other_local = "http://127.0.0.1:8081";
+        let mut wallet = WalletService::new(Some(local.into()), None).unwrap();
+        wallet.settings.node_fallback_urls = vec![other_local.into()];
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: local.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(local, false), candidate(other_local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(committed.switched);
+        assert_eq!(committed.active_node, other_local);
+        assert_eq!(wallet.node.base_url(), other_local);
+        assert!(committed.failover_declined.is_none());
+    }
+
+    /// The fresh install, and the step where most people leave.
+    ///
+    /// The wallet ships on the official node. That node is up and on the right
+    /// chain, so discovery used to declare the active node healthy and stop -
+    /// even with the person's own fullnode answering on this machine. The
+    /// wallet stayed on an endpoint it can never sign against, and the person
+    /// found out at the Send button.
+    #[test]
+    fn a_read_only_node_is_upgraded_to_the_one_running_on_this_machine() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        assert_eq!(wallet.network_mode, "mainnet");
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            // The official node is online and on the right chain. Under the
+            // old rule that alone ended the scan.
+            candidates: vec![candidate(official, true), candidate(local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(
+            committed.switched,
+            "a node that can never sign is not a node this scan is finished with"
+        );
+        assert_eq!(committed.active_node, local);
+        assert_eq!(wallet.node.base_url(), local);
+        assert_eq!(wallet.settings.node_url, local);
+        assert!(committed.failover_declined.is_none());
+    }
+
+    /// The upgrade is one-way. This is the same shape as the test above with
+    /// the two nodes swapped, and it must come out the other way round.
+    #[test]
+    fn a_signing_capable_node_is_never_downgraded_to_a_read_only_one() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(local.into()), None).unwrap();
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: local.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(local, true), candidate(official, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert_eq!(wallet.node.base_url(), local);
+    }
+
+    /// Nothing is offline, nothing is misconfigured, and the person still
+    /// cannot send. That case used to produce no message at all, because the
+    /// old code only spoke when the active node had failed.
+    #[test]
+    fn no_node_on_this_machine_is_said_out_loud_rather_than_reported_as_healthy() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(official, true), candidate(local, false)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert_eq!(wallet.node.base_url(), official);
+        let declined = committed
+            .failover_declined
+            .expect("a plaintext hop the payment will cross must be named, not called healthy");
+        assert!(
+            !declined.contains("cannot send"),
+            "the official node carries an ordinary payment; do not call it blocked: {declined}"
+        );
+        assert!(declined.contains("read which address you"), "{declined}");
+        assert!(declined.contains(local), "{declined}");
+        assert!(
+            declined.contains("Start a Hacash node on this computer"),
+            "{declined}"
+        );
+        // One probed port is not the machine. The message may not conclude
+        // that nothing is running here, because a node on another port is.
+        assert!(
+            declined.contains("different port"),
+            "the person whose node is on another port must not be sent to install a second one: {declined}"
+        );
+    }
+
+    /// The same upgrade, over real HTTP, against a server that has to satisfy
+    /// the block-one anchor check to be adopted.
+    ///
+    /// The tests above hand `commit_node_discovery` a report they wrote
+    /// themselves, which proves the decision but not the path. Here the
+    /// loopback candidate is a real HTTP probe against a real anchor check,
+    /// so the part that has to work over the wire does.
+    ///
+    /// The official endpoint's entry is still constructed rather than probed,
+    /// deliberately: a unit test must not reach out to the public mainnet node
+    /// to prove something about local behaviour. It is entered as online and
+    /// on the right chain, which is the case that used to end the scan.
+    #[tokio::test]
+    async fn the_upgrade_happens_over_the_wire_against_a_real_anchor_check() {
+        use axum::{Json, Router, routing::get};
+        use serde_json::json;
+
+        let _wallet_data = IsolatedWalletData::new();
+        let app = Router::new()
+            .route(
+                "/query/latest",
+                get(|| async { Json(json!({ "ret": 0, "height": 776333, "diamond": 5 })) }),
+            )
+            .route(
+                "/query/block/intro",
+                get(|| async {
+                    Json(json!({
+                        "ret": 0,
+                        "height": 1,
+                        "hash": crate::node_discovery::MAINNET_BLOCK_ONE_HASH
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Quote the port the kernel gave us, never the one we asked for.
+        let local = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        wallet.settings.node_fallback_urls = vec![local.clone()];
+        let snapshot = wallet.node_discovery_snapshot();
+
+        // The one probe that actually goes over a socket.
+        let local_status = crate::node_discovery::probe_node(&local, "mainnet").await;
+        assert!(local_status.online, "{:?}", local_status.error);
+        assert!(
+            local_status.network_match,
+            "the anchor check is what makes adoption safe: {:?}",
+            local_status.error
+        );
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(official, true), local_status],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+        assert!(committed.switched, "{committed:?}");
+        assert_eq!(wallet.node.base_url(), local);
+        // The gate is unchanged and still the one that decides.
+        crate::settings::validate_signing_node_url(wallet.node.base_url(), "mainnet")
+            .expect("the adopted node must be one this wallet may sign against");
+
+        server.abort();
+    }
+
+    /// Turning automatic failover off still means off. The upgrade is a
+    /// failover, not an exception to one.
+    #[test]
+    fn the_upgrade_respects_auto_failover_being_turned_off() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        wallet.settings.auto_node_failover = false;
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(official, true), candidate(local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert_eq!(wallet.node.base_url(), official);
+    }
+
+    /// The branch where the false reassurance survived.
+    ///
+    /// With automatic switching off, discovery returned before it could say
+    /// anything, so `failover_declined` was empty and `switched` was false -
+    /// and the Settings screen's last branch checks only online and
+    /// network_match, so it printed "The active node is healthy." to a wallet
+    /// that cannot send a single payment. Silence read as approval.
+    ///
+    /// The person's choice not to auto-switch is untouched. Only the silence
+    /// goes.
+    #[test]
+    fn failover_being_off_does_not_make_a_read_only_node_sound_healthy() {
+        let _wallet_data = IsolatedWalletData::new();
+        let official = crate::settings::DEFAULT_NODE_URL;
+        let local = crate::node_discovery::LOCAL_NODE_URL;
+        let mut wallet = WalletService::new(Some(official.into()), None).unwrap();
+        wallet.settings.auto_node_failover = false;
+        let snapshot = wallet.node_discovery_snapshot();
+
+        let report = NodeDiscoveryReport {
+            active_node: official.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            // The local node is up and adoptable. Automatic switching is off,
+            // so it is correctly not adopted - but the wallet must not then
+            // report the endpoint it is stuck on as healthy.
+            candidates: vec![candidate(official, true), candidate(local, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched, "off still means off");
+        assert_eq!(wallet.node.base_url(), official, "nothing was switched");
+        let declined = committed
+            .failover_declined
+            .expect("this branch must speak too, rather than report a healthy node");
+        assert!(
+            !declined.contains("cannot send"),
+            "the official node carries an ordinary payment; do not call it blocked: {declined}"
+        );
+        assert!(declined.contains("read which address you"), "{declined}");
+        assert!(
+            declined.contains("Automatic node switching is turned off"),
+            "{declined}"
+        );
+    }
+
+    /// The same branch on testnet, where the transport rule does not exist.
+    /// Turning failover off there must stay exactly as silent as it was.
+    #[test]
+    fn failover_being_off_says_nothing_new_where_the_rule_does_not_apply() {
+        let _wallet_data = IsolatedWalletData::new();
+        let node = "http://127.0.0.1:9999";
+        let mut wallet = WalletService::new(Some(node.into()), None).unwrap();
+        wallet.network_mode = "testnet".into();
+        wallet.settings.network_mode = "testnet".into();
+        wallet.settings.auto_node_failover = false;
+        let snapshot = wallet.node_discovery_snapshot();
+        assert_eq!(snapshot.network_mode, "testnet");
+
+        let report = NodeDiscoveryReport {
+            active_node: node.into(),
+            switched: false,
+            network_mode: snapshot.network_mode.clone(),
+            candidates: vec![candidate(node, true)],
+            failover_declined: None,
+        };
+        let committed = wallet.commit_node_discovery(&snapshot, report).unwrap();
+
+        assert!(!committed.switched);
+        assert!(
+            committed.failover_declined.is_none(),
+            "testnet has no transport rule to explain: {committed:?}"
+        );
     }
 }
 

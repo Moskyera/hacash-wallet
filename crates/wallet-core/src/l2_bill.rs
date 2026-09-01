@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use basis::method::verify_signature;
 use chrono::{TimeZone, Utc};
-use field::{Amount, Hex};
+use field::{Amount, Hex, Serialize as FieldSerialize};
 use l2_fast_pay_hub::wire::ChannelPayCompleteDocuments;
 use l2_fast_pay_hub::wire::TransferProveBody;
 use l2_fast_pay_hub::wire::{DIRECTION_LEFT_TO_RIGHT, DIRECTION_RIGHT_TO_LEFT};
@@ -157,13 +157,20 @@ pub(crate) fn trusted_channel_state(
         left_satoshi: channel.left.satoshi,
         right_satoshi: channel.right.satoshi,
     };
+    let mut serial_fingerprints = BTreeMap::<u64, String>::new();
 
     for entry in bills.list() {
-        let Ok(doc) = parse_bill_hex(&entry.bill_hex) else {
-            continue;
-        };
+        let doc = parse_bill_hex(&entry.bill_hex).map_err(|error| {
+            WalletError::Policy(format!(
+                "stored Fast Pay bill {} is corrupt or malformed: {error}",
+                entry.payment_id
+            ))
+        })?;
         if !doc.prove_bindings_valid() || !doc.chain_payment.all_signatures_verified() {
-            continue;
+            return Err(WalletError::Policy(format!(
+                "stored Fast Pay bill {} failed binding or signature verification",
+                entry.payment_id
+            )));
         }
         for body in &doc.prove_bodies {
             let bill_number = *body.bill_auto_number;
@@ -174,13 +181,22 @@ pub(crate) fn trusted_channel_state(
                 && *body.reuse_version as u64 == state.reuse_version
                 && body.left_address.to_readable() == state.left_address
                 && body.right_address.to_readable() == state.right_address
-                && bill_number > state.bill_auto_number
             {
-                state.bill_auto_number = bill_number;
-                state.left_balance = body.left_balance.clone();
-                state.right_balance = body.right_balance.clone();
-                state.left_satoshi = body_left_satoshi(body);
-                state.right_satoshi = body_right_satoshi(body);
+                let fingerprint = hex::encode(FieldSerialize::serialize(body));
+                if let Some(existing) = serial_fingerprints.insert(bill_number, fingerprint.clone())
+                    && existing != fingerprint
+                {
+                    return Err(WalletError::Policy(format!(
+                        "conflicting fully signed Fast Pay bills use the same bill number {bill_number}"
+                    )));
+                }
+                if bill_number > state.bill_auto_number {
+                    state.bill_auto_number = bill_number;
+                    state.left_balance = body.left_balance.clone();
+                    state.right_balance = body.right_balance.clone();
+                    state.left_satoshi = body_left_satoshi(body);
+                    state.right_satoshi = body_right_satoshi(body);
+                }
             }
         }
     }
@@ -662,6 +678,8 @@ mod tests {
             ret: 0,
             id: id.to_owned(),
             status: 0,
+            open_height: 100,
+            close_height: 0,
             reuse_version: 1,
             left: ChannelPartyBalance {
                 address: left.into(),
@@ -718,6 +736,75 @@ mod tests {
         assert!(summary.dispute_ready);
         assert_eq!(summary.prove_bodies.len(), 1);
         assert_eq!(summary.signatures.len(), 2);
+    }
+
+    #[test]
+    fn trusted_state_rejects_same_serial_equivocation() {
+        let user = Account::create_by("same-serial-user").unwrap();
+        let hub = Account::create_by("same-serial-hub").unwrap();
+        let channel_id = derive_channel_id(user.readable(), hub.readable(), 1);
+        let channel = sample_channel(&channel_id, user.readable(), hub.readable(), "5", "1");
+        let make_bill = |left_millimeis: u64, right_millimeis: u64, pay_millimeis: u64| {
+            let mut doc = build_same_channel_bill(
+                &ChannelWireInput {
+                    channel: channel.clone(),
+                    channel_id_hex: channel_id.clone(),
+                    left_balance_mei: HacAmount::from_millimeis(left_millimeis),
+                    right_balance_mei: HacAmount::from_millimeis(right_millimeis),
+                    left_satoshi: 0,
+                    right_satoshi: 0,
+                    bill_auto_number: 1,
+                },
+                ChannelSide::Left,
+                HacAmount::from_millimeis(pay_millimeis),
+                1_700_000_000,
+            )
+            .unwrap();
+            doc.chain_payment.fill_sign_by_account(&user).unwrap();
+            doc.chain_payment.fill_sign_by_account(&hub).unwrap();
+            doc.to_bill_hex()
+        };
+        let first = make_bill(4_000, 2_000, 1_000);
+        let conflicting = make_bill(3_000, 3_000, 2_000);
+        let store: BillStore = serde_json::from_value(serde_json::json!({
+            "bills": {"payment-a": first, "payment-b": conflicting}
+        }))
+        .unwrap();
+        let wallet_channel = crate::channel::ChannelInfo {
+            ret: channel.ret,
+            id: channel.id.clone(),
+            status: channel.status,
+            open_height: channel.open_height,
+            close_height: channel.close_height,
+            reuse_version: channel.reuse_version,
+            arbitration_lock: 5_000,
+            left: crate::channel::ChannelPartyBalance {
+                address: channel.left.address.clone(),
+                hacash: channel.left.hacash.clone(),
+                satoshi: channel.left.satoshi,
+            },
+            right: crate::channel::ChannelPartyBalance {
+                address: channel.right.address.clone(),
+                hacash: channel.right.hacash.clone(),
+                satoshi: channel.right.satoshi,
+            },
+            challenging: None,
+        };
+        let error = match trusted_channel_state(&store, &wallet_channel) {
+            Ok(_) => panic!("same-serial equivocation must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("same bill number 1"));
+
+        let corrupt_store: BillStore = serde_json::from_value(serde_json::json!({
+            "bills": {"payment-corrupt": "not-a-canonical-bill"}
+        }))
+        .unwrap();
+        let error = match trusted_channel_state(&corrupt_store, &wallet_channel) {
+            Ok(_) => panic!("corrupt stored bill must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("corrupt or malformed"));
     }
 
     #[test]

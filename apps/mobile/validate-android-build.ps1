@@ -5,6 +5,7 @@ $ErrorActionPreference = "Stop"
 $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $android = Join-Path $mobile "src-tauri\gen\android"
 $manifest = Join-Path $android "app\src\main\AndroidManifest.xml"
+$strings = Join-Path $android "app\src\main\res\values\strings.xml"
 $settingsGradle = Join-Path $android "tauri.settings.gradle"
 $appGradle = Join-Path $android "app\build.gradle.kts"
 $tauriBuildGradle = Join-Path $android "app\tauri.build.gradle.kts"
@@ -47,6 +48,18 @@ $errors = @()
 
 if (-not (Test-Path $manifest)) {
     $errors += "Missing AndroidManifest.xml - run: yarn tauri android init"
+}
+
+if (-not (Test-Path $strings)) {
+    $errors += "Missing Android strings.xml"
+} else {
+    $stringsContent = Get-Content $strings -Raw
+    if ($stringsContent -notmatch '<string name="app_name">HPAY</string>') {
+        $errors += "Android app_name must be HPAY"
+    }
+    if ($stringsContent -notmatch '<string name="main_activity_title">HPAY Wallet</string>') {
+        $errors += "Android main_activity_title must be HPAY Wallet"
+    }
 }
 
 if (Test-Path $manifest) {
@@ -495,6 +508,7 @@ if (Test-Path $companionPluginSource) {
         'HPAY/COMPANION/PAIRING-MOBILE-PROOF/V1',
         'HPAY/COMPANION/SESSION-RESPONSE/V1',
         'HPAY/COMPANION/APPROVAL-DECISION/V2',
+        'HPAY/COMPANION/AGENT-FAST-PAY-DECISION/V1',
         'HPAY/COMPANION/WITNESS-RECEIPT/V1',
         'HPAY/COMPANION/WITNESS-ROTATION/V1',
         'HPAY/COMPANION/WITNESS-ROTATION-BASELINE/V1',
@@ -502,6 +516,8 @@ if (Test-Path $companionPluginSource) {
         'fun signSessionResponse(',
         'fun signApprovalDecisionApprove(',
         'fun signApprovalDecisionReject(',
+        'fun signAgentFastPayApprovalDecisionApprove(',
+        'fun signAgentFastPayApprovalDecisionReject(',
         'fun signWitnessReceipt(',
         'hasCanonicalDomain(payload, expectedDomain)'
     )) {

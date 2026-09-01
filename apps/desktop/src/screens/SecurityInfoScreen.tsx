@@ -30,8 +30,20 @@ export default function SecurityInfoScreen({
   const [currentPassphrase, setCurrentPassphrase] = useState("");
   const [coldVaultConfirmation, setColdVaultConfirmation] = useState("");
   const [thresholdDraft, setThresholdDraft] = useState("");
+  /**
+   * Why the second-factor amount was not applied, said on the screen.
+   *
+   * The Apply button is enabled as soon as the field is non-empty, and the
+   * handler then dropped anything that was not a whole number of at least 1 with
+   * a bare `return`. Typing 0, or 0.5, produced a press that cleared nothing,
+   * changed nothing and said nothing. The rule is right and stays; only the
+   * silence is fixed. The core still enforces the same floor on the
+   * authenticated command.
+   */
+  const [thresholdRefusal, setThresholdRefusal] = useState("");
   const coldVault = status?.hardware_signing_mode === "airgap_only";
   const legacyKey = status?.legacy_key_derivation != null;
+  const webauthnConfigured = status?.webauthn_enabled === true;
   const freshFactorAvailable = !!status?.webauthn_enabled || nativeBioAvailable;
   // The core reports what it enforces, already combining the authenticated profile with
   // the chosen amount. A constant here would state the rule wrongly the moment either
@@ -118,7 +130,7 @@ export default function SecurityInfoScreen({
         </button>
         <button
           className={status?.security_profile === "paranoid" ? "primary" : ""}
-          disabled={busy || coldVault || !currentPassphrase}
+          disabled={busy || coldVault || !webauthnConfigured || !currentPassphrase}
           onClick={() =>
             runAuthenticated((passphrase) => onSetProfile("paranoid", passphrase))
           }
@@ -126,6 +138,11 @@ export default function SecurityInfoScreen({
           Paranoid profile
         </button>
       </div>
+      {!webauthnConfigured && !coldVault ? (
+        <p className="warn-text">
+          Register WebAuthn before enabling Paranoid or the WebAuthn signing gate.
+        </p>
+      ) : null}
 
       <h3>{t("security.secondFactorAmount")}</h3>
       <p className="muted">{t("security.secondFactorAmountHint")}</p>
@@ -151,7 +168,13 @@ export default function SecurityInfoScreen({
               disabled={busy || !currentPassphrase || !thresholdDraft}
               onClick={() => {
                 const amount = Number(thresholdDraft);
-                if (!Number.isInteger(amount) || amount < 1) return;
+                if (!Number.isInteger(amount) || amount < 1) {
+                  setThresholdRefusal(
+                    `The amount has to be a whole number of HAC, one or more. "${thresholdDraft}" is not, so nothing was changed and your threshold is still ${enforcedThreshold} HAC.`,
+                  );
+                  return;
+                }
+                setThresholdRefusal("");
                 setThresholdDraft("");
                 runAuthenticated((passphrase) =>
                   onSetSecondFactorThreshold(amount, passphrase),
@@ -163,6 +186,7 @@ export default function SecurityInfoScreen({
             <button
               disabled={busy || !currentPassphrase}
               onClick={() => {
+                setThresholdRefusal("");
                 setThresholdDraft("");
                 runAuthenticated((passphrase) => onSetSecondFactorThreshold(null, passphrase));
               }}
@@ -170,6 +194,11 @@ export default function SecurityInfoScreen({
               {t("security.secondFactorAmountReset")}
             </button>
           </div>
+          {thresholdRefusal ? (
+            <div className="alert" role="alert">
+              {thresholdRefusal}
+            </div>
+          ) : null}
         </>
       ) : null}
 
@@ -190,7 +219,13 @@ export default function SecurityInfoScreen({
         </button>
         <button
           className={status?.hardware_signing_mode === "webauthn_gate" ? "primary" : ""}
-          disabled={busy || coldVault || status?.watch_only || !currentPassphrase}
+          disabled={
+            busy ||
+            coldVault ||
+            status?.watch_only ||
+            !webauthnConfigured ||
+            !currentPassphrase
+          }
           onClick={() =>
             runAuthenticated((passphrase) => onSetHardwareMode("webauthn_gate", passphrase))
           }

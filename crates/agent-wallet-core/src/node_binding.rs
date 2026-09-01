@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use hacash_wallet_core::node::NodeClient;
 use hacash_wallet_core::node_discovery::MAINNET_BLOCK_ONE_HASH;
+use hacash_wallet_core::settings::validate_signing_node_url;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 use hacash_wallet_core::{CapabilitySource, NodeCapabilities};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,7 @@ pub(crate) struct AgentNodeProbe {
     pub status: AgentNodeStatus,
     pub error: Option<String>,
     pub snapshot: Option<AgentNodeSnapshot>,
+    client: Option<NodeClient>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +37,7 @@ pub struct AgentNodeSnapshot {
     pub node_version: String,
     pub network_kind: String,
     pub node_profile_id: String,
+    pub node_profile_commitment: String,
     pub chain_id: u32,
     pub mainnet: bool,
     pub current_height: u64,
@@ -48,15 +51,7 @@ pub struct AgentNodeSnapshot {
 pub(crate) struct VerifiedAgentNode {
     client: NodeClient,
     #[cfg(feature = "agent-wallet-testnet-pilot")]
-    node_profile_id: String,
-    #[cfg(feature = "agent-wallet-testnet-pilot")]
-    chain_id: u32,
-    #[cfg(feature = "agent-wallet-testnet-pilot")]
-    network_kind: String,
-    #[cfg(feature = "agent-wallet-testnet-pilot")]
-    network_instance_id: String,
-    #[cfg(feature = "agent-wallet-testnet-pilot")]
-    transaction_format_version: u64,
+    snapshot: AgentNodeSnapshot,
 }
 
 impl std::ops::Deref for VerifiedAgentNode {
@@ -69,37 +64,48 @@ impl std::ops::Deref for VerifiedAgentNode {
 
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 impl VerifiedAgentNode {
-    pub(crate) fn node_profile_id(&self) -> &str {
-        &self.node_profile_id
+    pub(crate) fn snapshot(&self) -> &AgentNodeSnapshot {
+        &self.snapshot
+    }
+
+    pub(crate) fn node_profile_commitment(&self) -> &str {
+        &self.snapshot.node_profile_commitment
     }
 
     pub(crate) const fn chain_id(&self) -> u32 {
-        self.chain_id
+        self.snapshot.chain_id
     }
 
     pub(crate) fn network_kind(&self) -> &str {
-        &self.network_kind
+        &self.snapshot.network_kind
     }
 
     pub(crate) fn network_instance_id(&self) -> &str {
-        &self.network_instance_id
+        &self.snapshot.network_instance_id
     }
 
     pub(crate) const fn transaction_format_version(&self) -> u64 {
-        self.transaction_format_version
+        self.snapshot.transaction_format_version
     }
 }
 
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-fn validate_pilot_capabilities(
+fn validate_agent_capabilities(
     capabilities: &NodeCapabilities,
+    network_mode: &str,
     expected_fingerprint: &str,
 ) -> AgentWalletResult<(String, String, String, u64)> {
+    let network_matches = match network_mode {
+        "testnet" => capabilities.supports_agent_local_pilot_payment(expected_fingerprint),
+        "mainnet" if cfg!(feature = "agent-wallet-bounded-mainnet-pilot") => {
+            capabilities.supports_agent_mainnet_payment(expected_fingerprint)
+        }
+        _ => false,
+    };
     if capabilities.source != CapabilitySource::Reported
         || capabilities.node.name != "hacash-fullnode"
         || capabilities.node.version != "1.0.10"
-        || capabilities.chain.mainnet
-        || !capabilities.supports_agent_local_pilot_payment(expected_fingerprint)
+        || !network_matches
     {
         return Err(AgentWalletError::NodeCapabilityMismatch);
     }
@@ -140,6 +146,7 @@ fn validate_pilot_capabilities(
     hasher.update([
         u8::from(capabilities.api.balance_query),
         u8::from(capabilities.api.transaction_submit),
+        u8::from(capabilities.api.transaction_submit_bound),
         u8::from(capabilities.api.transaction_query),
         u8::from(capabilities.api.reconciliation_by_tx_hash),
     ]);
@@ -197,6 +204,7 @@ pub(crate) async fn probe_agent_node(
             status: AgentNodeStatus::NetworkMismatch,
             error: Some("Agent Wallet node anchor is missing or invalid".into()),
             snapshot: None,
+            client: None,
         };
     }
 
@@ -207,6 +215,7 @@ pub(crate) async fn probe_agent_node(
                 status: AgentNodeStatus::Offline,
                 error: Some("Hacash node URL is invalid or unavailable".into()),
                 snapshot: None,
+                client: None,
             };
         }
     };
@@ -217,6 +226,7 @@ pub(crate) async fn probe_agent_node(
                 status: AgentNodeStatus::Offline,
                 error: Some("Hacash node anchor query failed".into()),
                 snapshot: None,
+                client: None,
             };
         }
         Err(_) => {
@@ -224,6 +234,7 @@ pub(crate) async fn probe_agent_node(
                 status: AgentNodeStatus::Offline,
                 error: Some("Hacash node anchor query timed out".into()),
                 snapshot: None,
+                client: None,
             };
         }
     };
@@ -235,6 +246,7 @@ pub(crate) async fn probe_agent_node(
             status: AgentNodeStatus::NetworkMismatch,
             error: Some("Hacash node block 1 does not match this Agent Wallet".into()),
             snapshot: None,
+            client: None,
         }
     } else {
         #[cfg(feature = "agent-wallet-testnet-pilot")]
@@ -247,6 +259,7 @@ pub(crate) async fn probe_agent_node(
                             status: AgentNodeStatus::CapabilityMismatch,
                             error: Some("Hacash node capability query failed".into()),
                             snapshot: None,
+                            client: None,
                         };
                     }
                     Err(_) => {
@@ -254,26 +267,46 @@ pub(crate) async fn probe_agent_node(
                             status: AgentNodeStatus::CapabilityMismatch,
                             error: Some("Hacash node capability query timed out".into()),
                             snapshot: None,
+                            client: None,
                         };
                     }
                 };
-            if network_mode != "testnet"
-                || capabilities.node.name != "hacash-fullnode"
+            let identity_matches = match network_mode {
+                "testnet" => capabilities.supports_agent_local_pilot_payment(expected_fingerprint),
+                "mainnet" if cfg!(feature = "agent-wallet-bounded-mainnet-pilot") => {
+                    capabilities.supports_agent_mainnet_payment(expected_fingerprint)
+                }
+                _ => false,
+            };
+            if capabilities.node.name != "hacash-fullnode"
                 || capabilities.node.version != "1.0.10"
-                || !capabilities.matches_agent_local_pilot_identity(expected_fingerprint)
+                || !identity_matches
             {
                 return AgentNodeProbe {
                     status: AgentNodeStatus::CapabilityMismatch,
-                    error: Some("Hacash node does not match the HPAY Local Pilot identity".into()),
+                    error: Some(
+                        "Hacash node does not match the exact HPAY Agent network identity".into(),
+                    ),
                     snapshot: None,
+                    client: None,
                 };
             }
-            let Some(network_instance_id) = capabilities.network.instance_id.clone() else {
-                return AgentNodeProbe {
-                    status: AgentNodeStatus::CapabilityMismatch,
-                    error: Some("HPAY Local Pilot node has no network instance identity".into()),
-                    snapshot: None,
-                };
+            let (
+                node_profile_commitment,
+                network_kind,
+                network_instance_id,
+                transaction_format_version,
+            ) = match validate_agent_capabilities(&capabilities, network_mode, expected_fingerprint)
+            {
+                Ok(binding) => binding,
+                Err(_) => {
+                    return AgentNodeProbe {
+                        status: AgentNodeStatus::CapabilityMismatch,
+                        error: Some("HPAY Agent node capability commitment is invalid".into()),
+                        snapshot: None,
+                        client: None,
+                    };
+                }
             };
             AgentNodeProbe {
                 status: AgentNodeStatus::Verified,
@@ -281,8 +314,9 @@ pub(crate) async fn probe_agent_node(
                 snapshot: Some(AgentNodeSnapshot {
                     node_name: capabilities.node.name,
                     node_version: capabilities.node.version,
-                    network_kind: capabilities.network.kind,
+                    network_kind,
                     node_profile_id: capabilities.network.node_profile_id,
+                    node_profile_commitment,
                     chain_id: capabilities.chain.id,
                     mainnet: capabilities.chain.mainnet,
                     current_height: capabilities.chain.height,
@@ -290,8 +324,9 @@ pub(crate) async fn probe_agent_node(
                     network_instance_id,
                     funding_confirmed: capabilities.network.funding_confirmed,
                     transaction_ready: capabilities.network.transaction_ready,
-                    transaction_format_version: capabilities.network.transaction_format_version,
+                    transaction_format_version,
                 }),
+                client: Some(node),
             }
         }
         #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
@@ -299,6 +334,7 @@ pub(crate) async fn probe_agent_node(
             status: AgentNodeStatus::Verified,
             error: None,
             snapshot: None,
+            client: Some(node),
         }
     }
 }
@@ -308,7 +344,9 @@ pub(crate) async fn verified_agent_node(
     network_mode: &str,
     expected_fingerprint: &str,
 ) -> AgentWalletResult<VerifiedAgentNode> {
-    let probe = probe_agent_node(node_url, network_mode, expected_fingerprint).await;
+    validate_signing_node_url(node_url, network_mode)
+        .map_err(|_| AgentWalletError::SigningBlocked)?;
+    let mut probe = probe_agent_node(node_url, network_mode, expected_fingerprint).await;
     match probe.status {
         AgentNodeStatus::Verified => {}
         AgentNodeStatus::NetworkMismatch | AgentNodeStatus::Unchecked => {
@@ -321,26 +359,19 @@ pub(crate) async fn verified_agent_node(
             return Err(AgentWalletError::NodeRejected);
         }
     }
-    let client = NodeClient::new(node_url)?;
+    let client = probe.client.take().ok_or(AgentWalletError::NodeRejected)?;
     #[cfg(feature = "agent-wallet-testnet-pilot")]
     {
-        if network_mode != "testnet" {
+        if network_mode != "testnet"
+            && !(network_mode == "mainnet" && cfg!(feature = "agent-wallet-bounded-mainnet-pilot"))
+        {
             return Err(AgentWalletError::SigningBlocked);
         }
-        let capabilities = tokio::time::timeout(AGENT_NODE_PROBE_TIMEOUT, client.capabilities())
-            .await
-            .map_err(|_| AgentWalletError::NodeCapabilityMismatch)?
-            .map_err(|_| AgentWalletError::NodeCapabilityMismatch)?;
-        let (node_profile_id, network_kind, network_instance_id, transaction_format_version) =
-            validate_pilot_capabilities(&capabilities, expected_fingerprint)?;
-        Ok(VerifiedAgentNode {
-            client,
-            node_profile_id,
-            chain_id: capabilities.chain.id,
-            network_kind,
-            network_instance_id,
-            transaction_format_version,
-        })
+        let snapshot = probe
+            .snapshot
+            .take()
+            .ok_or(AgentWalletError::NodeCapabilityMismatch)?;
+        Ok(VerifiedAgentNode { client, snapshot })
     }
     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
     Ok(VerifiedAgentNode { client })
@@ -374,6 +405,19 @@ mod tests {
     const TESTNET_ANCHOR: &str = "000008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff";
     const ARBITRARY_FORK: &str = "100008c8c945c4ca797f5aa70530caa51030ee0037e76410fd113852d50f2dff";
 
+    #[tokio::test]
+    async fn remote_http_mainnet_node_is_rejected_before_probe() {
+        assert!(matches!(
+            verified_agent_node(
+                hacash_wallet_core::settings::DEFAULT_NODE_URL,
+                "mainnet",
+                MAINNET_BLOCK_ONE_HASH,
+            )
+            .await,
+            Err(AgentWalletError::SigningBlocked)
+        ));
+    }
+
     fn official_style_capabilities() -> Value {
         let instance_id = hacash_wallet_core::network_instance_id(
             hacash_wallet_core::HPAY_LOCAL_PILOT_NETWORK_KIND,
@@ -401,7 +445,7 @@ mod tests {
             },
             "istanbul": { "activation_height": 1, "evaluation_height": 11, "active": true },
             "transactions": { "registered": [2, 3], "enabled": [2, 3] },
-            "actions": { "registered": [1], "enabled": [1] },
+            "actions": { "registered": [1, 2, 3, 14, 1041], "enabled": [1, 2, 3, 14, 1041] },
             "features": {
                 "action_guard": false, "tx_blob": false, "ast": false, "tex": false,
                 "native_assets": false, "hip20": false, "hip20_primitives": false,
@@ -413,6 +457,67 @@ mod tests {
             "api": {
                 "balance_query": true,
                 "transaction_submit": true,
+                "transaction_submit_bound": true,
+                "transaction_query": true,
+                "reconciliation_by_tx_hash": true
+            },
+            "limits": {
+                "max_tx_size": 1024, "max_tx_actions": 8, "max_type3_signers": 2,
+                "gas_max_byte": 1,
+                "gas_max": protocol::context::decode_gas_budget(1),
+                "ast_depth": 1
+            }
+        })
+    }
+
+    #[cfg(feature = "agent-wallet-bounded-mainnet-pilot")]
+    fn mainnet_capabilities() -> Value {
+        let instance_id = hacash_wallet_core::network_instance_id(
+            hacash_wallet_core::HPAY_MAINNET_NETWORK_KIND,
+            0,
+            true,
+            MAINNET_BLOCK_ONE_HASH,
+            hacash_wallet_core::HPAY_MAINNET_PROFILE_ID,
+            2,
+        );
+        json!({
+            "ret": 0,
+            "api_version": 1,
+            "node": { "name": "hacash-fullnode", "version": "1.0.10", "build_time": "test" },
+            "chain": { "id": 0, "height": 765432, "next_height": 765433, "mainnet": true },
+            "network": {
+                "kind": "mainnet",
+                "node_profile_id": "hacash-mainnet",
+                "block_1_available": true,
+                "block_1_hash": MAINNET_BLOCK_ONE_HASH,
+                "instance_id": instance_id,
+                "funding_confirmed": false,
+                "transaction_ready": true,
+                "current_height": 765432,
+                "transaction_format_version": 2
+            },
+            "sync": {
+                "tip_timestamp_unix": 1999940,
+                "observed_unix": 2000000,
+                "tip_age_seconds": 60,
+                "max_tip_age_seconds": 3600,
+                "fresh": true
+            },
+            "istanbul": { "activation_height": 700000, "evaluation_height": 765433, "active": true },
+            "transactions": { "registered": [2, 3], "enabled": [2, 3] },
+            "actions": { "registered": [1, 2, 3, 14, 1041], "enabled": [1, 2, 3, 14, 1041] },
+            "features": {
+                "action_guard": false, "tx_blob": false, "ast": false, "tex": false,
+                "native_assets": false, "hip20": false, "hip20_primitives": false,
+                "hvm": false, "p2sh": false, "account_abstraction": false,
+                "intent": false, "contract_state_leasing": false,
+                "ir_decompilation": false, "req_sign_list": false,
+                "type4_mainnet": false, "exact_unsigned_simulation": false
+            },
+            "api": {
+                "balance_query": true,
+                "transaction_submit": true,
+                "transaction_submit_bound": true,
                 "transaction_query": true,
                 "reconciliation_by_tx_hash": true
             },
@@ -532,13 +637,61 @@ mod tests {
         assert_eq!(verified.network_kind(), HPAY_LOCAL_PILOT_NETWORK_KIND);
         assert_eq!(verified.network_instance_id().len(), 64);
         assert_eq!(verified.transaction_format_version(), 2);
-        assert_eq!(verified.node_profile_id().len(), 64);
+        assert_eq!(verified.node_profile_commitment().len(), 64);
         assert!(
             verified
-                .node_profile_id()
+                .node_profile_commitment()
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+        // The mirror of the mainnet case below, and the reason the
+        // `!node.funding_confirmed` term in `require_exact_node_binding` is
+        // redundant on this rail: `supports_agent_local_pilot_payment` already
+        // demands the flag, so a pilot node that reaches the close gate always
+        // reports true, and one that reports false never gets a snapshot at
+        // all. `same_chain_id_with_missing_or_unready_network_identity_is_rejected`
+        // executes the false half.
+        assert!(verified.snapshot().funding_confirmed);
+        task.abort();
+    }
+
+    #[cfg(feature = "agent-wallet-bounded-mainnet-pilot")]
+    #[tokio::test]
+    async fn exact_fresh_mainnet_contract_is_accepted_and_bound_to_channel_type2() {
+        let (node_url, task) =
+            spawn_capability_node(MAINNET_BLOCK_ONE_HASH, mainnet_capabilities()).await;
+        let verified = verified_agent_node(&node_url, "mainnet", MAINNET_BLOCK_ONE_HASH)
+            .await
+            .unwrap();
+        assert_eq!(verified.chain_id(), 0);
+        assert_eq!(verified.network_kind(), "mainnet");
+        assert_eq!(verified.transaction_format_version(), 2);
+        assert!(verified.snapshot().mainnet);
+        // The node that opens a mainnet channel is accepted while reporting
+        // `funding_confirmed: false`, which is what mainnet always reports.
+        // `require_exact_node_binding` in `service/l2/verification.rs` refuses
+        // exactly that node, so the open is reachable and the close is not.
+        assert!(!verified.snapshot().funding_confirmed);
+        task.abort();
+    }
+
+    /// The second hard equality on the mainnet path, and the one with a date on
+    /// it: `validate_agent_capabilities` pins `node.version` to the literal
+    /// "1.0.10". A real mainnet node that is upgraded stops matching, and every
+    /// Agent Wallet path behind `verified_agent_node` closes at once - open,
+    /// close, voucher and payment alike. This is not a defect today, because the
+    /// owner's live node reports 1.0.10; it is asserted here so the pin is a
+    /// stated decision with a known blast radius rather than an accident.
+    #[cfg(feature = "agent-wallet-bounded-mainnet-pilot")]
+    #[tokio::test]
+    async fn a_mainnet_node_that_is_upgraded_past_the_pinned_version_is_refused() {
+        let mut capabilities = mainnet_capabilities();
+        capabilities["node"]["version"] = json!("1.0.11");
+        let (node_url, task) = spawn_capability_node(MAINNET_BLOCK_ONE_HASH, capabilities).await;
+        assert!(matches!(
+            verified_agent_node(&node_url, "mainnet", MAINNET_BLOCK_ONE_HASH).await,
+            Err(AgentWalletError::NodeCapabilityMismatch)
+        ));
         task.abort();
     }
 
@@ -639,6 +792,7 @@ mod tests {
         for field in [
             "balance_query",
             "transaction_submit",
+            "transaction_submit_bound",
             "transaction_query",
             "reconciliation_by_tx_hash",
         ] {
@@ -663,6 +817,21 @@ mod tests {
         capabilities["actions"]["registered"] = json!([]);
         capabilities["actions"]["enabled"] = json!([]);
         assert_capability_contract_rejected(capabilities).await;
+    }
+
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
+    #[tokio::test]
+    async fn capability_contract_without_any_channel_action_is_rejected() {
+        for required in [2, 3, 14, 1041] {
+            let mut capabilities = official_style_capabilities();
+            capabilities["actions"]["enabled"] = json!(
+                [1, 2, 3, 14, 1041]
+                    .into_iter()
+                    .filter(|kind| *kind != required)
+                    .collect::<Vec<_>>()
+            );
+            assert_capability_contract_rejected(capabilities).await;
+        }
     }
 
     #[cfg(feature = "agent-wallet-testnet-pilot")]

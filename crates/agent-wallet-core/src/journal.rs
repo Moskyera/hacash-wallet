@@ -117,6 +117,28 @@ pub(crate) enum AgentJournalEventKind {
     CompanionSessionEstablished,
     CompanionTransportFrameConsumed,
     PolicyChanged,
+    L2BindingVerified,
+    HvmBindingVerified,
+    HvmSigningPrepared,
+    HvmSigned,
+    HvmSubmitted,
+    HvmCommitted,
+    HvmRecoveryRequired,
+    HvmExactRetryReady,
+    /// The wallet left-signed the serial-1 full-refund bill for a channel it
+    /// intends to open, and stored the ask. Nothing has been funded.
+    HvmRegistryChannelOpenRequested,
+    /// The Hub's countersignature was validated by this wallet against its own
+    /// binding and the whole refund bundle is now durable. This is the record
+    /// that must exist before any funding may be built.
+    HvmRegistryChannelOpenCountersigned,
+    /// The exact deposit transfer was signed and made durable **before** it was
+    /// handed to a node. A crash after this point leaves a wallet that knows
+    /// money may already be on its way into the contract, which is the whole
+    /// reason the record is written first.
+    HvmRegistryChannelFundingSigned,
+    /// The wallet saw its own funding transaction in a block.
+    HvmRegistryChannelFunded,
     PaymentRequested,
     FundsReserved,
     ApprovalRequested,
@@ -163,6 +185,36 @@ pub(crate) enum AgentJournalEventKind {
     OperationsExpired,
     OperationsCompacted,
     RecoveryRequired,
+    FastPaySubmitted,
+    FastPayAwaitingRecipient,
+    FastPayUnsignedRecovered,
+    FastPayExactRetryReady,
+    ChannelSetupPrepared,
+    ChannelSetupSignatureMayExist,
+    ChannelSetupSigned,
+    ChannelSetupSubmitted,
+    ChannelSetupConfirmed,
+    /// The owner discarded a channel-setup review that was never confirmed. No
+    /// signature was ever produced for it, nothing reached the Hub or the
+    /// chain, and the deposit was never reserved. It releases the durable
+    /// channel-open intent so the same channel can be reviewed again; it moves
+    /// no money.
+    ChannelSetupDiscarded,
+    ChannelClosePrepared,
+    ChannelCloseSignatureMayExist,
+    ChannelCloseSigned,
+    ChannelCloseSubmitted,
+    ChannelCloseConfirmed,
+    // The one close voucher this channel will ever have. There is no refresh
+    // phase here on purpose: a second voucher would be a second signed close.
+    ChannelCloseVoucherSignatureMayExist,
+    ChannelCloseVoucherSigned,
+    ChannelCloseVoucherHeld,
+    ChannelCloseVoucherBroadcast,
+    /// The owner turned the rollback witness requirement on or off for this
+    /// wallet. It moves no money and changes no permission; it decides whether
+    /// later payments will wait for a phone receipt.
+    RollbackWitnessRequirementChanged,
 }
 
 impl AgentJournalEventKind {
@@ -182,6 +234,18 @@ impl AgentJournalEventKind {
             Self::CompanionSessionEstablished => 18,
             Self::CompanionTransportFrameConsumed => 19,
             Self::PolicyChanged => 20,
+            Self::L2BindingVerified => 74,
+            Self::HvmBindingVerified => 89,
+            Self::HvmSigningPrepared => 90,
+            Self::HvmSigned => 91,
+            Self::HvmSubmitted => 92,
+            Self::HvmCommitted => 93,
+            Self::HvmRecoveryRequired => 94,
+            Self::HvmExactRetryReady => 95,
+            Self::HvmRegistryChannelOpenRequested => 96,
+            Self::HvmRegistryChannelOpenCountersigned => 97,
+            Self::HvmRegistryChannelFundingSigned => 98,
+            Self::HvmRegistryChannelFunded => 99,
             Self::PaymentRequested => 30,
             Self::FundsReserved => 31,
             Self::ApprovalRequested => 32,
@@ -221,6 +285,26 @@ impl AgentJournalEventKind {
             Self::OperationsExpired => 42,
             Self::OperationsCompacted => 43,
             Self::RecoveryRequired => 50,
+            Self::FastPaySubmitted => 75,
+            Self::FastPayAwaitingRecipient => 76,
+            Self::FastPayUnsignedRecovered => 77,
+            Self::FastPayExactRetryReady => 78,
+            Self::ChannelSetupPrepared => 79,
+            Self::ChannelSetupSignatureMayExist => 80,
+            Self::ChannelSetupSigned => 81,
+            Self::ChannelSetupSubmitted => 82,
+            Self::ChannelSetupConfirmed => 83,
+            Self::ChannelClosePrepared => 84,
+            Self::ChannelCloseSignatureMayExist => 85,
+            Self::ChannelCloseSigned => 86,
+            Self::ChannelCloseSubmitted => 87,
+            Self::ChannelCloseConfirmed => 88,
+            Self::ChannelCloseVoucherSignatureMayExist => 89,
+            Self::ChannelCloseVoucherSigned => 90,
+            Self::ChannelCloseVoucherHeld => 91,
+            Self::ChannelCloseVoucherBroadcast => 92,
+            Self::ChannelSetupDiscarded => 93,
+            Self::RollbackWitnessRequirementChanged => 94,
         }
     }
 }

@@ -1,11 +1,26 @@
-//! Wallet Hub API v4. mirrors `hacash-wallet-core::l2_hub` client types.
+//! Wallet Hub API v7. mirrors `hacash-wallet-core::l2_hub` client types.
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{HubError, HubResult};
 
-pub const HUB_API_VERSION: u32 = 4;
+pub const HUB_API_VERSION: u32 = 7;
 
+/// The `/v1/health` payload: a cheap liveness answer, served from Hub-local
+/// state without any fullnode I/O.
+///
+/// Because it takes no measurement, it publishes no capability-dependent
+/// guarantee - not conservatively, not at all. A guarantee flag on this struct
+/// could only ever read `false` for want of evidence, which is indistinguishable
+/// from "checked and found absent"; a wallet gating on one would be permanently
+/// bricked, and a wallet trusting a `true` one would be trusting an unmeasured
+/// assertion. `/v1/readiness/mainnet` is the sole authority: it probes the
+/// fullnode, runs `HubHardGuarantees::measure` over the evidence, and publishes
+/// the result as `trustless_finality` / `unilateral_l1_enforceable`. That is the
+/// document the Hub's own money gate reads, and the one every wallet gate reads.
+///
+/// Nothing here should ever grow back into a guarantee. Fields on this struct
+/// answer "who are you and are you up", never "what are you good for".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubHealth {
     pub ok: bool,
@@ -21,18 +36,16 @@ pub struct HubHealth {
     /// True only when the hub completes the recipient-signature flow for routed payments.
     #[serde(default)]
     pub cross_channel_ready: bool,
-    /// True only after an external monotonic journal-head anchor is configured.
-    #[serde(default)]
-    pub external_rollback_anchor_ready: bool,
-    /// True only after unilateral dispute and final-claim recovery is proven on this network.
-    #[serde(default)]
-    pub l1_dispute_path_ready: bool,
-    /// True only for an authenticated Official ChannelPay session, not Wallet Hub API v4.
+    /// True only for an authenticated Official ChannelPay session, not Wallet Hub API v7.
     #[serde(default)]
     pub official_channelpay_ready: bool,
-    /// Aggregate operator assertion. Wallets still verify every prerequisite independently.
+    /// Explicit bounded pilot that depends on Hub availability and configured caps.
+    ///
+    /// Answerable from Hub-local configuration and the signing key alone, so it
+    /// is a liveness fact rather than a measured guarantee. The bounded pilot's
+    /// actual settlement authority still comes from `/v1/readiness/mainnet`.
     #[serde(default)]
-    pub production_mainnet_ready: bool,
+    pub trusted_bounded_pilot_ready: bool,
     /// Truthful transport/deployment label for UI and diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_profile: Option<String>,

@@ -173,6 +173,12 @@ export default function DappApprovalPanel({ unlocked, onNotify }: Props) {
             {meta.glyph}
           </div>
           <div className="dapp-approval-head-text">
+            {/*
+              Which wallet the site is asking for. This overlay hides the
+              sidebar switcher and the top bar, so it has to say so itself. A
+              constant: the panel is mounted only by the personal app.
+            */}
+            <span className="modal-space-label">My Wallet</span>
             <h2 id="dapp-approval-title">{meta.label}</h2>
           </div>
         </header>

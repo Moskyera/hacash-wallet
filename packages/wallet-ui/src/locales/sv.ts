@@ -127,7 +127,8 @@ export const sv = {
   "node.change": "Byt nod",
   "node.useOfficial": "Använd officiell nod",
   "node.customTitle": "Anpassad nod",
-  "node.customHint": "Ändra endast om du driver en egen Hacash-nod eller behöver en privat endpoint.",
+  "node.customHint":
+    "På mainnet skickar plånboken via den officiella noden över vanlig HTTP, eftersom den noden inte erbjuder något annat. Den som bär din trafik kan läsa vilken adress du frågar om och kan ange en felaktig nätverksavgift, så läs avgiften innan du godkänner. Ingen på vägen kan ändra vem som får betalt eller signera åt dig. Att köra Hacash på den här datorn och använda http://127.0.0.1:8080 tar bort allt detta, och är enda sättet att sätta upp Fast Pay eller stänga en kanal.",
   "node.grapheneTitle": "GrapheneOS / telefoner utan Google-tjänster",
   "node.grapheneHelp": "Använd samma APK som för andra Android-enheter. Aktivera nätverksbehörighet i appinformationen. Installera från Filer om webbläsaren blockerar APK-filen. Den officiella noden använder vanlig HTTP, så VPN eller filter kan blockera den. Ingen separat Graphene-version krävs.",
   "quantum.funding.title": "Finansiera quantum-konto",

@@ -8,9 +8,18 @@ license.workspace = true
 [features]
 default = []
 agent-wallet-testnet-pilot = ["hpay-companion-protocol/agent-wallet-testnet-pilot"]
+agent-wallet-bounded-mainnet-pilot = ["agent-wallet-testnet-pilot"]
+# Brings the Hub crate's registry deployment / init / funding builders into the
+# graph so the manager's own exit drive can be proven against a real deployed
+# contract in real blocks rather than against a hand-built snapshot. Test-only
+# in practice - nothing in this crate's own source is gated on it - and it
+# cannot live in `[dev-dependencies]` because the feature belongs to a normal
+# dependency.
+on-chain-exit-proof = ["agent-wallet-testnet-pilot", "l2-fast-pay-hub/local-pilot-tools"]
 
 [dependencies]
 hacash-wallet-core = { path = "../wallet-core" }
+l2-fast-pay-hub = { path = "../l2-fast-pay-hub" }
 hpay-agent-types = { path = "../agent-types" }
 hpay-agent-connector = { path = "../agent-connector" }
 hpay-companion-protocol = { path = "../companion-protocol" }
@@ -33,6 +42,7 @@ aes-gcm.workspace = true
 argon2.workspace = true
 protocol = { path = "../../../hacash-fullnodedev/protocol" }
 sys = { path = "../../../hacash-fullnodedev/sys" }
+field = { path = "../../../hacash-fullnodedev/field" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -46,5 +56,12 @@ hpay-companion-protocol = { path = "../companion-protocol", features = ["dev-sof
 # /create/transaction with a real consensus Type 2 body, because the signer
 # decodes and re-verifies whatever the node returns before it will sign it.
 # Never a runtime dependency: the crate itself must not construct transactions.
-field = { path = "../../../hacash-fullnodedev/field" }
 basis = { path = "../../../hacash-fullnodedev/basis" }
+mint = { path = "../../../hacash-fullnodedev/mint" }
+vm = { path = "../../../hacash-fullnodedev/vm" }
+reqwest = { workspace = true }
+# The fullnode's own in-memory chain. Same dependency, and for the same
+# reason, as `wallet-core`'s on-chain exit proofs: it is how this manager's own
+# exit drive gets executed by the real block executor against real HVM contract
+# state instead of being asserted about against a hand-built snapshot.
+testkit = { path = "../../../hacash-fullnodedev/testkit" }

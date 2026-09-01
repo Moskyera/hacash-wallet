@@ -52,6 +52,13 @@ const overview = (overrides: Partial<AgentWalletOverview> = {}): AgentWalletOver
   unlocked: true,
   payments_suspended: false,
   mainnet_spending_ready: true,
+  trusted_mainnet_fast_pay_pilot: false,
+  l2_binding: null,
+  hvm_channel_binding: null,
+  hvm_registry_binding: null,
+  l2_channel_setup: null,
+  l2_channel_close: null,
+  l2_channel_close_voucher: null,
   confirmed_balance_units: "1000000",
   reserved_units: "0",
   available_units: "1000000",
@@ -60,6 +67,10 @@ const overview = (overrides: Partial<AgentWalletOverview> = {}): AgentWalletOver
   authorized_agents: 0,
   pending_approvals: 0,
   pilot_enabled: true,
+  // The existing blocker cases were all written for a wallet that uses the
+  // witness, so the shared fixture keeps saying so and every one of them still
+  // asserts exactly what it asserted before the setting existed.
+  rollback_witness_required: true,
   mobile_witness_ready: true,
   mobile_witness_synchronized: true,
   latest_anchor_sequence: 1,
@@ -90,7 +101,7 @@ describe("Agent Wallet UI access is independent from write readiness", () => {
     ["zero balance", { confirmed_balance_units: "0" }],
     ["missing mobile", { mobile_witness_ready: false }],
     ["missing witness", { mobile_witness_synchronized: false }],
-    ["mainnet node", { node: { ...overview().node!, mainnet: true } }],
+    ["wrong-network mainnet node", { node: { ...overview().node!, mainnet: true } }],
   ])("keeps the dashboard open read-only for %s", (_label, change) => {
     expect(agentWalletUiState(runtime(), overview(change))).toBe("read_only");
   });
@@ -117,6 +128,35 @@ describe("Agent Wallet UI access is independent from write readiness", () => {
 
   it("becomes available only when every write prerequisite is satisfied", () => {
     expect(agentWalletUiState(runtime(), overview())).toBe("available");
+  });
+
+  it("accepts an exact verified mainnet node only with authenticated pilot consent", () => {
+    const mainnet = overview({
+      network_mode: "mainnet",
+      mainnet_spending_ready: true,
+      trusted_mainnet_fast_pay_pilot: true,
+      block_one_fingerprint:
+        "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+      node: {
+        ...overview().node!,
+        chain_id: 0,
+        mainnet: true,
+        current_height: 765_432,
+        network_kind: "mainnet",
+        node_profile_id: "hacash-mainnet",
+        funding_confirmed: false,
+        block_one_fingerprint:
+          "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56",
+      },
+    });
+    expect(agentWalletPaymentBlockers(runtime(), mainnet)).toEqual([]);
+    expect(
+      agentWalletPaymentBlockers(runtime(), {
+        ...mainnet,
+        trusted_mainnet_fast_pay_pilot: false,
+        mainnet_spending_ready: false,
+      }),
+    ).toContain("mainnet_consent_missing");
   });
 });
 
@@ -206,6 +246,45 @@ describe("the payment gate keeps every prerequisite it has today", () => {
 
   it("reports nothing when every payment prerequisite is satisfied", () => {
     expect(agentWalletPaymentBlockers(runtime(), overview())).toEqual([]);
+  });
+
+  // A WALLET THAT NEVER ASKED FOR A PHONE IS NOT MISSING ONE.
+  //
+  // These two blockers are the mirror of the Rust witness gate, and that gate
+  // is now the owner's setting rather than the build. With the setting off,
+  // pushing them would render the payment path as permanently blocked, with a
+  // phone to pair that the wallet does not use and a Rust side that would have
+  // approved the payment anyway. The mirror has to reflect what is actually
+  // enforced or it is a false report.
+  //
+  // Fails without the change: both blockers are pushed unconditionally, so the
+  // list is ["mobile_not_paired", "witness_not_initialized"].
+  it("asks for no phone at all when the owner did not ask for the witness", () => {
+    expect(
+      agentWalletPaymentBlockers(
+        runtime(),
+        overview({
+          rollback_witness_required: false,
+          mobile_witness_ready: false,
+          mobile_witness_synchronized: false,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  // And the other direction, so turning the setting off cannot be mistaken for
+  // deleting the requirement: an owner who opted in still gets both.
+  it("still demands the phone from an owner who asked for the witness", () => {
+    expect(
+      agentWalletPaymentBlockers(
+        runtime(),
+        overview({
+          rollback_witness_required: true,
+          mobile_witness_ready: false,
+          mobile_witness_synchronized: false,
+        }),
+      ),
+    ).toEqual(["mobile_not_paired", "witness_not_initialized"]);
   });
 });
 
@@ -555,7 +634,7 @@ describe("the pairing refusal never names an escape route that is closed", () =>
     expect(text).toContain("Clear the emergency stop in Payment control first");
     expect(text).toContain("Enable locally is unavailable too");
     // And it must carry the actual reason, not merely say "unavailable".
-    expect(text).toContain("does not match this Local Pilot network");
+    expect(text).toContain("does not match this Agent Wallet network");
     // The control the sentence names is genuinely disabled in that state.
     expect(
       emergencyStopControl({

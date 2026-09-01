@@ -1,5 +1,6 @@
 use std::fmt;
 
+use field::Amount;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -121,27 +122,20 @@ pub fn parse_amount_mei(wire: &str) -> HubResult<HacAmount> {
         return Err(HubError::Payment("empty amount".into()));
     }
 
-    if let Some((whole, millimeis)) = value.split_once(':') {
-        if millimeis.contains(':')
-            || whole.is_empty()
-            || millimeis.is_empty()
-            || !whole.bytes().all(|byte| byte.is_ascii_digit())
-            || !millimeis.bytes().all(|byte| byte.is_ascii_digit())
-            || millimeis.len() > 3
-        {
-            return Err(HubError::Payment(format!("invalid amount: {wire}")));
+    if value.contains(':') {
+        let amount = Amount::from(value)
+            .map_err(|error| HubError::Payment(format!("invalid Hacash amount {wire}: {error}")))?;
+        let zhu = amount
+            .to_zhu_u64()
+            .map_err(|error| HubError::Payment(format!("amount is too large: {error}")))?;
+        if zhu % crate::readiness::ZHU_PER_MILLIMEI != 0 {
+            return Err(HubError::Payment(format!(
+                "amount {wire} is below the exact L2 ledger precision"
+            )));
         }
-        let whole = whole
-            .parse::<u64>()
-            .map_err(|_| HubError::Payment(format!("amount is too large: {wire}")))?;
-        let millimeis = millimeis
-            .parse::<u64>()
-            .map_err(|_| HubError::Payment(format!("invalid amount: {wire}")))?;
-        return whole
-            .checked_mul(1000)
-            .and_then(|whole| whole.checked_add(millimeis))
-            .map(HacAmount::from_millimeis)
-            .ok_or_else(|| HubError::Payment(format!("amount is too large: {wire}")));
+        return Ok(HacAmount::from_millimeis(
+            zhu / crate::readiness::ZHU_PER_MILLIMEI,
+        ));
     }
 
     let (whole, fraction) = match value.split_once('.') {
@@ -204,17 +198,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_colon_wire_exactly() {
+    fn parses_hacash_financial_notation_exactly() {
         assert_eq!(
-            parse_amount_mei("1:244").unwrap(),
-            HacAmount::from_millimeis(1244)
+            parse_amount_mei("1:245").unwrap(),
+            HacAmount::from_millimeis(1)
         );
+        assert_eq!(
+            parse_amount_mei("1:248").unwrap(),
+            HacAmount::from_millimeis(1_000)
+        );
+        assert!(parse_amount_mei("1:244").is_err());
     }
 
     #[test]
-    fn colon_uses_raw_millimeis_while_decimal_uses_decimal_places() {
-        assert_eq!(parse_amount_mei("1:2").unwrap().as_millimeis(), 1_002);
-        assert_eq!(parse_amount_mei("1.2").unwrap().as_millimeis(), 1_200);
+    fn financial_notation_and_decimal_have_the_same_hac_value() {
+        assert_eq!(
+            parse_amount_mei("1:248").unwrap(),
+            parse_amount_mei("1").unwrap()
+        );
+        assert_eq!(
+            parse_amount_mei("1:245").unwrap(),
+            parse_amount_mei("0.001").unwrap()
+        );
         assert!(parse_amount_mei("1:").is_err());
         assert!(parse_amount_mei("1.").is_err());
     }

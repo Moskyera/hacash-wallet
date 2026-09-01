@@ -44,8 +44,18 @@ export type StrandedWitnessView = {
   transactionId: string | null;
   /** Why this payment is sitting here, in the owner's terms. */
   explanation: string;
-  /** The step to try first, always. Free, repeatable, and it usually works. */
+  /**
+   * The step to try first when it is available. Free, repeatable, and it
+   * usually works.
+   *
+   * When the core says a retry would be refused this says so instead, and says
+   * why, rather than inviting a press that cannot do anything. It read "trying
+   * again costs nothing and it is safe to try more than once" over a control
+   * the core refused outright on mainnet.
+   */
   phoneInstruction: string;
+  /** Asking the phone again would work right now. Mirrors the core. */
+  canRetryPhone: boolean;
   /** True once the window the phone was given has run out. */
   anchorExpired: boolean;
   /** The give-up control may be pressed. Mirrors the core's own predicate. */
@@ -101,11 +111,24 @@ export function strandedWitnessView(
         "Opening the payment on your phone again starts a new window."
       : "Your phone has an open confirmation window for this payment right now.";
 
-  const phoneInstruction =
-    `Open the ${STRANDED_PHONE_APP_NAME} on your paired phone and confirm this payment. ` +
-    (submitted
-      ? "Confirming records what already happened; it does not repeat the payment, and it cannot move money twice."
-      : "Trying again costs nothing and moves no money, and it is safe to try more than once.");
+  // The phone step is offered only while the core would honour it. Where it
+  // would not, the owner is told which of the two reasons applies, because they
+  // are opposites: a confirmation already on its way in is the payment
+  // finishing, and a wallet that cannot open a window at all is a dead end whose
+  // only way out is giving the payment up.
+  const phoneInstruction = stranded.retryable
+    ? `Open the ${STRANDED_PHONE_APP_NAME} on your paired phone and confirm this payment. ` +
+      (submitted
+        ? "Confirming records what already happened; it does not repeat the payment, and it cannot move money twice."
+        : "Trying again costs nothing and moves no money, and it is safe to try more than once.")
+    : stranded.network_supports_witness_retry
+      ? "Your phone has already sent a confirmation for this payment and this wallet is finishing it. " +
+        "There is nothing to confirm again, and nothing here needs pressing."
+      : "This wallet cannot ask your phone to confirm a payment on this network, so opening the " +
+        `${STRANDED_PHONE_APP_NAME} again will not move this payment on. ` +
+        (submitted
+          ? "The payment is on the network either way; the transaction id below is how to check it."
+          : "Nothing has been sent to the network and no money has moved. Giving the payment up returns the reserved funds to your spendable balance.");
 
   // The give-up control exists only for a payment that provably never reached
   // the node. Past that point taking it would assert the payment did not
@@ -128,13 +151,20 @@ export function strandedWitnessView(
     transactionId: stranded.transaction_id,
     explanation,
     phoneInstruction,
+    canRetryPhone: stranded.retryable,
     anchorExpired,
     canAbandon: stranded.abandonable,
     abandonWithheldReason,
+    // The tail of this sentence used to name Replace the paired phone as "the
+    // only thing that clears that". On mainnet that control answers
+    // WitnessRotationNetworkUnsupported, so the sentence sent a person to a
+    // button that refuses. It is only named where it can actually be used.
     afterAbandon:
       "After this, new agent payments work again. If your phone had already accepted this payment before it lost " +
-      "contact, it will refuse the next one too, and the only thing that clears that is " +
-      `${DESKTOP_CONTROLS.replace_the_paired_phone}, further down this page.`,
+      "contact, it will refuse the next one too" +
+      (stranded.network_supports_witness_retry
+        ? `, and the only thing that clears that is ${DESKTOP_CONTROLS.replace_the_paired_phone}, further down this page.`
+        : ". Replacing the paired phone is the fix for that, and it is not available on this network yet."),
     canReleaseAnchor: stranded.anchor_releasable,
     releaseExplanation:
       "Clearing the expired confirmation window changes nothing about this payment: the same amount, the same " +
@@ -149,6 +179,13 @@ export function strandedWitnessView(
           "payment it never saw before it was sent. Your existing paired phone is the only one that can finish this."
         : stranded.anchor_releasable
           ? `Clear the expired confirmation window first, then ${DESKTOP_CONTROLS.replace_the_paired_phone} becomes available.`
-          : "Your phone still has an open confirmation window, so replacing it is not offered yet.",
+          : stranded.network_supports_witness_retry
+            ? "Your phone still has an open confirmation window, so replacing it is not offered yet."
+            // The line above was the unconditional fallback, and on mainnet it
+            // was simply false: no confirmation window was ever opened, and
+            // this wallet cannot open one, because the anchor is testnet only.
+            // A person read an explanation about a window that does not exist
+            // and had no way to know the real reason.
+            : "Replacing the paired phone is not available on this network yet, so it is not offered here.",
   };
 }

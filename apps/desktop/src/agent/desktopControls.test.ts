@@ -324,8 +324,8 @@ describe("every control that cancels pending payment requests says so first", ()
 });
 
 describe("a passphrase with no recovery path is warned about beforehand", () => {
-  it("puts the warning above the field, outside any disclosure", () => {
-    const warning = APP.indexOf("no Agent Wallet backup and no recovery path");
+  it("puts the backup safety warning above the field, outside any disclosure", () => {
+    const warning = APP.indexOf("can recreate a live spending");
     const field = APP.indexOf("Agent Wallet passphrase");
     expect(warning).toBeGreaterThan(0);
     expect(warning).toBeLessThan(field);

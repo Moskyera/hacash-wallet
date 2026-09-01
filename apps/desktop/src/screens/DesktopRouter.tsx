@@ -3,7 +3,7 @@ import AirgapScreen from "../AirgapScreen";
 import { AssetSummary, HubDiscoveryEntry, TxRecord, WalletSettings, WalletStatus } from "../api";
 import type { AssetTrendHistory } from "../assetTrends";
 import { HubFeePayer, L1FeeSpeed, SendPreview } from "../api";
-import { DustWhisperSettings, PrivacySettings, RelayHealthStatus } from "../api";
+import { DustWhisperSettings, PrivacySettings, RelayEndpoint, RelayHealthStatus } from "../api";
 import { ChannelInfo, HubHealth } from "../api";
 import type { FastPayStatus } from "../fastPayUi";
 import type { PaymentQrPayload } from "../paymentQr";
@@ -12,6 +12,8 @@ import FastPayScreen from "./FastPayScreen";
 import HacdScreen from "./HacdScreen";
 import HistoryScreen from "./HistoryScreen";
 import HomeScreen from "./HomeScreen";
+import DualWorkspaceScreen from "./DualWorkspaceScreen";
+import MessagesScreen from "./MessagesScreen";
 import PrivacyScreen from "./PrivacyScreen";
 import QuantumScreen from "./QuantumScreen";
 import ReceiveScreen from "./ReceiveScreen";
@@ -37,6 +39,8 @@ export type DesktopData = {
   webauthnReady: boolean;
   nativeBioAvailable: boolean;
   relayHealth: RelayHealthStatus[];
+  /** What this wallet is serving, from `wallet_relay_endpoint`. */
+  relayEndpoint: RelayEndpoint | null;
   privacy: PrivacySettings;
   dustWhisper: DustWhisperSettings;
   busy: boolean;
@@ -75,10 +79,19 @@ export type DesktopActions = {
   onWatchOnly: (address: string) => void;
   onUnlock: (passphrase: string) => void;
   onLock: () => void;
+  /** Switches to the Agent Wallet space. Locks My Wallet on the way there. */
+  onOpenAgent: () => void;
   onOpenQrPay: () => void;
-  onEnableFastPay: (userDeposit: string) => void;
+  /** Resolves to the refusal text, or `null` when the open was submitted. */
+  onEnableFastPay: (userDeposit: string) => Promise<string | null>;
   onApplyHub: (entry: HubDiscoveryEntry) => Promise<void>;
-  onSaveL2Settings: (nodeUrl: string, hubUrl: string, hubAddress: string) => void;
+  onSaveL2Settings: (
+    nodeUrl: string,
+    hubUrl: string,
+    hubAddress: string,
+    trustedMainnetFastPayPilot: boolean,
+    currentPassphrase: string,
+  ) => void;
   onHubHealth: () => void;
   onPreviewChannel: (
     hubAddress: string,
@@ -150,6 +163,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     webauthnReady,
     nativeBioAvailable,
     relayHealth,
+    relayEndpoint,
     privacy,
     dustWhisper,
     busy,
@@ -183,6 +197,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
     onWatchOnly,
     onUnlock,
     onLock,
+    onOpenAgent,
     onOpenQrPay,
     onEnableFastPay,
     onApplyHub,
@@ -272,8 +287,22 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           lastTx={lastTx}
           privacy={privacy}
           onNavigate={setScreen}
+          onOpenAgent={onOpenAgent}
           onNotify={onNotify}
           clearMessages={clearMessages}
+        />
+      );
+    case "workspace":
+      return (
+        <DualWorkspaceScreen
+          status={status}
+          assets={assets}
+          assetTrends={assetTrends}
+          hideBalances={hideBalances}
+          hideAddresses={hideAddresses}
+          privacy={privacy}
+          onNavigate={setScreen}
+          onOpenAgent={onOpenAgent}
         />
       );
     case "fastpay":
@@ -363,6 +392,17 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           onGoSend={() => setScreen("send")}
         />
       );
+    case "messages":
+      return (
+        <MessagesScreen
+          status={status}
+          dustWhisper={dustWhisper}
+          relayEndpoint={relayEndpoint}
+          hideAddresses={hideAddresses}
+          onNavigate={setScreen}
+          onNotify={onNotify}
+        />
+      );
     case "history":
       return (
         <HistoryScreen
@@ -429,6 +469,7 @@ export default function DesktopRouter({ screen, data, actions }: Props) {
           status={status}
           dustWhisper={dustWhisper}
           relayHealth={relayHealth}
+          relayEndpoint={relayEndpoint}
           busy={busy}
           onSavePrivacy={onSavePrivacy}
           onSaveWhisper={onSaveWhisper}

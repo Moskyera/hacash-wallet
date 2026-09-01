@@ -31,6 +31,17 @@ pub struct NodeDiscoveryReport {
     pub switched: bool,
     pub network_mode: String,
     pub candidates: Vec<NodeCandidateStatus>,
+    /// Set when automatic failover found a working node and deliberately did
+    /// not move to it, because moving would have traded a node this wallet can
+    /// sign against for one it cannot.
+    ///
+    /// Carried so the surface can say so. Silence here was the whole defect:
+    /// a person pressed a button labelled "Find active node" while their own
+    /// loopback node was restarting, the wallet moved them to the plaintext
+    /// official endpoint, reported `switched: true`, and every later signing
+    /// attempt failed with an unexplained security-policy refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failover_declined: Option<String>,
 }
 
 /// Immutable node configuration captured while the wallet state lock is held.
@@ -55,6 +66,26 @@ impl NodeDiscoverySnapshot {
     }
 }
 
+/// Where a Hacash fullnode on this same machine answers by default.
+///
+/// `docs/l2/YOUR-FIRST-MAINNET-CHANNEL.md` tells a person to bind the node's
+/// HTTP API to `127.0.0.1:8080` and then type that address into Settings by
+/// hand. Everybody who followed that guide has a node listening here.
+pub const LOCAL_NODE_URL: &str = "http://127.0.0.1:8080";
+
+/// The endpoints this wallet will look at when it goes hunting for a node.
+///
+/// Loopback used to be missing from this list entirely, and the consequence
+/// was worse than a missing convenience. A person whose own fullnode was
+/// running perfectly on this machine could press "Find active node", have
+/// every candidate probed, and be told the official node was healthy - while
+/// the one node on the whole list they could actually sign against was never
+/// contacted, because nobody had typed it in yet. The button that exists to
+/// find a node could not find the node.
+///
+/// So loopback is probed, but only when the configured node cannot sign on
+/// this network. That keeps the scan identical for anybody already pointed at
+/// a node that works, and adds one local request for everybody who is stuck.
 pub fn candidate_urls(settings: &WalletSettings) -> Vec<String> {
     let mut urls = vec![settings.node_url.clone()];
     for url in &settings.node_fallback_urls {
@@ -62,10 +93,77 @@ pub fn candidate_urls(settings: &WalletSettings) -> Vec<String> {
             urls.push(url.clone());
         }
     }
+    if !failover_may_adopt(&settings.node_url, &settings.network_mode)
+        && !urls.iter().any(|url| url == LOCAL_NODE_URL)
+    {
+        urls.push(LOCAL_NODE_URL.into());
+    }
     if settings.network_mode == "mainnet" && !urls.iter().any(|url| url == DEFAULT_NODE_URL) {
         urls.push(DEFAULT_NODE_URL.into());
     }
     urls
+}
+
+/// What the wallet says when it is on the official node and no node on this
+/// machine answered.
+///
+/// This sentence used to begin "but it cannot send", and that was true for as
+/// long as the official endpoint was refused for mainnet signing. It is no
+/// longer true: an ordinary payment through the official node is now allowed,
+/// as one named exception, and the wallet ships pointed at it. Leaving the old
+/// wording would be the same false-reassurance bug pointed the other way,
+/// telling a person their wallet is broken while it works.
+///
+/// So it says what is the case, what it costs, and what removes the cost. The
+/// cost is real and is stated in plain words rather than buried: the
+/// connection is readable, which ties an address to a person's internet
+/// connection, and a wrong fee can be quoted, which is why the fee on the
+/// review screen is worth reading.
+///
+/// The last sentence is deliberately narrower than it wants to be. This scan
+/// probes one address, [`LOCAL_NODE_URL`], and one address is not the machine:
+/// a node bound to another port is running and would not have answered. An
+/// earlier wording concluded "there is no Hacash node running here yet", which
+/// is a claim the wallet has not got the evidence for, and it would have sent
+/// somebody who already had a working node off to install a second one. State
+/// what was probed, then give both fixes.
+pub fn no_local_signing_node_message(active_node: &str, network_mode: &str) -> String {
+    format!(
+        "This wallet can read your balance and send payments through {active_node}, the official \
+         Hacash node, and it does that over plain HTTP because that node offers nothing else. \
+         What that costs on {network_mode}: whoever carries your traffic can read which address \
+         you are asking about and see the payment go out, and they can quote a wrong network fee, \
+         so read the fee on the review screen before you approve. They cannot change who gets paid \
+         or how much, they cannot sign anything for you, and they cannot swap in a different chain. \
+         Nothing answered on {LOCAL_NODE_URL}, which is the one address on this computer this \
+         wallet checks. Start a Hacash node on this computer with its HTTP API on {LOCAL_NODE_URL} \
+         and all of that goes away, or, if you are already running one on a different port, type \
+         that address into the node field in Settings."
+    )
+}
+
+/// What the wallet says when it is on the official node, could have moved
+/// itself onto a node on this computer, and was told not to.
+///
+/// With `auto_node_failover` turned off, discovery returns before it is
+/// allowed to adopt anything. The active node is online and on the right
+/// chain, so the Settings screen fell through to "The active node is healthy.",
+/// which says nothing about the plaintext connection the payment will cross.
+///
+/// Nothing here switches anything. The choice to switch by hand is respected
+/// exactly as before; the person is only told what the current choice costs
+/// and which two things undo it.
+pub fn signing_node_not_adopted_message(active_node: &str, network_mode: &str) -> String {
+    format!(
+        "This wallet sends through {active_node}, the official Hacash node, over plain HTTP, \
+         because that node offers nothing else. On {network_mode} that means whoever carries your \
+         traffic can read which address you are asking about and see the payment go out, and can \
+         quote a wrong network fee, so read the fee on the review screen before you approve. They \
+         cannot change who gets paid or how much, and they cannot sign anything for you. \
+         Automatic node switching is turned off, so this wallet will not move itself onto a node \
+         on this computer even if you start one. Turn automatic node switching back on, or type \
+         the address of your own node, usually {LOCAL_NODE_URL}, into the node field in Settings."
+    )
 }
 
 pub async fn discover_node_snapshot(snapshot: &NodeDiscoverySnapshot) -> NodeDiscoveryReport {
@@ -111,7 +209,23 @@ pub async fn discover_node_candidates(settings: &WalletSettings) -> NodeDiscover
         switched: false,
         network_mode: settings.network_mode.clone(),
         candidates,
+        failover_declined: None,
     }
+}
+
+/// May automatic failover move this wallet onto `url` unattended?
+///
+/// Read-only endpoints stay listed and stay probed - that is what
+/// [`candidate_urls`] is for, and seeing that the official node is up is
+/// useful. This governs only the unattended *switch*.
+///
+/// The predicate is the settings layer's own, not a second opinion: a node
+/// this wallet could not sign against on this network is not a node automatic
+/// failover may silently adopt. Nothing here decides what a person may
+/// configure by hand; `validate_node_url` still governs that, and a person who
+/// deliberately types the official read-only endpoint still gets it.
+pub fn failover_may_adopt(url: &str, network_mode: &str) -> bool {
+    crate::settings::validate_signing_node_url(url, network_mode).is_ok()
 }
 
 pub async fn probe_node(url: &str, network_mode: &str) -> NodeCandidateStatus {
@@ -208,6 +322,134 @@ mod tests {
                 DEFAULT_NODE_URL
             ]
         );
+    }
+
+    /// The button called "Find active node" could not find the node.
+    ///
+    /// A person who had built a fullnode, put it on 127.0.0.1:8080 and not yet
+    /// typed that address into Settings was sitting on the shipped default.
+    /// Every candidate got probed, the official node answered, and the wallet
+    /// reported success - having never once contacted the only node on the
+    /// machine it could sign against.
+    #[test]
+    fn a_node_that_cannot_sign_makes_the_scan_look_at_this_machine() {
+        let settings = WalletSettings {
+            node_url: DEFAULT_NODE_URL.into(),
+            network_mode: "mainnet".into(),
+            ..WalletSettings::default()
+        };
+        assert!(
+            crate::settings::validate_signing_node_url(&settings.node_url, "mainnet").is_err(),
+            "the shipped default is the node that cannot sign; that is the premise"
+        );
+        assert_eq!(
+            candidate_urls(&settings),
+            vec![DEFAULT_NODE_URL, LOCAL_NODE_URL],
+            "loopback must be probed when the configured node cannot sign"
+        );
+    }
+
+    /// Adding a probe must not change the scan for anybody already set up.
+    #[test]
+    fn a_signing_capable_node_is_scanned_exactly_as_before() {
+        let settings = WalletSettings {
+            node_url: LOCAL_NODE_URL.into(),
+            network_mode: "mainnet".into(),
+            ..WalletSettings::default()
+        };
+        assert_eq!(
+            candidate_urls(&settings),
+            vec![LOCAL_NODE_URL, DEFAULT_NODE_URL],
+            "loopback is already the active node, so nothing is added"
+        );
+
+        let https = WalletSettings {
+            node_url: "https://node.example".into(),
+            network_mode: "mainnet".into(),
+            ..WalletSettings::default()
+        };
+        assert_eq!(
+            candidate_urls(&https),
+            vec!["https://node.example", DEFAULT_NODE_URL],
+            "an HTTPS node can sign, so this scan gains no local probe"
+        );
+    }
+
+    /// The transport rule does not apply off mainnet, so neither does the
+    /// probe. Testnet must keep scanning exactly what it scanned before.
+    #[test]
+    fn testnet_gains_no_loopback_probe() {
+        let settings = WalletSettings {
+            node_url: "https://testnet.example".into(),
+            network_mode: "testnet".into(),
+            ..WalletSettings::default()
+        };
+        assert_eq!(candidate_urls(&settings), vec!["https://testnet.example"]);
+    }
+
+    /// The sentence a person is owed has to name the endpoint, the reason and
+    /// the fix. A refusal that says only "requires HTTPS" is where they leave.
+    #[test]
+    fn the_refusal_names_the_node_the_reason_and_the_fix() {
+        let message = no_local_signing_node_message(DEFAULT_NODE_URL, "mainnet");
+        assert!(message.contains(DEFAULT_NODE_URL), "{message}");
+        assert!(message.contains(LOCAL_NODE_URL), "{message}");
+        // The official node CAN carry an ordinary payment, so this may not
+        // claim otherwise. What it must name is the cost of doing so.
+        assert!(
+            !message.contains("cannot send"),
+            "the named exception permits this send; saying otherwise is the false-reassurance bug pointed the other way: {message}"
+        );
+        assert!(message.contains("read which address you"), "{message}");
+        assert!(message.contains("wrong network fee"), "{message}");
+        assert!(
+            message.contains("Start a Hacash node on this computer"),
+            "the reason has to be in ordinary words: {message}"
+        );
+        assert!(
+            message.contains("Start a Hacash node on this computer"),
+            "a refusal with no next step is a dead end: {message}"
+        );
+    }
+
+    /// One probed address is not the whole machine.
+    ///
+    /// `candidate_urls` looks at exactly one loopback address. Concluding from
+    /// its silence that no node is running here is a claim beyond the
+    /// evidence, and it is wrong for the person whose node is on another port:
+    /// it tells them to go and install the thing they already have.
+    #[test]
+    fn the_refusal_does_not_claim_more_than_one_port_was_probed() {
+        let message = no_local_signing_node_message(DEFAULT_NODE_URL, "mainnet");
+        assert!(
+            !message.contains("there is no Hacash node running here"),
+            "the scan probed one port and may not conclude anything about the machine: {message}"
+        );
+        assert!(
+            message.contains("the one address on this computer this wallet checks"),
+            "say what was actually probed: {message}"
+        );
+        assert!(
+            message.contains("different port"),
+            "the person whose node is on another port needs the fix that applies to them: {message}"
+        );
+    }
+
+    /// Turning automatic switching off must not turn the explanation off too.
+    #[test]
+    fn the_failover_off_refusal_names_both_ways_out() {
+        let message = signing_node_not_adopted_message(DEFAULT_NODE_URL, "mainnet");
+        assert!(message.contains(DEFAULT_NODE_URL), "{message}");
+        assert!(
+            !message.contains("cannot send"),
+            "this node does send; the message states the cost, not a refusal: {message}"
+        );
+        assert!(message.contains("read which address you"), "{message}");
+        assert!(
+            message.contains("Automatic node switching is turned off"),
+            "the reason this wallet did not fix itself has to be the reason given: {message}"
+        );
+        assert!(message.contains(LOCAL_NODE_URL), "{message}");
     }
 
     #[test]

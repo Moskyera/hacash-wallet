@@ -1,101 +1,371 @@
-# Hacash Fast Pay - CSP Hub Operator Guide
+# HPAY Fast Pay Hub Operator Guide
 
-For **operators** running a Channel Payment Service Provider (CSP) hub. End users only need the wallet.
+This guide is for operators running the official Hacash ChannelPay-compatible HPAY Fast Pay Hub. End users only need HPAY Wallet.
+
+## Mainnet safety profiles
+
+HPAY has two separate mainnet profiles. `mainnet-pilot` is the fail-closed trustless profile and remains unavailable until an independent rollback anchor and unilateral L1 dispute path exist. `mainnet-bounded-pilot` is an explicit trusted-Hub pilot. It uses official Hacash ChannelPay bill documents and does not change Hacash consensus, but it is Hub coordinated and is not trustless or unilaterally enforceable on L1. The active Hacash mainnet exposes cooperative original-funding close action 3, so an operator and user must cooperate to settle a channel on L1.
+
+**Current release status:** the one-click installer selects `mainnet-bounded-pilot`. It can enable new channel funding and payment signing only for explicitly allowlisted users, only while every readiness check is green, and only inside the hard 1/10/100 HAC limits. Wallets remain opted out by default and must display and persist the user's explicit trusted-pilot consent. The trustless `mainnet-pilot` profile still reports the missing rollback/dispute blockers and keeps `payments_enabled=false`.
+
+The Hub fails closed unless all of the following remain true:
+
+- a compatible HPAY full node reports fresh mainnet capabilities;
+- the full node is at or above the pinned mainnet checkpoint;
+- the Hub signer, durable state and authenticated journal are configured;
+- the selected profile is exactly the policy explicitly accepted by the wallet;
+- for `mainnet-pilot`, an independent rollback anchor and unilateral L1 dispute path are verified, and the exact full node reports `features.channel_registry_unilateral_exit=true` with verified deployment evidence for the shared registry contract `hpay-hvm-shared-registry-v2`;
+- for `mainnet-bounded-pilot`, the payer is allowlisted and aggregate Hub TVL stays within its cap;
+- the wallet fee is exactly zero;
+- both the payment and channel-funding amounts stay within their configured caps;
+- readiness is rechecked immediately before every Hub signature.
+
+Normal HPAY Wallet L1 sends do not depend on this Hub and keep working when Fast Pay is unavailable.
 
 ## Components
 
 | Piece | Binary | Role |
 |-------|--------|------|
-| CSP hub | `fast-pay-hub` | Wallet Hub API v4 |
-| Fullnode | `hacash.exe` | Channel + L1 state |
-| Hub wallet | Separate keypair | Signs as the hub party on each channel |
+| Fast Pay Hub | `fast-pay-hub` | Wallet Hub API v7 and short-lived mainnet readiness |
+| HPAY full node | `hacash` / `hacash.exe` | Hacash L1 plus `/query/capabilities` |
+| Hub wallet | Separate Hacash keypair | Signs only the Hub side of ChannelPay bills |
 
 ## Prerequisites
 
-1. Hacash fullnode RPC (default `http://127.0.0.1:8080`)
-2. Hub wallet funded with HAC
-3. Open user-to-hub channels. Either channel side is supported.
+1. A fully synchronized HPAY-compatible Hacash full node, normally at `http://127.0.0.1:8080`.
+2. A dedicated Hub wallet funded only with the liquidity required for the pilot.
+3. A persistent data directory on local encrypted storage.
+4. HTTPS termination in front of the Hub. Never expose the internal HTTP port directly to the internet.
+5. Open user-to-Hub channels. Either channel side is supported.
 
-## Hub wallet
+## Secrets
 
-Record two values:
+Create and store three required independent values outside the source tree, plus an optional full-node API token:
 
-- `HACASH_HUB_ADDRESS` - base58 address
-- `HACASH_HUB_SECRET_HEX` - 64-char private key hex (must match address)
+- `HACASH_HUB_ADDRESS`: Hub Hacash address.
+- `HACASH_HUB_SECRET_HEX`: 64-character private key matching the Hub address.
+- HACASH_HUB_JOURNAL_KEY_HEX: independent random 32-byte key encoded as 64 hex characters.
+- HACASH_HUB_STATE_KEY_HEX: a second independent random 32-byte key used only to seal the complete durable state container.
+- `HACASH_NODE_API_TOKEN`: optional token matching the full node configuration. Required when the full node protects its API with a token.
+
+All three secret keys must be different. Never commit these values, upload them to a GitHub repository, include them in an image, or reuse one key for another purpose. Use the operating-system secret manager or a root-owned environment file with the narrowest possible permissions.
 
 ## Build
 
 ```bash
-cargo build -p l2-fast-pay-hub --features server --bin fast-pay-hub --release
+cargo build -p l2-fast-pay-hub --features server --bin fast-pay-hub --release --locked
 ```
 
-## Run
+## One-click Linux VPS package
+
+A `vX.Y.Z-hub` tag builds `hpay-fast-pay-hub-vX.Y.Z-linux-x64.tar.gz` through `.github/workflows/release-hub.yml`. The release contains the compiled binary, installer, hardened systemd unit and operator README. Verify the published SHA-256 file and GitHub provenance, extract the archive, then run `sudo ./install.sh`.
+
+The installer verifies the local HPAY full node, creates independent journal and sealed-state keys, installs a dedicated service account and binds the Hub only to loopback. It refuses to overwrite an existing signer, journal key, state key or state. HTTPS reverse-proxy setup remains an explicit operator step because it requires the operator's own domain and certificate.
+
+## Bounded mainnet pilot run
+
+The bounded mainnet pilot caps each payment at 1 HAC (`100000000` Zhu), each newly funded channel at 10 HAC (`1000000000` Zhu), and aggregate active/reserved Hub TVL at 100 HAC (`10000000000` Zhu). Operators may configure lower values, never higher ones.
+
+Build first, with the `server` feature, as the Build section above shows. Without that feature the binary target does not exist and `cargo build -p l2-fast-pay-hub --bin fast-pay-hub` stops with "requires the features: `server`".
+
+Set the aggregate TVL cap deliberately. The binary's compiled-in default for `--mainnet-max-aggregate-tvl-hac-zhu` is `100000000` (1 HAC), which is lower than the 10 HAC channel cap prescribed below, and a Hub whose aggregate cap is under its per-channel cap would publish a channel size it can never fund. The Hub now refuses to start on that pair and names both numbers, so set the variable as shown or lower the channel cap to match.
 
 ```bash
-export HACASH_HUB_ADDRESS=1YourHubAddress
-export HACASH_HUB_SECRET_HEX=your64charhex
+export HACASH_HUB_ADDRESS=1YourDedicatedHubAddress
+export HACASH_HUB_SECRET_HEX=your64characterhubprivatekey
+export HACASH_HUB_JOURNAL_KEY_HEX=yourIndependent64characterJournalKey
+export HACASH_HUB_STATE_KEY_HEX=yourDifferent64characterStateKey
+export HACASH_NODE_API_TOKEN=yourFullnodeApiToken
+export HACASH_HUB_DEPLOYMENT_PROFILE=mainnet-bounded-pilot
+export HACASH_HUB_MAINNET_MAX_PAYMENT_HAC_ZHU=100000000
+export HACASH_HUB_MAINNET_MAX_CHANNEL_FUNDING_HAC_ZHU=1000000000
+export HACASH_HUB_MAINNET_ALLOWED_USERS=1YourPilotUserAddress
+export HACASH_HUB_MAINNET_MAX_AGGREGATE_TVL_HAC_ZHU=10000000000
 
 ./target/release/fast-pay-hub \
   --listen 127.0.0.1:8790 \
   --node-url http://127.0.0.1:8080 \
   --hub-fee-mei 0 \
-  --state-file ./hub-state.json
+  --state-file /var/lib/hpay-fast-pay-hub/hub-state.json
 ```
 
-Health: `curl http://127.0.0.1:8790/v1/health`
+Check both endpoints before connecting a wallet:
 
-## Production
-
-- Use `--state-file` for persistence
-- TLS reverse proxy in front of hub
-- Never commit hub secret; `chmod 600` on state + env files
-- Firewall: public 443 only; hub port internal
-
-### systemd example
-
-```ini
-[Service]
-Environment=HACASH_HUB_ADDRESS=1YourHubAddress
-Environment=HACASH_HUB_SECRET_HEX=...
-ExecStart=/opt/hacash/fast-pay-hub --listen 127.0.0.1:8790 \
-  --node-url http://127.0.0.1:8080 --state-file /var/lib/hacash-hub/state.json
-Restart=on-failure
+```bash
+curl http://127.0.0.1:8790/v1/health
+curl http://127.0.0.1:8790/v1/readiness/mainnet
 ```
 
-## API v4
+For `mainnet-bounded-pilot`, `payments_enabled` may be `true` only when the node, durable storage, allowlist, TVL and caps are all green; `trusted_bounded_pilot` must be `true`, `wallet_fee_hac` must be `"0"`, and the wallet must have explicit local consent. For `mainnet-pilot`, `payments_enabled` must remain `false` until the rollback-anchor and unilateral-dispute blockers are backed by real independent services and tests. Readiness expires quickly by design; never cache it as permanent approval.
 
-- `GET /v1/health` - discovery (returns `hub_address`)
-- `POST /v1/fast-pay` - `{ payer, payee, amount, channel_id }` → `bill_hex`
-- `GET /v1/fast-pay/{id}` - payment status
+**Which capability the gate reads.** The Hub settles on the shared registry contract, settlement profile `hpay-hvm-shared-registry-v2`, so the flag that gates `mainnet-pilot` is `features.channel_registry_unilateral_exit` and its `channel_registry_unilateral_exit_evidence` document. The current Istanbul full node reports it `false`, with honest evidence naming the artifact exactly and reporting nothing deployed. Do not override this result with an operator flag.
 
-- `GET /v1/fast-pay/inbox/{payee}` retrieves routed payments awaiting the recipient signature
-- `POST /v1/fast-pay/{id}/confirm` merges verified signatures and settles only when complete
+`features.channel_unilateral_exit` is the older per-channel contract `hpay-hvm-channel-v1`. It also reports `false` — intentionally: legacy Go dispute action numbers collide with Istanbul TEX/AST action kinds, and the legacy codecs must not be copied into the mainnet registry. It is still published and still validated on parse, but it **gates nothing**. A wallet's channels do not live in that contract, so a `true` there would be a guarantee about a path nobody travels. If you are waiting for a flag to turn green, it is the registry one.
+
+## External rollback anchor (witness)
+
+The anchor is a counter held by a small separate service — the **witness** — that
+the Hub asks before it uses its signing key. It exists because every safety check
+inside the Hub reads the Hub's own state file, and none of them survive that file
+going backwards. A Hub restored from an old backup will re-sign a bill serial it
+has already signed, with different balances, and both signatures are valid to the
+contract. The witness catches that only because it is not in the Hub's backup set.
+
+**A Hub has exactly one witness, and running one is optional.** Both are settled
+design decisions, not current limitations, and everything below assumes them.
+
+*Exactly one, permanently.* There is no quorum, no threshold, no second witness
+to fail over to, and no adoption ceremony — and none of that is missing work. A
+multi-witness build was attempted and reverted: per-witness durable keying let a
+Hub with two witnesses be restored from backup, repointed at attacker-controlled
+witnesses, and re-sign a serial it had already signed. The single-witness Hub was
+never affected by that hole; the extra witness *was* the hole. Simplicity here is
+the security property. If you arrive at this thinking several witnesses would be
+an upgrade, read `docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md`, "One witness, by
+design", first — that experiment has been run and it produced a working exploit.
+
+*Optional, genuinely.* You may run a Hub with no witness. It is honest about
+having no anchor: it measures `external_rollback_anchor_ready = false`, which
+keeps the trustless `mainnet-pilot` profile blocked, and it never claims
+otherwise. A Hub with a witness is better off. Neither is a lie. What is not
+optional is what happens once a witness *is* configured — see the unreachable
+paragraph below.
+
+*Changing witness is therefore always a total change*, which every counterparty
+sees as a zero-overlap event and adjudicates for themselves. That is the whole of
+rotation; there is no ceremony and none is planned. Plan it as an operational
+event with a maintenance window and a conversation with your counterparties, per
+`docs/l2/RUNNING-A-WITNESS.md` §7.
+
+**If you run the witness yourself, be exact about what it buys you.** It catches
+a disk failure and the old-backup restore that follows, a bad restore, the wrong
+snapshot, a stale volume, crash recovery to old state, and a second Hub instance
+started by accident — which is **most real incidents**, and is well worth having.
+It does **not** catch you. You hold the disk, the keys and the process; you can
+stop both, restore both together and start both, and every check in this system
+passes. No code of ours changes that. A self-run witness protects you from your
+own infrastructure; it does not protect your counterparty from you. Only a
+witness you do not control — the counterparty's, or a neutral third party's —
+does that. This is why the posture is published beside the flag instead of hidden
+behind it, and why a Hub must never advertise the first as the second.
+
+**What ships today: no witness configured.** There is no public witness address
+yet, so there is no default to point at. A default hostname that did not answer
+would be worse than an empty field — the Hub would refuse to sign for a reason
+nobody could explain. With no witness configured the Hub starts, prints that it
+has no anchor, and measures `external_rollback_anchor_ready = false`. The
+trustless `mainnet-pilot` profile therefore stays blocked, which is the honest
+result. `mainnet-bounded-pilot` is unaffected: it never claimed an anchor.
+
+**What changes when a public witness exists.** It becomes a documented,
+copy-and-paste address in this guide and in `docs/l2/RUNNING-A-WITNESS.md`, and
+nothing else. It will never be a compiled-in constant, never a fallback the Hub
+reaches for on its own, and never a requirement — a Hub pointed at any other
+witness gets identical behaviour and an identical readiness measurement. See
+`docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md`, "Who runs the witness".
+
+All five settings are required together. A partial configuration is a startup
+failure, never a Hub that quietly runs without an anchor:
+
+```bash
+export HACASH_HUB_ROLLBACK_WITNESS_URL=https://witness.example.org
+export HACASH_HUB_ROLLBACK_WITNESS_ID=their-witness-id
+export HACASH_HUB_ROLLBACK_WITNESS_RECEIPT_ADDRESS=1TheirOnlineReceiptAddress
+export HACASH_HUB_ROLLBACK_WITNESS_AUTHORISATION_ADDRESS=1TheirOfflineAuthorisationAddress
+export HACASH_HUB_ROLLBACK_WITNESS_ATTESTATION_FILE=/etc/hpay-fast-pay-hub/witness-attestation.json
+
+scripts/START-HUB-WITH-REMOTE-WITNESS.sh https://witness.example.org
+```
+
+The witness operator supplies all five values.
+
+**Choosing a witness at the start is a configuration choice; changing it later is
+not.** Your own on separate infrastructure, the counterparty's, a neutral third
+party's — all three postures run the same binary and the same protocol, and
+picking among them on day one is exactly these five values. Do not read that as
+"you can swap witness whenever you like": the Hub pins the witness's store
+identity on first contact, inside its authenticated state commitment, so pointing
+a *running* Hub at a different witness refuses with
+`rollback_anchor_witness_instance_changed` and stops every channel on that Hub
+from signing, not just one. An earlier version of this guide said moving witness
+was "a change to those five values and nothing else"; that was false and is
+corrected here rather than softened. Read `docs/l2/RUNNING-A-WITNESS.md` §7
+before you commit to a witness operator, and choose one you expect to still be
+there in a year.
+
+**When the witness is unreachable the Hub refuses to sign and channels freeze.**
+That is designed, not a defect, and there is no flag, timeout, grace period or
+override that changes it: an unreachable oracle is not evidence. If a deployment
+cannot accept that availability cost, the honest answer is
+`mainnet-bounded-pilot`, which reports `trustless_finality: false` and says out
+loud that it depends on trusting the Hub. Do not run a mainnet profile with a
+hole in it and call it an anchor.
+
+**It refuses to sign; it does not refuse to run.** A Hub whose witness is
+unreachable at startup still starts. It serves reads, `/v1/readiness/mainnet`
+and cooperative close, refuses every signature, prints
+`rollback_anchor_witness_unreachable`, and publishes that same identifier in the
+readiness document's `blockers`. It re-probes every 30 seconds and resumes
+signing by itself once the witness answers and agrees, so there is nothing to
+restart. This is not a softening of the paragraph above: nothing signs until a
+probe agrees. It exists because a Hub that crash-loops under
+`Restart=on-failure` cannot serve a close and cannot tell you what is wrong.
+
+**The same holds when the witness identity has changed, and with one witness that
+is load-bearing rather than a nicety.** Because a Hub has exactly one witness,
+losing it would otherwise stop every channel with the only working exit being to
+drop the configuration and run unanchored — the anchor punishing you for a third
+party's failure, with "turn it off" as its failure mode. So a Hub whose witness
+identity changed starts, refuses to sign **silently** rather than crash-looping,
+keeps serving reads and cooperative close, publishes the break in the readiness
+document (`blockers` for the identifier, `limitations` for the explanation), and
+serves a declaration your **payers** adjudicate. Re-anchoring runs against a head
+the payer already holds — same serial, same bill commitment — and signs nothing
+new, deliberately: a Hub minting a fresh signature under a witness it had just
+chosen would be proving nothing. Do not restart the Hub in a loop and do not
+reconfigure the anchor to restore signing; look the identifier up in
+`docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` section 2.
+
+**Where the witness sits is published, not hidden.** `/v1/readiness/mainnet`
+carries a `rollback_anchor` object beside the flag, naming the attested posture
+and operator (`witness_posture`, `witness_operator`) and the Hub's own
+measurement of where the witness actually is (`witness_endpoint_is_local`,
+`witness_store_in_hub_state_tree`, and the verdict `witness_co_located`). A
+wallet, or anyone choosing a Hub, can read whether that Hub witnesses itself
+rather than inferring it from a missing blocker string. `null` means no verified
+live witness right now; it never means the anchor is optional.
+
+**A mainnet profile refuses to start if a witness store is in its own backup
+set.** At startup the Hub looks for a witness append-only log in its state
+directory, and directly beside it in the parent, recognising it by its header
+rather than its filename. Finding one on `mainnet-pilot` or
+`mainnet-bounded-pilot` is a hard refusal naming the exact file, because a
+counter that gets restored with the state it guards is not an anchor. Off the
+mainnet profiles it is allowed — local development and the Local Pilot need it —
+and published as `witness_co_located: true`. This check sees the store beside
+your state tree; it cannot see one a directory further out, so it is a lint that
+makes the weak layout loud, not a boundary.
+
+| Task | Document |
+|---|---|
+| Run a witness | `docs/l2/RUNNING-A-WITNESS.md` |
+| A Hub has refused to sign | `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md` |
+| Why it is built this way | `docs/l2/ADR-001-EXTERNAL-ROLLBACK-ANCHOR.md` |
+| Wire protocol | `docs/l2/ROLLBACK-ANCHOR-PROTOCOL.md` |
+
+For local development only, `scripts/DEV-ONLY-HUB-AND-WITNESS-SAME-HOST.sh` (and
+the `.bat`) starts a Hub and witness together on one machine. It exercises the
+real protocol and anchors nothing, because the witness shares the Hub's
+filesystem and backup set. It says so, at length, every time it starts.
+
+## Production hardening
+
+- Keep `--listen` on a private interface and publish only HTTPS port 443 through a reverse proxy with per-IP rate, connection and request-size limits.
+- By default the Hub ignores `X-Real-IP` and uses the socket peer. If the Hub itself must rate-limit original clients, set `--trusted-proxy-ip` to the one exact proxy IP and configure that proxy to overwrite, never append, a single `X-Real-IP` value. Never trust a subnet or a public peer.
+- Allow the Hub process to reach only its configured local full node.
+- Back up the state file, authenticated journal and checkpoint together while the service is stopped.
+- Monitor disk space, full-node synchronization, readiness blockers and clock synchronization.
+- Stop accepting payments if the journal or state cannot be durably written.
+- Start with small liquidity and caps. Raise them only after recovery drills and an independent security audit.
+- Run the Hub and miner/full node as separate processes and service accounts. Enabling the Hub must not change mining behavior.
+
+The maintained systemd policy is `scripts/hpay-fast-pay-hub/hpay-fast-pay-hub.service`. Do not keep a second hand-written unit: every hardening or path change must be made once in that canonical file and included unchanged in the release archive.
+
+## Backup and recovery
+
+Treat `/etc/hpay-fast-pay-hub` and `/var/lib/hpay-fast-pay-hub` as one inseparable backup set. The first contains signing and journal keys; the second contains state, the authenticated journal and its checkpoint.
+
+1. Stop the Hub and remove it from the reverse proxy before taking or restoring a backup.
+2. Copy both directories to encrypted offline storage while preserving owner and mode. Never upload the backup to GitHub or ordinary cloud storage.
+3. Restore only a matching pair onto a clean host while the service is stopped. Never combine state from one snapshot with keys, journal or checkpoint from another.
+4. Restore ownership (`root:hpayhub` for the environment file, `hpayhub:hpayhub` for state) and the restrictive permissions installed by the package.
+5. Start on loopback, inspect logs, then require green `/v1/health` and `/v1/readiness/mainnet` before restoring traffic.
+6. Keep the previous backup until a restart and recovery drill completes successfully.
+
+Never delete, regenerate or manually edit the journal/checkpoint to make the Hub start. A failed authenticated recovery is a safety stop that requires operator investigation.
+
+## Wallet Hub API v7
+
+- `GET /v1/health`: discovery and operational status.
+- `GET /v1/readiness/mainnet`: authoritative, short-lived mainnet-pilot gate.
+- `POST /v1/fast-pay`: creates a ChannelPay bill for `{ payer, payee, amount, channel_id }`.
+- `GET /v1/fast-pay/{id}`: payment status.
+- `GET /v1/fast-pay/inbox/{payee}`: routed payments awaiting recipient verification.
+- `POST /v1/fast-pay/{id}/confirm`: merges verified signatures and commits only when complete.
+
+## Read-only mainnet infrastructure preflight
+
+Before any canary funding, run a preflight against the exact public HTTPS node
+and Hub endpoints. Neither performs an unlock, signing, submission or state
+mutation. Which one you run depends on the rail.
+
+**Native ChannelPay rail with a close voucher.** Run it from the wallet, on the
+Fast Pay screen, before the deposit: the `wallet_native_rail_preflight` command.
+It reuses the wallet's production validators for node identity, block 1,
+freshness, the exact transaction and action kinds the open and the voucher
+contain, bounded-pilot readiness, zero wallet fee, this Hub's own declared caps,
+and the Hub's own fullnode. It additionally checks two things the registry
+preflight never did: that the Hub is ready to hand over a VOUCHER, which is a
+different flag set from the open, and that the Hub has a
+`POST /v1/l1/channel/close-voucher` route at all. Nothing the Hub publishes
+declares that route, so the only read-only test is an HTTP existence probe: a
+GET, which axum answers 405 with an `Allow` header without invoking the handler.
+If your Hub answers 404 there, say so to your users before they fund, because
+the voucher can only be issued after their deposit is on chain.
+
+**Which wallet can actually take that voucher.** Only the Agent Wallet, and
+only in a build with its feature flag on. The three voucher commands are
+`agent_wallet_take_fast_pay_channel_voucher`,
+`agent_wallet_fast_pay_channel_voucher` and
+`agent_wallet_broadcast_fast_pay_channel_voucher`; the main wallet has none of
+them, on desktop or on the phone. So the main wallet runs the preflight above,
+including its fatal close-voucher route check, for a capability it does not
+have. Because a channel it cannot leave is a channel it should not fund,
+`prepare_channel_open` and `execute_prepared_channel_open` now refuse a MAINNET
+open outright from the main wallet, and the Fast Pay screen says so before the
+deposit field rather than after. Testnet is unaffected and every existing
+channel still closes through the Hub exactly as before. Do not tell a main
+wallet user to take a close voucher: there is no command for them to run.
+
+**HVM shared-registry rail.** Only when the registry contract is deployed; the
+final gate reads a verified on-chain deployment and cannot pass without one.
+
+```text
+cargo run -p hacash-wallet-core --example hpay_mainnet_infrastructure_preflight -- --node-url https://NODE --hub-url https://HUB --hub-address HUB_HACASH_ADDRESS --payment 0.001 --channel-funding 1
+```
+
+A successful result deliberately prints `release_ready: false`. Infrastructure
+readiness is necessary but not sufficient: the next gate is the reviewed
+small-value mainnet lifecycle `open -> Personal Fast Pay -> Agent Fast Pay ->
+cooperative close`, including restart and exact-recovery checks. Preserve the
+JSON result with the canary report; never replace a failed field manually.
+Follow the exact stop conditions and evidence requirements in
+`docs/l2/MAINNET_CANARY_RUNBOOK.md`.
 
 ## Cross-channel settlement
 
-Routed payments require two open channels: payer-to-hub and recipient-to-hub. The hub must have enough HAC liquidity on the recipient channel. The flow is:
+Routed payments require two open channels: payer-to-Hub and recipient-to-Hub. The Hub must have enough HAC liquidity on the recipient channel.
 
-1. The hub prepares and signs both channel legs.
-2. The payer verifies the complete payment intent and signs.
+1. The Hub prepares the exact ChannelPay documents for both channel legs.
+2. The payer verifies the complete intent and signs its leg.
 3. The payment becomes `awaiting_recipient` and appears in the recipient inbox.
-4. The recipient verifies both channel legs and signs.
-5. The hub verifies every signature and atomically commits both channel ledgers.
+4. The recipient verifies both legs and signs.
+5. The Hub verifies every signature and atomically commits both channel ledgers.
 
-## Windows dev
+## Testnet/development
 
-```bat
-set HACASH_HUB_ADDRESS=1YourHubAddress
-set HACASH_HUB_SECRET_HEX=your64charhex
-scripts\START-DEV-STACK.bat
-```
+For local development, omit `HACASH_HUB_DEPLOYMENT_PROFILE` or set it to `testnet`. Mainnet Wallet clients will not accept this profile. Existing testnet payment behavior remains available, but L1 open/close recovery requires Wallet Hub API v7.
 
 ## Troubleshooting
 
-| Issue | Fix |
-|-------|-----|
-| Address mismatch | Secret must match `HACASH_HUB_ADDRESS` |
-| Channel not found | Check fullnode URL + channel id |
-| Missing hub signature | Set `HACASH_HUB_SECRET_HEX` |
-| Low balance | Increase payer funds or hub liquidity on the recipient channel |
+| Issue | Resolution |
+|-------|------------|
+| Address mismatch | The Hub secret must derive exactly `HACASH_HUB_ADDRESS`. |
+| `payments_enabled=false` | Read every entry in `blockers`; verify the full node, clock, profile, caps and durable storage. |
+| Full node capability unavailable | Use the HPAY-compatible full node and enable its local capability endpoint. Public legacy nodes cannot authorize mainnet Fast Pay. |
+| Channel not found | Check the full-node URL, channel ID and both channel participants. |
+| Missing Hub signature | Verify signer configuration and fresh readiness; the Hub intentionally refuses to sign when readiness turns red. |
+| Low balance | Add only bounded Hub liquidity or reduce the requested payment. |
+| Recovery required | Stop the service and follow **Backup and recovery** above. Preserve the complete matching config/state set; never delete or reconstruct the journal. |
 
-See `crates/l2-fast-pay-hub` and `crates/wallet-core/src/l2_hub.rs`.
+Implementation references: `crates/l2-fast-pay-hub` and `crates/wallet-core/src/l2_hub.rs`.

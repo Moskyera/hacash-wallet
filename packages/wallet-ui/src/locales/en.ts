@@ -62,7 +62,8 @@ export const en = {
   "node.change": "Change node",
   "node.useOfficial": "Use official node",
   "node.customTitle": "Custom node",
-  "node.customHint": "Only change this if you run your own Hacash node or need a private endpoint.",
+  "node.customHint":
+    "On mainnet this wallet sends through the official node over plain HTTP, because that node offers nothing else. Whoever carries your traffic can read which address you ask about and can quote a wrong network fee, so read the fee before you approve. Nobody on the way can change who gets paid, or sign for you. Running Hacash on this computer and using http://127.0.0.1:8080 removes all of it, and so does any node you reach over HTTPS. What mainnet signing refuses is plain HTTP from anywhere but this device. You do not need a node of your own to close a channel.",
   "node.grapheneTitle": "GrapheneOS / de-Googled phones",
   "node.grapheneHelp":
     "Same APK as other Android. In app info enable Network permission. Install from Files if the browser blocks APKs. Official node uses plain HTTP (nodeapi.hacash.org) - VPN/filters can block it. No separate Graphene build is required.",

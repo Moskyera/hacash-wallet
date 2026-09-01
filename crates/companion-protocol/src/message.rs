@@ -6,6 +6,13 @@ use crate::admin::{AdminCommand, SignedAdminCommand};
 use crate::approval::{ApprovalCommitment, MobileApprovalDecision, SignedApprovalDecision};
 use crate::codec::{CanonicalEncode, Decoder, Encoder};
 use crate::error::{CompanionError, CompanionResult};
+use crate::fast_pay_approval::{
+    AgentFastPayApprovalCommitment, AgentFastPayApprovalDecision,
+    SignedAgentFastPayApprovalDecision,
+};
+use crate::hvm_approval::{
+    AgentHvmApprovalCommitment, AgentHvmApprovalDecision, SignedAgentHvmApprovalDecision,
+};
 use crate::identity::DeviceId;
 use crate::pairing::MobilePairingProof;
 use crate::replay::MAX_CLOCK_SKEW_SECS;
@@ -152,6 +159,18 @@ pub enum CompanionPayload {
         accepted: bool,
         detail: String,
     },
+    AgentFastPayApprovalPoll {
+        agent_wallet_id: String,
+        operation_id: Option<String>,
+    },
+    AgentFastPayApprovalRequest(AgentFastPayApprovalCommitment),
+    AgentFastPayApprovalDecision(SignedAgentFastPayApprovalDecision),
+    AgentHvmApprovalPoll {
+        agent_wallet_id: String,
+        operation_id: Option<String>,
+    },
+    AgentHvmApprovalRequest(AgentHvmApprovalCommitment),
+    AgentHvmApprovalDecision(SignedAgentHvmApprovalDecision),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +284,28 @@ impl CompanionPayload {
             Self::ApprovalDecision(value) if value.decision.agent_wallet_id != wallet_id => {
                 Err(CompanionError::WalletScopeMismatch)
             }
+            Self::AgentFastPayApprovalPoll {
+                agent_wallet_id, ..
+            } if agent_wallet_id != wallet_id => Err(CompanionError::WalletScopeMismatch),
+            Self::AgentFastPayApprovalRequest(value) if value.agent_wallet_id != wallet_id => {
+                Err(CompanionError::WalletScopeMismatch)
+            }
+            Self::AgentFastPayApprovalDecision(value)
+                if value.decision.commitment.agent_wallet_id != wallet_id =>
+            {
+                Err(CompanionError::WalletScopeMismatch)
+            }
+            Self::AgentHvmApprovalPoll {
+                agent_wallet_id, ..
+            } if agent_wallet_id != wallet_id => Err(CompanionError::WalletScopeMismatch),
+            Self::AgentHvmApprovalRequest(value) if value.agent_wallet_id != wallet_id => {
+                Err(CompanionError::WalletScopeMismatch)
+            }
+            Self::AgentHvmApprovalDecision(value)
+                if value.decision.commitment.agent_wallet_id != wallet_id =>
+            {
+                Err(CompanionError::WalletScopeMismatch)
+            }
             Self::StatusSnapshot { status, .. } if status.agent_wallet_id != wallet_id => {
                 Err(CompanionError::WalletScopeMismatch)
             }
@@ -301,6 +342,40 @@ impl CompanionPayload {
                 value.canonical_bytes()?;
             }
             Self::ApprovalDecision(value) => {
+                value.decision.canonical_bytes()?;
+                validate_signature(&value.signature_hex)?;
+            }
+            Self::AgentFastPayApprovalPoll {
+                agent_wallet_id,
+                operation_id,
+            } => {
+                if agent_wallet_id.is_empty()
+                    || operation_id.as_ref().is_some_and(|value| value.is_empty())
+                {
+                    return Err(CompanionError::MalformedMessage);
+                }
+            }
+            Self::AgentFastPayApprovalRequest(value) => {
+                value.canonical_bytes()?;
+            }
+            Self::AgentFastPayApprovalDecision(value) => {
+                value.decision.canonical_bytes()?;
+                validate_signature(&value.signature_hex)?;
+            }
+            Self::AgentHvmApprovalPoll {
+                agent_wallet_id,
+                operation_id,
+            } => {
+                if agent_wallet_id.is_empty()
+                    || operation_id.as_ref().is_some_and(|value| value.is_empty())
+                {
+                    return Err(CompanionError::MalformedMessage);
+                }
+            }
+            Self::AgentHvmApprovalRequest(value) => {
+                value.canonical_bytes()?;
+            }
+            Self::AgentHvmApprovalDecision(value) => {
                 value.decision.canonical_bytes()?;
                 validate_signature(&value.signature_hex)?;
             }
@@ -583,6 +658,46 @@ impl CompanionPayload {
                 encoder.push_bytes(&value.receipt.canonical_bytes()?)?;
                 encoder.push_string(&value.signature_hex)?;
             }
+            Self::AgentFastPayApprovalPoll {
+                agent_wallet_id,
+                operation_id,
+            } => {
+                encoder.push_u8(19);
+                encoder.push_string(agent_wallet_id)?;
+                encoder.push_bool(operation_id.is_some());
+                if let Some(operation_id) = operation_id {
+                    encoder.push_string(operation_id)?;
+                }
+            }
+            Self::AgentFastPayApprovalRequest(value) => {
+                encoder.push_u8(20);
+                encoder.push_bytes(&value.canonical_bytes()?)?;
+            }
+            Self::AgentFastPayApprovalDecision(value) => {
+                encoder.push_u8(21);
+                encoder.push_bytes(&value.decision.canonical_bytes()?)?;
+                encoder.push_string(&value.signature_hex)?;
+            }
+            Self::AgentHvmApprovalPoll {
+                agent_wallet_id,
+                operation_id,
+            } => {
+                encoder.push_u8(22);
+                encoder.push_string(agent_wallet_id)?;
+                encoder.push_bool(operation_id.is_some());
+                if let Some(operation_id) = operation_id {
+                    encoder.push_string(operation_id)?;
+                }
+            }
+            Self::AgentHvmApprovalRequest(value) => {
+                encoder.push_u8(23);
+                encoder.push_bytes(&value.canonical_bytes()?)?;
+            }
+            Self::AgentHvmApprovalDecision(value) => {
+                encoder.push_u8(24);
+                encoder.push_bytes(&value.decision.canonical_bytes()?)?;
+                encoder.push_string(&value.signature_hex)?;
+            }
         }
         Ok(())
     }
@@ -700,6 +815,44 @@ impl CompanionPayload {
             18 => Ok(Self::WitnessRotationBaseline(
                 SignedWitnessRotationBaselineReceipt {
                     receipt: crate::rotation::WitnessRotationBaselineReceipt::from_canonical_bytes(
+                        decoder.read_bytes()?,
+                    )?,
+                    signature_hex: decoder.read_string()?,
+                },
+            )),
+            19 => Ok(Self::AgentFastPayApprovalPoll {
+                agent_wallet_id: decoder.read_string()?,
+                operation_id: if decoder.read_bool()? {
+                    Some(decoder.read_string()?)
+                } else {
+                    None
+                },
+            }),
+            20 => Ok(Self::AgentFastPayApprovalRequest(
+                AgentFastPayApprovalCommitment::from_canonical_bytes(decoder.read_bytes()?)?,
+            )),
+            21 => Ok(Self::AgentFastPayApprovalDecision(
+                SignedAgentFastPayApprovalDecision {
+                    decision: AgentFastPayApprovalDecision::from_canonical_bytes(
+                        decoder.read_bytes()?,
+                    )?,
+                    signature_hex: decoder.read_string()?,
+                },
+            )),
+            22 => Ok(Self::AgentHvmApprovalPoll {
+                agent_wallet_id: decoder.read_string()?,
+                operation_id: if decoder.read_bool()? {
+                    Some(decoder.read_string()?)
+                } else {
+                    None
+                },
+            }),
+            23 => Ok(Self::AgentHvmApprovalRequest(
+                AgentHvmApprovalCommitment::from_canonical_bytes(decoder.read_bytes()?)?,
+            )),
+            24 => Ok(Self::AgentHvmApprovalDecision(
+                SignedAgentHvmApprovalDecision {
+                    decision: AgentHvmApprovalDecision::from_canonical_bytes(
                         decoder.read_bytes()?,
                     )?,
                     signature_hex: decoder.read_string()?,
@@ -842,6 +995,107 @@ mod tests {
         }
     }
 
+    fn fast_pay_approval() -> AgentFastPayApprovalCommitment {
+        AgentFastPayApprovalCommitment {
+            approval_version: crate::AGENT_FAST_PAY_APPROVAL_VERSION,
+            approval_id: "fast_pay_approval_1".to_owned(),
+            challenge_nonce: "ab".repeat(16),
+            operation_id: "operation_fast_pay_1".to_owned(),
+            hub_operation_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            public_idempotency_key: "public-fast-pay-1".to_owned(),
+            hub_idempotency_key: "hpay-agent:550e8400-e29b-41d4-a716-446655440001".to_owned(),
+            agent_wallet_id: "wallet_one".to_owned(),
+            wallet_scope: "agent_wallet:wallet_one".to_owned(),
+            agent_id: "agent_one".to_owned(),
+            desktop_device_id: DeviceId::random(DeviceRole::Desktop),
+            request_commitment: "11".repeat(32),
+            binding_commitment: "22".repeat(32),
+            route_commitment: "33".repeat(32),
+            payer: "1AgentPayer".to_owned(),
+            payee: "1ProviderPayee".to_owned(),
+            amount_hac: "0.012".to_owned(),
+            amount_units: 12_000,
+            amount_millimeis: 12,
+            hub_url: "https://hub.example".to_owned(),
+            hub_address: "1HubAddress".to_owned(),
+            channel_id: "44".repeat(16),
+            channel_reuse_version: 1,
+            channel_open_height: 100,
+            fee_payer: "sender".to_owned(),
+            network_fee_units: 0,
+            wallet_fee_units: 0,
+            hub_fee_units: 0,
+            total_debit_units: 12_000,
+            policy_epoch: 2,
+            signer_epoch: 3,
+            emergency_epoch: 4,
+            issued_at: 100,
+            expires_at: 200,
+            network_binding: crate::AgentFastPayNetworkBinding {
+                network_mode: "testnet".to_owned(),
+                chain_id: 2,
+                genesis_identifier: "55".repeat(32),
+                node_profile_id: "66".repeat(32),
+                network_instance_id: "testnet-instance".to_owned(),
+                transaction_format_version: 2,
+            },
+        }
+    }
+
+    fn hvm_approval() -> AgentHvmApprovalCommitment {
+        AgentHvmApprovalCommitment {
+            approval_version: crate::AGENT_HVM_APPROVAL_VERSION,
+            approval_id: "hvm_approval_1".to_owned(),
+            challenge_nonce: "11".repeat(16),
+            operation_id: "operation_hvm_1".to_owned(),
+            hub_operation_id: "550e8400-e29b-41d4-a716-446655440010".to_owned(),
+            public_idempotency_key: "public-hvm-1".to_owned(),
+            hub_idempotency_key: "hpay-agent-hvm:550e8400-e29b-41d4-a716-446655440011".to_owned(),
+            agent_wallet_id: "wallet_one".to_owned(),
+            wallet_scope: "agent_wallet:wallet_one".to_owned(),
+            agent_id: "agent_one".to_owned(),
+            agent_authorization_epoch: 2,
+            desktop_device_id: DeviceId::random(DeviceRole::Desktop),
+            hub_url: "https://hub.example".to_owned(),
+            hub_address: "1HubAddress".to_owned(),
+            settlement_profile: "hpay-hvm-channel-v1".to_owned(),
+            contract_address: "3ContractAddress".to_owned(),
+            deployment_tx_hash: "22".repeat(32),
+            deployment_height: 900_000,
+            bytecode_sha3: "11a2efc27a0c951bbc6977186eb58bd076dd331a785f3c57242cf54a72238349"
+                .to_owned(),
+            channel_id: "33".repeat(16),
+            channel_reuse_version: 1,
+            challenge_blocks: 12,
+            binding_commitment: "44".repeat(32),
+            lease_snapshot_commitment: "55".repeat(32),
+            previous_bill_commitment: "66".repeat(32),
+            unsigned_request_commitment: "77".repeat(32),
+            payer: "1AgentPayer".to_owned(),
+            payee: "provider:compute".to_owned(),
+            amount_hac: "0.01".to_owned(),
+            amount_zhu: 1_000_000,
+            fee_payer: "sender".to_owned(),
+            network_fee_zhu: 0,
+            wallet_fee_zhu: 0,
+            hub_fee_zhu: 0,
+            total_debit_zhu: 1_000_000,
+            policy_epoch: 3,
+            signer_epoch: 4,
+            emergency_epoch: 5,
+            issued_at: 100,
+            expires_at: 200,
+            network_binding: crate::AgentFastPayNetworkBinding {
+                network_mode: "mainnet".to_owned(),
+                chain_id: 0,
+                genesis_identifier: "88".repeat(32),
+                node_profile_id: "99".repeat(32),
+                network_instance_id: "mainnet-instance".to_owned(),
+                transaction_format_version: 2,
+            },
+        }
+    }
+
     #[test]
     fn canonical_message_roundtrip_is_stable() {
         let value = message();
@@ -884,6 +1138,105 @@ mod tests {
             rotation_id: Some(String::new()),
         };
         assert_eq!(value.to_bytes(), Err(CompanionError::MalformedMessage));
+    }
+
+    #[test]
+    fn agent_fast_pay_payloads_roundtrip_and_are_wallet_scoped() {
+        let mut value = message();
+        value.payload = CompanionPayload::AgentFastPayApprovalPoll {
+            agent_wallet_id: "wallet_one".to_owned(),
+            operation_id: Some("operation_fast_pay_1".to_owned()),
+        };
+        let bytes = value.to_bytes().unwrap();
+        assert_eq!(CompanionMessage::from_bytes(&bytes).unwrap(), value);
+        value.payload.validate_for_wallet("wallet_one").unwrap();
+        assert_eq!(
+            value.payload.validate_for_wallet("wallet_two"),
+            Err(CompanionError::WalletScopeMismatch)
+        );
+
+        let approval = fast_pay_approval();
+        value.sender_device_id = approval.desktop_device_id.clone();
+        value.payload = CompanionPayload::AgentFastPayApprovalRequest(approval.clone());
+        let bytes = value.to_bytes().unwrap();
+        assert_eq!(CompanionMessage::from_bytes(&bytes).unwrap(), value);
+        value.payload.validate_for_wallet("wallet_one").unwrap();
+
+        let mobile = DeviceId::random(DeviceRole::Mobile);
+        let decision = AgentFastPayApprovalDecision::from_commitment(
+            approval,
+            crate::ApprovalDecision::Approve,
+            mobile,
+            1,
+            1,
+            101,
+        )
+        .unwrap();
+        value.payload =
+            CompanionPayload::AgentFastPayApprovalDecision(SignedAgentFastPayApprovalDecision {
+                decision,
+                signature_hex: "77".repeat(64),
+            });
+        let bytes = value.to_bytes().unwrap();
+        assert_eq!(CompanionMessage::from_bytes(&bytes).unwrap(), value);
+        value.payload.validate_for_wallet("wallet_one").unwrap();
+    }
+
+    #[test]
+    fn agent_fast_pay_poll_rejects_empty_scope_and_ambiguous_operation() {
+        let mut value = message();
+        value.payload = CompanionPayload::AgentFastPayApprovalPoll {
+            agent_wallet_id: String::new(),
+            operation_id: None,
+        };
+        assert_eq!(value.to_bytes(), Err(CompanionError::MalformedMessage));
+
+        value.payload = CompanionPayload::AgentFastPayApprovalPoll {
+            agent_wallet_id: "wallet_one".to_owned(),
+            operation_id: Some(String::new()),
+        };
+        assert_eq!(value.to_bytes(), Err(CompanionError::MalformedMessage));
+    }
+
+    #[test]
+    fn agent_hvm_payload_tags_roundtrip_and_remain_wallet_scoped() {
+        let mut value = message();
+        value.payload = CompanionPayload::AgentHvmApprovalPoll {
+            agent_wallet_id: "wallet_one".to_owned(),
+            operation_id: Some("operation_hvm_1".to_owned()),
+        };
+        let bytes = value.to_bytes().unwrap();
+        assert_eq!(CompanionMessage::from_bytes(&bytes).unwrap(), value);
+        value.payload.validate_for_wallet("wallet_one").unwrap();
+        assert_eq!(
+            value.payload.validate_for_wallet("wallet_two"),
+            Err(CompanionError::WalletScopeMismatch)
+        );
+
+        let approval = hvm_approval();
+        value.sender_device_id = approval.desktop_device_id.clone();
+        value.payload = CompanionPayload::AgentHvmApprovalRequest(approval.clone());
+        let bytes = value.to_bytes().unwrap();
+        assert_eq!(CompanionMessage::from_bytes(&bytes).unwrap(), value);
+        value.payload.validate_for_wallet("wallet_one").unwrap();
+
+        let decision = AgentHvmApprovalDecision::from_commitment(
+            approval,
+            crate::ApprovalDecision::Approve,
+            DeviceId::random(DeviceRole::Mobile),
+            1,
+            1,
+            101,
+        )
+        .unwrap();
+        value.payload =
+            CompanionPayload::AgentHvmApprovalDecision(SignedAgentHvmApprovalDecision {
+                decision,
+                signature_hex: "aa".repeat(64),
+            });
+        let bytes = value.to_bytes().unwrap();
+        assert_eq!(CompanionMessage::from_bytes(&bytes).unwrap(), value);
+        value.payload.validate_for_wallet("wallet_one").unwrap();
     }
     #[test]
     fn status_snapshot_carries_full_commitment_and_fails_closed() {

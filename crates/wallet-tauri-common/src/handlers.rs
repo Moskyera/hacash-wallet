@@ -26,6 +26,16 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::commands::wallet_enable_fast_pay,
             wallet_tauri_common::commands::wallet_hub_health,
             wallet_tauri_common::commands::wallet_discover_hubs,
+            wallet_tauri_common::commands::wallet_hub_declaration,
+            // Registered for BOTH shells on purpose. The hostage window this
+            // closes is identical on a phone: the voucher can only be taken
+            // after the deposit is on chain, so a mobile owner funding against
+            // a Hub with no close-voucher route finds out at the same moment a
+            // desktop owner would, with the money already in. It is read-only
+            // and needs no unlock, so there is no privilege reason to withhold
+            // it from mobile, and `acl_inventory` holds each shell's allowlist
+            // to exactly what it registers.
+            wallet_tauri_common::commands::wallet_native_rail_preflight,
             wallet_tauri_common::commands::wallet_ping_node,
             wallet_tauri_common::commands::wallet_ping_node_url,
             wallet_tauri_common::commands::wallet_fetch_asset_prices,
@@ -52,8 +62,10 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::prepared_commands::wallet_execute_prepared_btc,
             wallet_tauri_common::prepared_commands::wallet_prepare_channel_open,
             wallet_tauri_common::prepared_commands::wallet_execute_prepared_channel_open,
+            wallet_tauri_common::prepared_commands::wallet_recover_channel_open,
             wallet_tauri_common::prepared_commands::wallet_prepare_channel_close,
             wallet_tauri_common::prepared_commands::wallet_execute_prepared_channel_close,
+            wallet_tauri_common::prepared_commands::wallet_recover_channel_close,
             wallet_tauri_common::prepared_commands::wallet_prepare_airgap_sign,
             wallet_tauri_common::prepared_commands::wallet_execute_prepared_airgap_sign,
             wallet_tauri_common::prepared_commands::wallet_prepare_cold_vault_activation,
@@ -74,6 +86,7 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::commands::wallet_open_watch_only,
             wallet_tauri_common::commands::wallet_set_security_profile,
             wallet_tauri_common::commands::wallet_set_second_factor_threshold,
+            wallet_tauri_common::commands::wallet_set_mainnet_fast_pay_consent,
             wallet_tauri_common::commands::wallet_set_hardware_mode,
             wallet_tauri_common::commands::wallet_platform_info,
             wallet_tauri_common::security_commands::wallet_airgap_prepare_send,
@@ -100,6 +113,7 @@ macro_rules! wallet_invoke_handler {
             wallet_tauri_common::whisper_commands::messenger_threads,
             wallet_tauri_common::whisper_commands::messenger_messages,
             wallet_tauri_common::whisper_commands::messenger_mark_read,
+            wallet_tauri_common::whisper_commands::messenger_peer_security,
             wallet_tauri_common::whisper_commands::messenger_send,
             wallet_tauri_common::whisper_commands::messenger_poll_inbox,
             wallet_tauri_common::dapp_commands::wallet_bump_activity,

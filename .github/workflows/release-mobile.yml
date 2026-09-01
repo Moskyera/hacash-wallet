@@ -68,6 +68,12 @@ jobs:
         with:
           shared-key: release-android-arm64
 
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce Android mainnet Rust advisory policy
+        run: node scripts/check-rust-advisories.mjs release android-mainnet
+
       - name: Install pinned frontend dependencies
         working-directory: apps/mobile
         run: |
@@ -151,7 +157,7 @@ jobs:
 
       - name: Build unsigned Android arm64 release APK
         working-directory: apps/mobile
-        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-testnet-pilot
+        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-bounded-mainnet-pilot
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh
@@ -428,7 +434,16 @@ jobs:
             - Android 9 or newer
             - arm64-v8a
             - Signed APK with pinned release certificate
-            - AI Agent Wallet testnet pilot enabled
-            - No HPAY wallet fee for Agent Wallet operations
+            - AI Agent Wallet as a BOUNDED MAINNET pilot. It spends real HAC.
+              This APK is built with `--features agent-wallet-bounded-mainnet-pilot`,
+              so "testnet" would be false.
+            - It is off until you turn it on, and every payment needs your wallet
+              passphrase and an explicit approval on this device. None is ever made
+              without both.
+            - At most 10 HAC is at risk in any one Fast Pay channel. A channel closes
+              only if the Hub co-signs - this rail has no unilateral exit - so if the
+              Hub stops answering, what is in that channel stays locked. Do not put in
+              more than you can afford to lose.
+            - No HPAY wallet fee for Agent Wallet operations; you pay only the network fee.
 
             A SHA-256 checksum file is included with the APK.

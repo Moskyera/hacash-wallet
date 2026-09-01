@@ -5,6 +5,8 @@ use tokio::sync::Mutex;
 
 use crate::dapp_approval::DappApprovalQueue;
 #[cfg(feature = "desktop")]
+use crate::desktop_node::NodeProcess;
+#[cfg(feature = "desktop")]
 use crate::desktop_relay::RelayProcess;
 use crate::update::UpdateOfferStore;
 
@@ -98,16 +100,40 @@ pub struct AppState {
     pub inner: Arc<Mutex<WalletService>>,
     #[cfg(feature = "desktop")]
     pub relay: RelayProcess,
+    /// The supervised Hacash fullnode. Holding the `Child` here is the only
+    /// thing that ever authorises the word "ours" about a node.
+    #[cfg(feature = "desktop")]
+    pub node: Arc<NodeProcess>,
     pub dapp_approval: Arc<DappApprovalQueue>,
     pub updates: UpdateOfferStore,
 }
 
 impl AppState {
     pub fn new(service: WalletService) -> Self {
+        // The owner's fullnode pick, restored before anything can look for a
+        // node. It used to live only in memory, so every launch started with no
+        // pick and the search list carried a hardcoded Windows path to find one
+        // again - a path any account on the machine could overwrite, which the
+        // supervisor then ran. Restoring the pick is what let that path go.
+        #[cfg(feature = "desktop")]
+        let node = {
+            let node = NodeProcess::new();
+            let stored = service.get_settings().node_binary_path;
+            if let Some(path) = stored
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                node.set_picked_binary(Some(std::path::PathBuf::from(path)));
+            }
+            Arc::new(node)
+        };
         Self {
             inner: Arc::new(Mutex::new(service)),
             #[cfg(feature = "desktop")]
             relay: RelayProcess::new(),
+            #[cfg(feature = "desktop")]
+            node,
             dapp_approval: Arc::new(DappApprovalQueue::new()),
             updates: UpdateOfferStore::new(),
         }

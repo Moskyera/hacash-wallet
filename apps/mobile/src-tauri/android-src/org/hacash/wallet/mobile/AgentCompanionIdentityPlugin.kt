@@ -48,6 +48,10 @@ private val SESSION_RESPONSE_DOMAIN =
   "HPAY/COMPANION/SESSION-RESPONSE/V1".toByteArray(Charsets.US_ASCII)
 private val APPROVAL_DECISION_DOMAIN =
   "HPAY/COMPANION/APPROVAL-DECISION/V2".toByteArray(Charsets.US_ASCII)
+private val AGENT_FAST_PAY_DECISION_DOMAIN =
+  "HPAY/COMPANION/AGENT-FAST-PAY-DECISION/V1".toByteArray(Charsets.US_ASCII)
+private val AGENT_HVM_DECISION_DOMAIN =
+  "HPAY/COMPANION/AGENT-HVM-DECISION/V1".toByteArray(Charsets.US_ASCII)
 private val WITNESS_RECEIPT_DOMAIN =
   "HPAY/COMPANION/WITNESS-RECEIPT/V1".toByteArray(Charsets.US_ASCII)
 private val WITNESS_ROTATION_DOMAIN =
@@ -159,6 +163,23 @@ class AgentCompanionIdentityPlugin(private val activity: Activity) : Plugin(acti
   }
 
   @Command
+  fun finishAgentActivity(invoke: Invoke) {
+    val agentActivity = AgentCompanionActivity.currentResumed()
+    if (agentActivity == null) {
+      invoke.reject("The private Agent Wallet activity is not in the foreground")
+      return
+    }
+    agentActivity.runOnUiThread {
+      if (agentActivity.isFinishing || agentActivity.isDestroyed) {
+        invoke.reject("The private Agent Wallet activity is already closing")
+      } else {
+        agentActivity.finish()
+        invoke.resolve(JSObject().put("closed", true))
+      }
+    }
+  }
+
+  @Command
   fun signPairingRequest(invoke: Invoke) {
     signTyped(invoke, PAIRING_REQUEST_DOMAIN, "Pair this phone with HPAY Desktop")
   }
@@ -196,6 +217,42 @@ class AgentCompanionIdentityPlugin(private val activity: Activity) : Plugin(acti
       invoke,
       APPROVAL_DECISION_DOMAIN,
       "Reject this exact HPAY testnet payment",
+    )
+  }
+
+  @Command
+  fun signAgentFastPayApprovalDecisionApprove(invoke: Invoke) {
+    signTyped(
+      invoke,
+      AGENT_FAST_PAY_DECISION_DOMAIN,
+      "Approve this exact HPAY Agent Fast Pay request",
+    )
+  }
+
+  @Command
+  fun signAgentFastPayApprovalDecisionReject(invoke: Invoke) {
+    signTyped(
+      invoke,
+      AGENT_FAST_PAY_DECISION_DOMAIN,
+      "Reject this exact HPAY Agent Fast Pay request",
+    )
+  }
+
+  @Command
+  fun signAgentHvmApprovalDecisionApprove(invoke: Invoke) {
+    signTyped(
+      invoke,
+      AGENT_HVM_DECISION_DOMAIN,
+      "Approve this exact HPAY Agent HVM Fast Pay request",
+    )
+  }
+
+  @Command
+  fun signAgentHvmApprovalDecisionReject(invoke: Invoke) {
+    signTyped(
+      invoke,
+      AGENT_HVM_DECISION_DOMAIN,
+      "Reject this exact HPAY Agent HVM Fast Pay request",
     )
   }
 

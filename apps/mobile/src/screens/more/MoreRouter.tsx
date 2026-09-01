@@ -222,8 +222,24 @@ export default function MoreRouter({ page, data, actions }: Props) {
             onClick={async () => {
               try {
                 const json = await api.exportAllBillsJson();
-                downloadJson(`hacash-bills-${Date.now()}.json`, json);
-                onToast("All bills exported.", "success");
+                /*
+                 * "All bills exported." used to print unconditionally, because
+                 * nothing in the anchor-click path could throw. On Android
+                 * nothing was ever written, so a person was told their dispute
+                 * evidence was safely off the device when it was not.
+                 */
+                const handoff = await downloadJson(
+                  `hacash-bills-${Date.now()}.json`,
+                  json,
+                );
+                if (handoff.ok) {
+                  onToast(handoff.message, "success");
+                } else {
+                  onToast(
+                    `${handoff.message} Your dispute bills were NOT saved. Open a bill and use "Copy bill hex" to keep it.`,
+                    "error",
+                  );
+                }
               } catch (e) {
                 onToast(String(e), "error");
               }
@@ -301,6 +317,7 @@ export default function MoreRouter({ page, data, actions }: Props) {
           myAddress={statusAddress}
           hideAddresses={privacy.hide_addresses}
           whisperEnabled={dustWhisper?.enabled}
+          status={status}
           contacts={contacts}
           onToast={onToast}
           onGoPay={onGoPayPeer}

@@ -59,6 +59,9 @@ if ($badging -notmatch "package: name='org\.hacash\.wallet\.mobile'[^\r\n]*versi
 if ($badging -notmatch "package: name='org\.hacash\.wallet\.mobile'[^\r\n]*versionCode='$expectedVersionCode'") {
     throw "APK versionCode does not match the required upgrade code $expectedVersionCode"
 }
+if ($badging -notmatch "(?m)^application: label='HPAY'") {
+    throw "APK application label must be HPAY"
+}
 if ($badging -notmatch "(?m)^sdkVersion:'28'\s*$" -or $badging -notmatch "(?m)^targetSdkVersion:'36'\s*$") {
     throw "APK minSdk/targetSdk must be 28/36"
 }

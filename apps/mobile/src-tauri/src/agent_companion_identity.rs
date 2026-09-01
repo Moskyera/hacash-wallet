@@ -6,9 +6,10 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hpay_companion_protocol::{
-    ApprovalDecision, CompanionError, CompanionResult, DeviceId, DeviceSignaturePurpose,
-    DeviceSigningRequest, MobileApprovalDecision, PlatformDeviceIdentity, PlatformDeviceSigner,
-    PlatformP256Signature, PlatformSignFuture,
+    AgentFastPayApprovalDecision, AgentHvmApprovalDecision, ApprovalDecision, CompanionError,
+    CompanionResult, DeviceId, DeviceSignaturePurpose, DeviceSigningRequest,
+    MobileApprovalDecision, PlatformDeviceIdentity, PlatformDeviceSigner, PlatformP256Signature,
+    PlatformSignFuture,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -50,6 +51,23 @@ pub struct AndroidCompanionIdentityStatus {
     pub strong_box_backed: bool,
     pub authentication_enforced_by_secure_hardware: bool,
     pub auth_per_use: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidAgentActivityClose {
+    closed: bool,
+}
+
+pub async fn finish_agent_activity<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let response = handle(app)?
+        .run_mobile_plugin_async::<AndroidAgentActivityClose>("finishAgentActivity", ())
+        .await
+        .map_err(|error| format!("Android Agent companion activity close: {error}"))?;
+    if !response.closed {
+        return Err("Android Agent companion activity close was not confirmed".to_owned());
+    }
+    Ok(())
 }
 
 async fn native_status<R: Runtime>(
@@ -169,6 +187,22 @@ async fn sign_native<R: Runtime>(
                 ApprovalDecision::Reject => "signApprovalDecisionReject",
             }
         }
+        DeviceSignaturePurpose::AgentFastPayApprovalDecision
+            if cfg!(feature = "agent-wallet-testnet-pilot") =>
+        {
+            match AgentFastPayApprovalDecision::from_canonical_bytes(canonical_payload)?.decision {
+                ApprovalDecision::Approve => "signAgentFastPayApprovalDecisionApprove",
+                ApprovalDecision::Reject => "signAgentFastPayApprovalDecisionReject",
+            }
+        }
+        DeviceSignaturePurpose::AgentHvmApprovalDecision
+            if cfg!(feature = "agent-wallet-testnet-pilot") =>
+        {
+            match AgentHvmApprovalDecision::from_canonical_bytes(canonical_payload)?.decision {
+                ApprovalDecision::Approve => "signAgentHvmApprovalDecisionApprove",
+                ApprovalDecision::Reject => "signAgentHvmApprovalDecisionReject",
+            }
+        }
         DeviceSignaturePurpose::WitnessReceipt if cfg!(feature = "agent-wallet-testnet-pilot") => {
             "signWitnessReceipt"
         }
@@ -189,6 +223,8 @@ async fn sign_native<R: Runtime>(
             "signWitnessRotationBaselineReceipt"
         }
         DeviceSignaturePurpose::ApprovalDecision
+        | DeviceSignaturePurpose::AgentFastPayApprovalDecision
+        | DeviceSignaturePurpose::AgentHvmApprovalDecision
         | DeviceSignaturePurpose::AdminCommand
         | DeviceSignaturePurpose::RollbackAnchor
         | DeviceSignaturePurpose::WitnessReceipt

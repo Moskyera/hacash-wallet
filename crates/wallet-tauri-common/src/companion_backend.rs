@@ -1,15 +1,18 @@
 //! Narrow adapter between the private-LAN companion runtime and Agent Wallet.
 //!
-//! The adapter deliberately exposes only authenticated read-only status sync.
-//! It rejects approval decisions and admin commands, and has no
-//! Personal Wallet, generic send, key export, settings, provider or L2 surface.
+//! The default build exposes authenticated read-only status sync. The explicit
+//! testnet-pilot feature additionally accepts typed owner decisions for exact
+//! Agent operations, including Agent Fast Pay approval recording. Those paths
+//! perform no Hub submission, L2 signing or broadcast. Every build rejects
+//! generic sends and has no Personal Wallet, key export, settings or provider
+//! mutation surface.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use agent_wallet_core::{AgentDesktopSessionAttempt, AgentWalletId, AgentWalletManager};
 #[cfg(feature = "agent-wallet-testnet-pilot")]
-use agent_wallet_core::{OperationId, OperationStatus};
+use agent_wallet_core::{AgentFastPayStatus, AgentHvmPaymentStatus, OperationId, OperationStatus};
 use hpay_companion_lan_runtime::{
     DesktopHandshake, DesktopSessionBackend, HandleMessageResult, LanRuntimeError, RuntimeFuture,
 };
@@ -181,19 +184,33 @@ impl DesktopSessionBackend for AgentCompanionBackend {
                                 detail: "payment_rejected".to_owned(),
                             })
                         } else {
-                            if view.status != OperationStatus::SignedAwaitingWitness {
-                                return Err(LanRuntimeError::Backend);
+                            match view.status {
+                                OperationStatus::SignedAwaitingWitness => {
+                                    let proposal = manager
+                                        .pending_rollback_anchor(
+                                            &self.wallet_id,
+                                            &operation_id,
+                                            &connection.remote_device_id,
+                                            now,
+                                        )
+                                        .await
+                                        .map_err(|_| LanRuntimeError::Backend)?;
+                                    Some(CompanionPayload::RollbackAnchorProposal(proposal))
+                                }
+                                // The owner did not ask for a rollback witness
+                                // on this wallet, so the approval this phone
+                                // just gave finished the payment by itself.
+                                // There is no anchor to hand back, and treating
+                                // its absence as a transport failure would show
+                                // the owner an error on a payment that worked.
+                                OperationStatus::BroadcastSubmitted
+                                | OperationStatus::Committed => Some(CompanionPayload::AdminAck {
+                                    command_id: approval_id,
+                                    accepted: true,
+                                    detail: "payment_submitted".to_owned(),
+                                }),
+                                _ => return Err(LanRuntimeError::Backend),
                             }
-                            let proposal = manager
-                                .pending_rollback_anchor(
-                                    &self.wallet_id,
-                                    &operation_id,
-                                    &connection.remote_device_id,
-                                    now,
-                                )
-                                .await
-                                .map_err(|_| LanRuntimeError::Backend)?;
-                            Some(CompanionPayload::RollbackAnchorProposal(proposal))
                         }
                     }
                     #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
@@ -403,8 +420,152 @@ impl DesktopSessionBackend for AgentCompanionBackend {
                         return Err(LanRuntimeError::Backend);
                     }
                 }
+                CompanionPayload::AgentFastPayApprovalPoll {
+                    agent_wallet_id,
+                    operation_id,
+                } => {
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    {
+                        if agent_wallet_id != self.wallet_id.as_str() {
+                            return Err(LanRuntimeError::Backend);
+                        }
+                        let operation_id = operation_id
+                            .map(OperationId::parse)
+                            .transpose()
+                            .map_err(|_| LanRuntimeError::Backend)?;
+                        let approval = manager
+                            .pending_fast_pay_approval(
+                                &self.wallet_id,
+                                operation_id.as_ref(),
+                                &connection.remote_device_id,
+                                now,
+                            )
+                            .map_err(|_| LanRuntimeError::Backend)?;
+                        Some(match approval {
+                            Some(approval) => {
+                                CompanionPayload::AgentFastPayApprovalRequest(approval)
+                            }
+                            None => CompanionPayload::AdminAck {
+                                command_id: "agent_fast_pay_poll".to_owned(),
+                                accepted: true,
+                                detail: "no_pending_agent_fast_pay_approval".to_owned(),
+                            },
+                        })
+                    }
+                    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+                    {
+                        let _ = (agent_wallet_id, operation_id);
+                        return Err(LanRuntimeError::Backend);
+                    }
+                }
+                CompanionPayload::AgentFastPayApprovalDecision(signed) => {
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    {
+                        if signed.decision.mobile_device_id != connection.remote_device_id {
+                            return Err(LanRuntimeError::Backend);
+                        }
+                        let approval_id = signed.decision.commitment.approval_id.clone();
+                        let decision = signed.decision.decision;
+                        let view = manager
+                            .apply_mobile_fast_pay_approval(&self.wallet_id, signed, now)
+                            .map_err(|_| LanRuntimeError::Backend)?;
+                        let detail = match (decision, view.status) {
+                            (
+                                hpay_companion_protocol::ApprovalDecision::Approve,
+                                AgentFastPayStatus::Approved,
+                            ) => "agent_fast_pay_approved_no_submission",
+                            (
+                                hpay_companion_protocol::ApprovalDecision::Reject,
+                                AgentFastPayStatus::Rejected,
+                            ) => "agent_fast_pay_rejected",
+                            _ => return Err(LanRuntimeError::Backend),
+                        };
+                        Some(CompanionPayload::AdminAck {
+                            command_id: approval_id,
+                            accepted: true,
+                            detail: detail.to_owned(),
+                        })
+                    }
+                    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+                    {
+                        let _ = signed;
+                        return Err(LanRuntimeError::Backend);
+                    }
+                }
+                CompanionPayload::AgentHvmApprovalPoll {
+                    agent_wallet_id,
+                    operation_id,
+                } => {
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    {
+                        if agent_wallet_id != self.wallet_id.as_str() {
+                            return Err(LanRuntimeError::Backend);
+                        }
+                        let operation_id = operation_id
+                            .map(OperationId::parse)
+                            .transpose()
+                            .map_err(|_| LanRuntimeError::Backend)?;
+                        let approval = manager
+                            .pending_hvm_payment_approval(
+                                &self.wallet_id,
+                                operation_id.as_ref(),
+                                &connection.remote_device_id,
+                                now,
+                            )
+                            .map_err(|_| LanRuntimeError::Backend)?;
+                        Some(match approval {
+                            Some(approval) => CompanionPayload::AgentHvmApprovalRequest(approval),
+                            None => CompanionPayload::AdminAck {
+                                command_id: "agent_hvm_poll".to_owned(),
+                                accepted: true,
+                                detail: "no_pending_agent_hvm_approval".to_owned(),
+                            },
+                        })
+                    }
+                    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+                    {
+                        let _ = (agent_wallet_id, operation_id);
+                        return Err(LanRuntimeError::Backend);
+                    }
+                }
+                CompanionPayload::AgentHvmApprovalDecision(signed) => {
+                    #[cfg(feature = "agent-wallet-testnet-pilot")]
+                    {
+                        if signed.decision.mobile_device_id != connection.remote_device_id {
+                            return Err(LanRuntimeError::Backend);
+                        }
+                        let approval_id = signed.decision.commitment.approval_id.clone();
+                        let decision = signed.decision.decision;
+                        let view = manager
+                            .apply_mobile_hvm_payment_approval(&self.wallet_id, signed, now)
+                            .map_err(|_| LanRuntimeError::Backend)?;
+                        let detail = match (decision, view.status) {
+                            (
+                                hpay_companion_protocol::ApprovalDecision::Approve,
+                                AgentHvmPaymentStatus::Approved,
+                            ) => "agent_hvm_approved_no_submission",
+                            (
+                                hpay_companion_protocol::ApprovalDecision::Reject,
+                                AgentHvmPaymentStatus::Rejected,
+                            ) => "agent_hvm_rejected",
+                            _ => return Err(LanRuntimeError::Backend),
+                        };
+                        Some(CompanionPayload::AdminAck {
+                            command_id: approval_id,
+                            accepted: true,
+                            detail: detail.to_owned(),
+                        })
+                    }
+                    #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+                    {
+                        let _ = signed;
+                        return Err(LanRuntimeError::Backend);
+                    }
+                }
                 CompanionPayload::Disconnect { .. } => None,
                 CompanionPayload::ApprovalRequest(_)
+                | CompanionPayload::AgentFastPayApprovalRequest(_)
+                | CompanionPayload::AgentHvmApprovalRequest(_)
                 | CompanionPayload::RollbackAnchorProposal(_)
                 | CompanionPayload::WitnessRotationProposal(_)
                 | CompanionPayload::WitnessAck { .. }
@@ -796,6 +957,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "agent-wallet-testnet-pilot")]
     fn filtered_activity(
         payload: CompanionPayload,
         permissions: &BTreeSet<DevicePermission>,

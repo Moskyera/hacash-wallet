@@ -127,7 +127,8 @@ export const de = {
   "node.change": "Node wechseln",
   "node.useOfficial": "Offiziellen Node verwenden",
   "node.customTitle": "Benutzerdefinierter Node",
-  "node.customHint": "Ändern Sie dies nur, wenn Sie einen eigenen Hacash-Node betreiben oder einen privaten Endpoint benötigen.",
+  "node.customHint":
+    "Im Mainnet sendet diese Wallet über den offiziellen Node per einfachem HTTP, weil dieser Node nichts anderes anbietet. Wer Ihren Datenverkehr transportiert, kann lesen, nach welcher Adresse Sie fragen, und eine falsche Netzwerkgebühr nennen, lesen Sie die Gebühr also vor der Freigabe. Niemand auf dem Weg kann ändern, wer bezahlt wird, oder für Sie signieren. Hacash auf diesem Computer zu betreiben und http://127.0.0.1:8080 zu verwenden beseitigt all das und ist der einzige Weg, Fast Pay einzurichten oder einen Kanal zu schließen.",
   "node.grapheneTitle": "GrapheneOS / Telefone ohne Google-Dienste",
   "node.grapheneHelp": "Verwenden Sie dieselbe APK wie auf anderen Android-Geräten. Aktivieren Sie in den App-Informationen die Netzwerkberechtigung. Installieren Sie über Dateien, falls der Browser die APK blockiert. Der offizielle Node verwendet unverschlüsseltes HTTP, daher können VPN oder Filter die Verbindung blockieren. Eine separate Graphene-Version ist nicht erforderlich.",
   "quantum.funding.title": "Quantum-Konto finanzieren",

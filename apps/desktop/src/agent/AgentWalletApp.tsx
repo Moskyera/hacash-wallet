@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-shell";
-import { AGENT_WALLET_HOW_IT_WORKS_URL } from "@hacash/wallet-ui";
+import {
+  AGENT_WALLET_HOW_IT_WORKS_URL,
+  AGENT_WITNESS_PHONE_REQUIREMENT,
+  channelSetupReviewIsBlocked,
+  explainInvalidDepositAmount,
+  mainnetSigningTransportIsEligible,
+} from "@hacash/wallet-ui";
 import WalletLogo from "../components/WalletLogo";
 import MobileCompanionPanel, {
   EMPTY_COMPANION_SNAPSHOT,
   type CompanionActions,
   type CompanionSnapshot,
 } from "./MobileCompanionPanel";
+import RollbackWitnessSetting from "./RollbackWitnessSetting";
 import AgentAdminPages from "./AgentAdminPages";
 import {
   agentWalletApi,
@@ -19,7 +26,9 @@ import {
   type PendingPairing,
 } from "./api";
 import {
+  AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT,
   HPAY_LOCAL_PILOT,
+  HPAY_MAINNET,
   WRITE_BLOCKER_LABELS,
   agentWalletLocalEnableBlockers,
   agentWalletPairingBlockers,
@@ -28,6 +37,11 @@ import {
   emergencyStopControl,
   type AgentWalletWriteReadiness,
 } from "./access";
+import {
+  channelOpenProgress,
+  reviewCountdown,
+  type ChannelOpenProgress,
+} from "./channelWaitingView";
 import { connectorStatusForWallet } from "./controlSafety";
 import { DESKTOP_CONTROLS, type DesktopControlId } from "./desktopControls";
 import {
@@ -179,6 +193,7 @@ export default function AgentWalletApp({
       setBusy(false);
     }
   }, []);
+  const [showCreate, setShowCreate] = useState(false);
   const uiState = agentWalletUiState(runtime, overview);
 
   if (uiState === "loading") {
@@ -199,8 +214,8 @@ export default function AgentWalletApp({
       <AgentShell onOpenPersonal={onOpenPersonal}>
         <section className="agent-center-card">
           <h1>AI Agent Wallet unavailable in this build</h1>
-          <p>AI Agent Wallet Testnet Pilot is not enabled in this build.</p>
-          <p>Use an HPAY pilot build to access Agent Wallet testing.</p>
+          <p>The AI Agent Wallet backend is not enabled in this build.</p>
+          <p>Use a reviewed HPAY Agent Wallet build to access this space.</p>
           <p className="agent-safe-note">
             Backend feature: disabled. My Wallet is unaffected.
           </p>
@@ -257,8 +272,50 @@ export default function AgentWalletApp({
                 input.networkMode,
                 input.nodeUrl,
                 input.blockOneFingerprint,
+                input.mainnetPilotAcknowledgement,
               );
               setInfo(`Agent Wallet ${created.address} was created and remains locked.`);
+              await refreshRuntime();
+            })
+          }
+        />
+      </AgentShell>
+    );
+  }
+
+  if ((uiState === "locked" || !overview?.unlocked) && showCreate) {
+    // An Agent Wallet pins its network at creation and can never be moved to
+    // another one: the address, the channel binding and the voucher are all
+    // validated against it. So somebody who made one for the local pilot was
+    // locked out of mainnet permanently, because the create form was only
+    // reachable at zero wallets and nothing in the app deletes or resets one.
+    // The store has always been a BTreeMap with no limit and `create_wallet`
+    // has no one-wallet rule; the whole restriction was this screen.
+    return (
+      <AgentShell onOpenPersonal={onOpenPersonal}>
+        <p className="agent-warning" role="note">
+          You already have an Agent Wallet. This makes an additional one, which
+          is what you need when the one you have is on a different network: an
+          Agent Wallet cannot be moved between networks after it is created.
+          The existing wallet is untouched and stays in the list.
+        </p>
+        <button type="button" onClick={() => setShowCreate(false)}>
+          Back to unlocking the wallet you have
+        </button>
+        <CreateAgentWallet
+          busy={busy}
+          error={error}
+          onCreate={(input) =>
+            run(async () => {
+              const created = await agentWalletApi.create(
+                input.passphrase,
+                input.networkMode,
+                input.nodeUrl,
+                input.blockOneFingerprint,
+                input.mainnetPilotAcknowledgement,
+              );
+              setInfo(`Agent Wallet ${created.address} was created and remains locked.`);
+              setShowCreate(false);
               await refreshRuntime();
             })
           }
@@ -270,6 +327,9 @@ export default function AgentWalletApp({
   if (uiState === "locked" || !overview?.unlocked) {
     return (
       <AgentShell onOpenPersonal={onOpenPersonal}>
+        <button type="button" onClick={() => setShowCreate(true)}>
+          Create another Agent Wallet
+        </button>
         <UnlockAgentWallet
           wallets={runtime.wallets}
           selected={selected}
@@ -359,7 +419,7 @@ export default function AgentWalletApp({
         </div>
       </aside>
       <main className="agent-content">
-        <PilotBanner />
+        <PilotBanner overview={overview} />
         {error && <div className="alert" role="alert">{error}</div>}
         {info && <div className="info-box">{info}</div>}
         <AgentPageContent
@@ -535,14 +595,25 @@ function AgentShell({
   );
 }
 
-function PilotBanner() {
+function PilotBanner({ overview }: { overview?: AgentWalletOverview }) {
+  if (overview?.network_mode === "mainnet") {
+    return (
+      <section className="agent-pilot-banner" role="status" aria-label="Agent Wallet network safety">
+        <strong>AI AGENT WALLET</strong>
+        <span>HACASH MAINNET</span>
+        <span>TRUSTED BOUNDED FAST PAY PILOT</span>
+        <span>0% WALLET FEE</span>
+        <code>{overview.node?.network_instance_id ?? HPAY_MAINNET.blockOne}</code>
+      </section>
+    );
+  }
   return (
     <section className="agent-pilot-banner" role="status" aria-label="Agent Wallet network safety">
       <strong>AI AGENT WALLET</strong>
-      <span>{HPAY_LOCAL_PILOT.label}</span>
-      <span>PRIVATE DEVELOPMENT NETWORK</span>
-      <span>NO MAINNET FUNDS</span>
-      <code>{HPAY_LOCAL_PILOT.networkInstance}</code>
+      <span>{overview ? HPAY_LOCAL_PILOT.label : "NETWORK VERIFIED AFTER UNLOCK"}</span>
+      <span>{overview ? "PRIVATE DEVELOPMENT NETWORK" : "PAYMENTS FAIL CLOSED"}</span>
+      <span>{overview ? "NO MAINNET FUNDS" : "SEPARATE ENCRYPTED VAULT"}</span>
+      {overview && <code>{HPAY_LOCAL_PILOT.networkInstance}</code>}
     </section>
   );
 }
@@ -555,18 +626,41 @@ function CreateAgentWallet({
   error: string;
   onCreate: (input: {
     passphrase: string;
-    networkMode: "testnet";
+    networkMode: "mainnet" | "testnet";
     nodeUrl: string;
-    blockOneFingerprint: string;
+    blockOneFingerprint: string | null;
+    mainnetPilotAcknowledgement: string | null;
   }) => void;
 }) {
   const [passphrase, setPassphrase] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [networkMode, setNetworkMode] = useState<"mainnet" | "testnet">("testnet");
+  const [mainnetNodeUrl, setMainnetNodeUrl] = useState("");
+  const [mainnetAcknowledged, setMainnetAcknowledged] = useState(false);
+  const isMainnet = networkMode === "mainnet";
   const localError = useMemo(() => {
     if (passphrase && passphrase.length < 15) return "Use at least 15 characters.";
     if (confirmation && passphrase !== confirmation) return "Passphrases do not match.";
+    // This said `!mainnetNodeUrl.startsWith("https://")`, which is STRICTER
+    // than the rule it was reporting on, and it contradicted the control right
+    // below it.
+    //
+    // The core rule (`validate_signing_node_url`, crates/wallet-core/src/
+    // settings.rs) accepts HTTPS *or* plain HTTP to a loopback host, because a
+    // node on this same machine has no network hop to intercept. The submit
+    // button already asks `mainnetSigningTransportIsEligible`, which mirrors
+    // the core exactly. So with `http://127.0.0.1:8080`, the node an owner
+    // actually runs, the button was enabled and this line printed a red error
+    // saying HTTPS was required. A person reads the error, believes they are
+    // blocked, and stops, with nothing wrong.
+    //
+    // One predicate, used in both places. If the transport rule ever changes,
+    // it changes once.
+    if (isMainnet && mainnetNodeUrl && !mainnetSigningTransportIsEligible(mainnetNodeUrl, "mainnet")) {
+      return "Agent mainnet needs an HTTPS node, or a node on this same computer reached over http://127.0.0.1 or http://localhost.";
+    }
     return "";
-  }, [passphrase, confirmation]);
+  }, [passphrase, confirmation, isMainnet, mainnetNodeUrl]);
   return (
     <section className="agent-center-card agent-create">
       <span className="agent-eyebrow">Independent security boundary</span>
@@ -578,13 +672,13 @@ function CreateAgentWallet({
       {/* A before-the-fact warning. It stays visible; only the background list
           moved behind a disclosure. */}
       <div className="agent-warning">
-        Mainnet creation, funding and payments remain blocked until Agent Wallet
-        backup and recovery has been independently verified.
+        My Wallet and AI Agent Wallet use different addresses, private keys,
+        encrypted vaults and Fast Pay channels. The agent cannot access My Wallet.
       </div>
       <details className="agent-advanced-details">
         <summary>What this wallet can and cannot do</summary>
         <ul>
-          <li>Testnet foundation only in this release.</li>
+          <li>Choose Local Pilot for testing or the reviewed bounded mainnet pilot.</li>
           {/* This said "Every payment requires manual desktop approval." In a
               Testnet Pilot build the desktop cannot complete an approval at
               all, so that read as a description of a working flow. */}
@@ -593,12 +687,11 @@ function CreateAgentWallet({
             approved automatically.
           </li>
           <li>
-            Approving a payment is not available in this pilot build, on this
-            desktop or on the paired phone, so no agent payment can complete
-            yet. Requesting, reviewing and rejecting all work.
+            Every payment is bound to one exact payee, amount, Hub, channel and
+            approval. The wallet rechecks them before signing and submission.
           </li>
           <li>Agents never receive a private key or raw signing access.</li>
-          <li>Agent L2 Fast Pay is not enabled in this release.</li>
+          <li>Agent Fast Pay has no HPAY wallet fee.</li>
           <li>
             Network kind: {HPAY_LOCAL_PILOT.networkKind}. Profile:{" "}
             {HPAY_LOCAL_PILOT.profileId}. This private chain is not the official
@@ -611,11 +704,9 @@ function CreateAgentWallet({
           The only place this release stated it was inside Local Pilot health,
           which an owner reaches long after creating the wallet. */}
       <div className="agent-warning">
-        This release has no Agent Wallet backup and no recovery path. This
-        passphrase is the only thing that opens this wallet. If it is lost, the
-        wallet and anything ever sent to its address are lost for good, and
-        nothing on this desktop or on a paired phone can recover them. Write it
-        down somewhere you will still have in a year before continuing.
+        The encrypted backup and its passphrase can recreate a live spending
+        wallet. Store them separately and securely. Never run two restored
+        copies of the same Agent Wallet at the same time.
       </div>
       <label>
         Agent Wallet passphrase
@@ -639,16 +730,51 @@ function CreateAgentWallet({
         <summary>Network settings</summary>
         <label>
           Network
-          <input value={HPAY_LOCAL_PILOT.label} readOnly />
+          <select
+            value={networkMode}
+            onChange={(event) => {
+              setNetworkMode(event.target.value as "mainnet" | "testnet");
+              setMainnetAcknowledged(false);
+            }}
+          >
+            <option value="testnet">{HPAY_LOCAL_PILOT.label}</option>
+            <option value="mainnet">Hacash Mainnet bounded pilot</option>
+          </select>
         </label>
-        <label>
-          Local Pilot node API
-          <input value={HPAY_LOCAL_PILOT.nodeUrl} readOnly />
-        </label>
+        {isMainnet ? (
+          <label>
+            {/*
+              The label used to say HTTPS and the button used to enforce
+              `startsWith("https://")`, which refused http://127.0.0.1:8080 -
+              the exact configuration docs/HUB-OPERATOR.md prescribes and the
+              one the agent core treats as safest. There is no public HTTPS
+              Hacash node, so the only person who could create a bounded
+              mainnet Agent Wallet was one who did not exist, and the
+              self-hosted node owner, the safest case, was the one locked out.
+              The predicate below is now the core's own
+              (`validate_signing_node_url`), so this grants nothing
+              agent-wallet-core would not already have accepted.
+            */}
+            HPAY-compatible mainnet full node (HTTPS, or a node on this machine)
+            <input
+              value={mainnetNodeUrl}
+              placeholder="https://node.example or http://127.0.0.1:8080"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => setMainnetNodeUrl(event.target.value.trim())}
+            />
+          </label>
+        ) : (
+          <label>
+            Local Pilot node API
+            <input value={HPAY_LOCAL_PILOT.nodeUrl} readOnly />
+          </label>
+        )}
         <label>
           Local Pilot block 1 fingerprint
           <input
-            value={HPAY_LOCAL_PILOT.blockOne}
+            value={isMainnet ? HPAY_MAINNET.blockOne : HPAY_LOCAL_PILOT.blockOne}
             inputMode="text"
             autoComplete="off"
             spellCheck={false}
@@ -657,24 +783,64 @@ function CreateAgentWallet({
           />
         </label>
       </details>
+      {isMainnet && (
+        <div className="agent-warning">
+          <strong>Mainnet trusted bounded pilot</strong>
+          <p>
+            Fast Pay depends on the selected Hub. Until unilateral L1 exit is
+            independently verified, no Hub may exceed 1 HAC per payment,
+            10 HAC per channel and 100 HAC aggregate TVL. Those are the
+            ceilings this build refuses to cross, not the limits you get. A
+            Hub declares its own and they are often far lower. What your Hub
+            declares is what applies to you.
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={mainnetAcknowledged}
+              onChange={(event) => setMainnetAcknowledged(event.target.checked)}
+            />
+            {AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT}
+          </label>
+        </div>
+      )}
+      {/*
+        Said here, at creation, rather than at the first approval.
+
+        The witness gate is compiled into shipped builds and applies on both
+        networks, so without a paired witness phone this wallet can hold funds
+        and approve nothing. A person used to discover that after they had
+        created and funded it.
+      */}
+      <p className="agent-note">{AGENT_WITNESS_PHONE_REQUIREMENT}</p>
       <button
         type="button"
         className="agent-primary"
         disabled={
           busy ||
           passphrase.length < 15 ||
-          passphrase !== confirmation
+          passphrase !== confirmation ||
+          (isMainnet &&
+            (!mainnetAcknowledged ||
+              !mainnetSigningTransportIsEligible(mainnetNodeUrl, "mainnet")))
         }
         onClick={() =>
           onCreate({
             passphrase,
-            networkMode: "testnet",
-            nodeUrl: HPAY_LOCAL_PILOT.nodeUrl,
-            blockOneFingerprint: HPAY_LOCAL_PILOT.blockOne,
+            networkMode,
+            nodeUrl: isMainnet ? mainnetNodeUrl : HPAY_LOCAL_PILOT.nodeUrl,
+            blockOneFingerprint: isMainnet ? null : HPAY_LOCAL_PILOT.blockOne,
+            mainnetPilotAcknowledgement: isMainnet
+              ? AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT
+              : null,
           })
         }
       >
-        {busy ? "Creating encrypted vault..." : "Create Local Pilot Agent Wallet"}
+        {busy
+          ? "Creating encrypted vault..."
+          : isMainnet
+            ? "Create bounded mainnet Agent Wallet"
+            : "Create Local Pilot Agent Wallet"}
       </button>
     </section>
   );
@@ -914,8 +1080,8 @@ function AgentPageContent(props: PageContentProps) {
         );
       case "phone":
         return (
+          <div key={id}>
           <MobileCompanionPanel
-            key={id}
             walletId={overview.wallet_id}
             busy={busy}
             run={run}
@@ -927,6 +1093,15 @@ function AgentPageContent(props: PageContentProps) {
             actionsRef={companionActions}
             onLockAndSwitch={onLockAndSwitch}
           />
+          {/* Beside the phone, because that is where a person goes to ask what
+              the phone is for. The trade is spelled out on the panel itself. */}
+          <RollbackWitnessSetting
+            overview={overview}
+            busy={busy}
+            run={run}
+            onInfo={onInfo}
+          />
+          </div>
         );
       case "connector":
         return (
@@ -1026,8 +1201,717 @@ function AgentPageContent(props: PageContentProps) {
         <span className="agent-boundary-icon" aria-hidden>!</span>
         <p><strong>Separate wallet and permission domain.</strong> The AI agent cannot access your My Wallet private key.</p>
       </div>
+      <AgentFastPayChannelPanel
+        overview={overview}
+        busy={busy}
+        run={run}
+        onInfo={onInfo}
+        onRefresh={onRefresh}
+      />
       {order.map((id) => block(id))}
     </>
+  );
+}
+
+/**
+ * The deposit complaint and the button it must govern, in one component.
+ *
+ * They are together because they were apart, and being apart is how a screen
+ * comes to explain a problem it then allows. The core reports every malformed
+ * amount as the same five words, "payment amount is invalid", after a round
+ * trip. An owner typed `0,2` on a Greek keyboard, read those five words, and
+ * had no way to know a comma was the whole problem. Naming the rule here is
+ * only half the fix; the other half is that the press cannot go through while
+ * the rule is named, and both halves now read the same value.
+ *
+ * It does NOT rewrite what was typed. A wallet quietly correcting `0,2` to
+ * `0.2` is a wallet guessing about money.
+ *
+ * Exported so a test can render it with an amount. The panel keeps this state
+ * in `useState`, and the desktop tests render to static markup and cannot
+ * type, so a gate left inside the panel is a gate nothing can check.
+ */
+export function ChannelSetupReviewControl({
+  hubUrl,
+  deposit,
+  busy,
+  onReview,
+}: {
+  hubUrl: string;
+  deposit: string;
+  busy: boolean;
+  onReview: () => void;
+}) {
+  const problem = deposit.trim().length > 0 ? explainInvalidDepositAmount(deposit) : null;
+  return (
+    <>
+      {problem ? (
+        <p className="agent-warning" role="status">
+          {problem}
+        </p>
+      ) : null}
+      <button
+        type="button"
+        className="agent-primary"
+        disabled={busy || channelSetupReviewIsBlocked(hubUrl, deposit)}
+        onClick={onReview}
+      >
+        Review channel setup
+      </button>
+    </>
+  );
+}
+
+export function AgentFastPayChannelPanel({
+  overview,
+  busy,
+  run,
+  onInfo,
+  onRefresh,
+}: {
+  overview: AgentWalletOverview;
+  busy: boolean;
+  run: (work: () => Promise<void>) => Promise<void>;
+  onInfo: (message: string) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [hubUrl, setHubUrl] = useState("");
+  const [deposit, setDeposit] = useState("1");
+  const setup = overview.l2_channel_setup;
+  const close = overview.l2_channel_close;
+  const binding = overview.l2_binding;
+  const active = Boolean(binding && !binding.closed);
+  // A review that was never confirmed is the only thing this wallet can be
+  // asked to forget, and it is the one state the confirm button can never
+  // resolve once the 300 second window has closed. Every later phase keeps its
+  // recovery path and is offered no discard here, because a signature may exist
+  // for it and a wallet that forgets a signature can fund the same channel
+  // twice.
+  const discardable = setup?.phase === "prepared";
+  /*
+    A per-second tick, display only, and nothing is fetched by it.
+
+    The panel already knew when the review dies and never drew it. Worse, the
+    two booleans below were computed from a bare `Date.now()` at render time,
+    and the only thing that re-renders this panel is the 15 second overview
+    poll, so an expired review could sit on the screen looking live for another
+    fifteen seconds with a confirm button on it that could only refuse.
+
+    Placed inside this component on purpose. The overview poll is the FIRST
+    `window.setInterval` in this file and desktopControls.test.ts identifies it
+    by that position; this one is a thousand lines below it and stays below it.
+    Shape copied from MobileCompanionPanel's pairing countdown.
+  */
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      setNowSeconds(Math.floor(Date.now() / 1000));
+    }, 1_000);
+    return () => window.clearInterval(tick);
+  }, []);
+
+  const countdown = reviewCountdown({
+    expiresAt: setup?.expires_at,
+    nowSeconds,
+  });
+  /*
+    How far the chain has come, and whether it is honest to say so at all.
+
+    The open height only exists on the binding, and the binding only exists once
+    the core has already agreed the open is settled, so during the wait this is
+    deliberately a shape with no count in it. See channelWaitingView.ts.
+  */
+  const progress = channelOpenProgress({
+    currentHeight: overview.node?.current_height,
+    openHeight: binding?.channel_open_height,
+    confirmedAtHeight: binding?.confirmed_at_height,
+  });
+  /*
+    The stretch that rendered nothing: the deposit is on the chain, the channel
+    is not settled, and the exit panel below cannot render because it is gated
+    on a binding that cannot exist yet.
+  */
+  const awaitingChain =
+    setup?.phase === "submitted" || setup?.phase === "awaiting_confirmations";
+  const reviewExpired = Boolean(setup && countdown.kind === "expired");
+  // A setup that holds a signature the Hub will never accept again.
+  //
+  // The core decides this, not the screen; this only decides whether to offer
+  // the control. The clock it uses is exact rather than a guess: prepare sets
+  // expires_at to created_at + 300, and the core's own bar is created_at + 600
+  // (CHANNEL_OPEN_DEAD_AFTER, the age past which no Hub will accept the
+  // transaction), so expires_at + 300 is the same instant. The core still
+  // re-checks the clock, its durable store and the live chain before it agrees.
+  const signedSetup = setup?.phase === "signed" || setup?.phase === "recovery_required";
+  const requestIsDead = Boolean(
+    setup && signedSetup && setup.expires_at + 300 <= nowSeconds,
+  );
+
+  const finish = async (message: string) => {
+    onInfo(message);
+    await onRefresh();
+  };
+
+  return (
+    <section className="agent-panel">
+      <span className="agent-eyebrow">Owner controlled</span>
+      <h2>Agent Fast Pay channel</h2>
+      <p>
+        This channel belongs only to the Agent Wallet. It never uses the Personal Wallet channel
+        and it adds no HPAY wallet fee.
+      </p>
+
+      {/*
+        READINESS WHERE THE DECISION IS.
+
+        `payments_suspended` has always been on this overview and this panel
+        said nothing about it, while sitting ABOVE the one control that clears
+        it. So the owner pressed a channel button, met a refusal, and was given
+        no cause for it. The cause was two screens of scrolling below the
+        refusal.
+
+        Deliberately says only what is true and points at where the control
+        already is, on this same page. It does not restate the alerts line,
+        which overviewLayout.ts owns, and it does not name a second refusal
+        string: whether the clear itself is available is that module's sentence
+        to write, not this one's.
+      */}
+      {overview.payments_suspended ? (
+        <p className="agent-readiness" role="status">
+          <strong>Payments are off.</strong> Nothing can be opened, sent or
+          closed until you turn them back on, in Payment control further down
+          this page.
+        </p>
+      ) : null}
+
+      {!binding && !setup && (
+        <>
+          <label className="agent-field">
+            <span>Fast Pay Hub</span>
+            <input
+              value={hubUrl}
+              onChange={(event) => setHubUrl(event.target.value)}
+              placeholder="https://your-fast-pay-hub.example"
+              disabled={busy}
+            />
+          </label>
+          <label className="agent-field">
+            <span>Agent channel deposit (HAC)</span>
+            <input
+              value={deposit}
+              onChange={(event) => setDeposit(event.target.value)}
+              inputMode="decimal"
+              disabled={busy}
+            />
+          </label>
+          <ChannelSetupReviewControl
+            hubUrl={hubUrl}
+            deposit={deposit}
+            busy={busy}
+            onReview={() =>
+              void run(async () => {
+                await agentWalletApi.prepareFastPayChannel(
+                  overview.wallet_id,
+                  hubUrl.trim(),
+                  deposit.trim(),
+                );
+                await finish("Review the exact Agent channel deposit and network fee.");
+              })
+            }
+          />
+        </>
+      )}
+
+      {setup && !binding && (
+        <>
+          <div className="agent-stats-row">
+            <span>Deposit <strong>{formatUnits(setup.deposit_units)}</strong></span>
+            <span>Network fee <strong>{formatUnits(setup.network_fee_units)}</strong></span>
+            <span>Wallet fee <strong>{formatUnits(setup.wallet_fee_units)}</strong></span>
+            <span>Status <strong>{setup.phase.replace(/_/g, " ")}</strong></span>
+          </div>
+          {/*
+            THE DEADLINE THE OWNER WAS HELD TO AND NEVER SHOWN.
+
+            `expires_at` was on this review from the first version and was read
+            only to compute two booleans. The owner's first attempt expired
+            unseen while the wallet had crashed, and the refusal afterwards said
+            only that signing was blocked, which is what eight other causes say.
+
+            DIVERGENCE FROM design/Review.dc.html, on purpose: the design's
+            expired line reads "Nothing was signed and nothing was spent." This
+            screen cannot know that. Whether a signature could exist is decided
+            by the durable ChannelOpenSafety store, which is never sent here,
+            and there is one crash interleaving where it says a signature may
+            exist while the phase still reads prepared. So the countdown states
+            only that the window closed, and the notice below carries the rest.
+          */}
+          {setup.phase === "prepared" && countdown.kind === "live" ? (
+            <p className="agent-countdown" role="status">
+              These numbers are good for <strong>{countdown.label}</strong> more.
+              After that, prepare them again; nothing is lost by letting it run out.
+            </p>
+          ) : null}
+          {setup.phase === "prepared" && countdown.kind === "expired" ? (
+            <p className="agent-countdown" role="status">
+              <strong>These numbers have expired.</strong> Discard this review to
+              work them out again.
+            </p>
+          ) : null}
+          {/*
+            BLOCK PROGRESS DURING THE WAIT, AND WHY THERE IS NO BAR IN IT.
+
+            This is the half hour that broke people. The deposit is on the chain
+            and this panel rendered nothing for it, because ChannelExit is gated
+            on `binding && !binding.closed` and the binding cannot exist until
+            the core has already agreed the open is settled.
+
+            DIVERGENCE FROM design/Waiting.dc.html, on purpose: that artboard
+            draws six filling pips and "Opened at block 777933". The open height
+            is a hardcoded demo value there and has no source in the overview.
+            `AgentChannelSetupReview` carries no open height, no confirmed
+            height and no transaction hash, and `l2_binding` is null throughout
+            this window, so a 0..6 count here would be invented. The words are
+            kept, the count is not drawn until the data supports it, and the
+            real bar lives on the binding row below where the numbers are true.
+          */}
+          {awaitingChain ? (
+            <div className="agent-subpanel">
+              <h3>Why there is no exit button yet</h3>
+              <p>
+                Your deposit is on the chain and the channel is not settled yet.
+                The Hub cannot sign a way out of a channel the chain has not
+                settled, so this wallet does not offer one. The exit appears here
+                on its own once the open has six confirmations, which is about
+                half an hour on mainnet. Leave this window open.
+              </p>
+              {progress.kind === "chain_height_unknown" ? (
+                <p className="agent-wait-count">
+                  <span>
+                    Chain height <strong>not known</strong>
+                  </span>
+                  <span>This wallet cannot reach a node right now.</span>
+                </p>
+              ) : (
+                <>
+                  <p className="agent-wait-count">
+                    <span>
+                      Chain is at <strong>{progress.currentHeight}</strong>
+                    </span>
+                    <span>
+                      Open block <strong>not known yet</strong>
+                    </span>
+                  </p>
+                  <p>
+                    The block your open landed in is not known to this wallet yet,
+                    so there is no count to show rather than a made up one.
+                  </p>
+                </>
+              )}
+            </div>
+          ) : null}
+          {setup.fee_estimate_degraded ? (
+            <p className="agent-warning" role="status">
+              {setup.fee_estimate_degraded}
+            </p>
+          ) : null}
+          {/*
+            What the Hub said, kept across a refresh.
+
+            An owner opened their first mainnet channel, the Hub refused, and
+            the core mapped the refusal to Err(_) and returned five generic
+            words. They pressed the button twice more and learned nothing three
+            times. The core now stores the Hub's own sentence on the setup, so
+            it is still here after this panel reloads, which a returned error
+            is not.
+          */}
+          {setup.last_hub_refusal ? (
+            <p className="agent-warning" role="status">
+              The Fast Pay Hub refused this channel. Nothing was sent to the
+              chain and nothing was spent. The Hub said: {setup.last_hub_refusal}
+            </p>
+          ) : null}
+          {requestIsDead ? (
+            <p className="agent-warning" role="status">
+              This setup was signed and its signing window has closed, so no Hub
+              will accept it now. Your deposit was never sent. Abandon it to set
+              the channel up again; this wallet checks its own records and asks
+              the chain before it agrees, and refuses if either says the channel
+              may exist.
+            </p>
+          ) : null}
+          <p className="agent-exact-address">{setup.channel_id}</p>
+          {discardable && reviewExpired ? (
+            // This said "Nothing was signed, nothing was sent to the Hub and
+            // nothing was spent" as a flat statement. This screen cannot know
+            // that. It reads the phase and the clock; whether a signature could
+            // exist is decided by the durable ChannelOpenSafety store, which
+            // lives on disk and is never sent here. There is one interleaving,
+            // a crash between `safety.mark_signature_may_exist()` and the state
+            // write that follows it, where the store says a signature may exist
+            // while the phase still reads prepared. In exactly that state the
+            // core refuses the discard, so the screen would have asserted a
+            // correctness claim the wallet itself declines to make.
+            //
+            // So it now says only what the phase and clock actually establish,
+            // and lets the discard itself report the rest.
+            <p className="agent-warning" role="status">
+              This review was never confirmed and its window has closed, so it
+              can no longer be used. Discard it and set the channel up again.
+              Your deposit was never sent, so the funds are still in this
+              wallet either way.
+            </p>
+          ) : null}
+          <div className="agent-control-row">
+            {setup.phase === "prepared" && !reviewExpired ? (
+              <button
+                type="button"
+                className="agent-primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.confirmFastPayChannelSetup(
+                      overview.wallet_id,
+                      setup.operation_id,
+                      setup.review_commitment,
+                    );
+                    await finish("Agent Fast Pay channel setup advanced safely.");
+                  })
+                }
+              >
+                Confirm exact setup
+              </button>
+            ) : setup.phase === "prepared" ? null : (
+              // Deliberately nothing for an expired prepared review. Adding
+              // "Check or recover setup" here was tried and reverted: recovery
+              // for any non-Confirmed phase just re-runs the confirm, and the
+              // confirm is what refused, so the button fails identically. A
+              // control that can only refuse is the defect this panel keeps
+              // growing, not a remedy for it.
+              //
+              // Discard is the answer for this state. In the one interleaving
+              // where the core refuses even that, no button helps, and the
+              // refusal text carries the whole truth instead: nothing changed,
+              // nothing was spent, the deposit never left the wallet.
+              <button
+                type="button"
+                className="agent-primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.recoverFastPayChannelSetup(overview.wallet_id);
+                    await finish("Agent channel recovery checked the exact saved operation.");
+                  })
+                }
+              >
+                Check or recover setup
+              </button>
+            )}
+            {discardable ? (
+              <button
+                type="button"
+                className={reviewExpired ? "agent-primary" : undefined}
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.discardFastPayChannelSetup(
+                      overview.wallet_id,
+                      setup.operation_id,
+                      setup.review_commitment,
+                    );
+                    await finish(
+                      "That review was discarded. Nothing was signed and nothing was spent. Set the channel up again when you are ready.",
+                    );
+                  })
+                }
+              >
+                Discard this review
+              </button>
+            ) : null}
+            {/*
+              The exit from a signature nobody will accept.
+
+              Deliberately separate from Discard, and worded differently,
+              because it is a different claim. Discard says no signature was
+              ever produced. This says one was, and that it is now unusable by
+              anybody: the request envelope has closed, the transaction is past
+              the age any Hub will take, the wallet's own durable record shows
+              nothing came back, and the chain says the channel does not exist.
+              The core checks all four and refuses if any of them fails.
+            */}
+            {requestIsDead ? (
+              <button
+                type="button"
+                className="agent-primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await agentWalletApi.abandonDeadFastPayChannelSetup(
+                      overview.wallet_id,
+                      setup.operation_id,
+                      setup.review_commitment,
+                    );
+                    await finish(
+                      "That setup was abandoned. Its deposit never left this wallet, and the channel was never opened. Set the channel up again when you are ready.",
+                    );
+                  })
+                }
+              >
+                Abandon this signed setup
+              </button>
+            ) : null}
+          </div>
+        </>
+      )}
+
+      {binding && (
+        <>
+          <div className="agent-stats-row">
+            <span>Channel <strong>{binding.channel_id}</strong></span>
+            <span>Deposit <strong>{formatUnits(binding.deposit_units)}</strong></span>
+            <span>Status <strong>{active ? "ready" : "closed"}</strong></span>
+          </div>
+          <ChannelOpenConfirmations progress={progress} />
+        </>
+      )}
+
+      {active && (
+        <ChannelExit
+          overview={overview}
+          busy={busy}
+          run={run}
+          finish={finish}
+        />
+      )}
+
+      {active && !close && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await agentWalletApi.prepareFastPayChannelClose(overview.wallet_id);
+              await finish("Review the final signed balance and close network fee.");
+            })
+          }
+        >
+          Review channel close
+        </button>
+      )}
+
+      {close && (
+        <>
+          <div className="agent-stats-row">
+            <span>Current Agent share <strong>{formatUnits(close.original_agent_units)}</strong></span>
+            <span>Final Agent share <strong>{formatUnits(close.final_agent_units)}</strong></span>
+            <span>Network fee <strong>{formatUnits(close.network_fee_units)}</strong></span>
+            <span>Wallet fee <strong>{formatUnits(close.wallet_fee_units)}</strong></span>
+            <span>Status <strong>{close.phase.replace(/_/g, " ")}</strong></span>
+          </div>
+          {close.fee_estimate_degraded ? (
+            <p className="agent-warning" role="status">
+              {close.fee_estimate_degraded}
+            </p>
+          ) : null}
+          {close.phase === "prepared" ? (
+            <button
+              type="button"
+              className="agent-primary"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  await agentWalletApi.confirmFastPayChannelClose(
+                    overview.wallet_id,
+                    close.operation_id,
+                    close.review_commitment,
+                  );
+                  await finish("Agent channel close advanced safely.");
+                })
+              }
+            >
+              Confirm exact close
+            </button>
+          ) : close.phase !== "confirmed" ? (
+            <button
+              type="button"
+              className="agent-primary"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  await agentWalletApi.recoverFastPayChannelClose(overview.wallet_id);
+                  await finish("Agent close recovery checked the exact saved signature and ID.");
+                })
+              }
+            >
+              Check or recover close
+            </button>
+          ) : (
+            <p>The Agent Fast Pay channel is closed. Its signed history remains available.</p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * How far the chain has come against the count that actually gates the exit.
+ *
+ * Six confirmations, counted inclusively, the open block being the first. That
+ * is the same rule three times over in the core: the constant at
+ * service/l2.rs:50 is only ever used as `REQUIRED_OPEN_CONFIRMATIONS - 1`, at
+ * l2.rs:1058 where a binding is made and l2.rs:1108 where it is re-validated on
+ * every load, and the bare `open_height.saturating_add(5)` at
+ * channel_setup.rs:634 is that same arithmetic with the subtraction already
+ * done. The voucher the exit button takes cannot be issued without an active
+ * binding (channel_voucher.rs:125), and the only producer of one sits past that
+ * check. So the bar fills at open_height + 5 and nowhere else.
+ *
+ * It draws nothing at all when the chain height is not known. `overview.node`
+ * is null whenever the probe returned no snapshot, and a bar that treats an
+ * absent height as zero would report a channel sliding backwards.
+ */
+function ChannelOpenConfirmations({ progress }: { progress: ChannelOpenProgress }) {
+  if (progress.kind !== "counting") {
+    return (
+      <p className="agent-wait-count">
+        <span>
+          Confirmations <strong>not known</strong>
+        </span>
+        <span>This wallet cannot reach a node right now.</span>
+      </p>
+    );
+  }
+  return (
+    <div className="agent-wait">
+      <p className="agent-wait-count">
+        <span>
+          <strong>
+            {progress.confirmations} of {progress.required}
+          </strong>{" "}
+          confirmations
+        </span>
+        <span>
+          Chain is at <strong>{progress.currentHeight}</strong>, opened at{" "}
+          <strong>{progress.openHeight}</strong>
+        </span>
+      </p>
+      <div
+        className="agent-wait-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={progress.required}
+        aria-valuenow={progress.confirmations}
+        aria-label="Confirmations on the channel open"
+      >
+        <div className="agent-wait-fill" style={{ width: `${progress.percent}%` }} />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The owner's exit from the channel, and an honest account of where it came
+ * from.
+ *
+ * Two things have to come across, and neither of them is "you are safe". The
+ * first is what the owner actually holds: a finished transaction that pays them
+ * a stated amount and that their own node will accept without the hub. The
+ * second is that the hub had to sign it, once, and could have said no.
+ */
+function ChannelExit({
+  overview,
+  busy,
+  run,
+  finish,
+}: {
+  overview: AgentWalletOverview;
+  busy: boolean;
+  run: (work: () => Promise<void>) => Promise<void>;
+  finish: (message: string) => Promise<void>;
+}) {
+  const voucher = overview.l2_channel_close_voucher;
+  const held = voucher?.phase === "held" || voucher?.phase === "broadcast";
+
+  if (!voucher || !held) {
+    return (
+      <div className="agent-subpanel">
+        <h3>Your way out</h3>
+        <p className="agent-warning" role="status">
+          You do not hold a signed exit for this channel yet. Until you do, this wallet will not
+          make Fast Pay payments, because the deposit is on chain and the only way to get it back
+          is to ask the hub to close the channel.
+        </p>
+        <p>
+          The exit is a closing transaction the hub has to countersign. It can only be signed after
+          the channel exists, so there is a short gap between the deposit landing and the exit
+          arriving. This is that gap.
+        </p>
+        <button
+          type="button"
+          className="agent-primary"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await agentWalletApi.takeFastPayChannelVoucher(overview.wallet_id);
+              await finish("The hub countersigned your exit. Fast Pay is now available.");
+            })
+          }
+        >
+          Ask the hub for the exit
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="agent-subpanel">
+      <h3>Your way out</h3>
+      <div className="agent-stats-row">
+        <span>
+          Pays you back <strong>{formatUnits(voucher.refund_units)}</strong>
+        </span>
+        <span>
+          Costs you to send <strong>{formatUnits(voucher.network_fee_units)}</strong>
+        </span>
+        <span>
+          Status <strong>{voucher.phase === "broadcast" ? "sent" : "in hand"}</strong>
+        </span>
+      </div>
+      <p>
+        You are holding a finished closing transaction for this channel, signed by you and by the
+        hub. Sending it returns {formatUnits(voucher.refund_units)} to your wallet. It does not
+        expire, and you can send it from your own node whenever you want. The hub is not involved
+        in sending it and cannot stop it.
+      </p>
+      <p className="agent-warning" role="status">
+        The hub had to sign this once, when the channel opened, and it could have refused. Nothing
+        in Hacash could have forced it to sign. What you hold removes your need for the hub from
+        here on; it does not mean you never needed it.
+      </p>
+      {voucher.transaction_hash ? (
+        <p className="agent-exact-address">{voucher.transaction_hash}</p>
+      ) : null}
+      {voucher.phase === "broadcast" && voucher.broadcast ? (
+        <p>
+          Sent from {voucher.broadcast.node_url}. Once it is in a block the channel is closed and
+          the deposit is back in your wallet.
+        </p>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              await agentWalletApi.broadcastFastPayChannelVoucher(overview.wallet_id);
+              await finish("Your exit was sent from your own node. The hub was not involved.");
+            })
+          }
+        >
+          Send my exit without the hub
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -1101,7 +1985,9 @@ function NodeHealthPanel({
         <div><dt>Network</dt><dd>{node?.network_kind ?? "Identity unavailable"}</dd></div>
         <div><dt>Node identity</dt><dd>{overview.node_status === "verified" ? "Verified" : "Failed closed"}</dd></div>
         <div><dt>Agent payments</dt><dd>{paymentBlockers.length === 0 ? "Ready" : "Blocked"}</dd></div>
-        <div><dt>Mobile companion</dt><dd>{overview.mobile_witness_ready ? "Read-only rollback witness paired" : "Read-only rollback witness required"}</dd></div>
+        {/* "Required" is only true when the owner asked for it. Saying it
+            otherwise reported a wallet as missing something it does not use. */}
+        <div><dt>Mobile companion</dt><dd>{overview.mobile_witness_ready ? "Read-only rollback witness paired" : overview.rollback_witness_required ? "Read-only rollback witness required" : "Not used by this wallet"}</dd></div>
       </dl>
       <details className="agent-advanced-details">
         <summary>Node details</summary>

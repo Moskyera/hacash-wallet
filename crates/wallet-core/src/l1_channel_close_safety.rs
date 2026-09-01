@@ -1,0 +1,1846 @@
+//! Authenticated Personal Wallet recovery state for a Hub-coordinated L1 close.
+//!
+//! The exact user-signed Hub request is persisted before network submission.
+//! If a crash happens after the pre-sign marker but before those exact bytes are
+//! durable, the operation remains permanently recovery-required and is never
+//! signed again.
+
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+
+use fs2::FileExt;
+use hkdf::Hkdf;
+use l2_fast_pay_hub::journal::{
+    AuthenticatedJournal, JournalBinding, JournalEvent, JournalHead, JournalOperationType,
+    JournalPhase,
+};
+use l2_fast_pay_hub::l1_channel::MAX_CHANNEL_TRANSACTION_BYTES;
+use l2_fast_pay_hub::l1_channel_close::{
+    L1_CHANNEL_CLOSE_VOUCHER_STATUS, L1ChannelCloseRequest, L1ChannelCloseResponse,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::account::WalletAccount;
+use crate::error::{WalletError, WalletResult};
+use crate::l2_storage_scope::validate_scoped_l2_storage;
+use crate::paths::{secure_write, wallet_data_root};
+
+const KEY_DOMAIN: &[u8] = b"HPAY/L1/CHANNEL-CLOSE/JOURNAL/AUTH/V1";
+
+/// What a person is told when this wallet declines to open a mainnet Fast Pay
+/// channel, because it has no way to leave one.
+///
+/// The three close paths this wallet owns all hand the transaction to the Hub
+/// to countersign and broadcast. There is no fourth. The close voucher, the
+/// one thing that produces bytes an owner can broadcast alone, has never been
+/// wired to this wallet: `ChannelCloseStatus::VoucherHeld` above would accept
+/// and store one for the personal scope today, and nothing calls it with one.
+///
+/// So this refusal is not a new limitation. It is the existing limitation,
+/// enforced at the moment it can still be acted on. The consent checkbox
+/// already told a person that a channel here can only be closed if the Hub
+/// co-signs; what it did not do was stop them.
+///
+/// The sentence names where the exit does exist, because "no" without a
+/// destination reads as a broken build. It also says plainly what that rail
+/// is: a pilot in which the Hub countersigns once because it chose to, and
+/// nothing compels it. The word for that is not "trustless" and must never be.
+/// A note on what this sentence used to say, so it is not written back.
+///
+/// It located the exit "behind its own consent and its own build flag". Both
+/// halves were true and together they were misleading in the direction that
+/// costs a person a day of work. The build flag is ON in every official
+/// desktop release: the release workflow passes
+/// `agent-wallet-bounded-mainnet-pilot`, the commands are compiled, registered
+/// and in the desktop ACL, and a real button on the Agent screen presses them.
+/// So the flag is the one gate the reader has already passed, and naming it
+/// made the cheapest gate sound like the expensive one while saying nothing
+/// about the four that actually stop them:
+///
+///   1. it is a DIFFERENT WALLET holding DIFFERENT money, so the voucher does
+///      nothing for the channel this wallet was just refused,
+///   2. its mainnet consent can only be given at the instant that wallet is
+///      created and never afterwards,
+///   3. it signs only against a Hacash full node the person runs themselves,
+///      because no public node satisfies the binding, and
+///   4. it opens a channel only against a Fast Pay Hub in the bounded pilot
+///      profile with that new address on the Hub's own allowed list, which in
+///      practice means running the Hub too.
+///
+/// The rewrite names those instead. It also keeps saying that the voucher is
+/// asked for only AFTER the deposit confirms, because that is the one thing
+/// the destination does not fix, and a person deciding whether the trip is
+/// worth it deserves to know the destination has a smaller version of the same
+/// hole.
+///
+/// A second note, on the clause added when the Agent rail's mainnet gate was
+/// scoped. Until then this sentence pointed at a destination that did not
+/// actually work: `require_exact_node_binding` in agent-wallet-core demanded
+/// `funding_confirmed`, which is a local pilot signal a real mainnet node
+/// always reports false, so on mainnet the Agent Wallet could not take the
+/// voucher either. That term is now scoped to the pilot rail and the take and
+/// the self-broadcast really do work on mainnet.
+///
+/// A third note, correcting the second before it shipped. The second note
+/// claimed the Agent Wallet's COOPERATIVE close stays refused on mainnet
+/// because `require_mainnet_hard_guarantees` denies when no Hub can show
+/// trustless finality. That is false, and it is worth recording why so it is
+/// not reasoned back into place.
+///
+/// `require_channel_binding_guarantees` in `l2_hub.rs` branches on the policy
+/// the OWNER chose, not on the document. Under `TrustlessOnly` it does demand
+/// `trustless_finality` and `unilateral_l1_enforceable`. Under
+/// `TrustedBoundedPilot` it demands only that the Hub publishes the
+/// `mainnet-bounded-pilot` profile with `trusted_bounded_pilot` set. And
+/// `new_for_wallet_policy` selects `TrustedBoundedPilot` exactly when the mode
+/// is mainnet and the owner accepted the pilot consent, which is the only way
+/// to be on this rail at all. So against a bounded pilot Hub that answers, the
+/// co-signed close is not refused.
+///
+/// Which makes the voucher's value narrower and easier to say honestly: it is
+/// what protects the deposit when the Hub STOPS answering. The sentence now
+/// says only that, and says nothing about whether a co-signed close succeeds,
+/// because that depends on a Hub this refusal has never contacted. Nobody may
+/// compress any of it into "the mainnet exit works now".
+pub const MAINNET_CHANNEL_OPEN_WITHOUT_EXIT_REFUSAL: &str = concat!(
+    "This wallet will not open a mainnet Fast Pay channel, because it has no way out of one. ",
+    "Every close it can build has to be countersigned and broadcast by the Hub, and this wallet ",
+    "cannot take a close voucher, which is the only thing that would let you leave on your own. ",
+    "If the Hub stopped answering, refused to sign, or disappeared, the deposit would stay locked ",
+    "and nobody could release it for you. ",
+    "A close voucher does exist in this build, but not for this wallet and not for money you hold ",
+    "here. It belongs to the Agent Wallet, which is a separate wallet with its own address, its ",
+    "own passphrase and its own funds, and it is a trusted pilot: the Hub countersigns once ",
+    "because it chose to, and nothing compels it. ",
+    "Reaching it is not a setting you turn on. You would have to create that separate wallet and ",
+    "accept its mainnet terms at the moment you create it, because that consent cannot be given ",
+    "afterwards; send money to its new address on chain; and run both a Hacash full node and a ",
+    "Fast Pay Hub yourself, because no public node satisfies what it signs against and a Hub run ",
+    "by anyone else is refused before a deposit is built. Even there, the voucher is only asked ",
+    "for after your deposit has already confirmed on chain, so that rail carries a shorter ",
+    "version of the same gap this refusal is protecting you from. ",
+    "And be exact about what that voucher is. Once you hold one, you can broadcast it yourself, ",
+    "and a Hub that later goes quiet cannot keep your deposit. That is the whole of what it buys. ",
+    "It has to be taken while the Hub is still answering, so it is something you arrange before ",
+    "you need it rather than something you can fall back on afterwards. ",
+    "It is not part of this wallet and it is not on the phone build. ",
+    "Nothing about an existing channel changes. If you already have one open, closing it through ",
+    "the Hub still works exactly as before, and Fast Pay on testnet is untouched."
+);
+
+/// Refuse to open a Fast Pay channel this wallet could not leave.
+///
+/// Scoped to mainnet, which is the same scope the consent checkbox is scoped
+/// to, and evaluated before anything is previewed, quoted, prompted for or
+/// signed. Returning `Ok(())` on testnet is deliberate: the stranding this
+/// guards against costs real money only on mainnet, and the pilot rail this
+/// mechanism was proven on is a test chain.
+///
+/// This is a gate, not a preference. There is no override and no consent that
+/// opens it: the consent checkbox is already the "I accept there is no exit"
+/// toggle, and its existence is why a funded unleavable channel was reachable.
+/// Adding a second one would put the hole back.
+pub fn refuse_mainnet_channel_open_without_an_exit(network_mode: &str) -> WalletResult<()> {
+    if network_mode == "mainnet" {
+        return Err(WalletError::Policy(
+            MAINNET_CHANNEL_OPEN_WITHOUT_EXIT_REFUSAL.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Narrow authority used only to derive an authenticated channel-close journal
+/// key. Implementations must not expose the wallet secret or generic signing.
+pub trait ChannelCloseJournalKeyProvider {
+    fn derive_channel_close_journal_key(
+        &self,
+        wallet_scope: &str,
+        hub_identity: &str,
+        channel_id: &str,
+    ) -> WalletResult<Zeroizing<[u8; 32]>>;
+}
+
+impl ChannelCloseJournalKeyProvider for WalletAccount {
+    fn derive_channel_close_journal_key(
+        &self,
+        wallet_scope: &str,
+        hub_identity: &str,
+        channel_id: &str,
+    ) -> WalletResult<Zeroizing<[u8; 32]>> {
+        derive_key(self, wallet_scope, hub_identity, channel_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelCloseStatus {
+    PersistedBeforeSigning,
+    SignatureMayExist,
+    UserSigned,
+    HubSubmitted,
+    Confirmed,
+    RecoveryRequired,
+    /// The Hub countersigned a delta-zero close and handed the exact bytes
+    /// back instead of broadcasting them. The channel is still open and still
+    /// payable; nothing has reached a chain.
+    ///
+    /// This is not a trustless exit and must never be described as one. The
+    /// Hub chose to sign once and could have refused, in which case the
+    /// deposit would have been stuck. Once these bytes exist the Hub carries
+    /// the whole exposure, because they refund the balances recorded at open
+    /// no matter how far the channel is later spent down. That is acceptable
+    /// only in this bounded pilot, where the owner runs the Hub.
+    VoucherHeld,
+    /// The Hub released a close freeze it proved it had never signed, and this
+    /// wallet accepted that release.
+    ///
+    /// The close store had no terminal concept at all before this: `grep -c
+    /// is_terminal` on this file returned zero, there was no `cancel_*` and no
+    /// `abandon_*`, and `begin_or_resume` refused every close whose intent was
+    /// not byte-identical to the stuck one - which no second attempt can be,
+    /// because `prepare_channel_close` mints a fresh operation id and fresh
+    /// timestamps every time. One interrupted signature took the channel's
+    /// cooperative exit away for the life of the wallet.
+    ///
+    /// Terminal. The Hub only publishes `cancelled_before_signing` when its own
+    /// durable record carries no signed bytes, no signed-transaction commitment
+    /// and no confirmed height, so nothing was broadcast and nothing can land.
+    /// A fresh close is free to start.
+    CancelledBeforeSigning,
+}
+
+impl ChannelCloseStatus {
+    /// Whether this operation is finished with, one way or another.
+    ///
+    /// `VoucherHeld` counts: the owner is holding countersigned close bytes
+    /// they can broadcast themselves, so that operation is done even though the
+    /// channel is still open.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Confirmed | Self::VoucherHeld | Self::CancelledBeforeSigning
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelCloseOperation {
+    pub operation_id: String,
+    pub idempotency_key: String,
+    pub wallet_scope: String,
+    pub hub_identity: String,
+    pub channel_id: String,
+    pub reuse_version: u64,
+    pub open_height: u64,
+    pub user_address: String,
+    pub unsigned_transaction_hex: String,
+    pub created_unix: u64,
+    pub expires_unix: u64,
+    pub status: ChannelCloseStatus,
+    pub request: Option<L1ChannelCloseRequest>,
+    pub response: Option<L1ChannelCloseResponse>,
+    pub updated_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ChannelCloseState {
+    schema_version: u32,
+    journal_sequence: u64,
+    journal_head: String,
+    state_commitment: String,
+    operation: Option<ChannelCloseOperation>,
+}
+
+pub struct BeginChannelClose<'a> {
+    pub operation_id: &'a str,
+    pub idempotency_key: &'a str,
+    pub user_address: &'a str,
+    pub reuse_version: u64,
+    pub open_height: u64,
+    pub unsigned_transaction_hex: &'a str,
+    pub created_unix: u64,
+    pub expires_unix: u64,
+}
+
+pub struct ChannelCloseSafety {
+    path: PathBuf,
+    wallet_scope: String,
+    hub_identity: String,
+    channel_id: String,
+    journal: AuthenticatedJournal,
+    state: ChannelCloseState,
+    _lock: fs::File,
+}
+
+impl ChannelCloseSafety {
+    pub fn open(
+        account: &WalletAccount,
+        hub_identity: &str,
+        channel_id: &str,
+    ) -> WalletResult<Self> {
+        let wallet_scope = format!("personal:{}", account.address());
+        Self::open_scoped(
+            account,
+            wallet_data_root().join("l2").join("personal"),
+            &wallet_scope,
+            hub_identity,
+            channel_id,
+        )
+    }
+
+    pub fn open_scoped(
+        key_provider: &impl ChannelCloseJournalKeyProvider,
+        trusted_l2_root: impl AsRef<Path>,
+        wallet_scope: &str,
+        hub_identity: &str,
+        channel_id: &str,
+    ) -> WalletResult<Self> {
+        let trusted_l2_root = trusted_l2_root.as_ref();
+        validate_scoped_l2_storage(trusted_l2_root, wallet_scope)?;
+        let directory =
+            scoped_safety_directory(trusted_l2_root, wallet_scope, hub_identity, channel_id);
+        fs::create_dir_all(&directory).map_err(io_error)?;
+        let path = directory.join("channel-close.json");
+        let lock = acquire_lock(&directory.join("channel-close.lock"))?;
+        let mut key = key_provider.derive_channel_close_journal_key(
+            wallet_scope,
+            hub_identity,
+            channel_id,
+        )?;
+        let journal = AuthenticatedJournal::open(
+            directory.join("channel-close.journal.jsonl"),
+            &key[..],
+            JournalBinding {
+                wallet_scope: wallet_scope.to_owned(),
+                hub_or_provider_identity: hub_identity.to_owned(),
+                channel_id: Some(channel_id.to_owned()),
+            },
+        )
+        .map_err(hub_error)?;
+        key.zeroize();
+        let mut state = load_state(&path)?;
+        initialize_state(
+            &path,
+            &mut state,
+            &journal,
+            wallet_scope,
+            hub_identity,
+            channel_id,
+        )?;
+        Ok(Self {
+            path,
+            wallet_scope: wallet_scope.to_owned(),
+            hub_identity: hub_identity.to_owned(),
+            channel_id: channel_id.to_owned(),
+            journal,
+            state,
+            _lock: lock,
+        })
+    }
+
+    pub fn begin_or_resume(
+        &mut self,
+        input: BeginChannelClose<'_>,
+    ) -> WalletResult<ChannelCloseOperation> {
+        if let Some(existing) = self.state.operation.clone() {
+            if same_intent(
+                &existing,
+                &input,
+                &self.wallet_scope,
+                &self.hub_identity,
+                &self.channel_id,
+            ) {
+                return Ok(existing);
+            }
+            if existing.status == ChannelCloseStatus::CancelledBeforeSigning {
+                // The Hub proved this freeze was never signed and released it,
+                // so the channel is unfrozen and a fresh close may start. This
+                // is the store's only way out; without it one interrupted
+                // signature ended cooperative close for this channel forever.
+            } else {
+                return Err(WalletError::L2(
+                    "RecoveryRequired: a different channel-close operation is unresolved".into(),
+                ));
+            }
+        }
+        if input.reuse_version == 0
+            || input.open_height == 0
+            || input.created_unix == 0
+            || input.expires_unix <= input.created_unix
+        {
+            return Err(WalletError::L2(
+                "invalid channel-close recovery binding".into(),
+            ));
+        }
+        let operation = ChannelCloseOperation {
+            operation_id: input.operation_id.to_owned(),
+            idempotency_key: input.idempotency_key.to_owned(),
+            wallet_scope: self.wallet_scope.clone(),
+            hub_identity: self.hub_identity.clone(),
+            channel_id: self.channel_id.clone(),
+            reuse_version: input.reuse_version,
+            open_height: input.open_height,
+            user_address: input.user_address.to_owned(),
+            unsigned_transaction_hex: input.unsigned_transaction_hex.to_owned(),
+            created_unix: input.created_unix,
+            expires_unix: input.expires_unix,
+            status: ChannelCloseStatus::PersistedBeforeSigning,
+            request: None,
+            response: None,
+            updated_unix: input.created_unix,
+        };
+        self.transition(
+            operation.clone(),
+            JournalPhase::L1CloseFreezeIntentPersisted,
+        )?;
+        Ok(operation)
+    }
+
+    pub fn mark_signature_may_exist(&mut self) -> WalletResult<ChannelCloseOperation> {
+        let mut operation = self.operation()?;
+        if operation.status == ChannelCloseStatus::SignatureMayExist {
+            return Ok(operation);
+        }
+        if operation.status != ChannelCloseStatus::PersistedBeforeSigning {
+            return Err(WalletError::L2(
+                "RecoveryRequired: channel-close signing state is not fresh".into(),
+            ));
+        }
+        operation.status = ChannelCloseStatus::SignatureMayExist;
+        operation.updated_unix = unix_timestamp();
+        self.transition(operation.clone(), JournalPhase::L1CloseSignatureMayExist)?;
+        Ok(operation)
+    }
+
+    pub fn persist_user_signed(
+        &mut self,
+        request: &L1ChannelCloseRequest,
+    ) -> WalletResult<ChannelCloseOperation> {
+        let mut operation = self.operation()?;
+        require_request_binding(&operation, request)?;
+        if let Some(existing) = &operation.request {
+            if existing != request {
+                return Err(WalletError::L2(
+                    "idempotency conflict: channel-close signed bytes changed".into(),
+                ));
+            }
+            return Ok(operation);
+        }
+        if operation.status != ChannelCloseStatus::SignatureMayExist {
+            return Err(WalletError::L2(
+                "RecoveryRequired: exact close bytes were not preceded by the durable signing marker"
+                    .into(),
+            ));
+        }
+        operation.request = Some(request.clone());
+        operation.status = ChannelCloseStatus::UserSigned;
+        operation.updated_unix = unix_timestamp();
+        self.transition(operation.clone(), JournalPhase::L1SignatureProduced)?;
+        Ok(operation)
+    }
+
+    pub fn validate_hub_response(&self, response: &L1ChannelCloseResponse) -> WalletResult<()> {
+        validate_hub_response(&self.operation()?, response)
+    }
+    pub fn persist_hub_response(
+        &mut self,
+        response: &L1ChannelCloseResponse,
+    ) -> WalletResult<ChannelCloseOperation> {
+        let mut operation = self.operation()?;
+        validate_hub_response(&operation, response)?;
+        let next_status =
+            durable_status_for_hub_status(response.status.as_str()).ok_or_else(|| {
+                WalletError::L2(format!(
+                    "Hub returned an unsupported channel-close status: {}",
+                    response.status
+                ))
+            })?;
+        if !can_accept_hub_status(operation.status, next_status) {
+            return Err(WalletError::L2(format!(
+                "channel-close state cannot move backward from {:?} to {:?}",
+                operation.status, next_status
+            )));
+        }
+        if let Some(existing) = &operation.response
+            && operation.status == ChannelCloseStatus::Confirmed
+            && existing != response
+        {
+            return Err(WalletError::L2(
+                "idempotency conflict: confirmed channel-close response changed".into(),
+            ));
+        }
+        if operation.status == ChannelCloseStatus::Confirmed {
+            return Ok(operation);
+        }
+        operation.response = Some(response.clone());
+        operation.status = next_status;
+        operation.updated_unix = unix_timestamp();
+        let phase = match operation.status {
+            ChannelCloseStatus::Confirmed => JournalPhase::L1CloseConfirmed,
+            ChannelCloseStatus::HubSubmitted => JournalPhase::L1CloseSubmitted,
+            ChannelCloseStatus::RecoveryRequired => JournalPhase::L1CloseRecoveryRequired,
+            ChannelCloseStatus::VoucherHeld => JournalPhase::L1CloseVoucherIssued,
+            ChannelCloseStatus::CancelledBeforeSigning => JournalPhase::RecoveryCompleted,
+            _ => unreachable!(),
+        };
+        self.transition(operation.clone(), phase)?;
+        Ok(operation)
+    }
+    /// Release a close the Hub has never heard of.
+    ///
+    /// # What this is for
+    ///
+    /// The one state this store could reach and never leave: `begin_or_resume`
+    /// and `mark_signature_may_exist` are two durable writes with the signing
+    /// prompt between them, so a cancelled prompt, a wrong passphrase, a locked
+    /// session or a crash leaves `SignatureMayExist` with `request == None`.
+    /// `recover_channel_close` refuses that record before it reaches the Hub
+    /// ("exact user-signed bytes are unavailable"), and every later close is
+    /// refused because no second attempt can match the stuck intent. The owner
+    /// loses cooperative close on that channel, and the voucher with it,
+    /// permanently.
+    ///
+    /// # What must hold, all of it, checked here
+    ///
+    /// * This wallet never captured a request. `request.is_none()`. The POST
+    ///   body *is* the request and `persist_user_signed` runs before the POST,
+    ///   so a record with no request never left this machine.
+    /// * The Hub never answered. `response.is_none()`.
+    /// * The store never advanced past the signing marker.
+    /// * The caller has asked the Hub and been told, by a Hub that answered,
+    ///   that it holds no record of this operation. An unreachable Hub proves
+    ///   nothing and must not reach this call.
+    ///
+    /// # Why this is safe even if a signature really was produced
+    ///
+    /// A cooperative close reaches a chain only by the Hub countersigning it
+    /// and broadcasting it. A user signature that was never sent cannot be
+    /// countersigned by anybody, and the Hub's own record says it never was.
+    /// If that answer is ever contradicted - the Hub does have the operation
+    /// after all - the release is taken back: the next close goes through
+    /// `require_channel_can_freeze` and the Hub refuses a second close for a
+    /// channel it already owns.
+    pub fn release_close_the_hub_never_received(&mut self) -> WalletResult<()> {
+        let mut operation = self.operation()?;
+        if operation.status == ChannelCloseStatus::CancelledBeforeSigning {
+            // A previous run got this far and died before the caller finished.
+            return Ok(());
+        }
+        if operation.request.is_some()
+            || operation.response.is_some()
+            || !matches!(
+                operation.status,
+                ChannelCloseStatus::PersistedBeforeSigning
+                    | ChannelCloseStatus::SignatureMayExist
+                    | ChannelCloseStatus::RecoveryRequired
+            )
+        {
+            return Err(WalletError::L2(
+                "only a channel-close that never produced exact bytes and never reached the Hub may be released"
+                    .into(),
+            ));
+        }
+        operation.status = ChannelCloseStatus::CancelledBeforeSigning;
+        operation.updated_unix = unix_timestamp();
+        self.transition(operation, JournalPhase::RecoveryCompleted)
+    }
+
+    pub fn mark_recovery_required(&mut self) -> WalletResult<()> {
+        let mut operation = self.operation()?;
+        if operation.status == ChannelCloseStatus::RecoveryRequired {
+            return Ok(());
+        }
+        if operation.status == ChannelCloseStatus::Confirmed {
+            return Err(WalletError::L2(
+                "confirmed channel-close recovery state is terminal".into(),
+            ));
+        }
+        // A verified voucher in hand is a success, not a failure to recover
+        // from. Overwriting it would throw away the owner's only route out of
+        // the channel that does not need the Hub.
+        if operation.status == ChannelCloseStatus::VoucherHeld {
+            return Err(WalletError::L2(
+                "a verified close voucher is terminal and is never replaced".into(),
+            ));
+        }
+        if operation.status == ChannelCloseStatus::CancelledBeforeSigning {
+            return Err(WalletError::L2(
+                "a released channel-close is terminal and is never replaced".into(),
+            ));
+        }
+        operation.status = ChannelCloseStatus::RecoveryRequired;
+        operation.updated_unix = unix_timestamp();
+        self.transition(operation, JournalPhase::L1CloseRecoveryRequired)
+    }
+
+    pub fn operation(&self) -> WalletResult<ChannelCloseOperation> {
+        self.state
+            .operation
+            .clone()
+            .ok_or_else(|| WalletError::L2("channel-close recovery operation is missing".into()))
+    }
+
+    fn transition(
+        &mut self,
+        operation: ChannelCloseOperation,
+        phase: JournalPhase,
+    ) -> WalletResult<()> {
+        let previous = state_commitment(&self.state)?;
+        let mut next = self.state.clone();
+        next.schema_version = 1;
+        next.operation = Some(operation.clone());
+        let new_commitment = state_commitment(&next)?;
+        let request_commitment = operation
+            .request
+            .as_ref()
+            .map(l2_fast_pay_hub::l1_channel_close::close_request_commitment)
+            .transpose()
+            .map_err(hub_error)?
+            .unwrap_or_else(|| {
+                hex::encode(Sha256::digest(
+                    operation.unsigned_transaction_hex.as_bytes(),
+                ))
+            });
+        let record = self
+            .journal
+            .append(JournalEvent {
+                wallet_scope: operation.wallet_scope.clone(),
+                hub_or_provider_identity: operation.hub_identity.clone(),
+                channel_id: operation.channel_id.clone(),
+                channel_reuse_version: operation.reuse_version,
+                operation_id: operation.operation_id.clone(),
+                operation_type: JournalOperationType::L1ChannelClose,
+                operation_phase: phase,
+                amount_units: 0,
+                sender: operation.user_address.clone(),
+                recipient: operation.hub_identity.clone(),
+                previous_state_commitment: previous,
+                new_state_commitment: new_commitment.clone(),
+                idempotency_key: operation.idempotency_key.clone(),
+                request_commitment,
+                expected_bill_number: None,
+                unsigned_state_commitment: operation
+                    .request
+                    .as_ref()
+                    .map(|request| request.partial_transaction_commitment.clone()),
+                created_at: operation.updated_unix,
+            })
+            .map_err(hub_error)?;
+        next.journal_sequence = record.entry_sequence;
+        next.journal_head = record.entry_hash.clone();
+        next.state_commitment = new_commitment.clone();
+        save_state(&self.path, &next)?;
+        self.journal
+            .write_checkpoint(&JournalHead {
+                sequence: record.entry_sequence,
+                entry_hash: record.entry_hash,
+                state_commitment: new_commitment,
+            })
+            .map_err(hub_error)?;
+        self.state = next;
+        Ok(())
+    }
+}
+
+fn validate_hub_response(
+    operation: &ChannelCloseOperation,
+    response: &L1ChannelCloseResponse,
+) -> WalletResult<()> {
+    if response.schema != l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA
+        || response.operation_id != operation.operation_id
+        || !response
+            .channel_id
+            .eq_ignore_ascii_case(&operation.channel_id)
+        || response.reuse_version != operation.reuse_version
+        || response.open_height != operation.open_height
+    {
+        return Err(WalletError::L2(
+            "Hub channel-close response changed the durable operation".into(),
+        ));
+    }
+    if let Some(hash) = response.transaction_hash.as_deref() {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(WalletError::L2(
+                "Hub channel-close response contains an invalid transaction hash".into(),
+            ));
+        }
+        let request = operation.request.as_ref().ok_or_else(|| {
+            WalletError::L2("exact user-signed close request is unavailable".into())
+        })?;
+        let raw = hex::decode(&request.partial_transaction_hex)
+            .map_err(|error| WalletError::Transaction(error.to_string()))?;
+        let (transaction, consumed) = protocol::transaction::transaction_create(&raw)
+            .map_err(|error| WalletError::Transaction(error.to_string()))?;
+        if consumed != raw.len()
+            || !hex::encode(transaction.hash().as_bytes()).eq_ignore_ascii_case(hash)
+        {
+            return Err(WalletError::L2(
+                "Hub channel-close transaction hash differs from the exact signed request".into(),
+            ));
+        }
+    } else if matches!(
+        response.status.as_str(),
+        "submitted" | "confirmed_closed" | "retired" | L1_CHANNEL_CLOSE_VOUCHER_STATUS
+    ) {
+        return Err(WalletError::L2(
+            "Hub channel-close response is missing its transaction hash".into(),
+        ));
+    }
+    validate_voucher_fields(operation, response)
+}
+
+/// Re-prove a voucher response from the bytes, never from the Hub's word.
+///
+/// The Hub already ran this exact check before it signed
+/// (`l2_fast_pay_hub::l1_channel_close::validate_and_cosign_channel_close`).
+/// Repeating it here is deliberate: the wallet is about to store these bytes
+/// as the owner's only route out of the channel without the Hub, so a claim by
+/// the Hub that they are valid is worth nothing. An unverified voucher is
+/// never stored.
+fn validate_voucher_fields(
+    operation: &ChannelCloseOperation,
+    response: &L1ChannelCloseResponse,
+) -> WalletResult<()> {
+    if response.status != L1_CHANNEL_CLOSE_VOUCHER_STATUS {
+        // Only the voucher path returns bytes. On any other status the Hub
+        // owns the broadcast, so a second copy of a live close arriving here
+        // is not something to store quietly.
+        if response.signed_transaction_hex.is_some()
+            || response.signed_transaction_commitment.is_some()
+        {
+            return Err(WalletError::L2(
+                "Hub returned signed close bytes on a status that must never carry them".into(),
+            ));
+        }
+        return Ok(());
+    }
+    let request = operation.request.as_ref().ok_or_else(|| {
+        WalletError::L2(
+            "a close voucher cannot be verified without the exact user-signed request".into(),
+        )
+    })?;
+    let transaction_hash = response.transaction_hash.as_deref().ok_or_else(|| {
+        WalletError::L2("Hub close voucher is missing its transaction hash".into())
+    })?;
+    let signed_transaction_hex = response.signed_transaction_hex.as_deref().ok_or_else(|| {
+        WalletError::L2("Hub close voucher is missing its countersigned bytes".into())
+    })?;
+    let commitment = response
+        .signed_transaction_commitment
+        .as_deref()
+        .ok_or_else(|| {
+            WalletError::L2("Hub close voucher is missing its bytes commitment".into())
+        })?;
+    let verified = verify_channel_close_voucher_bytes(
+        signed_transaction_hex,
+        transaction_hash,
+        &operation.user_address,
+        &operation.hub_identity,
+        &operation.channel_id,
+        request.chain_id,
+    )?;
+    if !verified
+        .signed_transaction_commitment
+        .eq_ignore_ascii_case(commitment)
+    {
+        return Err(WalletError::L2(
+            "Hub close voucher commitment does not cover the returned bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The transaction hash of an encoded transaction, read from the bytes.
+///
+/// Exists so a caller can prove that a countersigned transaction is the one it
+/// authored: `fill_sign` adds a signature without changing `hash()`, so a
+/// voucher whose hash differs from the wallet's own partial bytes is a
+/// different transaction, whatever the Hub called it.
+pub fn transaction_hash_of_hex(transaction_hex: &str) -> WalletResult<String> {
+    let raw = hex::decode(transaction_hex)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    let (transaction, consumed) = protocol::transaction::transaction_create(&raw)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if consumed != raw.len() {
+        return Err(WalletError::L2(
+            "transaction bytes contain trailing data".into(),
+        ));
+    }
+    Ok(hex::encode(transaction.hash().as_bytes()))
+}
+
+/// What a verified delta-zero close voucher is, once the bytes have proved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedChannelCloseVoucher {
+    pub transaction_hash: String,
+    pub signed_transaction_commitment: String,
+}
+
+/// Prove that these exact bytes are a fully countersigned, delta-zero
+/// `[ChainAllow, ChannelClose]` for this exact channel, and nothing else.
+///
+/// Everything here is derived from the bytes themselves, so the caller depends
+/// on the Hub for the signature only, never for the claim about it. The two
+/// action topology is load bearing: a third Action 14 would move principal,
+/// and a delta-zero voucher must move none. `close_channel_default` then
+/// refunds the balances recorded at open, which for a zero-Hub-deposit channel
+/// is the whole deposit to the owner.
+pub fn verify_channel_close_voucher_bytes(
+    signed_transaction_hex: &str,
+    expected_transaction_hash: &str,
+    owner_address: &str,
+    hub_address: &str,
+    channel_id: &str,
+    chain_id: u32,
+) -> WalletResult<VerifiedChannelCloseVoucher> {
+    if owner_address.is_empty() || hub_address.is_empty() || owner_address == hub_address {
+        return Err(WalletError::L2(
+            "close voucher parties are missing or identical".into(),
+        ));
+    }
+    if expected_transaction_hash.len() != 64
+        || !expected_transaction_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(WalletError::L2(
+            "close voucher transaction hash is malformed".into(),
+        ));
+    }
+    let raw = hex::decode(signed_transaction_hex)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if raw.is_empty() || raw.len() > MAX_CHANNEL_TRANSACTION_BYTES {
+        return Err(WalletError::L2(
+            "close voucher bytes are empty or oversized".into(),
+        ));
+    }
+    let (transaction, consumed) = protocol::transaction::transaction_create(&raw)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if consumed != raw.len() {
+        return Err(WalletError::L2(
+            "close voucher bytes contain trailing data".into(),
+        ));
+    }
+    if transaction.ty() != 2 {
+        return Err(WalletError::L2(
+            "close voucher must be a Type 2 transaction".into(),
+        ));
+    }
+    let actions = transaction.actions();
+    if actions.len() != 2 || actions[0].kind() != 0x0411 || actions[1].kind() != 3 {
+        return Err(WalletError::L2(
+            "close voucher actions must be exactly [ChainAllow, ChannelClose]".into(),
+        ));
+    }
+    if actions
+        .iter()
+        .any(|action| protocol::action::HacFromToTrs::downcast(action).is_some())
+    {
+        return Err(WalletError::L2(
+            "close voucher carries a principal transfer and is not delta zero".into(),
+        ));
+    }
+    let guard = protocol::action::ChainAllow::downcast(&actions[0])
+        .ok_or_else(|| WalletError::L2("close voucher ChainAllow codec mismatch".into()))?;
+    let chains = guard.chains.as_list();
+    if chains.len() != 1 || chains[0].uint() != chain_id {
+        return Err(WalletError::L2(format!(
+            "close voucher must bind exactly chain {chain_id}"
+        )));
+    }
+    let close = mint::action::ChannelClose::downcast(&actions[1])
+        .ok_or_else(|| WalletError::L2("close voucher ChannelClose codec mismatch".into()))?;
+    if hex::encode(close.channel_id.as_bytes()) != channel_id.to_ascii_lowercase() {
+        return Err(WalletError::L2(
+            "close voucher names a different channel".into(),
+        ));
+    }
+    let owner = field::Address::from_readable(owner_address)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    let hub = field::Address::from_readable(hub_address)
+        .map_err(|error| WalletError::Transaction(error.to_string()))?;
+    if transaction.main() != owner {
+        return Err(WalletError::L2(
+            "close voucher fee payer is not the channel owner".into(),
+        ));
+    }
+    if !hex::encode(transaction.hash().as_bytes()).eq_ignore_ascii_case(expected_transaction_hash) {
+        return Err(WalletError::L2(
+            "close voucher bytes hash to a different transaction".into(),
+        ));
+    }
+    if transaction.signs().len() != 2 {
+        return Err(WalletError::L2(
+            "close voucher must carry exactly the two party signatures".into(),
+        ));
+    }
+    let signers: Vec<field::Address> = transaction
+        .signs()
+        .iter()
+        .map(|sign| field::Address::from(sys::Account::get_address_by_public_key(*sign.publickey)))
+        .collect();
+    if !signers.contains(&owner) || !signers.contains(&hub) {
+        return Err(WalletError::L2(
+            "close voucher signatures are not the owner and the Hub".into(),
+        ));
+    }
+    let owner_verified =
+        protocol::transaction::verify_target_signature(&owner, transaction.as_read())
+            .map_err(|error| WalletError::L2(error.to_string()))?;
+    let hub_verified = protocol::transaction::verify_target_signature(&hub, transaction.as_read())
+        .map_err(|error| WalletError::L2(error.to_string()))?;
+    if !owner_verified || !hub_verified {
+        return Err(WalletError::L2(
+            "close voucher is missing a verified party signature".into(),
+        ));
+    }
+    Ok(VerifiedChannelCloseVoucher {
+        transaction_hash: expected_transaction_hash.to_ascii_lowercase(),
+        signed_transaction_commitment: hex::encode(Sha256::digest(&raw)),
+    })
+}
+
+fn durable_status_for_hub_status(status: &str) -> Option<ChannelCloseStatus> {
+    match status {
+        "retired" => Some(ChannelCloseStatus::Confirmed),
+        "submitted" | "confirmed_closed" => Some(ChannelCloseStatus::HubSubmitted),
+        "recovery_required" => Some(ChannelCloseStatus::RecoveryRequired),
+        "cancelled_before_signing" => Some(ChannelCloseStatus::CancelledBeforeSigning),
+        L1_CHANNEL_CLOSE_VOUCHER_STATUS => Some(ChannelCloseStatus::VoucherHeld),
+        _ => None,
+    }
+}
+
+fn can_accept_hub_status(current: ChannelCloseStatus, next: ChannelCloseStatus) -> bool {
+    use ChannelCloseStatus::*;
+    match current {
+        Confirmed => next == Confirmed,
+        // Holding a voucher is its own terminal shape. The Hub broadcasts
+        // nothing on this path, so there is no later submission or
+        // confirmation for it to report, and a channel that has a voucher can
+        // never also be closed cooperatively.
+        VoucherHeld => next == VoucherHeld,
+        // Terminal, and the only status the Hub will never contradict: it is
+        // published only for a record the Hub proved carries no signature.
+        CancelledBeforeSigning => next == CancelledBeforeSigning,
+        PersistedBeforeSigning | SignatureMayExist | UserSigned => {
+            matches!(
+                next,
+                HubSubmitted | RecoveryRequired | Confirmed | VoucherHeld | CancelledBeforeSigning
+            )
+        }
+        // Once a close was submitted or has failed into recovery, a voucher
+        // for the same operation would be a second signed close.
+        // `CancelledBeforeSigning` is admitted from `RecoveryRequired` on
+        // purpose and is the release for a wallet that latched over a Hub or
+        // node outage: the Hub answering "I proved this was never signed" is
+        // evidence, not a guess, and it is the Hub's own durable record.
+        HubSubmitted | RecoveryRequired => {
+            matches!(
+                next,
+                HubSubmitted | RecoveryRequired | Confirmed | CancelledBeforeSigning
+            )
+        }
+    }
+}
+fn same_intent(
+    existing: &ChannelCloseOperation,
+    input: &BeginChannelClose<'_>,
+    wallet_scope: &str,
+    hub_identity: &str,
+    channel_id: &str,
+) -> bool {
+    existing.operation_id == input.operation_id
+        && existing.idempotency_key == input.idempotency_key
+        && existing.wallet_scope == wallet_scope
+        && existing.hub_identity == hub_identity
+        && existing.channel_id == channel_id
+        && existing.user_address == input.user_address
+        && existing.reuse_version == input.reuse_version
+        && existing.open_height == input.open_height
+        && existing.unsigned_transaction_hex == input.unsigned_transaction_hex
+        && existing.created_unix == input.created_unix
+        && existing.expires_unix == input.expires_unix
+}
+
+fn require_request_binding(
+    operation: &ChannelCloseOperation,
+    request: &L1ChannelCloseRequest,
+) -> WalletResult<()> {
+    if request.operation_id != operation.operation_id
+        || request.idempotency_key != operation.idempotency_key
+        || request.hub_address != operation.hub_identity
+        || request.user_address != operation.user_address
+        || !request
+            .channel_id
+            .eq_ignore_ascii_case(&operation.channel_id)
+        || request.reuse_version != operation.reuse_version
+        || request.open_height != operation.open_height
+        || request.created_unix != operation.created_unix
+        || request.expires_unix != operation.expires_unix
+    {
+        return Err(WalletError::L2(
+            "signed channel-close request does not match durable intent".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn scoped_safety_directory(
+    trusted_l2_root: &Path,
+    wallet_scope: &str,
+    hub_identity: &str,
+    channel_id: &str,
+) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(b"HPAY/L1/CHANNEL-CLOSE/STORE/V1");
+    hash_field(&mut digest, wallet_scope.as_bytes());
+    hash_field(&mut digest, hub_identity.as_bytes());
+    hash_field(&mut digest, channel_id.as_bytes());
+    trusted_l2_root
+        .join("channel-close")
+        .join(hex::encode(digest.finalize()))
+}
+
+fn derive_key(
+    account: &WalletAccount,
+    wallet_scope: &str,
+    hub_identity: &str,
+    channel_id: &str,
+) -> WalletResult<Zeroizing<[u8; 32]>> {
+    let mut secret = Zeroizing::new(account.inner().secret_key().serialize());
+    let mut salt = Sha256::new();
+    salt.update(KEY_DOMAIN);
+    hash_field(&mut salt, wallet_scope.as_bytes());
+    hash_field(&mut salt, hub_identity.as_bytes());
+    hash_field(&mut salt, channel_id.as_bytes());
+    let hkdf = Hkdf::<Sha256>::new(Some(&salt.finalize()), secret.as_slice());
+    let mut output = Zeroizing::new([0_u8; 32]);
+    hkdf.expand(KEY_DOMAIN, output.as_mut())
+        .map_err(|_| WalletError::L2("channel-close journal key derivation failed".into()))?;
+    secret.zeroize();
+    Ok(output)
+}
+
+fn initialize_state(
+    path: &Path,
+    state: &mut ChannelCloseState,
+    journal: &AuthenticatedJournal,
+    wallet_scope: &str,
+    hub_identity: &str,
+    channel_id: &str,
+) -> WalletResult<()> {
+    let had_state = state.schema_version != 0
+        || state.journal_sequence != 0
+        || !state.journal_head.is_empty()
+        || !state.state_commitment.is_empty();
+    let records = journal.verify().map_err(hub_error)?;
+    let checkpoint = journal.read_checkpoint().map_err(hub_error)?;
+    if records.is_empty() {
+        if had_state || checkpoint.is_some() {
+            return Err(WalletError::L2("JournalSequenceRollback".into()));
+        }
+        state.schema_version = 1;
+        let current = state_commitment(state)?;
+        let record = journal
+            .append(JournalEvent {
+                wallet_scope: wallet_scope.to_owned(),
+                hub_or_provider_identity: hub_identity.to_owned(),
+                channel_id: channel_id.to_owned(),
+                channel_reuse_version: 0,
+                operation_id: "personal-channel-close-store-v1".into(),
+                operation_type: JournalOperationType::Migration,
+                operation_phase: JournalPhase::RecoveryCompleted,
+                amount_units: 0,
+                sender: String::new(),
+                recipient: hub_identity.to_owned(),
+                previous_state_commitment: current.clone(),
+                new_state_commitment: current.clone(),
+                idempotency_key: "personal-channel-close-store-v1".into(),
+                request_commitment: current.clone(),
+                expected_bill_number: None,
+                unsigned_state_commitment: None,
+                created_at: unix_timestamp(),
+            })
+            .map_err(hub_error)?;
+        state.journal_sequence = record.entry_sequence;
+        state.journal_head = record.entry_hash.clone();
+        state.state_commitment = current.clone();
+        save_state(path, state)?;
+        journal
+            .write_checkpoint(&JournalHead {
+                sequence: record.entry_sequence,
+                entry_hash: record.entry_hash,
+                state_commitment: current,
+            })
+            .map_err(hub_error)?;
+        return Ok(());
+    }
+    if state.schema_version != 1 {
+        return Err(WalletError::L2(
+            "authenticated channel-close state schema is invalid".into(),
+        ));
+    }
+    let current = state_commitment(state)?;
+    let last = records
+        .last()
+        .ok_or_else(|| WalletError::L2("channel-close journal head is missing".into()))?;
+    if checkpoint
+        .as_ref()
+        .is_some_and(|checkpoint| checkpoint.sequence > last.entry_sequence)
+        || state.journal_sequence != last.entry_sequence
+        || state.journal_head != last.entry_hash
+        || state.state_commitment != current
+        || last.new_state_commitment != current
+    {
+        return Err(WalletError::L2(
+            "RecoveryRequired: channel-close journal and state differ".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn load_state(path: &Path) -> WalletResult<ChannelCloseState> {
+    if !path.exists() {
+        return Ok(ChannelCloseState::default());
+    }
+    if fs::metadata(path).map_err(io_error)?.len() > 4 * 1024 * 1024 {
+        return Err(WalletError::L2(
+            "channel-close recovery state is oversized".into(),
+        ));
+    }
+    let bytes = fs::read(path).map_err(io_error)?;
+    reject_legacy_channel_close_request(&bytes)?;
+    serde_json::from_slice(&bytes).map_err(|error| WalletError::L2(error.to_string()))
+}
+
+fn reject_legacy_channel_close_request(bytes: &[u8]) -> WalletResult<()> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+        WalletError::L2(format!("invalid channel-close recovery state: {error}"))
+    })?;
+    let Some(request) = value
+        .get("operation")
+        .and_then(|operation| operation.get("request"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(());
+    };
+    let schema_is_current = request.get("schema").and_then(serde_json::Value::as_str)
+        == Some(l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA);
+    let has_network_binding = [
+        "network",
+        "chain_id",
+        "mainnet",
+        "block_1_hash",
+        "node_profile_id",
+        "network_instance_id",
+        "transaction_format_version",
+    ]
+    .iter()
+    .all(|field| request.contains_key(*field));
+    if !schema_is_current || !has_network_binding {
+        return Err(WalletError::L2(
+            "RecoveryRequired: legacy channel-close request has no authenticated network binding; it cannot be signed, retried, or broadcast automatically"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn save_state(path: &Path, state: &ChannelCloseState) -> WalletResult<()> {
+    let bytes = serde_json::to_vec(state).map_err(|error| WalletError::L2(error.to_string()))?;
+    secure_write(path, &bytes).map_err(io_error)
+}
+
+fn state_commitment(state: &ChannelCloseState) -> WalletResult<String> {
+    let mut value =
+        serde_json::to_value(state).map_err(|error| WalletError::L2(error.to_string()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| WalletError::L2("channel-close state is not an object".into()))?;
+    object.remove("journal_sequence");
+    object.remove("journal_head");
+    object.remove("state_commitment");
+    let bytes = serde_json::to_vec(&value).map_err(|error| WalletError::L2(error.to_string()))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn acquire_lock(path: &Path) -> WalletResult<fs::File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(io_error)?;
+    file.try_lock_exclusive().map_err(|_| {
+        WalletError::L2("another wallet process owns this channel-close state".into())
+    })?;
+    Ok(file)
+}
+
+fn hash_field(digest: &mut Sha256, field: &[u8]) {
+    digest.update((field.len() as u64).to_be_bytes());
+    digest.update(field);
+}
+
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn io_error(error: std::io::Error) -> WalletError {
+    WalletError::L2(error.to_string())
+}
+
+fn hub_error(error: l2_fast_pay_hub::HubError) -> WalletError {
+    WalletError::L2(error.to_string())
+}
+
+#[cfg(test)]
+mod voucher_tests {
+    use basis::interface::{Transaction, TransactionRead};
+    use field::{AddrOrPtr, Address, Amount, ChannelId, Field, Serialize as _, Uint4};
+    use l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA;
+    use mint::action::ChannelClose;
+    use protocol::action::{ChainAllow, ChainIDList, HacFromToTrs};
+    use protocol::transaction::TransactionType2;
+    use sys::Account;
+
+    use super::*;
+
+    const CHANNEL_ID: &str = "00112233445566778899aabbccddeeff";
+    const CHAIN_ID: u32 = 7;
+
+    fn account(byte: u8) -> Account {
+        Account::create_by(&hex::encode([byte; 32])).unwrap()
+    }
+
+    struct VoucherFixture {
+        owner: String,
+        hub: String,
+        operation: ChannelCloseOperation,
+        response: L1ChannelCloseResponse,
+    }
+
+    /// Build the exact thing the Hub returns on the voucher path: a Type 2
+    /// `[ChainAllow, ChannelClose]` carrying both party signatures.
+    fn voucher_fixture(with_principal_transfer: bool, sign_hub: bool) -> VoucherFixture {
+        crate::protocol_init::ensure_protocol_setup();
+        let owner = account(41);
+        let hub = account(43);
+        let mut close = ChannelClose::new();
+        close.channel_id =
+            ChannelId::from(<[u8; 16]>::try_from(hex::decode(CHANNEL_ID).unwrap()).unwrap());
+        let now = 1_700_000_000_u64;
+        let mut tx = TransactionType2::new_by(
+            Address::from_readable(owner.readable()).unwrap(),
+            Amount::from("0.0001").unwrap(),
+            now,
+        );
+        let mut guard = ChainAllow::new();
+        guard.chains = ChainIDList::from_list(vec![Uint4::from(CHAIN_ID)]).unwrap();
+        tx.push_action(Box::new(guard)).unwrap();
+        tx.push_action(Box::new(close)).unwrap();
+        if with_principal_transfer {
+            let mut principal = HacFromToTrs::new();
+            principal.from = AddrOrPtr::from_addr(Address::from_readable(hub.readable()).unwrap());
+            principal.to = AddrOrPtr::from_addr(Address::from_readable(owner.readable()).unwrap());
+            principal.hacash = Amount::from("0.5").unwrap();
+            tx.push_action(Box::new(principal)).unwrap();
+        }
+        tx.fill_sign(&owner).unwrap();
+        let partial_transaction_hex = hex::encode(tx.serialize());
+        if sign_hub {
+            tx.fill_sign(&hub).unwrap();
+        }
+        let signed = tx.serialize();
+        let signed_transaction_hex = hex::encode(&signed);
+        let transaction_hash = hex::encode(tx.hash().as_bytes());
+
+        let request = L1ChannelCloseRequest {
+            schema: L1_CHANNEL_CLOSE_SCHEMA.into(),
+            network: "testnet".into(),
+            chain_id: CHAIN_ID,
+            mainnet: false,
+            block_1_hash: "11".repeat(32),
+            node_profile_id: "hpay-pilot".into(),
+            network_instance_id: "aa".repeat(16),
+            transaction_format_version: 2,
+            operation_id: "8a5b3fb0-2f0f-4a34-92a2-4a4b7d0a1b11".into(),
+            idempotency_key: "hpay:test:voucher:one".into(),
+            created_unix: now,
+            expires_unix: now + 300,
+            hub_address: hub.readable().into(),
+            user_address: owner.readable().into(),
+            channel_id: CHANNEL_ID.into(),
+            reuse_version: 1,
+            open_height: 900_000,
+            partial_transaction_commitment: hex::encode(Sha256::digest(
+                partial_transaction_hex.as_bytes(),
+            )),
+            partial_transaction_hex,
+            authorization_public_key_hex: hex::encode(owner.public_key().serialize_compressed()),
+            authorization_signature_hex: String::new(),
+        };
+        let operation = ChannelCloseOperation {
+            operation_id: request.operation_id.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            wallet_scope: "agent_wallet:voucher".into(),
+            hub_identity: hub.readable().into(),
+            channel_id: CHANNEL_ID.into(),
+            reuse_version: 1,
+            open_height: 900_000,
+            user_address: owner.readable().into(),
+            unsigned_transaction_hex: "020001".into(),
+            created_unix: now,
+            expires_unix: now + 300,
+            status: ChannelCloseStatus::UserSigned,
+            request: Some(request),
+            response: None,
+            updated_unix: now,
+        };
+        let response = L1ChannelCloseResponse {
+            schema: l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA.into(),
+            operation_id: operation.operation_id.clone(),
+            channel_id: CHANNEL_ID.into(),
+            reuse_version: 1,
+            open_height: 900_000,
+            status: L1_CHANNEL_CLOSE_VOUCHER_STATUS.into(),
+            transaction_hash: Some(transaction_hash),
+            signed_transaction_hex: Some(signed_transaction_hex),
+            signed_transaction_commitment: Some(hex::encode(Sha256::digest(&signed))),
+            reason: None,
+        };
+        VoucherFixture {
+            owner: owner.readable().into(),
+            hub: hub.readable().into(),
+            operation,
+            response,
+        }
+    }
+
+    #[test]
+    fn voucher_issued_is_a_durable_wallet_state_that_never_moves_on() {
+        assert_eq!(
+            durable_status_for_hub_status(L1_CHANNEL_CLOSE_VOUCHER_STATUS),
+            Some(ChannelCloseStatus::VoucherHeld)
+        );
+        assert!(can_accept_hub_status(
+            ChannelCloseStatus::UserSigned,
+            ChannelCloseStatus::VoucherHeld
+        ));
+        assert!(can_accept_hub_status(
+            ChannelCloseStatus::VoucherHeld,
+            ChannelCloseStatus::VoucherHeld
+        ));
+        for next in [
+            ChannelCloseStatus::HubSubmitted,
+            ChannelCloseStatus::Confirmed,
+            ChannelCloseStatus::RecoveryRequired,
+        ] {
+            assert!(
+                !can_accept_hub_status(ChannelCloseStatus::VoucherHeld, next),
+                "a held voucher must not move to {next:?}"
+            );
+            assert!(
+                !can_accept_hub_status(next, ChannelCloseStatus::VoucherHeld),
+                "{next:?} must not become a voucher"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_countersigned_delta_zero_voucher_is_accepted() {
+        let fixture = voucher_fixture(false, true);
+        validate_hub_response(&fixture.operation, &fixture.response).unwrap();
+        let verified = verify_channel_close_voucher_bytes(
+            fixture.response.signed_transaction_hex.as_deref().unwrap(),
+            fixture.response.transaction_hash.as_deref().unwrap(),
+            &fixture.owner,
+            &fixture.hub,
+            CHANNEL_ID,
+            CHAIN_ID,
+        )
+        .unwrap();
+        assert_eq!(
+            Some(verified.signed_transaction_commitment.as_str()),
+            fixture.response.signed_transaction_commitment.as_deref()
+        );
+    }
+
+    #[test]
+    fn every_missing_voucher_property_is_refused() {
+        let good = voucher_fixture(false, true);
+        let hex_bytes = good.response.signed_transaction_hex.clone().unwrap();
+
+        // Only one signature: the Hub never countersigned.
+        let unsigned_by_hub = voucher_fixture(false, false);
+        let error = validate_hub_response(&unsigned_by_hub.operation, &unsigned_by_hub.response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("two party signatures"), "{error}");
+
+        // A principal transfer is not delta zero.
+        let transfer = voucher_fixture(true, true);
+        let error = validate_hub_response(&transfer.operation, &transfer.response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[ChainAllow, ChannelClose]"), "{error}");
+
+        // Trailing bytes.
+        let mut trailing = good.response.clone();
+        trailing.signed_transaction_hex = Some(format!("{hex_bytes}00"));
+        assert!(validate_hub_response(&good.operation, &trailing).is_err());
+
+        // Bytes that do not hash to the announced transaction.
+        let mut wrong_hash = good.response.clone();
+        wrong_hash.transaction_hash = Some("cd".repeat(32));
+        assert!(validate_hub_response(&good.operation, &wrong_hash).is_err());
+
+        // Missing bytes on a voucher status.
+        let mut no_bytes = good.response.clone();
+        no_bytes.signed_transaction_hex = None;
+        let error = validate_hub_response(&good.operation, &no_bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("countersigned bytes"), "{error}");
+
+        // Missing or wrong commitment over those bytes.
+        let mut bad_commitment = good.response.clone();
+        bad_commitment.signed_transaction_commitment = Some("00".repeat(32));
+        let error = validate_hub_response(&good.operation, &bad_commitment)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("commitment"), "{error}");
+
+        // A different Hub address in the durable operation.
+        let mut other_hub = good.operation.clone();
+        other_hub.hub_identity = account(97).readable().into();
+        assert!(validate_hub_response(&other_hub, &good.response).is_err());
+
+        // A different chain in the durable request.
+        let mut other_chain = good.operation.clone();
+        other_chain.request.as_mut().unwrap().chain_id = 0;
+        let error = validate_hub_response(&other_chain, &good.response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bind exactly chain 0"), "{error}");
+
+        // A different channel.
+        let error = verify_channel_close_voucher_bytes(
+            &hex_bytes,
+            good.response.transaction_hash.as_deref().unwrap(),
+            &good.owner,
+            &good.hub,
+            "ffeeddccbbaa99887766554433221100",
+            CHAIN_ID,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("different channel"), "{error}");
+    }
+
+    #[test]
+    fn signed_bytes_on_a_cooperative_close_status_are_refused() {
+        let fixture = voucher_fixture(false, true);
+        let mut response = fixture.response.clone();
+        response.status = "submitted".into();
+        let error = validate_hub_response(&fixture.operation, &response)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must never carry them"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::IsolatedWalletData;
+
+    #[test]
+    fn legacy_signed_request_is_reported_as_recovery_required() {
+        let legacy = br#"{
+            "schema_version":1,
+            "journal_sequence":1,
+            "journal_head":"head",
+            "state_commitment":"commitment",
+            "operation":{
+                "request":{
+                    "schema":"hpay-l1-channel-close/1",
+                    "network":"mainnet",
+                    "chain_id":0
+                }
+            }
+        }"#;
+        let error = reject_legacy_channel_close_request(legacy).unwrap_err();
+        assert!(error.to_string().contains("RecoveryRequired"));
+        assert!(error.to_string().contains("network binding"));
+    }
+
+    #[test]
+    fn only_retired_is_a_terminal_wallet_close_state() {
+        assert_eq!(
+            durable_status_for_hub_status("retired"),
+            Some(ChannelCloseStatus::Confirmed)
+        );
+        assert_eq!(
+            durable_status_for_hub_status("confirmed_closed"),
+            Some(ChannelCloseStatus::HubSubmitted)
+        );
+        assert_eq!(
+            durable_status_for_hub_status("submitted"),
+            Some(ChannelCloseStatus::HubSubmitted)
+        );
+    }
+
+    /// A request that satisfies `require_request_binding` for `operation`.
+    ///
+    /// `persist_user_signed` only checks the binding, so the transaction bytes
+    /// do not have to be real for the state-machine tests below.
+    fn signed_close_request_for(operation: &ChannelCloseOperation) -> L1ChannelCloseRequest {
+        L1ChannelCloseRequest {
+            schema: l2_fast_pay_hub::l1_channel_close::L1_CHANNEL_CLOSE_SCHEMA.into(),
+            network: "testnet".into(),
+            chain_id: 7,
+            mainnet: false,
+            block_1_hash: "11".repeat(32),
+            node_profile_id: "hpay-pilot".into(),
+            network_instance_id: "aa".repeat(16),
+            transaction_format_version: 2,
+            operation_id: operation.operation_id.clone(),
+            idempotency_key: operation.idempotency_key.clone(),
+            created_unix: operation.created_unix,
+            expires_unix: operation.expires_unix,
+            hub_address: operation.hub_identity.clone(),
+            user_address: operation.user_address.clone(),
+            channel_id: operation.channel_id.clone(),
+            reuse_version: operation.reuse_version,
+            open_height: operation.open_height,
+            partial_transaction_commitment: "cd".repeat(32),
+            partial_transaction_hex: "020001".into(),
+            authorization_public_key_hex: "02".to_owned() + &"11".repeat(32),
+            authorization_signature_hex: "ef".repeat(64),
+        }
+    }
+
+    /// An interrupted close signature must not end cooperative close forever.
+    ///
+    /// `begin_or_resume` and `mark_signature_may_exist` are two durable writes
+    /// with the signing prompt between them, so a cancelled prompt, a wrong
+    /// passphrase, a locked session or a crash leaves `SignatureMayExist` with
+    /// no request. This store had no terminal concept at all - no
+    /// `is_terminal`, no cancel, no abandon - and `begin_or_resume` refuses any
+    /// intent that is not byte-identical, which no second attempt can be
+    /// because `prepare_channel_close` mints a fresh operation id and fresh
+    /// timestamps every time. The owner lost cooperative close on that channel,
+    /// and the voucher with it, for the life of the wallet.
+    #[test]
+    fn an_interrupted_close_signature_can_be_released_and_replaced() {
+        let _isolated = IsolatedWalletData::new();
+        let account = WalletAccount::create("channel-close-interrupted").unwrap();
+        let mut safety = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        let address = account.address();
+        let first = safety
+            .begin_or_resume(BeginChannelClose {
+                operation_id: "0e2b6cf6-2f7a-4a1e-9d1a-6a2f8c4b1d33",
+                idempotency_key: "hpay:test:channel-close:interrupted",
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        // The signing prompt is where it dies: the marker is durable, the
+        // bytes never arrive.
+        safety.mark_signature_may_exist().unwrap();
+        assert!(safety.operation().unwrap().request.is_none());
+
+        let second = || BeginChannelClose {
+            operation_id: "6d4c1a90-88b1-4c6b-9f2e-7c5d3e1a2b40",
+            idempotency_key: "hpay:test:channel-close:second",
+            user_address: &address,
+            reuse_version: 1,
+            open_height: 900_000,
+            unsigned_transaction_hex: "020001",
+            created_unix: 1_700_000_400,
+            expires_unix: 1_700_000_700,
+        };
+        let blocked = safety.begin_or_resume(second()).unwrap_err().to_string();
+        assert!(blocked.contains("a different channel-close operation is unresolved"));
+
+        // The release, gated on the caller having asked the Hub and been told
+        // it holds no such operation.
+        safety.release_close_the_hub_never_received().unwrap();
+        let released = safety.operation().unwrap();
+        assert_eq!(released.status, ChannelCloseStatus::CancelledBeforeSigning);
+        assert!(released.status.is_terminal());
+        assert_ne!(released.operation_id, second().operation_id);
+        assert_eq!(released.operation_id, first.operation_id);
+
+        // Terminal means terminal: nothing moves it again.
+        assert!(safety.mark_recovery_required().is_err());
+        assert!(safety.mark_signature_may_exist().is_err());
+
+        // And the channel has its cooperative exit back, across a restart.
+        drop(safety);
+        let mut reopened = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        assert_eq!(
+            reopened.operation().unwrap().status,
+            ChannelCloseStatus::CancelledBeforeSigning
+        );
+        let fresh = reopened
+            .begin_or_resume(second())
+            .expect("a released close must not block the next one");
+        assert_eq!(fresh.status, ChannelCloseStatus::PersistedBeforeSigning);
+        assert_eq!(fresh.operation_id, second().operation_id);
+    }
+
+    /// The release is refused the moment exact bytes exist, because then the
+    /// Hub may well have them.
+    #[test]
+    fn a_close_that_produced_exact_bytes_is_never_released_as_unsent() {
+        let _isolated = IsolatedWalletData::new();
+        let account = WalletAccount::create("channel-close-has-bytes").unwrap();
+        let mut safety = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        let address = account.address();
+        let operation = safety
+            .begin_or_resume(BeginChannelClose {
+                operation_id: "3a5f7b21-4c8d-4e9a-8b1c-2d3e4f5a6b70",
+                idempotency_key: "hpay:test:channel-close:signed",
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        safety.mark_signature_may_exist().unwrap();
+        let request = signed_close_request_for(&operation);
+        safety.persist_user_signed(&request).unwrap();
+        let refusal = safety
+            .release_close_the_hub_never_received()
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("never reached the Hub"), "{refusal}");
+        assert_eq!(
+            safety.operation().unwrap().status,
+            ChannelCloseStatus::UserSigned
+        );
+    }
+
+    /// The Hub's own release word is understood, and it is terminal here too.
+    #[test]
+    fn the_hub_release_status_is_read_and_is_terminal() {
+        assert_eq!(
+            durable_status_for_hub_status("cancelled_before_signing"),
+            Some(ChannelCloseStatus::CancelledBeforeSigning)
+        );
+        assert!(ChannelCloseStatus::CancelledBeforeSigning.is_terminal());
+        for from in [
+            ChannelCloseStatus::PersistedBeforeSigning,
+            ChannelCloseStatus::SignatureMayExist,
+            ChannelCloseStatus::UserSigned,
+            ChannelCloseStatus::RecoveryRequired,
+        ] {
+            assert!(
+                can_accept_hub_status(from, ChannelCloseStatus::CancelledBeforeSigning),
+                "{from:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_resumes_exact_intent_and_changed_intent_is_rejected() {
+        let _isolated = IsolatedWalletData::new();
+        let account = WalletAccount::create("channel-close-restart").unwrap();
+        let mut safety = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        let initial_address = account.address();
+        let input = BeginChannelClose {
+            operation_id: "4ed50c2c-7c7a-48df-a714-18b50550cf08",
+            idempotency_key: "hpay:test:channel-close:one",
+            user_address: &initial_address,
+            reuse_version: 1,
+            open_height: 900_000,
+            unsigned_transaction_hex: "020001",
+            created_unix: 1_700_000_000,
+            expires_unix: 1_700_000_300,
+        };
+        let first = safety.begin_or_resume(input).unwrap();
+        drop(safety);
+        let mut reopened = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        let address = account.address();
+        let resumed = reopened
+            .begin_or_resume(BeginChannelClose {
+                operation_id: &first.operation_id,
+                idempotency_key: &first.idempotency_key,
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        assert_eq!(first, resumed);
+        assert!(
+            reopened
+                .begin_or_resume(BeginChannelClose {
+                    operation_id: &first.operation_id,
+                    idempotency_key: &first.idempotency_key,
+                    user_address: &address,
+                    reuse_version: 2,
+                    open_height: 900_000,
+                    unsigned_transaction_hex: "020001",
+                    created_unix: 1_700_000_000,
+                    expires_unix: 1_700_000_300,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn crash_after_pre_sign_marker_never_allows_signing_again() {
+        let _isolated = IsolatedWalletData::new();
+        let account = WalletAccount::create("channel-close-sign-marker").unwrap();
+        let address = account.address();
+        let mut safety = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        safety
+            .begin_or_resume(BeginChannelClose {
+                operation_id: "b73a5507-9607-4a30-9733-5bf2ef65f6a5",
+                idempotency_key: "hpay:test:channel-close:marker",
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        safety.mark_signature_may_exist().unwrap();
+        drop(safety);
+        let mut reopened = ChannelCloseSafety::open(&account, "hub", "channel").unwrap();
+        assert!(reopened.mark_signature_may_exist().is_ok());
+        assert_eq!(
+            reopened.operation().unwrap().status,
+            ChannelCloseStatus::SignatureMayExist
+        );
+    }
+
+    #[test]
+    fn scoped_personal_and_agent_close_stores_are_isolated() {
+        let directory = tempfile::tempdir().unwrap();
+        let personal_root = directory.path().join("personal-l2");
+        let agent_root = directory.path().join("agent-l2");
+        let account = WalletAccount::create("channel-close-scoped-isolation").unwrap();
+        let address = account.address();
+        let personal_scope = format!("personal:{address}");
+        let agent_scope = "agent_wallet:wallet-one";
+
+        let mut personal = ChannelCloseSafety::open_scoped(
+            &account,
+            &personal_root,
+            &personal_scope,
+            "../same-hub",
+            "../same-channel",
+        )
+        .unwrap();
+        let mut agent = ChannelCloseSafety::open_scoped(
+            &account,
+            &agent_root,
+            agent_scope,
+            "../same-hub",
+            "../same-channel",
+        )
+        .unwrap();
+
+        assert!(
+            personal
+                .path
+                .starts_with(personal_root.join("channel-close"))
+        );
+        assert!(agent.path.starts_with(agent_root.join("channel-close")));
+        assert_ne!(personal.path, agent.path);
+        assert!(agent.operation().is_err());
+        assert!(
+            ChannelCloseSafety::open_scoped(
+                &account,
+                &personal_root,
+                &personal_scope,
+                "../same-hub",
+                "../same-channel",
+            )
+            .is_err()
+        );
+
+        let personal_operation = personal
+            .begin_or_resume(BeginChannelClose {
+                operation_id: "10a6bd37-0dd5-4fc0-b706-798717dc6cb0",
+                idempotency_key: "hpay:test:channel-close:personal",
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        let agent_operation = agent
+            .begin_or_resume(BeginChannelClose {
+                operation_id: "576a615b-5324-4da8-a860-f5fe774fd0e1",
+                idempotency_key: "hpay:test:channel-close:agent",
+                user_address: &address,
+                reuse_version: 1,
+                open_height: 900_000,
+                unsigned_transaction_hex: "020001",
+                created_unix: 1_700_000_000,
+                expires_unix: 1_700_000_300,
+            })
+            .unwrap();
+        agent.mark_signature_may_exist().unwrap();
+
+        assert_eq!(personal.operation().unwrap(), personal_operation);
+        assert_eq!(
+            agent.operation().unwrap().status,
+            ChannelCloseStatus::SignatureMayExist
+        );
+        assert_ne!(
+            personal_operation.operation_id,
+            agent_operation.operation_id
+        );
+        drop(personal);
+        drop(agent);
+
+        let personal = ChannelCloseSafety::open_scoped(
+            &account,
+            &personal_root,
+            &personal_scope,
+            "../same-hub",
+            "../same-channel",
+        )
+        .unwrap();
+        let agent = ChannelCloseSafety::open_scoped(
+            &account,
+            &agent_root,
+            agent_scope,
+            "../same-hub",
+            "../same-channel",
+        )
+        .unwrap();
+        assert_eq!(
+            personal.operation().unwrap().status,
+            ChannelCloseStatus::PersistedBeforeSigning
+        );
+        assert_eq!(
+            agent.operation().unwrap().status,
+            ChannelCloseStatus::SignatureMayExist
+        );
+    }
+}

@@ -837,7 +837,7 @@ function mapApproval(value: NativeApprovalCommitment): AgentCompanionPendingAppr
     expiresAtUnix: value.expires_at,
     networkBinding: value.network_binding
       ? {
-          networkId: value.network_binding.network_id as "testnet",
+          networkId: value.network_binding.network_id,
           chainId: value.network_binding.chain_id,
           genesisIdentifier: value.network_binding.genesis_identifier,
           nodeProfileId: value.network_binding.node_profile_id,
@@ -1016,6 +1016,45 @@ export function formatTotalDebit(
   return formatHacUnits((amount + networkFee).toString());
 }
 
+// The network id and chain id pairs a desktop can honestly stamp into an L1
+// approval binding, and therefore the only pairs this phone will approve.
+//
+// Read off the Rust producer, not guessed. The value is `node.network_kind()`
+// from the verified node probe, and the two rails are pinned by identity
+// predicates in `crates/wallet-core/src/node_capabilities.rs`: the local pilot
+// rail is `local_pilot_v1` with chain id 7, and mainnet is `mainnet` with
+// chain id 0.
+//
+// This replaced `binding.networkId === "testnet" && binding.chainId > 0`,
+// which matched NEITHER rail. Nothing noticed because the only test of it fed
+// a hand written fixture carrying "testnet", a value no producer emits. On
+// mainnet both halves of that condition failed at once, so a paired phone
+// could never approve a mainnet payment. "testnet" is kept only as the legacy
+// alias the Rust protocol crate also still accepts.
+const ACCEPTED_APPROVAL_NETWORKS: ReadonlyArray<
+  readonly [network: string, chainId: number | null]
+> = [
+  ["local_pilot_v1", 7],
+  ["mainnet", 0],
+  // Legacy alias for the pilot rail: any non-zero chain id, as the Rust side
+  // has always allowed for it.
+  ["testnet", null],
+];
+
+export function acceptedApprovalNetwork(
+  networkId: string,
+  chainId: number,
+): boolean {
+  if (!Number.isSafeInteger(chainId) || chainId < 0 || chainId > 0xffff_ffff) {
+    return false;
+  }
+  return ACCEPTED_APPROVAL_NETWORKS.some(
+    ([network, expectedChainId]) =>
+      network === networkId &&
+      (expectedChainId === null ? chainId > 0 : chainId === expectedChainId),
+  );
+}
+
 export type AgentApprovalFacts = {
   amountUnits: string;
   networkFeeUnits: string;
@@ -1037,10 +1076,7 @@ export function verifiedAgentApprovalFacts(
   const binding = approval.networkBinding;
   const networkBindingValid = snapshot.pilotEnabled
     ? binding !== null &&
-      binding.networkId === "testnet" &&
-      Number.isSafeInteger(binding.chainId) &&
-      binding.chainId > 0 &&
-      binding.chainId <= 0xffff_ffff &&
+      acceptedApprovalNetwork(binding.networkId, binding.chainId) &&
       /^[0-9a-f]{64}$/.test(binding.genesisIdentifier) &&
       /^[0-9a-f]{64}$/.test(binding.nodeProfileId) &&
       binding.transactionFormatVersion === "2"

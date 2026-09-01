@@ -76,6 +76,15 @@ describe("Android private-screen hardening", () => {
     }
     expect(companionIdentity).toContain("fun signApprovalDecisionApprove(");
     expect(companionIdentity).toContain("fun signApprovalDecisionReject(");
+    expect(companionIdentity).toContain(
+      "HPAY/COMPANION/AGENT-FAST-PAY-DECISION/V1",
+    );
+    expect(companionIdentity).toContain(
+      "fun signAgentFastPayApprovalDecisionApprove(",
+    );
+    expect(companionIdentity).toContain(
+      "fun signAgentFastPayApprovalDecisionReject(",
+    );
     expect(companionIdentity).toContain("fun signWitnessReceipt(");
     expect(companionIdentity).toContain("fun signWitnessRotationAuthorization(");
     expect(companionIdentity).toContain("fun signWitnessRotationBaselineReceipt(");

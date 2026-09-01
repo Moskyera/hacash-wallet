@@ -44,6 +44,22 @@ This document describes how the **Hacash Wallet** (`Moskyera/hacash-wallet`) is 
 - Run the hub binary from `crates/l2-fast-pay-hub` (or published release artifact)
 - Expose Hub API v4 over HTTPS; register in hub discovery list when upstream accepts community hubs
 
+### Relay operators (DUST Whisper messenger)
+
+- Read [`RUNNING-A-RELAY.md`](./RUNNING-A-RELAY.md), section 6 first: a relay
+  operator sees both addresses and the timing of every message, and can read
+  the bodies of messages sent before the two wallets had each other's keys
+- Run `scripts/START-DUST-WHISPER-RELAY.sh` (or the `.bat`) with the fullnode
+  URL the relay should forward transactions to. Pass the same node URL the
+  wallets use, scheme included: the wallet's default is
+  `http://nodeapi.hacash.org` and the relay binary's own default is the `https`
+  spelling of it, which the wallet reads as a different node and refuses
+- A loopback relay serves only its own machine. Serving anyone else means
+  binding, a reverse proxy with TLS, one open port, and a check run from a
+  different machine: section 4 of the guide
+- The messenger does not work until somebody runs one, and both parties have to
+  be using the same relay. There is no public relay and no default
+
 ### Node runners
 
 - Clone `hacash-fullnodedev` (main branch for legacy Types 1–3)
@@ -117,3 +133,4 @@ Open question: formal maintainer roster - track in design doc OQ-8.
 - [`hacash-quantum-wallet-design.md`](./hacash-quantum-wallet-design.md) - quantum fork plan (deferred implementation)
 - [`hacash-quantum-wallet-design-summary.md`](./hacash-quantum-wallet-design-summary.md) - executive summary
 - [`HUB-OPERATOR.md`](./HUB-OPERATOR.md) - Fast Pay hub operations
+- [`RUNNING-A-RELAY.md`](./RUNNING-A-RELAY.md) - DUST Whisper relay operations, and what a relay operator can see

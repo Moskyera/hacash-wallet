@@ -92,7 +92,7 @@
 }
 
 .desktop-topbar-button:hover {
-  border-color: var(--accent);
+  border-color: rgb(245 166 35 / 40%);
   background: rgb(245 166 35 / 8%);
 }
 
@@ -104,8 +104,33 @@
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(250px, 0.9fr) minmax(230px, 0.75fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
+}
+
+/*
+ * Recent activity, Fast Pay, Security and the Agent Wallet, one row across
+ * under the portfolio. Activity takes the wider track because its rows carry
+ * the most text; the three status cards are equal and narrow.
+ */
+.dashboard-panel-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(200px, 1fr));
+  align-items: start;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+@media (width <= 1240px) {
+  .dashboard-panel-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (width <= 700px) {
+  .dashboard-panel-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .dashboard-card,
@@ -120,21 +145,11 @@
   padding: 18px;
 }
 
-.dashboard-portfolio-card {
-  grid-column: 1 / 3;
-}
-
-.dashboard-activity-card {
-  grid-column: 1 / 3;
-}
-
-.dashboard-status-column {
-  grid-column: 3;
-  grid-row: 1 / 3;
-  display: grid;
-  align-content: start;
-  gap: 14px;
-}
+/*
+ * The portfolio card owns the full width of its own single-column grid, and the
+ * four panels below it sit in .dashboard-panel-row. Neither needs an explicit
+ * grid-column any more.
+ */
 
 .dashboard-card-heading {
   display: flex;
@@ -163,8 +178,14 @@
 
 .dashboard-portfolio-card .balance-portfolio-layout {
   display: grid;
-  grid-template-columns: minmax(220px, 1.25fr) minmax(0, 4fr);
+  grid-template-columns: minmax(280px, 1fr) minmax(0, 1.55fr);
   gap: 12px;
+}
+
+@media (width <= 1080px) {
+  .dashboard-portfolio-card .balance-portfolio-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .dashboard-portfolio-card .balance-total-card {
@@ -194,15 +215,22 @@
   font-size: 11px;
 }
 
+/* Two by two, as the design has it: four wide squeezes the longer balances. */
 .dashboard-portfolio-card .balance-assets-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 0;
 }
 
+@media (width <= 620px) {
+  .dashboard-portfolio-card .balance-assets-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .dashboard-portfolio-card .balance-asset-card {
   position: relative;
-  min-height: 170px;
+  min-height: 120px;
   align-items: stretch;
   overflow: hidden;
   padding: 14px;
@@ -602,3 +630,718 @@
     min-height: 104px;
   }
 }
+/*
+ * The Agent Wallet card on Home.
+ *
+ * Bordered in gold like the design, because it opens a different wallet space
+ * and that is worth marking. It carries no live agent figures: see the comment
+ * on AgentWalletCard for why there are none to carry.
+ */
+.dashboard-agent-card {
+  display: flex;
+  flex-direction: column;
+  border-color: var(--hpay-gold-line);
+}
+
+.dashboard-agent-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.dashboard-agent-mark {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--hpay-gold-line);
+  border-radius: 50%;
+  background: rgb(245 166 35 / 6%);
+}
+
+.dashboard-agent-mark svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-linecap: round;
+  stroke-width: 1.5;
+}
+
+.dashboard-agent-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.dashboard-agent-open {
+  width: 100%;
+  margin: 14px 0 0;
+  padding: 9px 12px;
+  border: 1px solid var(--hpay-gold-line);
+  border-radius: 10px;
+  background: rgb(245 166 35 / 8%);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dashboard-agent-open:hover {
+  background: rgb(245 166 35 / 14%);
+}
+
+.dashboard-agent-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+/*
+ * Spot price of one unit, under the holding. No change arrow: the price feed is
+ * a spot value with no history behind it, so there is nothing to compare to.
+ */
+.balance-asset-unit-price {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Portfolio value line in the total card. Taller than the per-asset lines
+ * because it is the one the eye goes to first, and pushed to the bottom of the
+ * card so the figure above it stays the headline.
+ */
+.balance-total-trend {
+  width: 100%;
+  height: 62px;
+  margin-top: 14px;
+}
+
+.balance-total-trend polyline {
+  stroke-width: 1.8;
+}
+
+/*
+ * Network, node and privacy, read at a glance from the top bar.
+ *
+ * There is no notification bell and no theme switch beside them: this build has
+ * neither a notification store nor a light theme, and a control that does
+ * nothing is worse than an absent one on a screen about money.
+ */
+.desktop-topbar-status {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Testnet is not a fault, so it is not red, but it must not read as mainnet. */
+.desktop-topbar-pill.testnet::before {
+  background: #f5a623;
+  box-shadow: 0 0 0 3px rgb(245 166 35 / 12%);
+}
+
+@media (width <= 1100px) {
+  .desktop-topbar-status {
+    display: none;
+  }
+}
+
+/*
+ * Sidebar groups, with the heading text removed.
+ *
+ * A hairline carries the separation the uppercase labels used to, at a fraction
+ * of the vertical space and none of the reading.
+ */
+.sidebar .nav-group + .nav-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hpay-line);
+}
+
+/* Build identity, so a screenshot always says which version produced it. */
+.sidebar-build {
+  display: grid;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid var(--hpay-line);
+  border-radius: 11px;
+  background: #050505;
+}
+
+.sidebar-build strong {
+  color: #ddd;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.sidebar-build span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.sidebar-build i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4a4a4a;
+}
+
+/* Lit only while the vault is actually open, so it reports rather than decorates. */
+.sidebar-build i.on {
+  background: #58c878;
+  box-shadow: 0 0 0 3px rgb(88 200 120 / 12%);
+}
+
+/*
+ * Dual Workspace: My Wallet and the Agent Wallet side by side.
+ *
+ * Only one of the two is ever unlocked, so only one column carries live
+ * figures. The agent column is deliberately sparse rather than padded out with
+ * numbers that would have to be invented.
+ */
+.workspace-guarantee {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--hpay-gold-line);
+  border-radius: 12px;
+  background: rgb(245 166 35 / 5%);
+  color: #cfcfcf;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.workspace-guarantee strong {
+  color: var(--accent);
+}
+
+.workspace-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+
+@media (width <= 1080px) {
+  .workspace-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.workspace-column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.workspace-column-head h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.workspace-tag {
+  padding: 4px 9px;
+  border: 1px solid rgb(88 200 120 / 34%);
+  border-radius: 999px;
+  color: #58c878;
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.workspace-tag-locked {
+  border-color: var(--hpay-line);
+  color: var(--muted);
+}
+
+.workspace-column-agent {
+  border-color: var(--hpay-gold-line);
+}
+
+.workspace-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.workspace-actions button {
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 9px 6px;
+  border: 1px solid var(--hpay-line);
+  border-radius: 10px;
+  background: #070707;
+  color: #d6d6d6;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.workspace-actions button:hover {
+  border-color: rgb(245 166 35 / 40%);
+  color: var(--accent);
+}
+
+.workspace-facts {
+  display: grid;
+  margin: 0;
+  gap: 0;
+}
+
+.workspace-facts > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid #1c1c1c;
+}
+
+.workspace-facts > div:first-child {
+  border-top: 0;
+}
+
+.workspace-facts dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.workspace-facts dd {
+  margin: 0;
+  color: #e6e6e6;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+}
+
+.workspace-facts dd.ready {
+  color: #58c878;
+}
+
+.workspace-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+/*
+ * The personal sidebar carries the space switcher, which is the primary "which
+ * wallet is this" marker. It scrolled away with the document, and the sticky top
+ * bar names the SCREEN, not the space: "Send", "History", "Settings". Halfway
+ * down any page but Home, nothing on screen said which wallet was open.
+ */
+.sidebar {
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  align-self: start;
+  overflow-y: auto;
+}
+
+/*
+ * And the top bar now names the space outright, so the answer survives even
+ * when the sidebar is scrolled inside itself or hidden at a narrow width.
+ */
+.desktop-topbar-space {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px 5px 8px;
+  border: 1px solid var(--hpay-gold-line);
+  border-radius: 999px;
+  background: rgb(245 166 35 / 8%);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.desktop-topbar-space svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 1.6;
+}
+
+/*
+ * The wallet space, stated inside overlays.
+ *
+ * Full-screen dialogs cover the sidebar switcher, the top bar and the space
+ * pill - every element that names the wallet space - and they are exactly the
+ * moments a wallet asks to sign. So each one names the space itself.
+ */
+.modal-space-label {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 4px 9px;
+  border: 1px solid var(--hpay-gold-line, rgb(245 166 35 / 32%));
+  border-radius: 999px;
+  background: rgb(245 166 35 / 8%);
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/*
+ * Refusals that reach the eye from the control that produced them.
+ *
+ * `onError` sets `wallet.error` and raises a toast. Both render at the top of
+ * <main>, above <DesktopRouter>, in normal document flow. Only .desktop-topbar
+ * is sticky, so neither followed the scroll, and the "Enable Fast Pay" button
+ * sits roughly two thousand pixels below that point. On top of that, no desktop
+ * stylesheet defined .toast at all - mobile.css:935 has the rule and the desktop
+ * app never got it - so the toast was an unstyled block that then deleted itself
+ * after four seconds. A press that was refused for a real, correct, well worded
+ * reason looked exactly like a press that did nothing. That is the owner's
+ * "Enable Fast Pay does nothing".
+ *
+ * Both are now pinned to the viewport and stacked above the sticky header
+ * (z-index 20), so the sentence appears where the person is looking.
+ */
+.toast {
+  position: fixed;
+  z-index: 200;
+  top: 16px;
+  left: 50%;
+  max-width: 560px;
+  width: calc(100% - 64px);
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 55%);
+  color: #f2f2f2;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  transform: translateX(-50%);
+}
+
+.toast-success {
+  border-color: rgb(245 166 35 / 55%);
+  color: var(--accent-2);
+}
+
+.toast-info {
+  border-color: var(--border);
+  color: #f2f2f2;
+}
+
+/*
+ * The error toast is deliberately not the success toast in another colour. A
+ * refusal has to be legible as a refusal at a glance, before the words are read.
+ */
+.toast-error {
+  border-color: rgb(245 166 35 / 85%);
+  border-left: 4px solid var(--accent);
+  background: #1a1206;
+  color: #ffd18a;
+}
+
+/*
+ * The persistent half of a refusal.
+ *
+ * The toast expires after 4000ms. This banner does not, so it is the copy still
+ * on screen when somebody walks back to the wallet and asks what happened. It
+ * gets the same pinning, sits under the toast, and carries a dismiss control -
+ * a pinned element that cannot be closed is an obstruction.
+ */
+.alert-floating {
+  position: fixed;
+  z-index: 199;
+  top: 68px;
+  left: 50%;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 560px;
+  width: calc(100% - 64px);
+  margin-top: 0;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 55%);
+  font-size: 13px;
+  line-height: 1.45;
+  transform: translateX(-50%);
+}
+
+.alert-floating-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.alert-floating-dismiss {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.alert-floating-dismiss:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/*
+ * THE NODE SYNC SURFACE, AND WHY IT IS NOT A SPINNER.
+ * ===================================================
+ *
+ * The owner asked for something on screen during a long wait, and they were
+ * right that silence loses people. A plain spinner would have made the worst
+ * case worse. A Hacash sync took about seven minutes on this machine, and for
+ * that whole time a real mainnet catch-up and a node that has quietly started
+ * a private chain of its own look identical: both show a climbing height. A
+ * spinner turns the same way for both. It would have covered the one moment
+ * that mistake was still cheap to fix.
+ *
+ * So the rules this stylesheet enforces:
+ *
+ *   - There is no indeterminate bar and no looping animation anywhere in here.
+ *     `.node-sync-fill` is drawn only when a real percentage exists, and it
+ *     moves only by transitioning to a width that actually changed. Motion
+ *     here always means a number moved.
+ *   - The chain verdict is the loudest thing in the block, and a wrong chain
+ *     does not look like a slow one. `.tone-bad` gets the heavy left rule and
+ *     the lit background that a refusal gets everywhere else in this app.
+ *   - `prefers-reduced-motion` removes the transition entirely. The width still
+ *     lands on the right value; it just gets there without sliding.
+ *
+ * Every class below is defined in apps/mobile/src/mobile.css as well. This is
+ * the lesson from `.toast`, which lived in the markup and in no desktop
+ * stylesheet at all, so every refusal on the Fast Pay screen rendered as an
+ * unstyled block off screen and deleted itself four seconds later.
+ * `nodeSyncCssIsBuilt.test.ts` greps the BUILT asset in dist, not this file,
+ * because a rule that does not survive the bundler is a rule that does not
+ * exist.
+ */
+.node-sync {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+}
+
+/*
+ * The first-second answer. Bigger than the lines under it on purpose: it is
+ * the one that decides whether the other two are worth reading.
+ */
+.node-sync-chain {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.node-sync-live {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-sync-distance {
+  margin: 0;
+  color: #f2f2f2;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+/*
+ * The track is never drawn empty and never drawn without a number. There is
+ * no `.node-sync-track--indeterminate`, and there must never be one.
+ */
+.node-sync-track {
+  overflow: hidden;
+  width: 100%;
+  height: 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #0a0a0a;
+}
+
+.node-sync-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width 600ms ease;
+}
+
+.node-sync-eta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/*
+ * "Working out how long", and everything else not yet known. Held apart from
+ * the measured line so an estimate and an admission never look the same.
+ */
+.node-sync-unknown {
+  font-style: italic;
+  opacity: 0.9;
+}
+
+/* Before the node has answered at all. A sentence, not a spinner. */
+.node-sync-waiting {
+  border-style: dashed;
+}
+
+.node-sync-chain.tone-ok,
+.node-watching.tone-ok,
+.node-headline.tone-ok {
+  border-left-color: rgb(245 166 35 / 55%);
+  background: #10130a;
+  color: #d9e7b0;
+}
+
+.node-sync-chain.tone-warn,
+.node-watching.tone-warn,
+.node-headline.tone-warn {
+  border-left-color: rgb(245 166 35 / 75%);
+  background: #1a1206;
+  color: #ffd18a;
+}
+
+/*
+ * A WRONG CHAIN IS NOT A SLOW CHAIN.
+ * This is the state a spinner would have hidden for seven minutes, so it is
+ * the loudest block on the panel and it carries no progress element at all.
+ */
+.node-sync-chain.tone-bad,
+.node-watching.tone-bad,
+.node-headline.tone-bad {
+  border-left: 4px solid var(--accent);
+  background: #200f04;
+  color: #ffc46b;
+  font-weight: 700;
+}
+
+.node-sync-chain.tone-idle,
+.node-watching.tone-idle,
+.node-headline.tone-idle {
+  border-left-color: var(--border);
+  background: var(--bg-card);
+  color: var(--muted);
+}
+
+.node-sync-chain.tone-busy,
+.node-watching.tone-busy,
+.node-headline.tone-busy {
+  border-left-color: rgb(245 166 35 / 45%);
+  background: var(--bg-card);
+  color: #f2f2f2;
+}
+
+/*
+ * The panel these lines sit inside. Every one of these classes was in the
+ * markup and in no stylesheet, exactly like `.toast` before it.
+ */
+.node-supervisor {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 16px);
+  background: var(--bg-card);
+}
+
+.node-headline {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.node-progress,
+.node-watching {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-left: 4px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.node-warn {
+  margin: 8px 0;
+  color: #ffd18a;
+  font-size: 13px;
+}
+
+.node-log {
+  overflow-x: auto;
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #070707;
+  color: #d8d8d8;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.node-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+/*
+ * AN ANIMATION NOBODY ASKED FOR IS NOT INFORMATION.
+ *
+ * The only motion in this block is the fill sliding to a width that changed,
+ * so removing it costs nothing: the bar still lands on the correct percentage,
+ * and every fact stays in the text beside it.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .node-sync-fill {
+    transition: none;
+  }
+}
+

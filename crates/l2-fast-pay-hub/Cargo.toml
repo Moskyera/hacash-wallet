@@ -2,7 +2,7 @@
 name = "l2-fast-pay-hub"
 version.workspace = true
 edition.workspace = true
-description = "Hacash CSP / Fast Pay hub. Wallet Hub API v4 reference server"
+description = "Hacash CSP / Fast Pay hub. Wallet Hub API v7 reference server"
 license.workspace = true
 
 [dependencies]
@@ -18,31 +18,73 @@ sha2.workspace = true
 hkdf.workspace = true
 hmac.workspace = true
 zeroize.workspace = true
+aes-gcm.workspace = true
+rand.workspace = true
 fs2.workspace = true
 sha3 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 field = { path = "../../../hacash-fullnodedev/field" }
 sys = { path = "../../../hacash-fullnodedev/sys" }
 basis = { path = "../../../hacash-fullnodedev/basis" }
+protocol = { path = "../../../hacash-fullnodedev/protocol" }
+mint = { path = "../../../hacash-fullnodedev/mint" }
+vm = { path = "../../../hacash-fullnodedev/vm" }
 axum = { workspace = true }
 tower-http = { workspace = true }
 clap = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
 
 [features]
 default = []
 server = ["dep:clap", "dep:tracing-subscriber"]
+local-pilot-tools = ["server"]
+# The witness service. Deliberately absent from a default Hub build: the Hub's
+# only witness client is a network client, and a configuration that would
+# collapse the anchor into a file on the Hub's own disk has to be built rather
+# than selected. See crates/l2-fast-pay-hub/src/rollback_anchor/witness.rs.
+rollback-witness = ["server"]
+# The user-side registry response watch. Separate from the Hub build because
+# it is not a Hub component and must never be mistaken for one: it exists to
+# answer an arbitration challenge on behalf of somebody who is asleep, and in
+# the case it is built for the Hub is the party challenging. It signs with its
+# own fee-paying key, holds no key of the user's, and cannot open a close.
+# See crates/l2-fast-pay-hub/src/hvm_registry_response_watch.rs.
+registry-response-watch = ["server"]
 
 [[bin]]
 name = "fast-pay-hub"
 path = "src/bin/fast-pay-hub.rs"
 required-features = ["server"]
 
+[[bin]]
+name = "hpay-hvm-local-pilot"
+path = "src/bin/hpay-hvm-local-pilot.rs"
+required-features = ["local-pilot-tools"]
+
+[[bin]]
+name = "hpay-hvm-registry-local-pilot"
+path = "src/bin/hpay-hvm-registry-local-pilot.rs"
+required-features = ["local-pilot-tools"]
+
+[[bin]]
+name = "hpay-rollback-witness"
+path = "src/bin/hpay-rollback-witness.rs"
+required-features = ["rollback-witness"]
+
+[[bin]]
+name = "hpay-registry-response-watch"
+path = "src/bin/hpay-registry-response-watch.rs"
+required-features = ["registry-response-watch"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 axum = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# The fullnode's own in-memory chain. Test-only, and deliberately so: it is how
+# the wallet's exact signed bytes get executed by the real block executor
+# against the real HVM contract instead of being asserted about in a unit test.
+testkit = { path = "../../../hacash-fullnodedev/testkit" }

@@ -1,8 +1,14 @@
-import { HOW_IT_WORKS_URL, OFFICIAL_NODE_URL, isOfficialNodeUrl } from "@hacash/wallet-ui";
+import {
+  HOW_IT_WORKS_URL,
+  OFFICIAL_NODE_URL,
+  isOfficialNodeUrl,
+  mainnetSigningTransportIsEligible,
+} from "@hacash/wallet-ui";
 import { open } from "@tauri-apps/plugin-shell";
 import { useEffect, useMemo, useState } from "react";
 import { api, type NodeDiscoveryReport, type WalletSettings } from "../api";
 import AppUpdateSection from "../components/AppUpdateSection";
+import NodeSupervisorPanel from "../components/NodeSupervisorPanel";
 import { formatInvokeError } from "../formatInvokeError";
 import { LanguageSwitcher, useLocale } from "../locale";
 
@@ -32,6 +38,20 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
   }, [settings]);
 
   const activeIsOfficial = useMemo(() => isOfficialNodeUrl(nodeUrl), [nodeUrl]);
+  /**
+   * Whether the node in this field can sign, judged the way the core judges it.
+   *
+   * `settings.officialHttpNotice` already existed and already said the truth.
+   * On desktop it rendered nowhere at all, and on mobile only inside the
+   * "Change node" branch, so it appeared only to somebody who had already
+   * worked out that the node was the problem. The one person who needed it was
+   * the one sitting on the default, reading "Using the official public node
+   * API" next to a primary button offering "Use official node".
+   */
+  const nodeCanSign = useMemo(
+    () => mainnetSigningTransportIsEligible(nodeUrl, settings?.network_mode ?? "mainnet"),
+    [nodeUrl, settings?.network_mode],
+  );
 
   const fallbackUrls = fallbackText
     .split(/\r?\n/)
@@ -50,7 +70,12 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
       setDiscovery(report);
       setNodeUrl(report.active_node);
       if (!isOfficialNodeUrl(report.active_node)) setShowCustomNode(true);
-      if (report.switched) {
+      // A working node was found and deliberately not adopted, because
+      // adopting it would have left this wallet unable to sign on mainnet.
+      // Declining silently was half the defect.
+      if (report.failover_declined) {
+        onError(report.failover_declined);
+      } else if (report.switched) {
         onInfo(t("settings.connectedTo", { node: report.active_node }));
       } else if (
         report.candidates.some(
@@ -95,6 +120,15 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
 
       <hr className="divider" />
 
+      {/*
+        Above the node URL box on purpose. The question "which node should I
+        type in here" only exists because the wallet does not run one, so the
+        offer to run one belongs before the box, not after it.
+      */}
+      <NodeSupervisorPanel onInfo={onInfo} onError={onError} />
+
+      <hr className="divider" />
+
       <h3>{t("settings.network")}</h3>
       <p className="muted">
         {t("settings.desktopNetworkNotice", {
@@ -114,6 +148,12 @@ export default function SettingsScreen({ settings, busy, onSave, onInfo, onError
           </>
         )}
       </p>
+
+      {!nodeCanSign ? (
+        <p className="alert" role="note">
+          {t("settings.officialHttpNotice")}
+        </p>
+      ) : null}
 
       {!showCustomNode ? (
         <div className="actions-row">

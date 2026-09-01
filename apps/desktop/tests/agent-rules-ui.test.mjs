@@ -113,10 +113,26 @@ test("expired mobile pairing offers cannot remain actionable", () => {
 });
 
 
-test("new Agent Wallet creation remains testnet-only until backup exists", () => {
-  assert.doesNotMatch(agentAppSource, /<option value="mainnet"/);
-  assert.match(agentAppSource, /networkMode: "testnet"/);
-  assert.match(agentAppSource, /Mainnet creation, funding and payments remain blocked/);
+test("new mainnet Agent Wallet creation is explicit, bounded and fail closed", () => {
+  assert.match(agentAppSource, /<option value="mainnet"/);
+  assert.match(agentAppSource, /mainnetNodeUrl\.startsWith\("https:\/\/"\)/);
+  assert.match(agentAppSource, /mainnetAcknowledged/);
+  // The acknowledgement must be RENDERED, not merely mentioned. It used to be
+  // imported and put in the create payload while the checkbox beside it read
+  // "I understand the bounded pilot and recovery limitations", so the sentence
+  // naming the loss was verified for string equality against a person who had
+  // never been shown it. Matching the bare identifier passed that whole time.
+  // Match the JSX braces, which only the rendered use has.
+  assert.match(agentAppSource, /\{AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT\}/);
+  assert.doesNotMatch(agentAppSource, /I understand the bounded pilot and recovery limitations/);
+  // The numbers are what no Hub may exceed. A Hub declares its own and the
+  // only one ever measured on mainnet declared a hundredth of these, so the
+  // screen must not offer them as the limits the person actually gets.
+  assert.match(agentAppSource, /1 HAC per payment/);
+  assert.match(agentAppSource, /10 HAC per channel/);
+  assert.match(agentAppSource, /100 HAC aggregate TVL/);
+  assert.match(agentAppSource, /no Hub may exceed/);
+  assert.match(agentAppSource, /What your Hub\s+declares is what applies/);
 });
 
 test("Agent Wallet routing never uses payment readiness as a navigation redirect", () => {
@@ -134,7 +150,7 @@ test("Agent Wallet routing never uses payment readiness as a navigation redirect
 
 test("non-pilot build shows an explicit unavailable screen without auto-switching", () => {
   assert.match(agentAppSource, /AI Agent Wallet unavailable in this build/);
-  assert.match(agentAppSource, /Use an HPAY pilot build to access Agent Wallet testing/);
+  assert.match(agentAppSource, /Use a reviewed HPAY Agent Wallet build to access this space/);
   const unavailable = agentAppSource
     .split('uiState === "unavailable_in_this_build"')[1]
     .split('uiState === "recovery_required"')[0];
@@ -270,4 +286,22 @@ test("the payment predicate keeps every prerequisite", () => {
   }
   assert.match(agentAppSource, /paymentBlockers\.map/);
   assert.match(agentAppSource, /paymentBlockers\.length === 0 \? "Ready"/);
+});
+
+test("an Agent Wallet on the wrong network does not lock a person out for good", () => {
+  // An Agent Wallet pins its network at creation and can never be moved:
+  // address, channel binding and voucher all validate against it. The create
+  // form was reachable only at zero wallets, and nothing in the app deletes or
+  // resets one, so somebody who made a local-pilot wallet could never reach
+  // mainnet. The store is a BTreeMap with no limit and create_wallet has no
+  // one-wallet rule; the entire restriction was this one screen. It cost a
+  // live mainnet setup a manual directory move.
+  assert.match(agentAppSource, /const \[showCreate, setShowCreate\] = useState\(false\)/);
+  assert.match(agentAppSource, /Create another Agent Wallet/);
+  assert.match(agentAppSource, /setShowCreate\(true\)/);
+  // And the reason is on screen, because "create another" without saying why
+  // reads as a footgun rather than the way out of a dead end.
+  assert.match(agentAppSource, /cannot be moved between networks after it is created/);
+  // The wallet they already have must survive it.
+  assert.match(agentAppSource, /existing wallet is untouched/);
 });

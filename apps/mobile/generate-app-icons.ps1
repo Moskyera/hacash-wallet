@@ -128,4 +128,13 @@ New-Item -ItemType Directory -Force -Path $anydpi | Out-Null
   <background android:drawable="@color/ic_launcher_background"/>
 </adaptive-icon>
 '@ | Set-Content -Path (Join-Path $anydpi "ic_launcher_round.xml") -Encoding UTF8 -NoNewline
+
+# Record which artwork these mipmaps were rendered from. apply-android-patches.ps1
+# compares this against the live source so a new logo can never be shipped with
+# launcher icons left over from the previous one. The stamp lives outside
+# icons\android because everything under that directory is copied verbatim into
+# the Android res\ tree, where a stray non-resource file is invalid.
+$sourceStamp = Join-Path $icons "android-mipmap-source.sha256"
+(Get-FileHash $srcIcon -Algorithm SHA256).Hash | Set-Content -Path $sourceStamp -Encoding ASCII -NoNewline
 Write-Host "Android launcher mipmaps synced (glossy artwork)." -ForegroundColor Green
+Write-Host "Stamped mipmap source artwork hash to $sourceStamp" -ForegroundColor Green

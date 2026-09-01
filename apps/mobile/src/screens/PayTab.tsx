@@ -24,6 +24,7 @@ import {
   isValidHacdName,
   isValidHacashAddress,
   normalizeHacdName,
+  officialNodePlaintextDisclosure,
   type PaymentAsset,
 } from "@hacash/wallet-ui";
 import type { PaymentQrPayload } from "../paymentQr";
@@ -158,9 +159,28 @@ export default function PayTab({
     }
   };
 
+  /**
+   * What this payment costs on the connection it will cross.
+   *
+   * Null on a node on this phone, on an HTTPS node, and off mainnet, so it
+   * appears only where the cost is actually paid and never becomes wallpaper.
+   * The core prints the same fact into the approval prompt; this is the
+   * version somebody can read before they have typed anything, on the screen
+   * where they decide.
+   */
+  const plaintextCost = officialNodePlaintextDisclosure(
+    settings?.node_url,
+    settings?.network_mode,
+  );
+
   return (
     <div className="card">
       <h2>Pay</h2>
+      {plaintextCost ? (
+        <p className="muted small" role="note">
+          {plaintextCost}
+        </p>
+      ) : null}
       <AssetSelector
         value={asset}
         onChange={(next) => {
@@ -279,6 +299,17 @@ export default function PayTab({
             <div className="preview-box animate-in">
               <span className="badge badge-rail">{preview.plan.rail_label}</span>
               <p className="muted small">{preview.plan.rail_detail}</p>
+              {preview.plan.fast_pay_declined ? (
+                <p className="alert small" role="note">
+                  Fast Pay is set up but is not carrying this payment:{" "}
+                  {preview.plan.fast_pay_declined}
+                </p>
+              ) : null}
+              {preview.plan.fee_estimate_degraded ? (
+                <p className="alert small" role="note">
+                  {preview.plan.fee_estimate_degraded}
+                </p>
+              ) : null}
               <p>
                 <strong>{preview.amount_mei} HAC</strong> →{" "}
                 <code>{maskAddress(preview.to, hideAddresses)}</code>

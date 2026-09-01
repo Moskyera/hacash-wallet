@@ -5,6 +5,7 @@
 
 pub(crate) mod commands;
 mod lifecycle;
+mod network;
 #[cfg(target_os = "android")]
 mod pairing;
 pub(crate) mod pilot;
@@ -337,6 +338,9 @@ mod tests {
         }
         assert!(source.contains("cfg!(feature = \"agent-wallet-testnet-pilot\")"));
         assert!(source.contains("CompanionPayload::ApprovalDecision"));
+        assert!(source.contains("CompanionPayload::AgentFastPayApprovalPoll"));
+        assert!(source.contains("CompanionPayload::AgentFastPayApprovalRequest"));
+        assert!(source.contains("CompanionPayload::AgentFastPayApprovalDecision"));
         assert!(source.contains("CompanionPayload::RecoverPendingWitness"));
         assert!(source.contains("CompanionPayload::WitnessReceipt"));
     }

@@ -1,0 +1,160 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, "Segoe UI", system-ui, sans-serif; background: #000; }
+    a { color: #f5a623; } a:hover { color: #ffb43c; }
+    .mono { font-family: ui-monospace, Consolas, monospace; }
+    button { font-family: inherit; cursor: pointer; transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease; }
+    button:not(:disabled):hover { border-color: rgba(245, 166, 35, 0.34); }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    input { font-family: inherit; }
+    input:focus { outline: none; border-color: rgba(245, 166, 35, 0.34); }
+  </style>
+</helmet>
+
+<div style="background:#000;color:#edf2f7;min-height:100%;padding:36px 40px;box-sizing:border-box">
+
+  <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:28px">
+    <span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#8d8d8d;font-weight:600">Step 1 of 4</span>
+    <h1 style="margin:0;font-size:26px;font-weight:600;letter-spacing:-.01em">Open a Fast Pay channel</h1>
+    <p style="margin:0;font-size:14px;line-height:1.55;color:#8d8d8d;max-width:62ch">
+      Money you put in a channel can be spent instantly, and it comes back out when you close it.
+      Nothing is spent on this screen.
+    </p>
+  </div>
+
+  <!--
+    Payments-on is step zero and sits at the top. In the shipped build the
+    control you had to press FIRST was below the one it gated, with nothing
+    saying so, and the refusal that followed named no cause.
+  -->
+  <div style="display:flex;align-items:center;gap:14px;padding:14px 18px;border:1px solid {{payBorder}};border-radius:16px;background:#0a0a0a;margin-bottom:22px">
+    <span style="width:8px;height:8px;border-radius:50%;background:{{payDot}};box-shadow:0 0 0 4px {{payGlow}};flex:none"></span>
+    <div style="flex-grow:1">
+      <div style="font-size:14px;font-weight:600">{{payTitle}}</div>
+      <div style="font-size:13px;color:#8d8d8d;margin-top:2px">{{paySub}}</div>
+    </div>
+    <button onClick="{{togglePayments}}" style="border:1px solid #242424;background:#111;color:#edf2f7;border-radius:10px;padding:9px 14px;font-size:13px;min-height:38px">{{payAction}}</button>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:18px;margin-bottom:22px">
+
+    <label style="display:flex;flex-direction:column;gap:8px">
+      <span style="font-size:13px;font-weight:500;color:#edf2f7">Fast Pay Hub</span>
+      <input value="{{hub}}" onInput="{{onHub}}" class="mono"
+        style="background:#111;border:1px solid #242424;border-radius:12px;color:#edf2f7;padding:12px 14px;font-size:13px;min-height:44px;box-sizing:border-box">
+      <span style="font-size:12px;color:#8d8d8d;line-height:1.5">Your own Hub, on this machine.</span>
+    </label>
+
+    <label style="display:flex;flex-direction:column;gap:8px">
+      <span style="font-size:13px;font-weight:500;color:#edf2f7">How much to put in</span>
+      <div style="display:flex;align-items:center;gap:10px;background:#111;border:1px solid {{amountBorder}};border-radius:12px;padding:0 14px;min-height:44px;box-sizing:border-box">
+        <input value="{{amount}}" onInput="{{onAmount}}" class="mono"
+          style="background:transparent;border:none;color:#edf2f7;font-size:15px;flex-grow:1;padding:12px 0;min-width:0">
+        <span style="font-size:13px;color:#8d8d8d">HAC</span>
+      </div>
+      <!--
+        The ceiling belongs beside the field, not inside a refusal that arrives
+        after a round trip. The shipped field came pre-filled with 1, five times
+        this Hub's own cap, and answered "payment amount is invalid".
+      -->
+      <span style="font-size:12px;color:{{amountHintColor}};line-height:1.5">{{amountHint}}</span>
+    </label>
+
+  </div>
+
+  <div style="border:1px solid #1f1f1f;border-radius:16px;background:#0a0a0a;padding:18px 20px;margin-bottom:24px">
+    <div style="font-size:13px;font-weight:600;margin-bottom:10px">Before you decide</div>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <span style="color:#f5a623;font-size:13px;line-height:1.55;flex:none">&bull;</span>
+        <span style="font-size:13px;line-height:1.55;color:#8d8d8d">Closing this channel needs the Hub to sign too. <strong style="color:#edf2f7;font-weight:500">Take your way out as soon as it opens</strong>, and a Hub that later goes quiet cannot keep your deposit.</span>
+      </div>
+      <div style="display:flex;gap:10px;align-items:flex-start">
+        <span style="color:#f5a623;font-size:13px;line-height:1.55;flex:none">&bull;</span>
+        <span style="font-size:13px;line-height:1.55;color:#8d8d8d">It takes about <strong style="color:#edf2f7;font-weight:500">half an hour</strong> before your way out can be issued. Stay at the computer.</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:16px">
+    <button disabled="{{blocked}}" style="border:1px solid rgba(245,166,35,.34);background:#f5a623;color:#0a0a0a;border-radius:12px;padding:0 22px;font-size:14px;font-weight:600;min-height:46px">Check the exact numbers</button>
+    <span style="font-size:13px;color:{{ctaNoteColor}}">{{ctaNote}}</span>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { amount: '0.2', hub: 'http://127.0.0.1:8790', paymentsOn: true };
+  }
+
+  // Mirrors explainInvalidDepositAmount in packages/wallet-ui: the parser takes
+  // at most three decimals, needs a digit before the point, and splits only on
+  // a full stop. Each rule gets its own sentence, because "payment amount is
+  // invalid" was true of all of them and useful for none.
+  amountProblem(raw) {
+    const value = (raw || '').trim();
+    if (value.length === 0) return 'Type an amount, for example 0.2';
+    if (value.includes(',')) return 'Use a full stop, not a comma. Type 0.2 rather than 0,2.';
+    const parts = value.split('.');
+    if (parts.length > 2) return 'That has more than one decimal point.';
+    const whole = parts[0];
+    const fraction = parts.length > 1 ? parts[1] : '';
+    if (whole.length === 0) return 'Put a digit before the point. Type 0.2 rather than .2';
+    if (!/^\d+$/.test(whole)) return 'Digits only, with no spaces or letters.';
+    if (value.includes('.') && fraction.length === 0) return 'Put a digit after the point.';
+    if (fraction.length > 0 && !/^\d+$/.test(fraction)) return 'Digits only, with no spaces or letters.';
+    if (fraction.length > 3) return 'At most three digits after the point.';
+    const zhu = Math.round(parseFloat(value) * 100000000);
+    if (zhu === 0) return 'The deposit has to be more than zero.';
+    if (zhu > 20000000) return 'This Hub takes at most 0.2 HAC per channel.';
+    return null;
+  }
+
+  renderVals() {
+    const problem = this.amountProblem(this.state.amount);
+    const hubEmpty = (this.state.hub || '').trim().length === 0;
+    const on = this.state.paymentsOn;
+    const blocked = Boolean(problem) || hubEmpty || !on;
+
+    let note = 'You will see the fee before anything is signed.';
+    if (!on) note = 'Turn payments on first.';
+    else if (hubEmpty) note = 'Fill in the Hub address.';
+    else if (problem) note = 'Fix the amount above.';
+
+    return {
+      amount: this.state.amount,
+      hub: this.state.hub,
+      blocked,
+      amountBorder: problem ? '#d4891a' : 'rgba(245,166,35,.34)',
+      amountHint: problem || 'This Hub takes at most 0.2 HAC per channel.',
+      amountHintColor: problem ? '#f5a623' : '#8d8d8d',
+      ctaNote: note,
+      ctaNoteColor: blocked ? '#f5a623' : '#8d8d8d',
+      payTitle: on ? 'Payments are on' : 'Payments are off',
+      paySub: on ? 'Turned on locally, on this computer.' : 'Nothing can be opened or sent until you turn them on.',
+      payAction: on ? 'Turn off' : 'Turn on',
+      payDot: on ? '#f5a623' : '#5c5c5c',
+      payGlow: on ? 'rgba(245,166,35,.14)' : 'rgba(140,140,140,.10)',
+      payBorder: on ? '#1f1f1f' : '#d4891a',
+      onAmount: (event) => this.setState({ amount: event.target.value }),
+      onHub: (event) => this.setState({ hub: event.target.value }),
+      togglePayments: () => this.setState({ paymentsOn: !this.state.paymentsOn }),
+    };
+  }
+}
+</script>
+</body>
+</html>

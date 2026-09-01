@@ -127,7 +127,8 @@ export const pt = {
   "node.change": "Alterar node",
   "node.useOfficial": "Usar node oficial",
   "node.customTitle": "Node personalizado",
-  "node.customHint": "Altere apenas se executar o seu próprio node Hacash ou precisar de um endpoint privado.",
+  "node.customHint":
+    "Na mainnet esta carteira envia através do node oficial em HTTP simples, porque esse node não oferece mais nada. Quem transporta o seu tráfego consegue ler que endereço está a consultar e pode indicar uma taxa de rede errada, por isso leia a taxa antes de aprovar. Ninguém no caminho pode mudar quem recebe nem assinar por si. Executar o Hacash neste computador e usar http://127.0.0.1:8080 remove tudo isso, e é a única forma de configurar o Fast Pay ou fechar um canal.",
   "node.grapheneTitle": "GrapheneOS / telefones sem serviços Google",
   "node.grapheneHelp": "Use o mesmo APK dos outros Android. Ative a permissão de rede nas informações da aplicação. Instale a partir de Ficheiros se o browser bloquear o APK. O node oficial usa HTTP simples, pelo que uma VPN ou filtro pode bloqueá-lo. Não é necessária uma versão Graphene separada.",
   "quantum.funding.title": "Financiar conta quantum",

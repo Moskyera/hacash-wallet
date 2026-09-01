@@ -4,6 +4,7 @@ import type {
   AssetPriceResponse,
   CanonicalTransaction,
   HacdDiamondInfo as SharedHacdDiamondInfo,
+  NativeRailPreflightView,
   NodeCapabilities,
   ParsedAddress,
   Type4ProbeResult,
@@ -19,11 +20,201 @@ export type PrivacySettings = {
   pause_auto_lock_dapp: boolean;
 };
 
+/**
+ * Where the relay this wallet hosts accepts connections.
+ *
+ * `loopback` is 127.0.0.1: this machine and nothing else, which is why a
+ * wallet hosting a relay has never been reachable by the person it wants to
+ * message. `all_interfaces` is 0.0.0.0, which is what makes hosting for
+ * somebody else possible and is never chosen for anybody.
+ * `crates/wallet-core/src/dust_whisper.rs` holds the setting.
+ */
+export type RelayBind = "loopback" | "all_interfaces";
+
 export type DustWhisperSettings = {
   enabled: boolean;
   relay_urls: string[];
   fallback_direct: boolean;
   auto_start_relay: boolean;
+  relay_bind: RelayBind;
+  /**
+   * The addresses this wallet's own relay carries mail for.
+   *
+   * Empty is open to whoever can reach the socket, which is what every relay
+   * this wallet has run has been. It is the one defence against a stranger on
+   * the same network filling the relay that a free keypair does not walk
+   * around. See `InboxAllowlist`, crates/dust-whisper/src/messenger_relay.rs.
+   */
+  relay_allowlist: string[];
+};
+
+/**
+ * What this wallet is serving, from `wallet_relay_endpoint`.
+ *
+ * `listen_addr` is read back from the socket by
+ * `crates/wallet-tauri-common/src/desktop_relay.rs`, so it is the address the
+ * relay is on rather than the address that was asked for. `lan_url` is offered
+ * only when the bind is wide enough for it to mean anything, and it is a
+ * candidate address, not a promise that anybody can reach it.
+ */
+export type RelayEndpoint = {
+  hosting: boolean;
+  serving: boolean;
+  listen_addr: string | null;
+  bind: RelayBind;
+  loopback_only: boolean;
+  port: number | null;
+  own_url: string | null;
+  lan_addr: string | null;
+  lan_url: string | null;
+  idle_reason: string | null;
+  /**
+   * The addresses the person added, exactly as stored. This is NOT the whole
+   * of who the relay serves: the wallet's own address is added to the list the
+   * relay enforces and is never stored here. Read `served_addresses` when the
+   * question is who can use this relay.
+   */
+  allowlist: string[];
+  /** This wallet's own address, which its own relay always carries mail for. */
+  own_address: string | null;
+  /**
+   * Every address this relay will answer for: the owner, plus the additions.
+   * Anybody not on it gets nothing on every route - no send, no mailbox, no
+   * challenge, no acknowledgement, no directory answer. This is the list the
+   * relay enforces, so it is the list a screen must quote.
+   */
+  served_addresses: string[];
+  /** True when this relay would carry mail for no address at all. */
+  serves_nobody: boolean;
+  /** Who may push a transaction through this relay. Always this machine. */
+  transaction_reach: string;
+  /**
+   * Every relay URL this wallet is configured with, in the order a send walks
+   * them. The order is the point: see `firstAcceptWarning` in relayReach.ts.
+   */
+  relay_urls: string[];
+};
+
+/**
+ * WHAT THE SUPERVISED HACASH NODE IS DOING, from
+ * `wallet_node_supervisor_status`.
+ *
+ * Every field is something the backend read rather than something it assumed.
+ * `ours` is set by exactly one thing: a live child this wallet is holding
+ * whose own stdout said it took the API port. The node binds its own socket,
+ * and when the port is taken it prints an error and carries on without an API,
+ * so "our child is alive and the port answers" would be a claim on somebody
+ * else's node.
+ */
+export type NodeSupervisorState =
+  | "not_present"
+  | "blocked"
+  | "starting"
+  | "catching_up"
+  | "ready"
+  | "foreign"
+  | "failed"
+  | "stopping"
+  | "stopped";
+
+/**
+ * Which chain the node being watched is actually on.
+ *
+ * This is the field that tells a real mainnet sync apart from a node that has
+ * quietly started a private chain of its own. Both show a climbing height, so
+ * the height is not the evidence: the pinned block one hash is.
+ */
+export type ChainAnchor = "confirmed" | "not_yet_available" | "wrong" | "unknown";
+
+export type NodeBinarySource = "bundled" | "picked" | "found" | "legacy";
+
+export type NodeBinaryReport = {
+  path: string | null;
+  source: NodeBinarySource | null;
+  version: string | null;
+  database_type: number | null;
+  /** Every path looked at and what was found there, so a dead end is fixable. */
+  searched: { path: string; source: NodeBinarySource; verdict: string }[];
+  /** The path a person pointed the wallet at, whether or not it still works. */
+  picked_path: string | null;
+  /**
+   * Set when that path no longer answers as a fullnode. When it is set nothing
+   * else is chosen: running a different node than the one somebody picked,
+   * without saying so, is the substitution that does not crash and lies about
+   * money.
+   */
+  picked_problem: string | null;
+};
+
+/**
+ * Who the kernel says holds the API port at this poll.
+ *
+ * The node prints `[Api Server] listening on ...` exactly once. That line is an
+ * announcement, not a binding, and the process keeps its chain and p2p threads
+ * running whether or not the API thread survives. So ownership of the port is
+ * asked of the operating system every time rather than remembered from that
+ * one line.
+ */
+export type ApiPortHolder =
+  | { holder: "not_checked" }
+  | { holder: "nobody" }
+  | { holder: "our_child"; pid: number }
+  | { holder: "stranger"; pid: number }
+  | { holder: "bound_by_unknown" };
+
+export type ConfigWriteOutcome =
+  | { outcome: "written" }
+  | { outcome: "unchanged" }
+  | { outcome: "rewritten" }
+  | { outcome: "left_alone"; reason: string };
+
+export type NodeSupervisorReport = {
+  state: NodeSupervisorState;
+  /** The only field that authorises the word "ours". */
+  ours: boolean;
+  headline: string;
+  /** Why this state, built from something that was read. */
+  detail: string;
+  binary: NodeBinaryReport;
+  api_url: string;
+  api_port: number;
+  p2p_port: number;
+  data_dir: string;
+  config_path: string;
+  config: ConfigWriteOutcome | null;
+  height: number | null;
+  tip_age_seconds: number | null;
+  max_tip_age_seconds: number | null;
+  /**
+   * The node's own timestamp on its newest block, and its own clock when it
+   * answered. Two readings of these are the only honest way to a percentage:
+   * they give the seconds per block across exactly the blocks this node just
+   * took in, which turns a tip age into a number of blocks still to go. No
+   * block interval is assumed anywhere on the way.
+   */
+  tip_timestamp_unix: number | null;
+  observed_unix: number | null;
+  fresh: boolean | null;
+  anchor: ChainAnchor;
+  /** Which chain is being watched, named by its block one hash. */
+  watching: string;
+  peer_role: string | null;
+  peers_inbound: number | null;
+  peers_outbound: number | null;
+  /**
+   * Ready means the wallet can trust this node about the chain. It does not
+   * mean anybody can reach it. This quotes the same peers block the native
+   * rail preflight reads rather than inventing a second opinion.
+   */
+  reach: string | null;
+  exit_code: number | null;
+  last_error_lines: string[];
+  stopped_hard: boolean;
+  can_start: boolean;
+  can_stop: boolean;
+  offers: string[];
+  /** Checked, not remembered. See ApiPortHolder. */
+  api_port_holder: ApiPortHolder;
 };
 
 export type RelayHealthStatus = {
@@ -159,6 +350,7 @@ export type WalletSettings = {
   auto_node_failover?: boolean;
   network_mode?: "mainnet" | "testnet";
   l2_hub_url: string | null;
+  trusted_mainnet_fast_pay_pilot: boolean;
   hub_right_address: string | null;
   channel_id_hex: string | null;
   webauthn_enabled: boolean;
@@ -183,6 +375,12 @@ export type NodeDiscoveryReport = {
   switched: boolean;
   network_mode: "mainnet" | "testnet";
   candidates: NodeCandidateStatus[];
+  /**
+   * Set when automatic failover found a working node and deliberately did not
+   * move to it, because moving would have traded a node this wallet can sign
+   * against for one it cannot. Absent from older cores.
+   */
+  failover_declined?: string | null;
 };
 
 export type Hip23Check = {
@@ -206,6 +404,16 @@ export type SendPreview = {
     rail_detail: string;
     fee_breakdown: SendFeeBreakdown;
     l1_fee_tiers?: L1FeeTierQuote[];
+    // Set when the wallet had Fast Pay set up for this send and chose
+    // not to use it. The blockchain fallback is correct; doing it in
+    // silence was not.
+    fast_pay_declined?: string | null;
+    // Set when the fee above is a guess rather than a quote, because the node
+    // did not answer the fee query or could not build the body. The fallback
+    // is correct; showing an invented fee as though the network had quoted it
+    // was not. An under-priced transfer that sits unconfirmed inside a channel
+    // challenge window loses the window, and the older split settles.
+    fee_estimate_degraded?: string | null;
   };
   from: string;
   to: string;
@@ -252,6 +460,7 @@ export type SendResult = {
 
 export type ChannelSetupPreview = {
   channel_id: string;
+  reuse_version: number;
   left_address: string;
   right_address: string;
   left_deposit: string;
@@ -321,6 +530,8 @@ export type HubHealth = {
   hub_fee_mei?: string | number;
   settlement_ready?: boolean;
   cross_channel_ready?: boolean;
+  trusted_bounded_pilot_ready?: boolean;
+  deployment_profile?: string;
 };
 
 export type HubDiscoveryEntry = {
@@ -337,6 +548,63 @@ export type HubDiscoveryReport = {
   hubs: HubDiscoveryEntry[];
   online_count: number;
 };
+
+export type DeclaredHubCaps = {
+  max_payment_hac: string | null;
+  max_channel_funding_hac: string | null;
+  max_aggregate_tvl_hac: string | null;
+  aggregate_tvl_within_limit: boolean | null;
+  /**
+   * Whether this Hub can admit a new channel of any size at all.
+   *
+   * Optional because an older Hub does not publish it, and `false` is the
+   * alarming value: a required field defaulted to false would tell everyone
+   * their Hub was closed. `aggregate_tvl_within_limit` cannot answer this
+   * question - it is `current <= cap`, so it reads true at exactly the cap,
+   * which is where the first mainnet channel open landed.
+   */
+  new_channel_admission_available?: boolean | null;
+  /** What the Hub says its aggregate TVL is right now, in HAC. */
+  aggregate_tvl_hac?: string | null;
+};
+
+/**
+ * One Hub answering for itself. Every field is transcribed from that Hub's
+ * /v1/health and /v1/readiness/mainnet, so a person choosing a provider sees
+ * the Hub's declared caps and the Hub's own named blockers rather than this
+ * build's compile-time ceilings. Read-only: the readiness document is
+ * re-fetched and re-gated at the signing boundary regardless.
+ */
+export type HubDeclaration = {
+  hub_url: string;
+  reachable: boolean;
+  error: string | null;
+  name: string | null;
+  hub_address: string | null;
+  version: number | null;
+  settlement_ready: boolean;
+  cross_channel_ready: boolean;
+  hub_fee_mei: string | null;
+  deployment_profile: string | null;
+  mainnet_checked: boolean;
+  readiness_profile: string | null;
+  payments_enabled: boolean | null;
+  declared_caps: DeclaredHubCaps;
+  blockers: string[];
+  disclosed_blockers: string[];
+  limitations: string[];
+  readiness_error: string | null;
+};
+
+/**
+ * The read-only mainnet preflight for the native ChannelPay rail with a close
+ * voucher. Shape mirrors `hpay_native_rail_preflight::PreflightReport`.
+ *
+ * Aliased from the shared UI package rather than restated here, so the type,
+ * the never-show-PASS rule and the card that renders it all read one
+ * definition.
+ */
+export type NativeRailPreflight = NativeRailPreflightView;
 
 export type AirgapUnsigned = {
   v: number;
@@ -585,10 +853,49 @@ export const api = {
   webauthnAuthFinish: (operationId: string, assertionJson: string) =>
     invoke<void>("wallet_webauthn_auth_finish", { operationId, assertionJson }),
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
-  discoverHubs: () => invoke<HubDiscoveryReport>("wallet_discover_hubs"),
+  // hubUrl is what the person has typed but not yet saved. Discovery used to
+  // read only the saved setting, so the field the panel told them to paste
+  // into was the one thing the scan skipped.
+  discoverHubs: (hubUrl?: string) =>
+    invoke<HubDiscoveryReport>("wallet_discover_hubs", { hubUrl: hubUrl?.trim() || null }),
+  hubDeclaration: (hubUrl: string) =>
+    invoke<HubDeclaration>("wallet_hub_declaration", { hubUrl }),
+  /**
+   * Read-only. Signs nothing, unlocks nothing, broadcasts nothing.
+   *
+   * Every argument may be left out, in which case the wallet uses what it
+   * already has saved. A missing value produces a red item with a reason
+   * rather than an error, because a report tells a person more than a throw.
+   */
+  nativeRailPreflight: (args: {
+    nodeUrl?: string;
+    hubUrl?: string;
+    hubAddress?: string;
+    ownerAddress?: string;
+    channelDepositHac: string;
+    paymentHac: string;
+  }) =>
+    invoke<NativeRailPreflight>("wallet_native_rail_preflight", {
+      nodeUrl: args.nodeUrl?.trim() || null,
+      hubUrl: args.hubUrl?.trim() || null,
+      hubAddress: args.hubAddress?.trim() || null,
+      ownerAddress: args.ownerAddress?.trim() || null,
+      channelDepositHac: args.channelDepositHac,
+      paymentHac: args.paymentHac,
+    }),
   fastPayStatus: () => invoke<FastPayStatus>("wallet_fast_pay_status"),
-  enableFastPay: (depositMei?: number) =>
-    invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei: depositMei ?? null }),
+  // `wallet_enable_fast_pay` is deliberately NOT bound here.
+  //
+  // It was, and nothing called it, and that cost real time: the owner audited
+  // every gate inside `WalletService::enable_fast_pay` against their live Hub
+  // looking for why "Enable Fast Pay" would not start, and that function is not
+  // on the button's path at all. `enable_fast_pay` configures a provider and
+  // stops at `needs_channel` on purpose, because opening a funded channel is
+  // irreversible L1 work that the core only permits through the exact prepared
+  // ceremony. The button uses `prepareChannelOpen` plus
+  // `executePreparedChannelOpen` below, which is that ceremony. The command
+  // still exists and is still in the ACL; it is what the read-only mainnet
+  // observation harness calls.
   listBills: () => invoke<BillEntry[]>("wallet_list_bills"),
   fastPayInbox: () => invoke<FastPayInboxItem[]>("wallet_fast_pay_inbox"),
   acceptFastPay: (paymentId: string) =>
@@ -605,19 +912,22 @@ export const api = {
     p3?: Record<string, unknown> | null,
   ) => invoke<Hip23PatternCheck[]>("wallet_validate_hip23", { universal, p2, p3 }),
   channelInfo: () => invoke<ChannelInfo | null>("wallet_channel_info"),
-  previewChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  previewChannelOpen: (hubAddress: string, userDepositMei: string, hubDepositMei: string) =>
     invoke<ChannelSetupPreview>("wallet_preview_channel_open", {
       hubAddress,
       userDepositMei,
       hubDepositMei,
     }),
-  prepareChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  prepareChannelOpen: (hubAddress: string, userDepositMei: string, hubDepositMei: string) =>
     invoke<PreparedOperationView>("wallet_prepare_channel_open", { hubAddress, userDepositMei, hubDepositMei }),
   executePreparedChannelOpen: (operationId: string) =>
     invoke<string>("wallet_execute_prepared_channel_open", { operationId }),
   prepareChannelClose: () => invoke<PreparedOperationView>("wallet_prepare_channel_close"),
   executePreparedChannelClose: (operationId: string) =>
-    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),
+  recoverChannelOpen: () => invoke<string>("wallet_recover_channel_open"),
+  recoverChannelClose: () => invoke<string>("wallet_recover_channel_close"),
+  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
     invoke<string>("wallet_open_channel", {
       hubAddress,
       userDepositMei,
@@ -657,12 +967,36 @@ export const api = {
     invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
   setSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) =>
     invoke<void>("wallet_set_second_factor_threshold", { amountMei, currentPassphrase }),
+  setMainnetFastPayConsent: (consented: boolean, currentPassphrase: string) =>
+    invoke<void>("wallet_set_mainnet_fast_pay_consent", { consented, currentPassphrase }),
   updatePrivacySettings: (privacy: PrivacySettings) =>
     invoke<void>("wallet_update_privacy_settings", { privacy }),
   updateDustWhisperSettings: (dustWhisper: DustWhisperSettings) =>
     invoke<void>("wallet_update_dust_whisper_settings_desktop", { dustWhisper }),
   whisperRelayHealth: () =>
     invoke<RelayHealthStatus[]>("wallet_whisper_relay_health"),
+  /** Read-only. Starts nothing and moves no socket. */
+  relayEndpoint: () => invoke<RelayEndpoint>("wallet_relay_endpoint"),
+  /**
+   * Read-only, and polled: a cold sync is minutes, so the interesting state
+   * cannot be carried by a converge function's return value. Starts nothing,
+   * stops nothing, writes no config.
+   */
+  nodeSupervisorStatus: () =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_status"),
+  /**
+   * Converge, not command. A live node of ours means nothing happens, so a
+   * second press changes nothing. Refusals come back inside the report rather
+   * than as an error, so the screen keeps saying why.
+   */
+  nodeSupervisorStart: () =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_start"),
+  /** Only ever reaches a child this wallet is holding. */
+  nodeSupervisorStop: () =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_stop"),
+  /** The path is confirmed by running the binary, never by its filename. */
+  nodeSupervisorSetBinary: (path: string | null) =>
+    invoke<NodeSupervisorReport>("wallet_node_supervisor_set_binary", { path }),
   clearTxHistory: () => invoke<void>("wallet_clear_tx_history"),
   airgapPrepareSend: (to: string, amountMei: number) =>
     invoke<AirgapPrepareResult>("wallet_airgap_prepare_send", { to, amountMei }),
@@ -756,3 +1090,113 @@ export type AppUpdateInfo = AppUpdateBase &
         download_size: number;
       }
   );
+
+export type MessageDirection = "in" | "out";
+
+export type ChatMessage = {
+  id: string;
+  peer: string;
+  direction: MessageDirection;
+  body: string;
+  timestamp_utc: string;
+  /** True only when a relay accepted the envelope. Set by `messenger_send`. */
+  delivered: boolean;
+  /**
+   * Whether this one message travelled sealed to the peer's own key (v2).
+   * `false` is v1, whose key comes from the two addresses the relay holds in
+   * clear. `null` or absent is a record written before the wallet tracked it,
+   * about which nothing is known.
+   */
+  sealed?: boolean | null;
+  /**
+   * When this wallet took delivery of an incoming message, by its own clock.
+   *
+   * `timestamp_utc` is the sender's own signed claim, and a relay that holds a
+   * message back for a week hands that claim over untouched. The conversation
+   * is ordered on this instead. Absent on outgoing messages and on records
+   * written before the wallet kept it.
+   */
+  received_utc?: string | null;
+  /**
+   * Why no relay took an outgoing message, in the relay's own words.
+   *
+   * "No relay accepted it" used to be the whole story, so a relay that was down
+   * and a recipient whose mailbox was full read identically.
+   */
+  delivery_error?: string | null;
+  /**
+   * WHICH relay accepted an outgoing message, when one did.
+   *
+   * A send stops at the first relay in the list that accepts, and a wallet
+   * hosting its own relay always has one that accepts: its own, on this
+   * machine. So `delivered: true` was also the answer for a message that never
+   * left the computer it was typed on, while the friend's replies kept
+   * arriving because collecting mail tries every relay. Absent on incoming
+   * messages, on undelivered ones, and on records written before this existed.
+   */
+  delivered_via?: string | null;
+};
+
+/** What the screen may say about one conversation's privacy. */
+export type MessengerPeerSecurity = {
+  /** The wallet holds a verified key for this peer, so the next send is sealed. */
+  sends_sealed: boolean;
+  /** Messages already in the thread that are not known to have been sealed. */
+  unsealed_messages: number;
+};
+
+/**
+ * What one pass over the configured relays actually managed to do.
+ *
+ * A bare count cannot separate an empty inbox from a relay that never answered
+ * or one that refused the claim, and the screen used to report all three as
+ * "nothing new".
+ */
+export type MessengerPollOutcome = {
+  added: number;
+  relays_tried: number;
+  relays_answered: number;
+  relays_refused: number;
+  rejected_envelopes: number;
+  /**
+   * Correctly signed envelopes whose body this wallet could not open, cleared
+   * from the relay rather than left there. Left there, they held the inbox at
+   * the relay's cap and every correspondent was refused with "inbox full"
+   * while the owner was told there was nothing new.
+   */
+  undecryptable: number;
+  /** The local store is at its ceiling, so messages were left on the relay. */
+  store_full: boolean;
+};
+
+export type ChatThread = {
+  peer: string;
+  /** The newest message in the thread, cut short for the list row. */
+  last_message: string;
+  /** The sender's own claim about when the newest message was written. */
+  last_timestamp_utc: string;
+  /** When this wallet last saw activity here. The list is ordered on this. */
+  last_activity_utc: string;
+  unread: number;
+};
+
+/**
+ * The messenger commands. All five are registered for the desktop shell in the
+ * shared block of `crates/wallet-tauri-common/src/handlers.rs`; until this
+ * binding existed the desktop app called none of them.
+ */
+export const messengerApi = {
+  threads: () => invoke<ChatThread[]>("messenger_threads"),
+  messages: (peer: string) => invoke<ChatMessage[]>("messenger_messages", { peer }),
+  markRead: (peer: string) => invoke<void>("messenger_mark_read", { peer }),
+  /**
+   * Whether the next message to this peer is sealed to that peer's own key, and
+   * how many messages already in the thread are not known to have been. The
+   * screen says nothing about privacy that this answer does not support.
+   */
+  peerSecurity: (peer: string) =>
+    invoke<MessengerPeerSecurity>("messenger_peer_security", { peer }),
+  send: (peer: string, body: string) => invoke<ChatMessage>("messenger_send", { peer, body }),
+  /** Reports what the poll reached, not only how many messages it took. */
+  pollInbox: () => invoke<MessengerPollOutcome>("messenger_poll_inbox"),
+};

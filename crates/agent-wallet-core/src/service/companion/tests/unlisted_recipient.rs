@@ -83,7 +83,7 @@ async fn spawn_node() -> MockNode {
                 },
                 "istanbul": { "activation_height": 1, "evaluation_height": 11, "active": true },
                 "transactions": { "registered": [2, 3], "enabled": [2, 3] },
-                "actions": { "registered": [1], "enabled": [1] },
+                "actions": { "registered": [1, 2, 3, 14, 1041], "enabled": [1, 2, 3, 14, 1041] },
                 "features": {
                     "action_guard": false, "tx_blob": false, "ast": false, "tex": false,
                     "native_assets": false, "hip20": false, "hip20_primitives": false,
@@ -95,6 +95,7 @@ async fn spawn_node() -> MockNode {
                 "api": {
                     "balance_query": true,
                     "transaction_submit": true,
+                    "transaction_submit_bound": true,
                     "transaction_query": true,
                     "reconciliation_by_tx_hash": true
                 },
@@ -128,6 +129,7 @@ fn manager_for_node(
                 network_mode: "testnet".to_owned(),
                 node_url: node_url.to_owned(),
                 block_one_fingerprint: Some(TESTNET_ANCHOR.to_owned()),
+                mainnet_pilot_acknowledgement: None,
             },
             now,
         )
@@ -753,6 +755,7 @@ fn pending_unlisted_approval(
         wallet_id.clone(),
         unlisted_request(&format!("ceremony-{}", operation_id.as_str()), now + 300),
         now,
+        true,
     )
     .unwrap();
     operation.reserve(HacUnits::MIN_NETWORK_FEE).unwrap();

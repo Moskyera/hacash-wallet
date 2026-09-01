@@ -12,10 +12,14 @@ use crate::policy::{AgentPermission, AgentRecord, AgentStatus};
 use crate::signer::SignedAgentEnvelope;
 use crate::types::{AgentId, AgentWalletId, OperationId, WalletScope};
 
-use super::state::{active_reservations, exposure_for_agent_in_window, scoped_idempotency_key};
+use super::state::{
+    active_l1_reservations, exposure_for_agent_in_window, operation_count,
+    pending_operations_for_agent, recent_requests_for_agent, scoped_idempotency_key,
+};
 use super::{
     AgentAuthorization, AgentWalletManager, AgentWalletState, IdempotencyRecord,
     MAX_APPROVAL_SECONDS, MAX_OPERATIONS_PER_WALLET, MAX_REQUESTS_PER_AGENT_PER_MINUTE,
+    OperationRail,
 };
 
 impl AgentWalletManager {
@@ -32,7 +36,7 @@ impl AgentWalletManager {
             self.load_verified_state(&wallet_id, &session.state_master, &session.journal_key)?;
         let agent = validate_authorization(&state, authorization)?.clone();
         require_permission(&agent, authorization, AgentPermission::CreatePaymentIntent)?;
-        require_agent_spending_network(&state.network_mode)?;
+        require_agent_spending_network(&state.network_mode, state.trusted_mainnet_fast_pay_pilot)?;
         self.sweep_expired_pre_signing_operations(
             &mut state,
             &session.state_master,
@@ -43,8 +47,15 @@ impl AgentWalletManager {
         let safety_permit = emergency.issue_safety_permit(state.payments_suspended)?;
 
         request.validate(now)?;
-        hacash_wallet_core::require_address_for_network(&request.recipient, &state.network_mode)
-            .map_err(|_| AgentWalletError::RecipientNotAllowed)?;
+        // Door one of two. An agent payment is a payment to a person, and
+        // a contract address is the fourth route into a registry channel that
+        // nobody had counted. See
+        // `hacash_wallet_core::require_agent_payment_recipient`.
+        hacash_wallet_core::require_agent_payment_recipient(
+            &request.recipient,
+            &state.network_mode,
+        )
+        .map_err(|_| AgentWalletError::RecipientNotAllowed)?;
         let network_fee = HacUnits::MIN_NETWORK_FEE;
         let total_debit = request.amount_units.checked_add(network_fee)?;
 
@@ -60,7 +71,9 @@ impl AgentWalletManager {
         let idempotency_key = scoped_idempotency_key(&agent.agent_id, &request.idempotency_key);
         let request_commitment = request.commitment_hex()?;
         if let Some(existing) = state.idempotency.get(&idempotency_key) {
-            if existing.request_commitment != request_commitment {
+            if existing.rail != OperationRail::L1
+                || existing.request_commitment != request_commitment
+            {
                 return Err(AgentWalletError::IdempotencyConflict);
             }
             return state
@@ -68,6 +81,24 @@ impl AgentWalletManager {
                 .get(existing.operation_id.as_str())
                 .map(AgentOperation::view)
                 .ok_or(AgentWalletError::RecoveryRequired);
+        }
+
+        if state.fast_pay_operations.values().any(|operation| {
+            operation.agent_id() == &agent.agent_id
+                && operation.idempotency_key() == request.idempotency_key
+        }) {
+            return Err(AgentWalletError::IdempotencyConflict);
+        }
+        if let Some(existing) = state.operations.values().find(|operation| {
+            operation.agent_id() == &agent.agent_id
+                && operation.view().idempotency_key == request.idempotency_key
+        }) {
+            let view = existing.view();
+            return if view.request_commitment == request_commitment {
+                Ok(view)
+            } else {
+                Err(AgentWalletError::IdempotencyConflict)
+            };
         }
 
         #[cfg(feature = "agent-wallet-testnet-pilot")]
@@ -94,14 +125,17 @@ impl AgentWalletManager {
 
         ensure_operation_capacity(&state)?;
         ensure_agent_request_rate(&state, &agent.agent_id, now)?;
-        validate_policy_for_request(&state, &agent, &request, total_debit, now)?;
+        validate_policy_for_payment(&state, &agent, &request.recipient, total_debit, now)?;
 
+        // Pinned here, at intent, and never asked again for this payment. See
+        // `AgentOperation::witness_required`.
         let mut operation = AgentOperation::new(
             OperationId::new(),
             agent.agent_id.clone(),
             wallet_id.clone(),
             request,
             now,
+            super::rollback_witness_required(&state),
         )?;
         operation.reserve(network_fee)?;
         let total = operation.view().total_debit_units;
@@ -118,7 +152,7 @@ impl AgentWalletManager {
             network_id: node.network_kind().to_owned(),
             chain_id: node.chain_id(),
             genesis_identifier: state.block_one_fingerprint.clone(),
-            node_profile_id: node.node_profile_id().to_owned(),
+            node_profile_id: node.node_profile_commitment().to_owned(),
             transaction_format_version: node.transaction_format_version(),
         });
         #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
@@ -130,7 +164,7 @@ impl AgentWalletManager {
             .map_err(|_| AgentWalletError::NodeRejected)
             .and_then(|entry| HacUnits::from_decimal(entry.hacash_decimal()))?;
         safety_permit.checkpoint(state.payments_suspended)?;
-        let reserved = active_reservations(&state)?;
+        let reserved = active_l1_reservations(&state)?;
         let available = balance
             .checked_sub(reserved)
             .map_err(|_| AgentWalletError::InsufficientAgentBalance)?;
@@ -142,6 +176,7 @@ impl AgentWalletManager {
         state.idempotency.insert(
             idempotency_key,
             IdempotencyRecord {
+                rail: OperationRail::L1,
                 request_commitment,
                 operation_id: operation_id.clone(),
             },
@@ -318,7 +353,7 @@ impl AgentWalletManager {
         let session = self.session(wallet_id)?;
         let mut state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
-        require_agent_spending_network(&state.network_mode)?;
+        require_agent_spending_network(&state.network_mode, state.trusted_mainnet_fast_pay_pilot)?;
         self.sweep_expired_pre_signing_operations(
             &mut state,
             &session.state_master,
@@ -410,7 +445,17 @@ impl AgentWalletManager {
             // expires it, `prepare_witness_rotation` refuses while it exists,
             // and no further intent can be created. So ask about the exact
             // device that would have to produce the anchor.
-            if !pinned_witness_phone_can_sign(&state) {
+            //
+            // ASKED ONLY OF A PAYMENT THAT ASKED FOR A WITNESS. The refusal
+            // below exists to stop a payment signing into a status whose only
+            // exit is a phone that cannot sign. A payment the owner never asked
+            // a phone to countersign signs into `Signed` instead, which
+            // broadcasts on its own, so there is nothing here to protect it
+            // from and this line must not be reachable for an owner who has not
+            // asked for a phone.
+            if probe.witness_required(super::rollback_witness_required(&state))
+                && !pinned_witness_phone_can_sign(&state)
+            {
                 return Err(AgentWalletError::WitnessPhoneRequiredForApproval);
             }
         }
@@ -538,8 +583,14 @@ impl AgentWalletManager {
             return Ok(None);
         }
         let operation_id = operation.operation_id().clone();
+        // The same question `approve_desktop_and_broadcast` asks, asked of the
+        // same payment, so the two cannot drift: a payment that wants no witness
+        // is resumed, and one that wants a witness is resumed only if the pinned
+        // phone could still sign the anchor it will need.
         #[cfg(feature = "agent-wallet-testnet-pilot")]
-        if !pinned_witness_phone_can_sign(&state) {
+        if operation.witness_required(super::rollback_witness_required(&state))
+            && !pinned_witness_phone_can_sign(&state)
+        {
             return Ok(None);
         }
         drop(state);
@@ -564,7 +615,7 @@ impl AgentWalletManager {
         let session = self.session(wallet_id)?;
         let mut state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
-        require_agent_spending_network(&state.network_mode)?;
+        require_agent_spending_network(&state.network_mode, state.trusted_mainnet_fast_pay_pilot)?;
         self.sweep_expired_pre_signing_operations(
             &mut state,
             &session.state_master,
@@ -598,12 +649,22 @@ impl AgentWalletManager {
                 || binding.network_id != node.network_kind()
                 || binding.chain_id != node.chain_id()
                 || binding.genesis_identifier != state.block_one_fingerprint
-                || binding.node_profile_id != node.node_profile_id()
+                || binding.node_profile_id != node.node_profile_commitment()
                 || binding.transaction_format_version != node.transaction_format_version()
             {
                 return Err(AgentWalletError::ApprovalCommitmentMismatch);
             }
         }
+
+        // Read once, from the operation's own pinned answer, and used for every
+        // branch below. Asking twice is how a payment gets signed under one
+        // answer and resumed under the other.
+        let wallet_witness_required = super::rollback_witness_required(&state);
+        let witness_required = state
+            .operations
+            .get(operation_id.as_str())
+            .ok_or(AgentWalletError::OperationNotFound)?
+            .witness_required(wallet_witness_required);
 
         match state
             .operations
@@ -637,7 +698,7 @@ impl AgentWalletManager {
                     .operations
                     .get_mut(operation_id.as_str())
                     .ok_or(AgentWalletError::OperationNotFound)?
-                    .record_signed(&signed.transaction, tx_hash)?;
+                    .record_signed(&signed.transaction, tx_hash, wallet_witness_required)?;
                 safety_permit.checkpoint(state.payments_suspended)?;
                 state.updated_at = now;
                 self.persist_event(
@@ -665,7 +726,7 @@ impl AgentWalletManager {
                     &session.journal_key,
                 )?;
             }
-            OperationStatus::Signed if !cfg!(feature = "agent-wallet-testnet-pilot") => {}
+            OperationStatus::Signed if !witness_required => {}
             OperationStatus::SignedAwaitingWitness => {
                 return Err(AgentWalletError::RollbackWitnessRequired);
             }
@@ -680,12 +741,10 @@ impl AgentWalletManager {
             .operations
             .get(operation_id.as_str())
             .ok_or(AgentWalletError::OperationNotFound)?;
-        if cfg!(feature = "agent-wallet-testnet-pilot")
-            && operation.status() == OperationStatus::SignedAwaitingWitness
-        {
+        if operation.status() == OperationStatus::SignedAwaitingWitness {
             return Ok(operation.view());
         }
-        let expected_broadcast_state = if cfg!(feature = "agent-wallet-testnet-pilot") {
+        let expected_broadcast_state = if witness_required {
             OperationStatus::WitnessedAwaitingBroadcast
         } else {
             OperationStatus::Signed
@@ -793,7 +852,7 @@ impl AgentWalletManager {
             }
         }
         #[cfg(feature = "agent-wallet-testnet-pilot")]
-        {
+        if witness_required {
             state
                 .operations
                 .get_mut(operation_id.as_str())
@@ -830,13 +889,15 @@ impl AgentWalletManager {
         let session = self.session(wallet_id)?;
         let mut state =
             self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
-        require_agent_spending_network(&state.network_mode)?;
+        require_agent_spending_network(&state.network_mode, state.trusted_mainnet_fast_pay_pilot)?;
+        let wallet_witness_required = super::rollback_witness_required(&state);
         let operation = state
             .operations
             .get_mut(operation_id.as_str())
             .ok_or(AgentWalletError::OperationNotFound)?;
         let view = operation.view();
-        let reconcilable = if cfg!(feature = "agent-wallet-testnet-pilot") {
+        let witness_required = operation.witness_required(wallet_witness_required);
+        let reconcilable = if witness_required {
             view.status == OperationStatus::ReconciliationRequired
         } else {
             matches!(
@@ -847,16 +908,22 @@ impl AgentWalletManager {
         if !reconcilable || view.tx_hash.as_deref() != Some(confirmed_tx_hash) {
             return Err(AgentWalletError::ApprovalCommitmentMismatch);
         }
-        #[cfg(feature = "agent-wallet-testnet-pilot")]
-        operation.mark_reconciled_awaiting_final_witness(confirmed_tx_hash.to_owned(), now)?;
-        #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
-        operation.mark_committed(confirmed_tx_hash.to_owned(), "confirmed".to_owned(), now)?;
+        if witness_required {
+            // Unreachable off the pilot build: nothing there can pin a witness
+            // requirement, so nothing there can ask for a final receipt.
+            #[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+            return Err(AgentWalletError::InvalidOperationState);
+            #[cfg(feature = "agent-wallet-testnet-pilot")]
+            operation.mark_reconciled_awaiting_final_witness(confirmed_tx_hash.to_owned(), now)?;
+        } else {
+            operation.mark_committed(confirmed_tx_hash.to_owned(), "confirmed".to_owned(), now)?;
+        }
         state.updated_at = now;
         self.persist_event(
             &mut state,
             &session.state_master,
             &session.journal_key,
-            if cfg!(feature = "agent-wallet-testnet-pilot") {
+            if witness_required {
                 AgentJournalEventKind::TransactionReconciled
             } else {
                 AgentJournalEventKind::PaymentCommitted
@@ -1071,21 +1138,45 @@ fn require_permission(
     }
 }
 
-pub(super) fn agent_spending_ready(network_mode: &str) -> bool {
-    network_mode != "mainnet"
+pub(super) fn agent_spending_ready(
+    network_mode: &str,
+    trusted_mainnet_fast_pay_pilot: bool,
+) -> bool {
+    match network_mode {
+        "testnet" => cfg!(test) || cfg!(feature = "agent-wallet-testnet-pilot"),
+        "mainnet" => {
+            trusted_mainnet_fast_pay_pilot && cfg!(feature = "agent-wallet-bounded-mainnet-pilot")
+        }
+        _ => false,
+    }
 }
 
-pub(super) fn require_agent_spending_network(network_mode: &str) -> AgentWalletResult<()> {
-    if agent_spending_ready(network_mode) {
+pub(super) fn require_agent_spending_network(
+    network_mode: &str,
+    trusted_mainnet_fast_pay_pilot: bool,
+) -> AgentWalletResult<()> {
+    if agent_spending_ready(network_mode, trusted_mainnet_fast_pay_pilot) {
         Ok(())
     } else {
         Err(AgentWalletError::SigningBlocked)
     }
 }
+
+#[cfg(test)]
 pub(super) fn validate_policy_for_request(
     state: &AgentWalletState,
     agent: &AgentRecord,
     request: &AgentPaymentRequest,
+    total_debit: HacUnits,
+    now: u64,
+) -> AgentWalletResult<()> {
+    validate_policy_for_payment(state, agent, &request.recipient, total_debit, now)
+}
+
+pub(super) fn validate_policy_for_payment(
+    state: &AgentWalletState,
+    agent: &AgentRecord,
+    recipient: &str,
     total_debit: HacUnits,
     now: u64,
 ) -> AgentWalletResult<()> {
@@ -1095,7 +1186,7 @@ pub(super) fn validate_policy_for_request(
     }
     // The blocklist is absolute and is checked on its own. No policy flag and no
     // owner approval can admit a blocked recipient.
-    if policy.blocked_recipients.contains(&request.recipient) {
+    if policy.blocked_recipients.contains(recipient) {
         return Err(AgentWalletError::RecipientNotAllowed);
     }
     // The allowlist keeps its meaning: a recipient on it is one the owner has
@@ -1105,18 +1196,12 @@ pub(super) fn validate_policy_for_request(
     // to pass every check below, and it is still admitted only by the exact
     // owner approval ceremony, which nothing here bypasses. Being proposed and
     // approved never adds the recipient to `allowed_recipients`.
-    if !policy.allowed_recipients.contains(&request.recipient)
+    if !policy.allowed_recipients.contains(recipient)
         && !policy.allow_unlisted_recipient_with_approval
     {
         return Err(AgentWalletError::RecipientNotAllowed);
     }
-    let pending = state
-        .operations
-        .values()
-        .filter(|operation| {
-            operation.agent_id() == &agent.agent_id && operation.status().retains_reservation()
-        })
-        .count();
+    let pending = pending_operations_for_agent(state, &agent.agent_id);
     if pending >= usize::from(policy.max_pending_operations) {
         return Err(AgentWalletError::TooManyPendingOperations);
     }
@@ -1130,7 +1215,50 @@ pub(super) fn validate_policy_for_request(
     Ok(())
 }
 
-fn wallet_id_from_scope(scope: &WalletScope) -> AgentWalletResult<AgentWalletId> {
+/// Revalidates an already-reserved, owner-approved payment against the current
+/// policy without counting that same operation a second time.
+///
+/// `validate_policy_for_payment` runs before a new reservation is inserted, so
+/// it must ask whether adding one more operation would exceed the limits. At
+/// the signing boundary the operation is already present in authenticated
+/// state: the current pending count and exposure already include it. Using the
+/// intent-time predicate there would therefore reject a valid last slot and
+/// add the approved amount twice to the daily exposure.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub(super) fn revalidate_approved_payment_policy(
+    state: &AgentWalletState,
+    agent: &AgentRecord,
+    recipient: &str,
+    total_debit: HacUnits,
+    now: u64,
+) -> AgentWalletResult<()> {
+    let policy = &agent.policy;
+    if total_debit > policy.max_per_payment_units {
+        return Err(AgentWalletError::PaymentLimitExceeded);
+    }
+    if policy.blocked_recipients.contains(recipient) {
+        return Err(AgentWalletError::RecipientNotAllowed);
+    }
+    if !policy.allowed_recipients.contains(recipient)
+        && !policy.allow_unlisted_recipient_with_approval
+    {
+        return Err(AgentWalletError::RecipientNotAllowed);
+    }
+    if pending_operations_for_agent(state, &agent.agent_id)
+        > usize::from(policy.max_pending_operations)
+    {
+        return Err(AgentWalletError::TooManyPendingOperations);
+    }
+    if exposure_for_agent_in_window(state, &agent.agent_id, now, 86_400)? > policy.max_daily_units {
+        return Err(AgentWalletError::DailyLimitExceeded);
+    }
+    if !policy.approval_mode.requires_explicit_user_action() {
+        return Err(AgentWalletError::ApprovalRequired);
+    }
+    Ok(())
+}
+
+pub(super) fn wallet_id_from_scope(scope: &WalletScope) -> AgentWalletResult<AgentWalletId> {
     let raw = scope
         .as_str()
         .strip_prefix("agent_wallet:")
@@ -1145,13 +1273,7 @@ pub(super) fn ensure_agent_request_rate(
     agent_id: &AgentId,
     now: u64,
 ) -> AgentWalletResult<()> {
-    let recent_requests = state
-        .operations
-        .values()
-        .filter(|operation| {
-            operation.agent_id() == agent_id && operation.created_at() >= now.saturating_sub(60)
-        })
-        .count();
+    let recent_requests = recent_requests_for_agent(state, agent_id, now);
     if recent_requests >= MAX_REQUESTS_PER_AGENT_PER_MINUTE {
         Err(AgentWalletError::RateLimited)
     } else {
@@ -1159,7 +1281,7 @@ pub(super) fn ensure_agent_request_rate(
     }
 }
 pub(super) fn ensure_operation_capacity(state: &AgentWalletState) -> AgentWalletResult<()> {
-    if state.operations.len() >= MAX_OPERATIONS_PER_WALLET
+    if operation_count(state).is_none_or(|count| count >= MAX_OPERATIONS_PER_WALLET)
         || state.idempotency.len() >= MAX_OPERATIONS_PER_WALLET
     {
         Err(AgentWalletError::RateLimited)
@@ -1178,4 +1300,27 @@ pub(super) fn random_challenge_nonce() -> String {
     let mut bytes = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod network_gate_tests {
+    use super::{agent_spending_ready, require_agent_spending_network};
+    use crate::error::AgentWalletError;
+
+    #[test]
+    fn spending_gate_accepts_only_the_exact_compiled_testnet_pilot() {
+        assert!(agent_spending_ready("testnet", false));
+        assert_eq!(
+            agent_spending_ready("mainnet", true),
+            cfg!(feature = "agent-wallet-bounded-mainnet-pilot")
+        );
+        assert!(!agent_spending_ready("mainnet", false));
+        for refused in ["", "Testnet", "devnet", "local"] {
+            assert!(!agent_spending_ready(refused, true), "accepted {refused}");
+            assert_eq!(
+                require_agent_spending_network(refused, true),
+                Err(AgentWalletError::SigningBlocked)
+            );
+        }
+    }
 }

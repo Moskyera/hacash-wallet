@@ -54,6 +54,14 @@ jobs:
         with:
           shared-key: wallet-rust-quality
 
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce the exact reviewed Rust advisory policy
+        run: |
+          node --test scripts/check-rust-advisories.test.mjs
+          node scripts/check-rust-advisories.mjs check
+
       - name: Check Rust formatting
         run: >-
           cargo fmt
@@ -71,6 +79,9 @@ jobs:
           -p hacash-wallet-mobile
           -- --check
 
+      - name: Validate the one-click Fast Pay Hub installer
+        run: bash -n scripts/hpay-fast-pay-hub/install.sh
+
       - name: Create Tauri compile-only frontend fixtures
         run: |
           # generate_context! validates frontendDist; frontend jobs build the real bundles.
@@ -82,6 +93,15 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --all-features --exclude hacash-wallet --locked -- -D warnings
           cargo clippy -p hacash-wallet --all-targets --locked -- -D warnings
+
+      # Every other Rust step here builds with the pilot feature on, so the
+      # shape the code claims to preserve - a build where the witness lifecycle
+      # is not compiled at all - was never compiled anywhere. A call into a
+      # cfg-gated accessor from a `cfg!` branch broke exactly this and reached
+      # a desktop release build before anything noticed. It is a check, not a
+      # test run: the promise being kept is that it still builds.
+      - name: Compile the agent wallet with the pilot lifecycle absent
+        run: cargo check -p agent-wallet-core --all-targets --no-default-features --locked
 
       - name: Test Rust workspace with the supported Linux feature set
         run: |
@@ -136,13 +156,25 @@ jobs:
         working-directory: apps/${{ matrix.app }}
         run: yarn install --frozen-lockfile --non-interactive
 
+      # The style gate reads the BUILT stylesheet of BOTH apps, because "styled
+      # on desktop, bare on the phone" is one defect wearing two hats. This job
+      # is a matrix over one app at a time, so on a clean runner that gate could
+      # never pass: it failed on missing dist rather than on a missing rule, in
+      # every run, while reading green locally where both dists happened to
+      # exist. Install and build both, and build BEFORE testing, so the gate
+      # reads what actually ships instead of reporting the build order.
+      - name: Install dependencies for the other app
+        working-directory: apps/${{ matrix.app == 'desktop' && 'mobile' || 'desktop' }}
+        run: yarn install --frozen-lockfile --non-interactive
+
+      - name: Type-check and build both frontends
+        run: |
+          yarn --cwd apps/desktop build
+          yarn --cwd apps/mobile build
+
       - name: Run frontend unit tests
         working-directory: apps/${{ matrix.app }}
         run: yarn test
-
-      - name: Type-check and build frontend
-        working-directory: apps/${{ matrix.app }}
-        run: yarn build
 
   desktop-compile:
     name: Desktop compile (${{ matrix.os }})
@@ -184,15 +216,15 @@ jobs:
         working-directory: apps/desktop
         run: yarn install --frozen-lockfile --non-interactive
 
-      - name: Compile Linux desktop without the blocked Agent pilot
+      - name: Compile Linux desktop with bounded Agent mainnet
         if: runner.os == 'Linux'
         working-directory: apps/desktop
-        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-bounded-mainnet-pilot
 
-      - name: Compile Windows desktop with the Agent Wallet testnet pilot
+      - name: Compile Windows desktop with bounded Agent mainnet
         if: runner.os == 'Windows'
         working-directory: apps/desktop
-        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-testnet-pilot
+        run: node node_modules/@tauri-apps/cli/tauri.js build --ci --no-bundle -- --locked --features agent-wallet-bounded-mainnet-pilot
 
   android-compile:
     name: Android arm64 debug compile
@@ -267,7 +299,7 @@ jobs:
 
       - name: Build Android arm64 debug APK
         working-directory: apps/mobile
-        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-testnet-pilot
+        run: node node_modules/@tauri-apps/cli/tauri.js android build --ci --debug --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-bounded-mainnet-pilot
 
       - name: Revalidate Android integration after Tauri regeneration
         shell: pwsh

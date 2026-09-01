@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { BillSummary } from "../api";
+import { handOffTextFile } from "@hacash/wallet-ui";
 import { formatInvokeError } from "../formatInvokeError";
 import { copyWithPrivacyClear } from "../privacy";
 
@@ -42,14 +43,22 @@ export default function BillDetailModal({
     setMsg("");
     try {
       const json = await onExportJson(bill!.payment_id);
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `bill-${bill!.payment_id.slice(0, 8)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setMsg("Bill JSON downloaded.");
+      /*
+       * "Bill JSON downloaded." used to print no matter what. On Android the
+       * anchor click is inert - no DownloadListener is installed in the shell -
+       * so no file was ever created. Note that the sibling control in this very
+       * sheet, "Copy bill hex", genuinely works, so the sheet was reporting two
+       * successes of which only one was real.
+       */
+      const handoff = await handOffTextFile(
+        `bill-${bill!.payment_id.slice(0, 8)}.json`,
+        json,
+      );
+      setMsg(
+        handoff.ok
+          ? handoff.message
+          : `${handoff.message} This bill was NOT saved. Use "Copy bill hex" above to keep it.`,
+      );
     } catch (e) {
       setMsg(formatInvokeError(e));
     } finally {

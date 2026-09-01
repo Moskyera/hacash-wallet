@@ -20,14 +20,26 @@ use crate::types::{AgentId, WalletScope};
 mod backup_recovery_establishment;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod broadcast_crash_recovery;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod chain7_live_voucher;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod channel_open_retry;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod close_voucher;
 mod decisions;
 mod desktop_approval;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod desktop_witness_flow;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod durable_write_probe;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod fast_pay_decisions;
 mod fixtures;
 mod lifecycle;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod mainnet_witness_exit;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod mainnet_witness_exit_attack;
 mod pairing;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod pilot_node;
@@ -44,5 +56,7 @@ mod unlisted_recipient;
 mod witness;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod witness_crash_recovery;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+mod witness_optional;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod witness_phase_expiry;

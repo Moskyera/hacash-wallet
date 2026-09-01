@@ -1,0 +1,36 @@
+[Unit]
+Description=HPAY Fast Pay Hub mainnet pilot
+Documentation=file:/opt/hpay-fast-pay-hub/README.md
+Wants=network-online.target
+After=network-online.target hacash-node.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=hpayhub
+Group=hpayhub
+WorkingDirectory=/var/lib/hpay-fast-pay-hub
+EnvironmentFile=/etc/hpay-fast-pay-hub/hub.env
+ExecStart=/opt/hpay-fast-pay-hub/fast-pay-hub --listen 127.0.0.1:8790 --node-url http://127.0.0.1:8080 --hub-fee-mei 0 --state-file /var/lib/hpay-fast-pay-hub/hub-state.json
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=60s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/hpay-fast-pay-hub
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

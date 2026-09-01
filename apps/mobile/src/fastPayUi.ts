@@ -20,11 +20,11 @@ export function l1FeeSpeedDetail(speed: L1FeeSpeed): string {
     case "slow":
       return "Network minimum fee.";
     case "fast":
-      return "5× network average. higher mempool priority.";
+      return "5x network average. Higher mempool priority.";
     case "ultra":
-      return "15× network average. highest priority.";
+      return "15x network average. Highest priority.";
     default:
-      return "1.2× network average. balanced.";
+      return "1.2x network average. Balanced.";
   }
 }
 

@@ -649,7 +649,7 @@ impl AgentWalletManager {
 }
 
 /// Which of the four documents a test is replacing.
-#[cfg(test)]
+#[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BackupDocument {
     RegistryEntry,
@@ -666,7 +666,7 @@ pub(crate) enum BackupDocument {
 /// documents nonetheless disagree, is exactly the case that must be refused
 /// rather than half-restored, and it is not reachable by flipping a byte: the
 /// commitment and the AEAD would catch that first. Test builds only.
-#[cfg(test)]
+#[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
 pub(crate) fn replace_backup_document_for_test(
     backup_json: &str,
     passphrase: &str,
@@ -696,7 +696,7 @@ pub(crate) fn replace_backup_document_for_test(
 /// holds the file and the passphrase, on the other hand, can re-seal anything
 /// they like, and a restore still has to refuse a file whose declared version or
 /// declared wallet does not match what is actually inside it. Test builds only.
-#[cfg(test)]
+#[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
 pub(crate) fn reseal_backup_metadata_for_test(
     backup_json: &str,
     passphrase: &str,
@@ -710,7 +710,7 @@ pub(crate) fn reseal_backup_metadata_for_test(
 }
 
 /// The four documents of a backup, for a test that needs to splice them.
-#[cfg(test)]
+#[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
 pub(crate) fn backup_documents_for_test(
     backup_json: &str,
     passphrase: &str,

@@ -83,6 +83,43 @@ export async function copyWithPrivacyClear(
   }
 }
 
+/**
+ * Copy something, and always tell the person what happened.
+ *
+ * `copyWithPrivacyClear` throws when the writer is missing and otherwise lets
+ * `clipboard.writeText` reject. Six call sites awaited it and then toasted
+ * success with no try/catch, and every button fired them as
+ * `onClick={() => void copyHacd()}`. A failed write became an unhandled
+ * rejection: no success toast, no error toast, a button that looks broken and
+ * says nothing. "Copy address" twice on Receive, "Copy HACD receive code",
+ * "Copy Hacash address for BTC", the payment URI, and the quantum address.
+ *
+ * Owning the outcome in one place is the point: a call site cannot forget the
+ * catch again, because there is no longer a version of this that throws.
+ *
+ * Returns whether the copy landed, so a caller that wants to do something more
+ * on success still can. It never rejects.
+ */
+export async function copyAndReport(
+  text: string,
+  clipboardClearSecs: number,
+  onToast: (msg: string, kind: "success" | "info" | "error") => void,
+  successMessage: string,
+  clipboard: ClipboardWriter | null = defaultClipboard(),
+): Promise<boolean> {
+  try {
+    await copyWithPrivacyClear(text, clipboardClearSecs, clipboard);
+  } catch (error) {
+    onToast(
+      `Nothing was copied: ${error instanceof Error ? error.message : String(error)}`,
+      "error",
+    );
+    return false;
+  }
+  onToast(successMessage, "success");
+  return true;
+}
+
 export const DEFAULT_PRIVACY: PrivacySettings = {
   hide_balances: false,
   hide_addresses: false,

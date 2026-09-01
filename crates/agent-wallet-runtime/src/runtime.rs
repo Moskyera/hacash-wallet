@@ -564,22 +564,123 @@ mod lifecycle_tests {
         }
     }
 
+    /// A worker that cannot finish until it is released.
+    ///
+    /// This is what lets the bounded reap below be checked without a stopwatch:
+    /// while the gate is shut there is no completion to observe, so a reap that
+    /// returns at all is one that stopped at its own deadline.
+    fn gated_worker() -> (WorkerHandle, Arc<AtomicBool>) {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (completion_tx, completion_rx) = mpsc::sync_channel(1);
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = Arc::clone(&release);
+        let join = thread::spawn(move || {
+            while !worker_release.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let _ = completion_tx.send(Ok(()));
+        });
+        (
+            WorkerHandle {
+                shutdown,
+                completion: completion_rx,
+                completion_result: None,
+                join: Some(join),
+            },
+            release,
+        )
+    }
+
+    /// `reap_within` is bounded by its own deadline, not by how long the worker
+    /// takes, and a reap that gives up keeps the `JoinHandle` so a later stop
+    /// can retry it.
+    ///
+    /// The bound is asserted structurally rather than with elapsed wall clock.
+    /// A stopwatch here would not be measuring this code: `reap_within` can
+    /// guarantee only that it stops *asking* at its deadline, and the gap
+    /// between that and the caller regaining the CPU belongs to the OS
+    /// scheduler. Under load that gap grows without limit, so any absolute
+    /// millisecond ceiling fails on a busy machine while the code under test is
+    /// behaving perfectly - a false red that says nothing about the runtime.
+    ///
+    /// Gating the worker instead makes the real property decidable and makes it
+    /// a stronger claim: while the gate is shut the worker never completes, so
+    /// only an implementation that honours its deadline can return here at all.
+    /// One that waited on the worker would hang outright rather than merely
+    /// look slow, and no amount of machine load can turn a correct
+    /// implementation into a failure.
     #[test]
     fn timed_out_reap_retains_ownership_and_a_later_retry_joins() {
-        let mut worker = delayed_worker(Duration::from_millis(40));
+        let (mut worker, release) = gated_worker();
         worker.request_shutdown();
-        let started = Instant::now();
-        assert_eq!(worker.reap_within(Duration::from_millis(2)).unwrap(), None);
-        assert!(started.elapsed() < Duration::from_millis(30));
-        assert!(worker.join.is_some(), "timeout must retain the JoinHandle");
 
         assert_eq!(
-            worker.reap_within(Duration::from_secs(1)).unwrap(),
+            worker.reap_within(Duration::from_millis(2)).unwrap(),
+            None,
+            "a reap must give up at its own deadline, not wait for the worker"
+        );
+        assert!(worker.join.is_some(), "timeout must retain the JoinHandle");
+        assert!(
+            !worker.join.as_ref().unwrap().is_finished(),
+            "the reap returned while the worker was still running, which is the \
+             whole claim: it stopped at its deadline instead of outlasting the worker"
+        );
+
+        // Released, the retained handle is reaped and joined exactly once. The
+        // generous bound here is a hang detector, not a promptness measure:
+        // nothing is asserted about how much of it is used.
+        release.store(true, Ordering::Release);
+        assert_eq!(
+            worker.reap_within(Duration::from_secs(10)).unwrap(),
             Some(Ok(()))
         );
         assert!(
             worker.join.is_none(),
             "completed retry must join exactly once"
+        );
+    }
+
+    /// The deadline a reap is given is the deadline it uses.
+    ///
+    /// This is the one claim about `reap_within` that nothing but a clock can
+    /// see: honouring 2ms and quietly honouring some larger constant differ in
+    /// elapsed time and in nothing else. A single sample cannot carry it, and
+    /// trying was what made this module flaky - machine load can delay any one
+    /// sample without limit, so an absolute ceiling on one reading goes red on
+    /// a busy machine while the code is behaving perfectly.
+    ///
+    /// The *minimum* over many samples does carry it, and is not a loosened
+    /// tolerance but a sounder estimator: load can only ever make a sample
+    /// slower, never faster. An implementation that honours a 2ms deadline
+    /// produces at least one fast sample among many however busy the machine
+    /// gets; one that floors the deadline at a larger constant produces none,
+    /// however idle it is.
+    #[test]
+    fn a_bounded_reap_uses_the_deadline_it_was_given() {
+        const SAMPLES: usize = 25;
+        const CEILING: Duration = Duration::from_millis(60);
+        const DEADLINE: Duration = Duration::from_millis(2);
+
+        let mut fastest = Duration::MAX;
+        for _ in 0..SAMPLES {
+            let (mut worker, release) = gated_worker();
+            worker.request_shutdown();
+            let started = Instant::now();
+            assert_eq!(
+                worker.reap_within(DEADLINE).unwrap(),
+                None,
+                "the gate is shut, so there is nothing to reap"
+            );
+            fastest = fastest.min(started.elapsed());
+            // Release and drain, so no sample leaves a live thread behind.
+            release.store(true, Ordering::Release);
+            let _ = worker.reap_within(Duration::from_secs(10));
+        }
+
+        assert!(
+            fastest < CEILING,
+            "every one of {SAMPLES} reaps given a {DEADLINE:?} deadline took at \
+             least {fastest:?}, so the deadline being used is not the one passed in"
         );
     }
 

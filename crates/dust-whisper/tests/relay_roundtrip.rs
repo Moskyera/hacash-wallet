@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 
 use dust_whisper::crypto::generate_relay_keypair;
 use dust_whisper::protocol::WhisperSettings;
-use dust_whisper::relay::{build_router, relay_state_from_secret};
+use dust_whisper::relay::{
+    build_router, relay_state_from_secret, serve_router, submit_token_from_secret,
+};
 use dust_whisper::submit_tx;
 use reqwest::Client;
 use tokio::task::JoinHandle;
@@ -40,7 +42,10 @@ async fn whisper_relay_forwards_encrypted_submit() {
     let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_addr = relay_listener.local_addr().unwrap();
     let relay_handle = tokio::spawn(async move {
-        axum::serve(relay_listener, relay_app).await.unwrap();
+        // Served with connection info, the way the wallet serves it. The
+        // transaction route needs to know where a caller came from, because it
+        // forwards only for this machine (`SubmitAccess`).
+        serve_router(relay_listener, relay_app).await.unwrap();
     });
 
     let client = Client::new();
@@ -50,9 +55,17 @@ async fn whisper_relay_forwards_encrypted_submit() {
         fallback_direct: false,
     };
 
-    let result = submit_tx(&client, &settings, &node_url, "cafebabe")
-        .await
-        .expect("whisper submit");
+    // The token this relay's own key derives to. Loopback is no longer the
+    // whole credential: see `SubmitAccess::ThisMachineOnly`.
+    let result = submit_tx(
+        &client,
+        &settings,
+        &node_url,
+        "cafebabe",
+        Some(submit_token_from_secret(&sk).as_str()),
+    )
+    .await
+    .expect("whisper submit");
 
     assert_eq!(result.ret, 0);
     assert_eq!(result.hash.as_deref(), Some("mockhash123"));
@@ -71,7 +84,10 @@ async fn whisper_blocks_relay_for_the_wrong_node() {
     let relay_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let relay_addr = relay_listener.local_addr().unwrap();
     let relay_handle = tokio::spawn(async move {
-        axum::serve(relay_listener, relay_app).await.unwrap();
+        // Served with connection info, the way the wallet serves it. The
+        // transaction route needs to know where a caller came from, because it
+        // forwards only for this machine (`SubmitAccess`).
+        serve_router(relay_listener, relay_app).await.unwrap();
     });
     let settings = WhisperSettings {
         enabled: true,
@@ -84,6 +100,7 @@ async fn whisper_blocks_relay_for_the_wrong_node() {
         &settings,
         "http://127.0.0.1:65534",
         "cafebabe",
+        Some(submit_token_from_secret(&sk).as_str()),
     )
     .await
     .unwrap_err();

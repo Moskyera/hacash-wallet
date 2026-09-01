@@ -1,4 +1,8 @@
-import { HowItWorksPrompt } from "@hacash/wallet-ui";
+import {
+  HowItWorksPrompt,
+  officialNodePlaintextDisclosure,
+  plainSendBlockedNotice,
+} from "@hacash/wallet-ui";
 import { open } from "@tauri-apps/plugin-shell";
 
 import type { AssetSummary, PrivacySettings, TxRecord, WalletStatus } from "../api";
@@ -21,6 +25,7 @@ type Props = {
   lastTx: string;
   privacy: PrivacySettings;
   onNavigate: (screen: Screen) => void;
+  onOpenAgent: () => void;
   onNotify: (msg: string, kind: "error" | "info" | "success") => void;
   clearMessages: () => void;
 };
@@ -36,10 +41,22 @@ export default function HomeScreen({
   lastTx,
   privacy,
   onNavigate,
+  onOpenAgent,
   onNotify,
   clearMessages,
 }: Props) {
   const { t } = useLocale();
+  /**
+   * Said on the first screen, not discovered at the Send button.
+   *
+   * A person who installs this, creates a wallet and sees a balance has every
+   * reason to believe the wallet works. Nothing on Home contradicted that, and
+   * the contradiction arrived several screens later as a toast. This is the
+   * same fact placed where it is still cheap to act on.
+   */
+  const sendBlocked = plainSendBlockedNotice(status?.node_url, status?.network_mode);
+  /** The cost of the shipped default, said on the first screen rather than never. */
+  const plaintextCost = officialNodePlaintextDisclosure(status?.node_url, status?.network_mode);
 
   return (
     <section className="dashboard-page">
@@ -54,6 +71,24 @@ export default function HomeScreen({
         openExternal={open}
         onError={(error) => onNotify(formatInvokeError(error), "error")}
       />
+
+      {sendBlocked ? (
+        <div className="alert dashboard-send-blocked" role="note">
+          <p>{sendBlocked}</p>
+          <button type="button" onClick={() => onNavigate("settings")}>
+            Open Settings
+          </button>
+        </div>
+      ) : null}
+
+      {plaintextCost ? (
+        <div className="alert dashboard-send-blocked" role="note">
+          <p>{plaintextCost}</p>
+          <button type="button" onClick={() => onNavigate("settings")}>
+            Open Settings
+          </button>
+        </div>
+      ) : null}
 
       <div className="dashboard-grid">
         <article className="dashboard-card dashboard-portfolio-card">
@@ -70,6 +105,9 @@ export default function HomeScreen({
           </div>
         </article>
 
+      </div>
+
+      <div className="dashboard-panel-row">
         <section className="dashboard-card dashboard-activity-card">
           <DashboardHeading title="Recent activity" action="View all" onAction={() => onNavigate("history")} />
           {history.length === 0 ? (
@@ -92,26 +130,26 @@ export default function HomeScreen({
           )}
         </section>
 
-        <aside className="dashboard-status-column">
-          <section className="dashboard-card dashboard-status-card">
-            <DashboardHeading title="Fast Pay status" />
-            <StatusLine label="Status" value={fastPayReady ? "Ready" : "Setup required"} ready={fastPayReady} />
-            <StatusLine label="Channel" value={status?.channel_id ? "Open" : "Not configured"} ready={Boolean(status?.channel_id)} />
-            <StatusLine label="Route" value={status?.l2_enabled ? "L2 enabled" : "L1 only"} ready={Boolean(status?.l2_enabled)} />
-            {!status?.watch_only ? (
-              <button type="button" className="dashboard-text-action" onClick={() => onNavigate("fastpay")}>Manage Fast Pay</button>
-            ) : null}
-          </section>
+        <section className="dashboard-card dashboard-status-card">
+          <DashboardHeading title="Fast Pay status" />
+          <StatusLine label="Status" value={fastPayReady ? "Ready" : "Setup required"} ready={fastPayReady} />
+          <StatusLine label="Channel" value={status?.channel_id ? "Open" : "Not configured"} ready={Boolean(status?.channel_id)} />
+          <StatusLine label="Route" value={status?.l2_enabled ? "L2 enabled" : "L1 only"} ready={Boolean(status?.l2_enabled)} />
+          {!status?.watch_only ? (
+            <button type="button" className="dashboard-text-action" onClick={() => onNavigate("fastpay")}>Manage Fast Pay</button>
+          ) : null}
+        </section>
 
-          <section className="dashboard-card dashboard-status-card">
-            <DashboardHeading title="Security status" />
-            <StatusLine label="Encrypted vault" value={status?.locked ? "Locked" : "Active"} ready={!status?.locked} />
-            <StatusLine label="Security profile" value={status?.security_profile ?? "Unavailable"} ready={Boolean(status?.security_profile)} />
-            <StatusLine label="Signing" value={signingLabel(status)} ready={Boolean(status?.signing_available)} />
-            <StatusLine label="Privacy" value={privacy.screen_privacy ? "Protected" : "Standard"} ready={privacy.screen_privacy} />
-            <button type="button" className="dashboard-text-action" onClick={() => onNavigate("security")}>Review security</button>
-          </section>
-        </aside>
+        <section className="dashboard-card dashboard-status-card">
+          <DashboardHeading title="Security status" />
+          <StatusLine label="Encrypted vault" value={status?.locked ? "Locked" : "Active"} ready={!status?.locked} />
+          <StatusLine label="Security profile" value={status?.security_profile ?? "Unavailable"} ready={Boolean(status?.security_profile)} />
+          <StatusLine label="Signing" value={signingLabel(status)} ready={Boolean(status?.signing_available)} />
+          <StatusLine label="Privacy" value={privacy.screen_privacy ? "Protected" : "Standard"} ready={privacy.screen_privacy} />
+          <button type="button" className="dashboard-text-action" onClick={() => onNavigate("security")}>Review security</button>
+        </section>
+
+        <AgentWalletCard onOpenAgent={onOpenAgent} />
       </div>
 
       {lastTx ? (
@@ -130,6 +168,46 @@ export default function HomeScreen({
           }}
         />
       </div>
+    </section>
+  );
+}
+
+/**
+ * The Agent Wallet, seen from My Wallet.
+ *
+ * This card cannot show an agent balance, a spend figure or a pending-approval
+ * count, and does not pretend to. Reading any of that needs the Agent Wallet's
+ * own key, and the two spaces never hold an unlock session at the same time.
+ *
+ * It also states the consequence of the button, which is the one thing someone
+ * on this screen cannot guess: going there locks this wallet.
+ */
+function AgentWalletCard({ onOpenAgent }: { onOpenAgent: () => void }) {
+  return (
+    <section className="dashboard-card dashboard-agent-card">
+      <DashboardHeading title="AI Agent Wallet" />
+      <div className="dashboard-agent-body">
+        <span className="dashboard-agent-mark" aria-hidden>
+          <svg viewBox="0 0 24 24" role="presentation">
+            <rect x="4" y="7" width="16" height="12" rx="3" />
+            <circle cx="9.5" cy="13" r="1.4" />
+            <circle cx="14.5" cy="13" r="1.4" />
+            <path d="M12 7V4" />
+            <circle cx="12" cy="3" r="1.1" />
+          </svg>
+        </span>
+        <p className="dashboard-agent-copy">
+          A separate wallet with its own key and its own spending limits, for payments an
+          AI agent asks you to approve.
+        </p>
+      </div>
+      <button type="button" className="dashboard-agent-open" onClick={onOpenAgent}>
+        Open AI Agent Wallet
+      </button>
+      <p className="dashboard-agent-note">
+        Opening it locks My Wallet. The two never share a key, a passphrase or an unlock
+        session, so only one is open at a time.
+      </p>
     </section>
   );
 }

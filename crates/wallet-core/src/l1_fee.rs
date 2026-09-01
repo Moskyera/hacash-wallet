@@ -10,8 +10,8 @@ use crate::send_options::{
     compute_service_fee_mei, format_service_fee_amount_wire,
 };
 use crate::type4_fee::{
-    L1_DEFAULT_LOWEST_FEE_PURITY, Type4FeeEstimate, local_fee_from_wire_bytes, mei_to_fee_wire,
-    parse_fee_mei_decimal,
+    FeeEstimateProvenance, FeeGuess, L1_DEFAULT_LOWEST_FEE_PURITY, Type4FeeEstimate,
+    local_fee_from_wire_bytes, mei_to_fee_wire, parse_fee_mei_decimal,
 };
 
 pub type L1FeeEstimate = Type4FeeEstimate;
@@ -26,6 +26,56 @@ pub const L1_LEGACY_SIGNATURE_BYTES: usize = 97;
 pub const L1_PROBE_FEE_WIRE: &str = "1:244";
 /// Minimum spread between L1 tiers when multipliers collapse after rounding.
 pub const L1_TIER_MIN_DELTA_MEI: f64 = 0.000001;
+
+/// Above this multiple of the wallet's own per-byte rate for the same size,
+/// the fee stops being presented as the node's reliable answer.
+///
+/// Measured rather than picked. Against `minimum_l1_fee_estimate`, a quote of
+/// 0.0033132 mei (the value nodeapi.hacash.org returns, recorded in
+/// `type4_fee.rs`) works out at 30 times the floor on a 166-byte transaction,
+/// 19 on a 263-byte one and 0.9 on a 5500-byte one: the node's answer does not
+/// track size the way the wallet's floor does, so the honest observed band is
+/// wide, roughly 1 to 30. A hundred is well outside it and still far below the
+/// 274 to 9091 that a thousandfold inflation produces.
+pub const NODE_FEE_QUOTE_DOUBTED_MULTIPLE: u64 = 100;
+
+/// The base fee, in HAC, above which the wallet refuses the quote outright
+/// instead of displaying it.
+///
+/// This one is absolute rather than size-relative, because size-relative is
+/// the wrong shape for the outer limit: the same forged quote is 274 times the
+/// floor on a large transaction and 9091 on a small one, so a ratio ceiling
+/// that catches it everywhere has to be set absurdly low. What does not vary
+/// is the money. A real Hacash L1 base fee is about 0.003 HAC. Half a HAC,
+/// before any speed multiplier, is not a fee; it is somebody on the connection
+/// making a number up, and in testing exactly that number was signed and
+/// broadcast with nothing on the review screen calling it strange.
+///
+/// A person who genuinely wants to pay more than this is not blocked from the
+/// chain, only from having a stranger's number chosen for them: the refusal
+/// names the node and says to run one of their own.
+pub const NODE_FEE_QUOTE_REFUSED_MEI: f64 = 0.5;
+
+/// How many times the wallet's own rate for this size the node is asking for.
+///
+/// Size-relative, so it stays meaningful as transactions grow: the wallet's
+/// floor is priced per byte, and comparing against it asks "is this node
+/// charging like a node" rather than "is this a big number".
+fn node_quote_multiple_of_floor(base_mei: f64, wire_bytes: usize) -> u64 {
+    let floor = minimum_l1_fee_estimate(wire_bytes).fee_mei;
+    // Zero means "no opinion", which is the honest answer when either number
+    // is not a usable positive quantity. Never a division that could produce a
+    // NaN and compare false against every threshold.
+    let usable = floor.is_finite() && floor > 0.0 && base_mei.is_finite() && base_mei > 0.0;
+    if !usable {
+        return 0;
+    }
+    let multiple = base_mei / floor;
+    if multiple >= u64::MAX as f64 {
+        return u64::MAX;
+    }
+    multiple as u64
+}
 
 pub const L1_SPEED_MULT_NORMAL: f64 = 1.20;
 pub const L1_SPEED_MULT_FAST: f64 = 5.0;
@@ -47,6 +97,19 @@ pub struct L1FeeTierSet {
     pub selected: L1FeeEstimate,
 }
 
+impl L1FeeTierSet {
+    /// True when any number behind these tiers is a guess rather than a
+    /// measurement. Every tier is derived from the same base rate and the same
+    /// size, so one answer covers the whole set.
+    pub fn is_degraded(&self) -> bool {
+        self.selected.is_degraded()
+    }
+
+    pub fn warning(&self) -> Option<String> {
+        self.selected.warning()
+    }
+}
+
 fn wire_bytes_from_build(built: &BuildTxResponse) -> WalletResult<usize> {
     let body = built
         .body
@@ -56,7 +119,14 @@ fn wire_bytes_from_build(built: &BuildTxResponse) -> WalletResult<usize> {
 }
 
 pub fn signed_l1_wire_bytes(unsigned_wire_bytes: usize) -> usize {
-    unsigned_wire_bytes.saturating_add(L1_LEGACY_SIGNATURE_BYTES)
+    signed_l1_wire_bytes_for_signatures(unsigned_wire_bytes, 1)
+}
+
+pub fn signed_l1_wire_bytes_for_signatures(
+    unsigned_wire_bytes: usize,
+    signature_count: usize,
+) -> usize {
+    unsigned_wire_bytes.saturating_add(L1_LEGACY_SIGNATURE_BYTES.saturating_mul(signature_count))
 }
 
 pub fn minimum_l1_fee_estimate(wire_bytes: usize) -> L1FeeEstimate {
@@ -74,7 +144,13 @@ pub fn l1_fee_mei_for_speed(base_mei: f64, min_mei: f64, speed: L1FeeSpeed) -> f
     target.max(min_mei)
 }
 
-fn estimate_from_mei(fee_mei: f64, wire_bytes: usize, purity: u64, min_mei: f64) -> L1FeeEstimate {
+fn estimate_from_mei(
+    fee_mei: f64,
+    wire_bytes: usize,
+    purity: u64,
+    min_mei: f64,
+    provenance: FeeEstimateProvenance,
+) -> L1FeeEstimate {
     let fee_mei = crate::hip23::normalize_l1_fee_mei(fee_mei).max(min_mei);
     L1FeeEstimate {
         fee_mei,
@@ -82,6 +158,7 @@ fn estimate_from_mei(fee_mei: f64, wire_bytes: usize, purity: u64, min_mei: f64)
         fee_wire: mei_to_fee_wire(fee_mei),
         wire_bytes,
         purity,
+        provenance,
     }
 }
 
@@ -95,7 +172,13 @@ fn enforce_distinct_l1_tiers(
         if tiers[i].fee_mei <= tiers[i - 1].fee_mei {
             let bumped =
                 crate::hip23::normalize_l1_fee_mei(tiers[i - 1].fee_mei + L1_TIER_MIN_DELTA_MEI);
-            let est = estimate_from_mei(bumped, wire_bytes, purity, min_mei);
+            let est = estimate_from_mei(
+                bumped,
+                wire_bytes,
+                purity,
+                min_mei,
+                FeeEstimateProvenance::measured(),
+            );
             tiers[i].fee_mei = est.fee_mei;
             tiers[i].fee_wire = est.fee_wire;
         }
@@ -117,7 +200,13 @@ pub fn build_l1_fee_tiers(
     .into_iter()
     .map(|speed| {
         let raw_mei = l1_fee_mei_for_speed(base_mei, min_mei, speed);
-        let est = estimate_from_mei(raw_mei, wire_bytes, purity, min_mei);
+        let est = estimate_from_mei(
+            raw_mei,
+            wire_bytes,
+            purity,
+            min_mei,
+            FeeEstimateProvenance::measured(),
+        );
         L1FeeTierQuote {
             speed,
             label: speed.label().into(),
@@ -131,18 +220,49 @@ pub fn build_l1_fee_tiers(
     tiers
 }
 
-async fn base_fee_mei(node: &NodeClient, wire_bytes: usize) -> WalletResult<(f64, u64)> {
+/// The base rate this fee is priced from, and an honest account of where it
+/// came from.
+///
+/// This used to answer `Ok((base, purity))` whether or not the node replied,
+/// which meant a caller could not tell the network's rate from the wallet's own
+/// compiled-in floor. The fallback stays, because refusing to quote a fee at all
+/// when the node blinks is worse; what changes is that the fallback now says so.
+async fn base_fee_mei(
+    node: &NodeClient,
+    wire_bytes: usize,
+    tx_type: u8,
+) -> WalletResult<(f64, u64, FeeEstimateProvenance)> {
     let wire_bytes = wire_bytes.max(1);
-    match node.query_fee_average(wire_bytes, L1_TX_TYPE).await {
-        Ok(resp) => {
-            let base = parse_fee_mei_decimal(&resp.feasible)?;
-            Ok((base, resp.purity))
-        }
-        Err(_) => {
-            let min = minimum_l1_fee_estimate(wire_bytes);
-            Ok((min.fee_mei, min.purity))
-        }
-    }
+    let node_error = match node.query_fee_average(wire_bytes, tx_type).await {
+        // A `ret == 0` whose fee will not parse is a node that did not answer
+        // the question, so it takes the same audible fallback rather than
+        // failing the whole quote.
+        Ok(resp) => match parse_fee_mei_decimal(&resp.feasible) {
+            Ok(base) => {
+                let multiple = node_quote_multiple_of_floor(base, wire_bytes);
+                if base >= NODE_FEE_QUOTE_REFUSED_MEI {
+                    return Err(WalletError::Policy(format!(
+                        "node_fee_quote_implausible: the node asked for a network fee of {base} HAC on a {wire_bytes} byte transaction, about {multiple} times this wallet's own rate for that size. The wallet will not sign a fee it cannot believe. If your node is right about this, run Hacash on your own computer and point the wallet at it."
+                    )));
+                }
+                let provenance = if multiple >= NODE_FEE_QUOTE_DOUBTED_MULTIPLE {
+                    FeeEstimateProvenance::measured()
+                        .with(FeeGuess::NodeQuoteFarAboveFloor { multiple })
+                } else {
+                    FeeEstimateProvenance::measured()
+                };
+                return Ok((base, resp.purity, provenance));
+            }
+            Err(err) => err.to_string(),
+        },
+        Err(err) => err.to_string(),
+    };
+    let min = minimum_l1_fee_estimate(wire_bytes);
+    Ok((
+        min.fee_mei,
+        min.purity,
+        FeeEstimateProvenance::measured().with(FeeGuess::PurityFromLocalFloor { node_error }),
+    ))
 }
 
 pub async fn estimate_l1_fee(
@@ -150,11 +270,77 @@ pub async fn estimate_l1_fee(
     wire_bytes: usize,
     speed: L1FeeSpeed,
 ) -> WalletResult<L1FeeEstimate> {
+    estimate_l1_fee_for_type(node, wire_bytes, speed, L1_TX_TYPE).await
+}
+
+pub async fn estimate_l1_fee_for_type(
+    node: &NodeClient,
+    wire_bytes: usize,
+    speed: L1FeeSpeed,
+    tx_type: u8,
+) -> WalletResult<L1FeeEstimate> {
+    estimate_l1_fee_for_type_with_provenance(
+        node,
+        wire_bytes,
+        speed,
+        tx_type,
+        FeeEstimateProvenance::measured(),
+    )
+    .await
+}
+
+/// The same estimate, carrying forward guesses a caller already had to make
+/// before it got here (a size it could not measure, most often).
+pub async fn estimate_l1_fee_for_type_with_provenance(
+    node: &NodeClient,
+    wire_bytes: usize,
+    speed: L1FeeSpeed,
+    tx_type: u8,
+    inherited: FeeEstimateProvenance,
+) -> WalletResult<L1FeeEstimate> {
     let wire_bytes = wire_bytes.max(1);
-    let (base_mei, purity) = base_fee_mei(node, wire_bytes).await?;
+    let (base_mei, purity, mut provenance) = base_fee_mei(node, wire_bytes, tx_type).await?;
+    for guess in inherited.guesses() {
+        provenance = provenance.with(guess.clone());
+    }
     let min_mei = minimum_l1_fee_estimate(wire_bytes).fee_mei;
     let fee_mei = l1_fee_mei_for_speed(base_mei, min_mei, speed);
-    Ok(estimate_from_mei(fee_mei, wire_bytes, purity, min_mei))
+    Ok(estimate_from_mei(
+        fee_mei, wire_bytes, purity, min_mei, provenance,
+    ))
+}
+
+/// The size to price from, and whether it is a measurement or a default.
+///
+/// The build probe exists so the fee is charged against the bytes that will
+/// actually be signed. When it fails the code still has to produce a number, so
+/// it uses `L1_DEFAULT_WIRE_BYTES`; the point of returning the provenance
+/// alongside is that a default is no longer indistinguishable from a measured
+/// body.
+fn wire_bytes_with_provenance(
+    built: &WalletResult<BuildTxResponse>,
+    fallback_wire_bytes: usize,
+) -> (usize, FeeEstimateProvenance) {
+    let node_error = match built {
+        Ok(resp) if resp.ret == 0 => match wire_bytes_from_build(resp) {
+            Ok(bytes) => return (bytes, FeeEstimateProvenance::measured()),
+            Err(err) => err.to_string(),
+        },
+        Ok(resp) => resp
+            .err
+            .clone()
+            .or_else(|| resp.error.clone())
+            .or_else(|| resp.message.clone())
+            .unwrap_or_else(|| format!("build transaction failed (ret={})", resp.ret)),
+        Err(err) => err.to_string(),
+    };
+    (
+        fallback_wire_bytes,
+        FeeEstimateProvenance::measured().with(FeeGuess::SizeFromDefault {
+            node_error,
+            assumed_bytes: fallback_wire_bytes,
+        }),
+    )
 }
 
 async fn estimate_from_build(
@@ -163,13 +349,23 @@ async fn estimate_from_build(
     fallback_wire_bytes: usize,
     speed: L1FeeSpeed,
 ) -> WalletResult<L1FeeEstimate> {
-    let wire_bytes = match built {
-        Ok(ref resp) if resp.ret == 0 => wire_bytes_from_build(resp).unwrap_or(fallback_wire_bytes),
-        _ => fallback_wire_bytes,
-    };
-    estimate_l1_fee(node, wire_bytes, speed)
-        .await
-        .or_else(|_| Ok(fallback_l1_fee(wire_bytes)))
+    let (wire_bytes, size_provenance) = wire_bytes_with_provenance(&built, fallback_wire_bytes);
+    match estimate_l1_fee_for_type_with_provenance(
+        node,
+        wire_bytes,
+        speed,
+        L1_TX_TYPE,
+        size_provenance.clone(),
+    )
+    .await
+    {
+        Ok(est) => Ok(est),
+        Err(err) => Ok(fallback_l1_fee_after_node_error(
+            wire_bytes,
+            &err.to_string(),
+            size_provenance,
+        )),
+    }
 }
 
 pub async fn estimate_hac_l1_fee_tiers(
@@ -200,11 +396,11 @@ pub async fn estimate_hac_l1_fee_tiers(
     } else {
         node.build_send_hac_tx(from, to, amount_wire, &probe).await
     };
-    let wire_bytes = match &built {
-        Ok(resp) if resp.ret == 0 => wire_bytes_from_build(resp).unwrap_or(L1_DEFAULT_WIRE_BYTES),
-        _ => L1_DEFAULT_WIRE_BYTES,
-    };
-    let (base_mei, purity) = base_fee_mei(node, wire_bytes).await?;
+    let (wire_bytes, size_provenance) = wire_bytes_with_provenance(&built, L1_DEFAULT_WIRE_BYTES);
+    let (base_mei, purity, mut provenance) = base_fee_mei(node, wire_bytes, L1_TX_TYPE).await?;
+    for guess in size_provenance.guesses() {
+        provenance = provenance.with(guess.clone());
+    }
     let min_mei = minimum_l1_fee_estimate(wire_bytes).fee_mei;
     let tiers = build_l1_fee_tiers(base_mei, min_mei, wire_bytes, purity);
     let selected_mei = tiers
@@ -215,7 +411,7 @@ pub async fn estimate_hac_l1_fee_tiers(
     Ok(L1FeeTierSet {
         wire_bytes,
         tiers,
-        selected: estimate_from_mei(selected_mei, wire_bytes, purity, min_mei),
+        selected: estimate_from_mei(selected_mei, wire_bytes, purity, min_mei, provenance),
     })
 }
 
@@ -284,18 +480,53 @@ pub async fn estimate_native_asset_l1_fee(
     estimate_from_build(node, built, L1_DEFAULT_WIRE_BYTES, speed).await
 }
 
-pub fn fallback_l1_fee(wire_bytes: usize) -> L1FeeEstimate {
+/// The bare hardcoded fee, with no provenance worth trusting.
+///
+/// **Private, deliberately.** This stamps `measured()` because the only caller
+/// that may hand it out overwrites the provenance immediately, and a value
+/// that says "measured" while carrying a compiled-in constant is precisely the
+/// bug this module was rewritten to remove. Leaving it public was a trap: the
+/// next caller to reach for the obvious name would have reintroduced the
+/// silent fallback while every test stayed green.
+///
+/// Anything reached by way of a node failure must come through
+/// [`fallback_l1_fee_after_node_error`], which records what was guessed and
+/// why.
+fn fallback_l1_fee(wire_bytes: usize) -> L1FeeEstimate {
     L1FeeEstimate {
         fee_mei: L1_DEFAULT_FEE_MEI,
         fee_node: wire_mei_for_node(L1_PROBE_FEE_WIRE),
         fee_wire: L1_PROBE_FEE_WIRE.to_string(),
         wire_bytes,
         purity: L1_DEFAULT_LOWEST_FEE_PURITY,
+        provenance: FeeEstimateProvenance::measured(),
     }
 }
 
+/// The hardcoded default fee, marked as the guess it is.
+///
+/// `fallback_l1_fee` on its own is indistinguishable from a real quote once it
+/// reaches a caller, which is exactly how a node outage used to turn into a
+/// silently under-priced transaction. Anything reached by way of a node failure
+/// must come through here instead.
+pub fn fallback_l1_fee_after_node_error(
+    wire_bytes: usize,
+    node_error: &str,
+    inherited: FeeEstimateProvenance,
+) -> L1FeeEstimate {
+    let mut est = fallback_l1_fee(wire_bytes);
+    let mut provenance = FeeEstimateProvenance::measured().with(FeeGuess::PurityFromLocalFloor {
+        node_error: node_error.to_owned(),
+    });
+    for guess in inherited.guesses() {
+        provenance = provenance.with(guess.clone());
+    }
+    est.provenance = provenance;
+    est
+}
+
 pub fn format_l1_fee_label(est: &L1FeeEstimate) -> String {
-    format!("~{} HAC", est.fee_wire)
+    format!("~{} HAC", est.fee_node)
 }
 
 #[cfg(test)]
@@ -312,6 +543,7 @@ mod tests {
     #[test]
     fn signed_size_includes_legacy_signature() {
         assert_eq!(signed_l1_wire_bytes(110), 207);
+        assert_eq!(signed_l1_wire_bytes_for_signatures(110, 2), 304);
     }
 
     #[test]

@@ -81,6 +81,15 @@ pub struct AgentSafetyPermit {
     generation: u64,
 }
 
+/// Holds the emergency transition lock across one irreversible local action.
+/// A stop requested before this guard is acquired fails closed; a stop that
+/// arrives afterwards waits until the action and its immediate durable write
+/// have left the protected boundary.
+#[cfg(any(test, feature = "agent-wallet-testnet-pilot"))]
+pub(crate) struct AgentIrreversibleGuard<'a> {
+    _transition: MutexGuard<'a, ()>,
+}
+
 /// A generation-bound authorization for companion connectivity only.
 ///
 /// Unlike `AgentSafetyPermit`, this permit deliberately ignores the
@@ -363,6 +372,22 @@ impl AgentSafetyPermit {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    #[cfg(any(test, feature = "agent-wallet-testnet-pilot"))]
+    pub(crate) fn irreversible_checkpoint(
+        &self,
+        authenticated_state_suspended: bool,
+    ) -> AgentWalletResult<AgentIrreversibleGuard<'_>> {
+        let transition = self
+            .inner
+            .transition
+            .lock()
+            .map_err(|_| AgentWalletError::RecoveryRequired)?;
+        self.checkpoint(authenticated_state_suspended)?;
+        Ok(AgentIrreversibleGuard {
+            _transition: transition,
+        })
     }
 }
 
@@ -650,6 +675,7 @@ mod tests {
             first.checkpoint(false),
             Err(AgentWalletError::AgentPaymentsSuspended)
         );
+        assert!(first.irreversible_checkpoint(false).is_err());
         let enable = controller.issue_authenticated_enable_permit().unwrap();
         controller
             .clear_after_authenticated_enable(enable, false)
@@ -657,6 +683,41 @@ mod tests {
         let second = controller.issue_safety_permit(false).unwrap();
         assert!(second.generation() > generation);
         second.checkpoint(false).unwrap();
+    }
+
+    #[test]
+    fn irreversible_checkpoint_serializes_key_use_with_emergency_stop() {
+        use std::sync::{Barrier, mpsc};
+        use std::time::Duration;
+
+        let (_temp, _storage, _wallet_id, controller) = controller();
+        let permit = controller.issue_safety_permit(false).unwrap();
+        let guard = permit.irreversible_checkpoint(false).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let worker_controller = controller.clone();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_barrier.wait();
+            finished_tx.send(worker_controller.request_stop()).unwrap();
+        });
+
+        barrier.wait();
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        drop(guard);
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(())
+        );
+        worker.join().unwrap();
+        assert_eq!(
+            permit.checkpoint(false),
+            Err(AgentWalletError::AgentPaymentsSuspended)
+        );
     }
 
     #[test]

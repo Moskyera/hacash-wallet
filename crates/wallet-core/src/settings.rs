@@ -114,6 +114,98 @@ pub fn validate_node_url(raw: &str) -> WalletResult<String> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
+/// Validate a node endpoint that will be trusted immediately before signing.
+///
+/// The legacy official API remains readable over HTTP for compatibility, but
+/// it must never become a mainnet signing authority. Mainnet signing accepts
+/// only authenticated remote transport or an endpoint on the same machine.
+pub fn validate_signing_node_url(raw: &str, network_mode: &str) -> WalletResult<String> {
+    let normalized = validate_node_url(raw)?;
+    if network_mode != "mainnet" {
+        return Ok(normalized);
+    }
+    let url = url::Url::parse(&normalized)
+        .map_err(|e| WalletError::Policy(format!("invalid signing node URL: {e}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| WalletError::Policy("signing node URL is missing a host".into()))?;
+    if url.scheme() == "https" || (url.scheme() == "http" && is_loopback_host(host)) {
+        return Ok(normalized);
+    }
+    Err(WalletError::Policy(
+        "mainnet signing requires HTTPS, except for a node on this same device".into(),
+    ))
+}
+
+/// What it costs to sign an ordinary payment through the official node.
+///
+/// Said in the words a person would use, because it is the only thing they can
+/// act on. The official endpoint answers plain HTTP and serves no TLS at all
+/// (`https://nodeapi.hacash.org`, `:443`, `nodeapi.org`, `api.hacash.org` and
+/// `node.hacash.org` all refuse the connection), so there is no HTTPS address
+/// to point at and "wait for TLS" is not a shipping option.
+///
+/// What somebody on the network path can do, and what they cannot:
+/// they can read the request and the reply, which ties an address and a
+/// payment to an IP; and they can quote a wrong network fee. They cannot forge
+/// a signature, they cannot change who is paid or how much (the transaction the
+/// node builds is compared against the request before anything is signed), and
+/// they cannot pass off a different chain while the block 1 anchor is checked,
+/// which it now is on this path as on every other.
+pub const OFFICIAL_NODE_PLAINTEXT_DISCLOSURE: &str = "This wallet is talking to the official Hacash node over plain HTTP, because that node offers nothing else. Whoever carries your traffic (your wifi, your ISP, a VPN) can read which address you are asking about and see the payment go out, so it links your address to your connection. They can also quote a wrong network fee, which is why the fee below is worth reading. They cannot change who gets paid or how much, they cannot sign anything for you, and they cannot swap in a different chain. Running Hacash on your own computer and pointing this wallet at http://127.0.0.1:8080 removes all of it.";
+
+/// The same fact, short enough to sit in a fingerprint prompt.
+///
+/// The full disclosure belongs on a screen a person can read at their own
+/// pace. A native biometric prompt is not that screen, and a paragraph pushed
+/// into one is a paragraph nobody reads, so this is the one sentence that has
+/// to survive: the connection is readable, and the fee beside it is the node's
+/// own number rather than the wallet's.
+pub const OFFICIAL_NODE_PLAINTEXT_SHORT: &str = "Plain HTTP to the official node. Readable on the way, and the fee above is the node's own number. Nobody on the way can change who is paid or how much.";
+
+/// Validate a node endpoint for an ordinary on-chain payment.
+///
+/// This is [`validate_signing_node_url`] plus exactly one named exception: the
+/// official endpoint, the wallet's own shipped default, at exactly
+/// `http://nodeapi.hacash.org`. Nothing else changes and nothing else is
+/// widened. A custom remote plaintext node is refused by `validate_node_url`
+/// before this function sees it, with the same message it has always had.
+///
+/// It is deliberately a separate function rather than a loosening of
+/// [`validate_signing_node_url`]. That rule still governs Fast Pay channels,
+/// the HPAY rail preflight, the Agent Wallet and unattended node failover, and
+/// none of those move. The exception applies only where a person is sending
+/// their own money on chain, having been told what it costs.
+pub fn validate_l1_payment_node_url(raw: &str, network_mode: &str) -> WalletResult<String> {
+    let normalized = validate_node_url(raw)?;
+    match validate_signing_node_url(&normalized, network_mode) {
+        Ok(url) => Ok(url),
+        Err(strict) => {
+            if network_mode == "mainnet" && normalized == DEFAULT_NODE_URL {
+                Ok(normalized)
+            } else {
+                Err(strict)
+            }
+        }
+    }
+}
+
+/// True when the named exception, and nothing else, is what permits signing.
+///
+/// A screen uses this to decide whether to print
+/// [`OFFICIAL_NODE_PLAINTEXT_DISCLOSURE`]. It is false for loopback, false for
+/// HTTPS, and false off mainnet, so the disclosure appears only where the cost
+/// is actually being paid.
+pub fn l1_payment_uses_official_plaintext(raw: &str, network_mode: &str) -> bool {
+    if network_mode != "mainnet" {
+        return false;
+    }
+    let Ok(normalized) = validate_node_url(raw) else {
+        return false;
+    };
+    normalized == DEFAULT_NODE_URL && validate_signing_node_url(&normalized, network_mode).is_err()
+}
+
 /// Safe normalization for internal constructors and migration of old settings.
 pub fn sanitize_node_url(raw: &str) -> String {
     validate_node_url(raw).unwrap_or_else(|_| DEFAULT_NODE_URL.into())
@@ -196,6 +288,21 @@ pub struct WalletSettings {
     #[serde(default = "default_network_mode")]
     pub network_mode: String,
     pub l2_hub_url: Option<String>,
+    /// Explicit consent to the capped Hub-dependent mainnet pilot.
+    ///
+    /// False is the fail-closed default. This never weakens L1 sends and is
+    /// consulted only when constructing an L2 Hub client on mainnet.
+    ///
+    /// Turning it on needs `WalletService::set_trusted_mainnet_fast_pay_pilot`,
+    /// which asks for the wallet passphrase; `update_settings` refuses. Turning
+    /// it off is a tightening and needs nothing. It is still a plain field in a
+    /// plain file, so a party who can write this file can set it - but the same
+    /// party can already point `l2_hub_url` at a Hub of their choosing, so what
+    /// bounds that exposure is the Hub caps and the prepared-review ceremony,
+    /// not this flag. What the authenticated command buys is that no
+    /// unauthenticated caller on the IPC surface can turn it on.
+    #[serde(default)]
+    pub trusted_mainnet_fast_pay_pilot: bool,
     pub hub_right_address: Option<String>,
     pub channel_id_hex: Option<String>,
     pub webauthn_enabled: bool,
@@ -231,6 +338,21 @@ pub struct WalletSettings {
     /// Legacy plaintext storage. migrated to `quantum.keystore.enc` on unlock.
     #[serde(default)]
     pub quantum_keystore_json: Option<String>,
+    /// The fullnode binary the owner picked, kept so the pick survives a restart.
+    ///
+    /// Before this existed the pick lived in a `Mutex` and died with the
+    /// process, which is why the search list carried a hardcoded
+    /// `C:/hpay/fullnode.exe` to find a node again on the next launch. That
+    /// path is writable by every authenticated account on the machine, and the
+    /// supervisor EXECUTES what it finds - every three seconds while the
+    /// settings screen is open, with no signature check and no prompt. The
+    /// fallback is gone; this is what replaces it.
+    ///
+    /// A party who can write this file can point it anywhere, but that party is
+    /// already the owner - which is exactly the difference from a path any
+    /// account on a shared machine could overwrite.
+    #[serde(default)]
+    pub node_binary_path: Option<String>,
 }
 
 impl Default for WalletSettings {
@@ -241,6 +363,7 @@ impl Default for WalletSettings {
             auto_node_failover: true,
             network_mode: default_network_mode(),
             l2_hub_url: None,
+            trusted_mainnet_fast_pay_pilot: false,
             hub_right_address: None,
             channel_id_hex: None,
             webauthn_enabled: false,
@@ -256,6 +379,7 @@ impl Default for WalletSettings {
             quantum_mode: false,
             quantum_meta: None,
             quantum_keystore_json: None,
+            node_binary_path: None,
         }
     }
 }
@@ -420,6 +544,131 @@ mod tests {
             validate_node_url("http://127.0.0.1:8080").unwrap(),
             "http://127.0.0.1:8080"
         );
+    }
+
+    #[test]
+    fn mainnet_signing_rejects_the_legacy_http_node_but_allows_https_or_loopback() {
+        assert!(validate_signing_node_url(DEFAULT_NODE_URL, "mainnet").is_err());
+        assert_eq!(
+            validate_signing_node_url("https://node.example", "mainnet").unwrap(),
+            "https://node.example"
+        );
+        assert_eq!(
+            validate_signing_node_url("http://127.0.0.1:8080", "mainnet").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert!(validate_signing_node_url(DEFAULT_NODE_URL, "testnet").is_ok());
+    }
+
+    /// The exception is one URL wide, and the proof is the refusals beside it.
+    ///
+    /// A wallet that shipped pointed at a node its own signing gate refused is
+    /// a wallet that cannot send out of the box, which is what this exception
+    /// exists to fix. What it must not do is become a general permission for
+    /// plaintext, so every neighbour of the exception is listed here: the
+    /// lookalike host, the userinfo trick, an unrelated plaintext host, and a
+    /// port variant of the official name.
+    #[test]
+    fn the_l1_payment_exception_is_exactly_one_url_wide() {
+        assert_eq!(
+            validate_l1_payment_node_url(DEFAULT_NODE_URL, "mainnet").unwrap(),
+            DEFAULT_NODE_URL
+        );
+        for alias in ["nodeapi.hacash.org", "nodeapi.org", " nodeapi.hacash.org "] {
+            assert_eq!(
+                validate_l1_payment_node_url(alias, "mainnet").unwrap(),
+                DEFAULT_NODE_URL,
+                "{alias}"
+            );
+        }
+
+        // Loopback stays allowed, and stays the configuration that needs no
+        // disclosure at all.
+        assert_eq!(
+            validate_l1_payment_node_url("http://127.0.0.1:8080", "mainnet").unwrap(),
+            "http://127.0.0.1:8080"
+        );
+        assert_eq!(
+            validate_l1_payment_node_url("https://node.example", "mainnet").unwrap(),
+            "https://node.example"
+        );
+
+        // A custom remote plaintext node is refused, and the refusal is the
+        // one it has always had. This assertion is on the exact words because
+        // a message that drifts is a message somebody has to re-learn.
+        for hostile in [
+            "http://attacker.example",
+            "http://nodeapi.hacash.org.evil.example",
+        ] {
+            let error = validate_l1_payment_node_url(hostile, "mainnet")
+                .expect_err("a custom remote plaintext node must stay refused");
+            assert_eq!(
+                error.to_string(),
+                WalletError::Policy(
+                    "custom remote nodes must use HTTPS; only the official node is allowed over HTTP"
+                        .into(),
+                )
+                .to_string(),
+                "{hostile}"
+            );
+        }
+        let ported = validate_l1_payment_node_url("http://nodeapi.hacash.org:8080", "mainnet")
+            .expect_err("a port variant is not the official endpoint");
+        assert!(
+            ported.to_string().contains("must not use a custom port"),
+            "{ported}"
+        );
+    }
+
+    /// The disclosure appears exactly where the cost is being paid.
+    #[test]
+    fn the_plaintext_disclosure_is_claimed_only_by_the_official_node_on_mainnet() {
+        assert!(l1_payment_uses_official_plaintext(
+            DEFAULT_NODE_URL,
+            "mainnet"
+        ));
+        assert!(!l1_payment_uses_official_plaintext(
+            "http://127.0.0.1:8080",
+            "mainnet"
+        ));
+        assert!(!l1_payment_uses_official_plaintext(
+            "https://node.example",
+            "mainnet"
+        ));
+        assert!(!l1_payment_uses_official_plaintext(
+            DEFAULT_NODE_URL,
+            "testnet"
+        ));
+        assert!(!l1_payment_uses_official_plaintext(
+            "http://attacker.example",
+            "mainnet"
+        ));
+
+        // The words a person acts on, checked rather than assumed present.
+        for needed in [
+            "plain HTTP",
+            "read which address",
+            "wrong network fee",
+            "cannot change who gets paid",
+            "http://127.0.0.1:8080",
+        ] {
+            assert!(
+                OFFICIAL_NODE_PLAINTEXT_DISCLOSURE.contains(needed),
+                "the disclosure has to say {needed:?}: {OFFICIAL_NODE_PLAINTEXT_DISCLOSURE}"
+            );
+        }
+        assert!(OFFICIAL_NODE_PLAINTEXT_SHORT.len() < 200);
+    }
+
+    /// The strict rule did not move, and everything that depends on it is
+    /// named here so a future edit has to read this list before widening it.
+    #[test]
+    fn the_strict_signing_rule_still_refuses_the_official_node() {
+        assert!(validate_signing_node_url(DEFAULT_NODE_URL, "mainnet").is_err());
+        assert!(!crate::node_discovery::failover_may_adopt(
+            DEFAULT_NODE_URL,
+            "mainnet"
+        ));
     }
 
     #[test]

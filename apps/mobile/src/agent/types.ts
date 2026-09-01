@@ -54,7 +54,7 @@ export type SignedRotationPairingTicket = {
     desktop_device_id: string;
     expected_candidate_device_id: string;
     expected_candidate_identity_fingerprint: string;
-    network_id: "testnet";
+    network_id: string;
     expires_at: string;
   };
   desktop_signature_hex: string;
@@ -70,7 +70,7 @@ export type SignedRotationCandidateAcceptance = {
     desktop_device_id: string;
     candidate_device_id: string;
     candidate_identity_fingerprint: string;
-    network_id: "testnet";
+    network_id: string;
     accepted_at: string;
   };
   candidate_signature_hex: string;
@@ -184,6 +184,7 @@ export const MAX_COMPANION_DISCARDED_CONSENTS = 32;
 export const COMPANION_CONSENT_KINDS = [
   "witness_confirmation",
   "pilot_approval",
+  "agent_fast_pay_approval",
 ] as const;
 
 export type CompanionConsentKind = (typeof COMPANION_CONSENT_KINDS)[number];
@@ -349,6 +350,119 @@ export type CompanionPilotDecisionView = {
   detail: string;
 };
 
+export type AgentFastPayNetworkBinding = {
+  network_mode: "testnet" | "mainnet";
+  chain_id: number;
+  genesis_identifier: string;
+  node_profile_id: string;
+  network_instance_id: string;
+  transaction_format_version: string;
+};
+
+export type AgentFastPayApprovalCommitment = {
+  approval_version: string;
+  approval_id: string;
+  challenge_nonce: string;
+  operation_id: string;
+  hub_operation_id: string;
+  public_idempotency_key: string;
+  hub_idempotency_key: string;
+  agent_wallet_id: string;
+  wallet_scope: string;
+  agent_id: string;
+  desktop_device_id: string;
+  request_commitment: string;
+  binding_commitment: string;
+  route_commitment: string;
+  payer: string;
+  payee: string;
+  amount_hac: string;
+  amount_units: string;
+  amount_millimeis: string;
+  hub_url: string;
+  hub_address: string;
+  channel_id: string;
+  channel_reuse_version: string;
+  channel_open_height: string;
+  fee_payer: "sender";
+  network_fee_units: string;
+  wallet_fee_units: string;
+  hub_fee_units: string;
+  total_debit_units: string;
+  policy_epoch: string;
+  signer_epoch: string;
+  emergency_epoch: string;
+  issued_at: string;
+  expires_at: string;
+  network_binding: AgentFastPayNetworkBinding;
+};
+
+export type CompanionAgentFastPayPendingView = {
+  commitment: AgentFastPayApprovalCommitment | null;
+};
+
+export type CompanionAgentFastPayDecisionView = {
+  operationId: string;
+  approvalId: string;
+  approved: boolean;
+  detail: string;
+};
+
+export type AgentHvmApprovalCommitment = {
+  approval_version: string;
+  approval_id: string;
+  challenge_nonce: string;
+  operation_id: string;
+  hub_operation_id: string;
+  public_idempotency_key: string;
+  hub_idempotency_key: string;
+  agent_wallet_id: string;
+  wallet_scope: string;
+  agent_id: string;
+  agent_authorization_epoch: string;
+  desktop_device_id: string;
+  hub_url: string;
+  hub_address: string;
+  settlement_profile: string;
+  contract_address: string;
+  deployment_tx_hash: string;
+  deployment_height: string;
+  bytecode_sha3: string;
+  channel_id: string;
+  channel_reuse_version: string;
+  challenge_blocks: string;
+  binding_commitment: string;
+  lease_snapshot_commitment: string;
+  previous_bill_commitment: string;
+  unsigned_request_commitment: string;
+  payer: string;
+  payee: string;
+  amount_hac: string;
+  amount_zhu: string;
+  fee_payer: "sender";
+  network_fee_zhu: string;
+  wallet_fee_zhu: string;
+  hub_fee_zhu: string;
+  total_debit_zhu: string;
+  policy_epoch: string;
+  signer_epoch: string;
+  emergency_epoch: string;
+  issued_at: string;
+  expires_at: string;
+  network_binding: AgentFastPayNetworkBinding;
+};
+
+export type CompanionAgentHvmPendingView = {
+  commitment: AgentHvmApprovalCommitment | null;
+};
+
+export type CompanionAgentHvmDecisionView = {
+  operationId: string;
+  approvalId: string;
+  approved: boolean;
+  detail: string;
+};
+
 export type CompanionWitnessView = {
   anchorId: string;
   accepted: boolean;
@@ -438,7 +552,12 @@ export type AgentCompanionActivity = {
 };
 
 export type AgentCompanionApprovalNetworkBinding = {
-  networkId: "testnet";
+  // The desktop stamps `node.network_kind()` here, which is "local_pilot_v1"
+  // on the pilot rail and "mainnet" on mainnet. It was declared as the literal
+  // "testnet", a value no producer emits, and a cast in companionView.ts made
+  // the compiler agree. The type is now what the wire actually carries, and
+  // `networkBindingValid` is the thing that decides which values are accepted.
+  networkId: string;
   chainId: number;
   genesisIdentifier: string;
   nodeProfileId: string;

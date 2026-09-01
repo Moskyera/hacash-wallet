@@ -1,0 +1,146 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+  <style>
+    body { margin: 0; font-family: Inter, "Segoe UI", system-ui, sans-serif; background: #000; }
+    a { color: #f5a623; } a:hover { color: #ffb43c; }
+    .mono { font-family: ui-monospace, Consolas, monospace; }
+    button { font-family: inherit; cursor: pointer; transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease; }
+    button:not(:disabled):hover { border-color: rgba(245, 166, 35, 0.34); }
+    button:disabled { cursor: default; opacity: .55; }
+  </style>
+</helmet>
+
+<div style="background:#000;color:#edf2f7;min-height:100%;padding:36px 40px;box-sizing:border-box">
+
+  <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:26px">
+    <span style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#8d8d8d;font-weight:600">{{stepLabel}}</span>
+    <h1 style="margin:0;font-size:26px;font-weight:600;letter-spacing:-.01em">{{heading}}</h1>
+  </div>
+
+  <div style="border:1px solid rgba(245,166,35,.34);border-radius:16px;background:rgba(245,166,35,.06);padding:24px;margin-bottom:20px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <svg viewBox="0 0 24 24" style="width:22px;height:22px;flex:none" fill="none" stroke="#f5a623" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 12l2 2 4-4"></path>
+        <circle cx="12" cy="12" r="9"></circle>
+      </svg>
+      <span style="font-size:15px;font-weight:600">{{cardTitle}}</span>
+    </div>
+    <div style="display:flex;gap:34px;margin-bottom:16px">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font-size:12px;color:#8d8d8d">{{payLabel}}</span>
+        <span class="mono" style="font-size:20px;font-weight:600">0.2 HAC</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font-size:12px;color:#8d8d8d">Costs to send</span>
+        <span class="mono" style="font-size:20px">0.0002 HAC</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <span style="font-size:12px;color:#8d8d8d">In your wallet</span>
+        <span class="mono" style="font-size:20px;color:{{balanceColor}}">{{balance}}</span>
+      </div>
+    </div>
+    <p style="margin:0;font-size:13px;line-height:1.6;color:#8d8d8d;max-width:62ch">{{cardBody}}</p>
+  </div>
+
+  <!--
+    The one sentence the shipped screen got right and must never lose. The Hub
+    chose to sign; nothing in Hacash compelled it. Every version of this copy
+    keeps saying that, and none of it may ever use the word trustless.
+  -->
+  <div style="border:1px solid #1f1f1f;border-radius:16px;background:#0a0a0a;padding:18px 20px;margin-bottom:24px">
+    <p style="margin:0;font-size:13px;line-height:1.6;color:#8d8d8d">
+      The Hub had to sign this once, when the channel opened, and it could have refused.
+      Nothing in Hacash could have forced it. What you hold removes your need for the Hub
+      from here on. <strong style="color:#edf2f7;font-weight:500">It does not mean you never needed it.</strong>
+    </p>
+  </div>
+
+  <sc-if value="{{held}}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:22px">
+      <button onClick="{{send}}" style="border:1px solid rgba(245,166,35,.34);background:#f5a623;color:#0a0a0a;border-radius:12px;padding:0 22px;font-size:14px;font-weight:600;min-height:46px">Send it now and close the channel</button>
+      <span style="font-size:13px;color:#8d8d8d">Or keep it and pay from the channel.</span>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{sending}}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;align-items:center;gap:14px;border:1px solid #1f1f1f;border-radius:16px;background:#0a0a0a;padding:16px 20px;margin-bottom:22px">
+      <span style="width:8px;height:8px;border-radius:50%;background:#f5a623;box-shadow:0 0 0 4px rgba(245,166,35,.14);flex:none"></span>
+      <div style="flex-grow:1">
+        <div style="font-size:14px;font-weight:600">Sent from your own node. Waiting for a block.</div>
+        <div style="font-size:13px;color:#8d8d8d;margin-top:2px">The Hub was not involved and cannot stop it.</div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{closed}}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;align-items:center;gap:14px;border:1px solid rgba(245,166,35,.34);border-radius:16px;background:rgba(245,166,35,.06);padding:16px 20px;margin-bottom:22px">
+      <svg viewBox="0 0 24 24" style="width:20px;height:20px;flex:none" fill="none" stroke="#f5a623" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M9 12l2 2 4-4"></path><circle cx="12" cy="12" r="9"></circle>
+      </svg>
+      <div style="flex-grow:1">
+        <div style="font-size:14px;font-weight:600">Closed at block 778065. Your money is back.</div>
+        <div style="font-size:13px;color:#8d8d8d;margin-top:2px">You closed it yourself, without asking anyone.</div>
+      </div>
+      <button onClick="{{reset}}" style="border:1px solid #242424;background:#111;color:#8d8d8d;border-radius:10px;padding:9px 14px;font-size:13px;min-height:38px">Replay</button>
+    </div>
+  </sc-if>
+
+  <div style="border-top:1px solid #1f1f1f;padding-top:18px">
+    <div style="font-size:12px;color:#8d8d8d;margin-bottom:6px">Transaction</div>
+    <div class="mono" style="font-size:12px;color:#8d8d8d;word-break:break-all;line-height:1.6">0b93ac71d857a4d2094fb4312214227f6c3d55d5a356d128f22b935c5d04d282</div>
+  </div>
+
+</div>
+</x-dc>
+
+<script data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = { phase: 'held' };
+  }
+
+  componentWillUnmount() {
+    if (this.timer) clearTimeout(this.timer);
+  }
+
+  renderVals() {
+    const phase = this.state.phase;
+    const closed = phase === 'closed';
+    const sending = phase === 'sending';
+
+    return {
+      held: phase === 'held',
+      sending,
+      closed,
+      stepLabel: closed ? 'Step 4 of 4 - done' : 'Step 4 of 4',
+      heading: closed ? 'The channel is closed' : 'Your way out is ready',
+      cardTitle: closed ? 'Sent by you, from your own node' : 'Signed by you and by the Hub',
+      payLabel: closed ? 'Paid you back' : 'Pays you back',
+      // The three balances are the owner's real ones from the first mainnet
+      // channel: 0.3 before, 0.099759 with the deposit committed, 0.299556
+      // back after the close paid its own fee.
+      balance: closed ? '0.299556' : '0.099759',
+      balanceColor: closed ? '#f5a623' : '#edf2f7',
+      cardBody: closed
+        ? 'The deposit came back and the fee came out of it. Nothing was asked of the Hub.'
+        : 'You can send this yourself, from your own node, whenever you want. It does not expire. The Hub is not involved and cannot stop it.',
+      send: () => {
+        this.setState({ phase: 'sending' });
+        this.timer = setTimeout(() => this.setState({ phase: 'closed' }), 2600);
+      },
+      reset: () => this.setState({ phase: 'held' }),
+    };
+  }
+}
+</script>
+</body>
+</html>

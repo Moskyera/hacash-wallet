@@ -22,6 +22,16 @@ pub struct HacdSendPreview {
     pub diamond_number: Option<u64>,
     pub fee_mei: f64,
     pub fee_wire: String,
+    /// Why the fee above is a guess, when it is one.
+    ///
+    /// `None` means the node quoted it. `Some` carries the node's own refusal,
+    /// so a HACD transfer priced from the wallet's compiled-in floor says so
+    /// rather than looking like a live quote. HAC and channel operations
+    /// already carried this; a diamond transfer uses the same
+    /// `estimate_hacd_l1_fee` path and had no reason to be the one that
+    /// stayed quiet.
+    #[serde(default)]
+    pub fee_estimate_degraded: Option<String>,
     pub service_fee_mei: f64,
     pub service_fee_treasury: String,
     pub total_hac_debit_mei: f64,
@@ -159,6 +169,7 @@ pub async fn preview_hacd_send(
         diamond_count: names.len(),
         diamond_number: first_info.number,
         fee_mei: fee_est.fee_mei,
+        fee_estimate_degraded: fee_est.provenance.warning(),
         fee_wire: fee_est.fee_node,
         service_fee_mei: HACD_SERVICE_FEE_MEI,
         service_fee_treasury: WALLET_TREASURY_ADDRESS.into(),

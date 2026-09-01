@@ -14,6 +14,7 @@ pub struct HacUnits(u64);
 
 impl HacUnits {
     pub const PER_HAC: u64 = 1_000_000;
+    pub const PER_MILLIMEI: u64 = 1_000;
     pub const ZERO: Self = Self(0);
     pub const MIN_NETWORK_FEE: Self = Self(1_000);
 
@@ -23,6 +24,15 @@ impl HacUnits {
 
     pub const fn get(self) -> u64 {
         self.0
+    }
+
+    /// Converts the Agent ledger's 1e-6 HAC units into the L2 protocol's
+    /// millimeis without rounding.
+    pub fn to_millimeis_exact(self) -> AgentWalletResult<u64> {
+        if self == Self::ZERO || !self.0.is_multiple_of(Self::PER_MILLIMEI) {
+            return Err(AgentWalletError::InvalidAmount);
+        }
+        Ok(self.0 / Self::PER_MILLIMEI)
     }
 
     pub fn checked_add(self, other: Self) -> AgentWalletResult<Self> {
@@ -148,5 +158,26 @@ mod tests {
         assert!(HacUnits::from_decimal("-1").is_err());
         assert!(HacUnits::from_decimal("1.0000001").is_err());
         assert!(HacUnits::from_decimal("1e3").is_err());
+    }
+
+    #[test]
+    fn l2_millimei_conversion_is_exact_and_never_rounds() {
+        assert_eq!(HacUnits::new(8_000).to_millimeis_exact().unwrap(), 8);
+        assert_eq!(
+            HacUnits::new(1_000_000).to_millimeis_exact().unwrap(),
+            1_000
+        );
+        assert_eq!(
+            HacUnits::new(1).to_millimeis_exact(),
+            Err(AgentWalletError::InvalidAmount)
+        );
+        assert_eq!(
+            HacUnits::new(1_001).to_millimeis_exact(),
+            Err(AgentWalletError::InvalidAmount)
+        );
+        assert_eq!(
+            HacUnits::ZERO.to_millimeis_exact(),
+            Err(AgentWalletError::InvalidAmount)
+        );
     }
 }

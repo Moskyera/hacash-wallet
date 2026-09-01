@@ -21,6 +21,8 @@ hkdf.workspace = true
 sha2.workspace = true
 secp256k1.workspace = true
 chrono.workspace = true
+sys = { path = "../../../hacash-fullnodedev/sys" }
+field = { path = "../../../hacash-fullnodedev/field" }
 urlencoding = "2"
 url.workspace = true
 axum = { workspace = true }

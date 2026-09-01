@@ -1,0 +1,75 @@
+{
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 900,
+      "h": 760,
+      "title": "1 - Open a channel (live)",
+      "is_interactive": true
+    },
+    {
+      "file": "Review.dc.html",
+      "x": 1000,
+      "y": 0,
+      "w": 900,
+      "h": 760,
+      "title": "2 - The exact numbers (live)",
+      "is_interactive": true
+    },
+    {
+      "file": "Waiting.dc.html",
+      "x": 2000,
+      "y": 0,
+      "w": 900,
+      "h": 760,
+      "title": "3 - Waiting on the chain (live)",
+      "is_interactive": true
+    },
+    {
+      "file": "Exit.dc.html",
+      "x": 3000,
+      "y": 0,
+      "w": 900,
+      "h": 760,
+      "title": "4 - Your way out (live)",
+      "is_interactive": true
+    },
+    {
+      "file": "Refusals.dc.html",
+      "x": 1000,
+      "y": 900,
+      "w": 900,
+      "h": 780,
+      "title": "When it says no (live)",
+      "is_interactive": true
+    }
+  ],
+  "annotations": [
+    {
+      "id": "waiting-note",
+      "x": 2000,
+      "y": -150,
+      "w": 900,
+      "text": "The half hour that broke people, running.\n\nIn the shipped build this screen showed nothing at all: the exit panel does not render until the channel settles, so you watched an empty page with your money committed and no way to tell that from a broken app.\n\nBlocks arrive, the count moves, and the exit appears on its own. Watch it again from the bottom, or change the pace with the Timing tweak above the frame."
+    },
+    {
+      "id": "order-note",
+      "x": 0,
+      "y": -150,
+      "w": 900,
+      "text": "Everything here works.\n\nType a comma in the amount and the screen says so before anything is sent. Go over the Hub's limit and it names the limit. Turn payments off and the button below tells you why it will not go.\n\nIn the shipped build all three came back as one sentence, after a round trip, and two of them as the same sentence."
+    },
+    {
+      "id": "refusal-note",
+      "x": 1000,
+      "y": 1780,
+      "w": 900,
+      "text": "Pick a chip. Every one of these four is real, from tonight. The left column cost eight hours."
+    }
+  ],
+  "launch": {
+    "view": "canvas"
+  }
+}

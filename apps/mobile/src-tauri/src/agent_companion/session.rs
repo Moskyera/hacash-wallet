@@ -2,6 +2,8 @@
 use hpay_companion_protocol::{CompanionMessage, CompanionPayload};
 
 #[cfg(any(target_os = "android", test))]
+use super::network::agent_fast_pay_network_allowed;
+#[cfg(any(target_os = "android", test))]
 use super::storage::MobileCompanionDurableState;
 
 #[cfg(any(target_os = "android", test))]
@@ -28,7 +30,10 @@ pub(super) fn inbound_payload_allowed(payload: &CompanionPayload) -> bool {
     ) || (cfg!(feature = "agent-wallet-testnet-pilot")
         && matches!(
             payload,
-            CompanionPayload::RollbackAnchorProposal(_) | CompanionPayload::WitnessAck { .. }
+            CompanionPayload::RollbackAnchorProposal(_)
+                | CompanionPayload::WitnessAck { .. }
+                | CompanionPayload::AgentFastPayApprovalRequest(_)
+                | CompanionPayload::AgentHvmApprovalRequest(_)
         ))
 }
 
@@ -53,6 +58,10 @@ pub(super) fn outbound_payload_allowed(payload: &CompanionPayload) -> bool {
         && matches!(
             payload,
             CompanionPayload::ApprovalDecision(_)
+                | CompanionPayload::AgentFastPayApprovalPoll { .. }
+                | CompanionPayload::AgentFastPayApprovalDecision(_)
+                | CompanionPayload::AgentHvmApprovalPoll { .. }
+                | CompanionPayload::AgentHvmApprovalDecision(_)
                 | CompanionPayload::RecoverPendingWitness { .. }
                 | CompanionPayload::WitnessReceipt(_)
                 // The replacement phone's half stays pilot-only: it ends in a
@@ -104,6 +113,32 @@ fn validate_inbound_message(
                 && rotation.new_mobile_device_id != state.mobile_device_id)
         {
             return Err("Inbound witness rotation scope is invalid".to_owned());
+        }
+    }
+    if let CompanionPayload::AgentFastPayApprovalRequest(approval) = &message.payload {
+        approval
+            .validate_at(now)
+            .map_err(|error| error.to_string())?;
+        if approval.agent_wallet_id != state.agent_wallet_id
+            || approval.desktop_device_id != state.desktop_device_id
+            || !agent_fast_pay_network_allowed(&approval.network_binding)
+        {
+            return Err("Inbound Agent Fast Pay approval scope is invalid".to_owned());
+        }
+    }
+    if let CompanionPayload::AgentHvmApprovalRequest(approval) = &message.payload {
+        approval
+            .validate_at(now)
+            .map_err(|error| error.to_string())?;
+        if approval.agent_wallet_id != state.agent_wallet_id
+            || approval.desktop_device_id != state.desktop_device_id
+            || !agent_fast_pay_network_allowed(&approval.network_binding)
+            || approval.network_fee_zhu != 0
+            || approval.wallet_fee_zhu != 0
+            || approval.hub_fee_zhu != 0
+            || approval.total_debit_zhu != approval.amount_zhu
+        {
+            return Err("Inbound Agent HVM approval scope is invalid".to_owned());
         }
     }
     if let CompanionPayload::StatusSnapshot {
@@ -207,6 +242,16 @@ mod android {
         Sync,
         Ping,
         Approval(SignedApprovalDecision),
+        AgentFastPayApprovalPoll {
+            agent_wallet_id: String,
+            operation_id: Option<String>,
+        },
+        AgentFastPayApprovalDecision(hpay_companion_protocol::SignedAgentFastPayApprovalDecision),
+        AgentHvmApprovalPoll {
+            agent_wallet_id: String,
+            operation_id: Option<String>,
+        },
+        AgentHvmApprovalDecision(hpay_companion_protocol::SignedAgentHvmApprovalDecision),
         RecoverPendingWitness(String),
         Witness(SignedWitnessReceipt),
         RotationPoll(Option<String>),
@@ -448,6 +493,26 @@ mod android {
                         OutboundKind::Approval(decision) => {
                             CompanionPayload::ApprovalDecision(decision.clone())
                         }
+                        OutboundKind::AgentFastPayApprovalPoll {
+                            agent_wallet_id,
+                            operation_id,
+                        } => CompanionPayload::AgentFastPayApprovalPoll {
+                            agent_wallet_id: agent_wallet_id.clone(),
+                            operation_id: operation_id.clone(),
+                        },
+                        OutboundKind::AgentFastPayApprovalDecision(signed) => {
+                            CompanionPayload::AgentFastPayApprovalDecision(signed.clone())
+                        }
+                        OutboundKind::AgentHvmApprovalPoll {
+                            agent_wallet_id,
+                            operation_id,
+                        } => CompanionPayload::AgentHvmApprovalPoll {
+                            agent_wallet_id: agent_wallet_id.clone(),
+                            operation_id: operation_id.clone(),
+                        },
+                        OutboundKind::AgentHvmApprovalDecision(signed) => {
+                            CompanionPayload::AgentHvmApprovalDecision(signed.clone())
+                        }
                         OutboundKind::RecoverPendingWitness(operation_id) => {
                             CompanionPayload::RecoverPendingWitness {
                                 operation_id: operation_id.clone(),
@@ -502,6 +567,46 @@ mod android {
                         {
                             return Err(
                                 "Desktop returned an unexpected approval response".to_owned()
+                            );
+                        }
+                        OutboundKind::AgentFastPayApprovalPoll { .. }
+                            if !matches!(
+                                response.payload,
+                                CompanionPayload::AgentFastPayApprovalRequest(_)
+                                    | CompanionPayload::AdminAck { .. }
+                            ) =>
+                        {
+                            return Err(
+                                "Desktop returned an unexpected Agent Fast Pay approval response"
+                                    .to_owned(),
+                            );
+                        }
+                        OutboundKind::AgentFastPayApprovalDecision(_)
+                            if !matches!(response.payload, CompanionPayload::AdminAck { .. }) =>
+                        {
+                            return Err(
+                                "Desktop returned an unexpected Agent Fast Pay decision response"
+                                    .to_owned(),
+                            );
+                        }
+                        OutboundKind::AgentHvmApprovalPoll { .. }
+                            if !matches!(
+                                response.payload,
+                                CompanionPayload::AgentHvmApprovalRequest(_)
+                                    | CompanionPayload::AdminAck { .. }
+                            ) =>
+                        {
+                            return Err(
+                                "Desktop returned an unexpected Agent HVM approval response"
+                                    .to_owned(),
+                            );
+                        }
+                        OutboundKind::AgentHvmApprovalDecision(_)
+                            if !matches!(response.payload, CompanionPayload::AdminAck { .. }) =>
+                        {
+                            return Err(
+                                "Desktop returned an unexpected Agent HVM decision response"
+                                    .to_owned(),
                             );
                         }
                         OutboundKind::RecoverPendingWitness(_)
@@ -579,6 +684,8 @@ mod android {
                 &kind,
                 OutboundKind::Sync
                     | OutboundKind::Ping
+                    | OutboundKind::AgentFastPayApprovalPoll { .. }
+                    | OutboundKind::AgentHvmApprovalPoll { .. }
                     | OutboundKind::RecoverPendingWitness(_)
                     | OutboundKind::RotationPoll(_)
             );
@@ -704,6 +811,8 @@ mod tests {
             approval_sequence: 0,
             pending_pairing_ack: None,
             pending_approval: None,
+            pending_agent_fast_pay_approval: None,
+            pending_agent_hvm_approval: None,
             pending_witness: None,
             discarded_consents: Vec::new(),
             discarded_consents_dropped: 0,
@@ -785,6 +894,24 @@ mod tests {
             outbound_payload_allowed(&CompanionPayload::RecoverPendingWitness {
                 operation_id: "operation_one".to_owned(),
             }),
+            cfg!(feature = "agent-wallet-testnet-pilot")
+        );
+        let fast_pay_poll = CompanionPayload::AgentFastPayApprovalPoll {
+            agent_wallet_id: "wallet_one".to_owned(),
+            operation_id: Some("operation_fast_pay_one".to_owned()),
+        };
+        assert!(!inbound_payload_allowed(&fast_pay_poll));
+        assert_eq!(
+            outbound_payload_allowed(&fast_pay_poll),
+            cfg!(feature = "agent-wallet-testnet-pilot")
+        );
+        let hvm_poll = CompanionPayload::AgentHvmApprovalPoll {
+            agent_wallet_id: "wallet_one".to_owned(),
+            operation_id: Some("operation_hvm_one".to_owned()),
+        };
+        assert!(!inbound_payload_allowed(&hvm_poll));
+        assert_eq!(
+            outbound_payload_allowed(&hvm_poll),
             cfg!(feature = "agent-wallet-testnet-pilot")
         );
         assert!(!outbound_payload_allowed(&CompanionPayload::Pong));

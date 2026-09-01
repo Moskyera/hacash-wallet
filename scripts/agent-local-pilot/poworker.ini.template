@@ -1,17 +1,21 @@
-; CPU-only worker for HPAY Local Pilot Chain V1.
+; Guarded CPU/OpenCL worker for HPAY Local Pilot Chain V1.
 ; It connects only to the loopback miner API selected by the guarded launcher.
 connect = 127.0.0.1:@@RPC_PORT@@
-supervene = 2
+supervene = @@CPU_THREADS@@
 nonce_max = 4294967295
 notice_wait = 5
 
 [efficiency]
 mode = max
 dynamic_supervene = false
-supervene_min = 2
-supervene_max = 2
+supervene_min = @@CPU_THREADS@@
+supervene_max = @@CPU_THREADS@@
 oom_fallback = true
-max_temp_c = 0
+; Local Pilot mining can run for hours while HVM lifecycle funds accumulate.
+; Throttle at 90 C and pause at the runtime's critical 95 C threshold instead
+; of leaving the GPU in reporting-only mode.
+max_temp_c = 85
+throttle_work_groups = 8
 idle_start_hour = 255
 idle_end_hour = 255
 pause_if_unprofitable = false
@@ -19,10 +23,14 @@ benchmark_seconds = 0
 stats_file = @@STATS_FILE@@
 
 [gpu]
-use_opencl = false
+use_opencl = @@USE_OPENCL@@
 use_cuda = false
-cpu_assist = false
-work_groups = 1
-local_size = 1
-unit_size = 1
+cpu_assist = @@CPU_ASSIST@@
+gpu_profile = amd_balanced
+platform_id = @@OPENCL_PLATFORM_ID@@
+device_ids = @@OPENCL_DEVICE_IDS@@
+opencl_dir = @@OPENCL_DIR@@
+work_groups = 16
+local_size = 256
+unit_size = 64
 debug = 0

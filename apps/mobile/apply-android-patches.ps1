@@ -4,6 +4,7 @@ $mobile = Split-Path -Parent $MyInvocation.MyCommand.Path
 $android = Join-Path $mobile "src-tauri\gen\android"
 $gradle = Join-Path $android "app\build.gradle.kts"
 $manifest = Join-Path $android "app\src\main\AndroidManifest.xml"
+$strings = Join-Path $android "app\src\main\res\values\strings.xml"
 $netSrc = Join-Path $mobile "src-tauri\android-network-security.xml"
 $netDstDir = Join-Path $android "app\src\main\res\xml"
 $netDst = Join-Path $netDstDir "network_security_config.xml"
@@ -15,6 +16,16 @@ $backupRulesDst = Join-Path $netDstDir "backup_rules.xml"
 if (-not (Test-Path $gradle)) {
     throw "Missing $gradle. Run yarn tauri android init first."
 }
+
+if (-not (Test-Path $strings)) {
+    throw "Missing $strings. Run yarn tauri android init first."
+}
+
+$stringsContent = Get-Content $strings -Raw
+$stringsContent = $stringsContent -replace '<string name="app_name">[^<]*</string>', '<string name="app_name">HPAY</string>'
+$stringsContent = $stringsContent -replace '<string name="main_activity_title">[^<]*</string>', '<string name="main_activity_title">HPAY Wallet</string>'
+Set-Content -Path $strings -Value $stringsContent -NoNewline
+Write-Host "Normalized Android application labels to HPAY" -ForegroundColor Green
 
 & (Join-Path $mobile "merge-android-permissions.ps1")
 
@@ -114,21 +125,66 @@ Set-Content -Path $gradle -Value $gradleContent -NoNewline
 $iconSrcRoot = Join-Path $mobile "src-tauri\icons\android"
 $iconDstRoot = Join-Path $android "app\src\main\res"
 $mipmapProbe = Join-Path $iconSrcRoot "mipmap-xxxhdpi\ic_launcher_foreground.png"
-if (-not (Test-Path $mipmapProbe)) {
-    Write-Host "Regenerating Android launcher mipmaps (missing or stale)..." -ForegroundColor Yellow
-    & (Join-Path $mobile "generate-app-icons.ps1")
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$iconSourceArt = Join-Path $mobile "..\..\packages\wallet-ui\src\assets\hpay-mark.png"
+if (-not (Test-Path $iconSourceArt)) {
+    throw "Missing launcher source artwork $iconSourceArt"
 }
-if (Test-Path $iconSrcRoot) {
-    Get-ChildItem -Path $iconSrcRoot -Recurse -File | ForEach-Object {
-        $rel = $_.FullName.Substring($iconSrcRoot.Length).TrimStart([char[]]@('\', '/'))
-        $dst = Join-Path $iconDstRoot $rel
-        $parent = Split-Path -Parent $dst
-        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        Copy-Item $_.FullName $dst -Force
+$currentSourceHash = (Get-FileHash $iconSourceArt -Algorithm SHA256).Hash
+$sourceStamp = Join-Path $mobile "src-tauri\icons\android-mipmap-source.sha256"
+$stampedHash = if (Test-Path $sourceStamp) { (Get-Content $sourceStamp -Raw).Trim() } else { "" }
+
+# Existence alone does not prove freshness: the mipmaps are rendered from
+# hpay-mark.png, so a new logo leaves the old launcher icons sitting on disk and
+# perfectly passing a Test-Path check. Compare the stamped source hash instead.
+$mipmapsStale = (-not (Test-Path $mipmapProbe)) -or ($stampedHash -ne $currentSourceHash)
+if ($mipmapsStale) {
+    $reason = if (-not (Test-Path $mipmapProbe)) {
+        "missing"
+    } elseif ([string]::IsNullOrWhiteSpace($stampedHash)) {
+        "unstamped - cannot prove they match the current artwork"
+    } else {
+        "stale - rendered from $($stampedHash.Substring(0, 12))..., artwork is now $($currentSourceHash.Substring(0, 12))..."
     }
-    Write-Host "Synced branded launcher icons to gen/android res" -ForegroundColor Green
+    Write-Host "Regenerating Android launcher mipmaps ($reason)..." -ForegroundColor Yellow
+    Push-Location $mobile
+    try {
+        & (Join-Path $mobile "generate-app-icons.ps1")
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    } finally {
+        Pop-Location
+    }
+    $stampedHash = if (Test-Path $sourceStamp) { (Get-Content $sourceStamp -Raw).Trim() } else { "" }
+    if ($stampedHash -ne $currentSourceHash) {
+        throw "Launcher mipmap regeneration did not stamp the current artwork hash; refusing to package a possibly stale app icon."
+    }
 }
+if (-not (Test-Path $iconSrcRoot)) {
+    throw "Missing $iconSrcRoot. Without it the APK would ship the default Tauri placeholder icon instead of the HPAY mark."
+}
+Get-ChildItem -Path $iconSrcRoot -Recurse -File | ForEach-Object {
+    $rel = $_.FullName.Substring($iconSrcRoot.Length).TrimStart([char[]]@('\', '/'))
+    $dst = Join-Path $iconDstRoot $rel
+    $parent = Split-Path -Parent $dst
+    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    Copy-Item $_.FullName $dst -Force
+}
+Write-Host "Synced branded launcher icons to gen/android res" -ForegroundColor Green
+
+# Prove the branded mipmaps actually landed in the tree Gradle packages, rather
+# than trusting that Copy-Item did what it was told.
+foreach ($density in @("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi")) {
+    foreach ($name in @("ic_launcher.png", "ic_launcher_round.png", "ic_launcher_foreground.png")) {
+        $expected = Join-Path $iconSrcRoot "mipmap-$density\$name"
+        $actual = Join-Path $iconDstRoot "mipmap-$density\$name"
+        if (-not (Test-Path $actual)) {
+            throw "Launcher icon $actual is missing after sync"
+        }
+        if ((Get-FileHash $actual -Algorithm SHA256).Hash -ne (Get-FileHash $expected -Algorithm SHA256).Hash) {
+            throw "Launcher icon $actual does not match the branded source $expected"
+        }
+    }
+}
+Write-Host "Verified branded launcher mipmaps in gen/android res" -ForegroundColor Green
 
 # Replace default green Tauri adaptive background with solid black (matches HPAY branding).
 $bgXml = Join-Path $iconDstRoot "drawable\ic_launcher_background.xml"

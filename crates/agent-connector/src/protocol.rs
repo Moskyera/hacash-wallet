@@ -298,10 +298,28 @@ impl AgentRequest {
 pub struct CreatePaymentIntent {
     pub idempotency_key: String,
     pub asset: String,
+    /// Explicit payment rail. Omission preserves the protocol-v1 L1 behavior.
+    #[serde(default, skip_serializing_if = "AgentPaymentRail::is_layer1")]
+    pub rail: AgentPaymentRail,
     pub amount_units: u64,
     pub recipient: String,
     pub reason: String,
     pub expires_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPaymentRail {
+    #[default]
+    Layer1,
+    FastPay,
+    HvmFastPay,
+}
+
+impl AgentPaymentRail {
+    fn is_layer1(value: &Self) -> bool {
+        *value == Self::Layer1
+    }
 }
 
 impl CreatePaymentIntent {
@@ -337,6 +355,8 @@ pub enum AgentOperationStatus {
     Signed,
     BroadcastSubmitted,
     BroadcastUncertain,
+    FastPaySubmitted,
+    FastPayAwaitingRecipient,
     SubmittedAwaitingFinalWitness,
     ReconciliationRequired,
     ReconciledAwaitingFinalWitness,
@@ -500,6 +520,39 @@ mod tests {
           }
         }"#;
         assert!(serde_json::from_str::<AgentRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn payment_rail_defaults_to_layer1_and_fast_pay_is_explicit() {
+        let legacy = r#"{
+          "action":"create_payment_intent",
+          "payload":{
+            "idempotency_key":"invoice-12345678",
+            "asset":"HAC",
+            "amount_units":1000,
+            "recipient":"1AVRuFXNFi3rdMrPH4hdqSgFrEBnWisWaS",
+            "reason":"test",
+            "expires_at_unix":200
+          }
+        }"#;
+        let AgentRequest::CreatePaymentIntent(legacy) =
+            serde_json::from_str::<AgentRequest>(legacy).unwrap()
+        else {
+            panic!("wrong request variant");
+        };
+        assert_eq!(legacy.rail, AgentPaymentRail::Layer1);
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("rail"));
+
+        let mut fast_pay = legacy;
+        fast_pay.rail = AgentPaymentRail::FastPay;
+        let encoded = serde_json::to_string(&fast_pay).unwrap();
+        assert!(encoded.contains(r#""rail":"fast_pay""#));
+        assert_eq!(
+            serde_json::from_str::<CreatePaymentIntent>(&encoded)
+                .unwrap()
+                .rail,
+            AgentPaymentRail::FastPay
+        );
     }
 
     #[test]

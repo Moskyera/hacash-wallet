@@ -72,16 +72,19 @@
 
 .wallet-space-switcher button {
   min-height: 38px;
-  border: 0;
+  /* Transparent rather than 0 so the active state can take a border without
+     the two halves of the switcher changing size. */
+  border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: #999;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .wallet-space-switcher button.active {
-  background: #ff9d00;
-  color: #000;
+  border-color: rgb(245 166 35 / 38%);
+  background: rgb(245 166 35 / 12%);
+  color: #ffbc4d;
 }
 
 .agent-sidebar nav {
@@ -122,15 +125,22 @@
   gap: 8px;
 }
 
+/*
+ * Every ordinary button in the Agent Wallet. It used to be gold text on a gold
+ * wash with a gold border at weight 700, which made an eight-button page read
+ * as eight primary actions. Neutral is the honest default; the gold is spent
+ * on .agent-primary-action, and the loudest thing on any page stays the
+ * .agent-danger control.
+ */
 .agent-sidebar-foot button,
 .agent-content button,
 .agent-center-card button {
   min-height: 40px;
-  border: 1px solid #4d3109;
+  border: 1px solid #2b2b2b;
   border-radius: 9px;
-  background: #15100a;
-  color: #ffad24;
-  font-weight: 700;
+  background: #0b0b0b;
+  color: #dcdcdc;
+  font-weight: 600;
 }
 
 .agent-content {
@@ -203,6 +213,29 @@
   border-radius: 14px;
 }
 
+/* A section inside a panel that is about one thing on its own, such as the
+   channel exit. Set apart enough to read as its own subject without becoming a
+   second card competing with the panel it lives in. */
+.agent-subpanel {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border: 1px solid #2d210f;
+  border-radius: 12px;
+  background: #0b0a08;
+  display: grid;
+  gap: 10px;
+}
+
+.agent-subpanel h3 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.agent-subpanel p {
+  margin: 0;
+}
+
 .agent-panel h2 {
   margin-top: 0;
 }
@@ -249,13 +282,28 @@
   color: #ff784f;
 }
 
-.agent-content button.agent-danger {
+/*
+ * DELIBERATELY LOUD. Left exactly as it was while every other button on these
+ * pages was quietened: Disable All Agent Payments, Revoke, Reject and Give up
+ * are the controls whose loudness is the point. font-weight is restated
+ * because the neutral base above dropped to 600 and these must not follow it.
+ *
+ * .agent-danger-action is the same control class the mobile companion already
+ * styles; on desktop it was used by the witness re-target confirm
+ * (WitnessRotationPanel) and had no rule at all here, so a control that makes
+ * you type a confirmation phrase drew as an ordinary grey button.
+ */
+.agent-content button.agent-danger,
+.agent-content button.agent-danger-action,
+.agent-center-card button.agent-danger-action {
   border-color: #8d2f13;
   background: #210a04;
   color: #ff805c;
+  font-weight: 700;
 }
 
 .agent-warning,
+.agent-note,
 .agent-safe-note {
   padding: 13px 15px;
   border: 1px solid #55370b;
@@ -326,8 +374,9 @@
 .agent-center-card .agent-primary {
   width: 100%;
   margin-top: 20px;
-  background: #ff9d00;
-  color: #000;
+  border-color: rgb(245 166 35 / 45%);
+  background: rgb(245 166 35 / 10%);
+  color: #ffbc4d;
 }
 
 .agent-center-card button:disabled,
@@ -502,10 +551,12 @@
   font-weight: 400;
 }
 
+/* A gold outline over a gold tint. Enough to find it among neutral buttons,
+   and it no longer outshouts Disable All Agent Payments beside it. */
 .agent-content button.agent-primary-action {
-  border-color: #ff9d00;
-  background: #ff9d00;
-  color: #000;
+  border-color: rgb(245 166 35 / 45%);
+  background: rgb(245 166 35 / 10%);
+  color: #ffbc4d;
 }
 
 .agent-block-action {
@@ -855,4 +906,148 @@
   color: #ff9d00;
   font-size: 12px;
   font-weight: 700;
+}
+
+/*
+ * "You are here" in the Agent Wallet space.
+ *
+ * The current space is rendered as a <span class="wallet-space-current active">
+ * while the other space is a <button>. Every .active rule in this file and in
+ * dashboard.css targets buttons, so until now the CURRENT space drew as plain
+ * unstyled text and the OTHER space drew as a bordered control: the strongest
+ * element on screen pointed at the wallet you were not in. This is the exact
+ * inverse of the personal sidebar and it is fixed here.
+ */
+.wallet-space-switcher .wallet-space-current {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  /* Kept identical to `.wallet-space-switcher button.active` above; if the two
+     drift apart, "you are here" points at the wrong wallet again. */
+  border: 1px solid rgb(245 166 35 / 38%);
+  background: rgb(245 166 35 / 12%);
+  color: #ffbc4d;
+  font-size: inherit;
+  font-weight: 600;
+  text-align: center;
+}
+
+.agent-sidebar .wallet-space-switcher .wallet-space-current,
+.agent-entry .wallet-space-switcher .wallet-space-current {
+  min-height: 34px;
+  padding: 7px;
+  font-size: 10px;
+}
+
+/*
+ * Chrome that survives scrolling.
+ *
+ * The agent app had no sticky or fixed element in its unlocked state, so once a
+ * page scrolled, the brand, the space switcher, the pilot banner and the only
+ * heading naming the space all left the viewport together. On four of the six
+ * agent pages nothing else names the space at all, which meant a scrolled Rules
+ * or Activity screen gave no way to tell which wallet was on screen.
+ */
+.agent-sidebar {
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  align-self: start;
+  overflow-y: auto;
+}
+
+/*
+ * THE HALF HOUR THE WALLET SHOWED NOTHING.
+ *
+ * An owner opened the first mainnet Fast Pay channel on this rail. Between the
+ * confirm and the settle their money was on the chain and this screen drew
+ * nothing for it, because the exit panel is gated on a binding that provably
+ * cannot exist until the wait is over. An ordinary wait and a dead app looked
+ * identical.
+ *
+ * Every class below is rendered by AgentFastPayChannelPanel. They are written
+ * here rather than borrowed from dashboard.css, which the agent screen does not
+ * import: .node-sync-* only looks reusable, and it is built on custom
+ * properties this sheet does not define.
+ */
+
+/*
+ * Quieter than .agent-warning on purpose. Payments being off is a state the
+ * owner chose, not a refusal, and it must not read as one; the amber is spent
+ * on the three words that name the state.
+ */
+.agent-readiness {
+  padding: 11px 14px;
+  border: 1px solid #2d210f;
+  border-radius: 10px;
+  background: #0b0a08;
+  color: #ccc;
+  line-height: 1.55;
+}
+
+.agent-readiness strong {
+  color: #ffad24;
+}
+
+.agent-wait {
+  display: grid;
+  gap: 8px;
+}
+
+/*
+ * tabular-nums is load bearing, not decoration. A block height and a mm:ss
+ * countdown both change on a timer, and proportional digits make the whole line
+ * shuffle sideways every tick, which reads as the screen redrawing itself
+ * rather than as a number moving.
+ */
+.agent-wait-count,
+.agent-countdown {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: #aaa;
+  line-height: 1.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-wait-count strong,
+.agent-countdown strong {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-wait-track {
+  height: 8px;
+  border: 1px solid #2d210f;
+  border-radius: 999px;
+  background: #150f06;
+  overflow: hidden;
+}
+
+/*
+ * Determinate only. There is no indeterminate variant of this track and there
+ * must never be one: a bar that moves while nothing is known is the exact
+ * screen this work exists to remove. The only motion is a transition on a width
+ * that a real confirmation count changed, so movement always means a block
+ * arrived.
+ */
+.agent-wait-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #ffad24;
+  transition: width 240ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * The fill still lands on the correct width. Only the slide is dropped, so
+   * somebody who asked for no motion loses the animation and not the number.
+   */
+  .agent-wait-fill {
+    transition: none;
+  }
 }

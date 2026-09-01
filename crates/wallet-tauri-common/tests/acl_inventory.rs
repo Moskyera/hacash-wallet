@@ -3,9 +3,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const COMMAND_PREFIXES: [&str; 4] = ["wallet_", "quantum_", "messenger_", "agent_wallet_"];
-const AGENT_COMPANION_COMMANDS: [&str; 21] = [
+const AGENT_COMPANION_COMMANDS: [&str; 26] = [
+    "agent_wallet_companion_close_activity",
     "agent_wallet_companion_connect",
     "agent_wallet_companion_create_identity",
+    "agent_wallet_companion_decide_fast_pay",
+    "agent_wallet_companion_decide_hvm_fast_pay",
     "agent_wallet_companion_decide_payment",
     // Ends this phone's intent to sign one exact payment it is holding. It
     // deletes no pairing, no identity and no witness memory, and it can only
@@ -19,6 +22,8 @@ const AGENT_COMPANION_COMMANDS: [&str; 21] = [
     "agent_wallet_companion_pairing_deliver_ack",
     "agent_wallet_companion_pairing_start",
     "agent_wallet_companion_pairing_retry_request",
+    "agent_wallet_companion_pending_fast_pay",
+    "agent_wallet_companion_pending_hvm_fast_pay",
     "agent_wallet_companion_ping",
     "agent_wallet_companion_reset",
     "agent_wallet_companion_rotation_step",
@@ -147,7 +152,7 @@ fn assert_capability_scope(root: &Path, app: &str, launchpad_permission: &str) {
         );
         assert_eq!(
             companion["permissions"],
-            serde_json::json!(["allow-agent-companion", "core:window:allow-close"])
+            serde_json::json!(["allow-agent-companion"])
         );
     }
 }

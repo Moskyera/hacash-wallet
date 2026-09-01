@@ -8,6 +8,7 @@ use l2_fast_pay_hub::HubState;
 use l2_fast_pay_hub::api::FastPayRequest;
 use l2_fast_pay_hub::channel_id::derive_channel_id;
 use l2_fast_pay_hub::journal::{AuthenticatedJournal, JournalBinding, JournalPhase};
+use l2_fast_pay_hub::l1_channel::canonical_network_instance_id;
 use l2_fast_pay_hub::wire::ChannelPayCompleteDocuments;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,25 +34,75 @@ fn secret_hex(account: &Account) -> String {
 
 async fn mock_node(channels: HashMap<String, Value>) -> (String, JoinHandle<()>) {
     let channels = Arc::new(RwLock::new(channels));
-    let app = Router::new().route(
-        "/query/channel",
-        get({
-            let channels = channels.clone();
-            move |Query(query): Query<ChannelQuery>| {
+    let app = Router::new()
+        .route(
+            "/query/channel",
+            get({
                 let channels = channels.clone();
-                async move {
-                    let id = query.id.unwrap_or_default();
-                    let channels = channels.read().await;
-                    Json(
-                        channels
-                            .get(&id)
-                            .cloned()
-                            .unwrap_or_else(|| json!({ "ret": 1, "err": "channel not found" })),
-                    )
+                move |Query(query): Query<ChannelQuery>| {
+                    let channels = channels.clone();
+                    async move {
+                        let id = query.id.unwrap_or_default();
+                        let channels = channels.read().await;
+                        Json(
+                            channels
+                                .get(&id)
+                                .cloned()
+                                .unwrap_or_else(|| json!({ "ret": 1, "err": "channel not found" })),
+                        )
+                    }
                 }
-            }
-        }),
-    );
+            }),
+        )
+        .route(
+            "/query/capabilities",
+            get(|| async {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let block_1_hash = "11".repeat(32);
+                let node_profile_id = "hpay-test-profile";
+                let instance_id = canonical_network_instance_id(
+                    "testnet",
+                    1,
+                    false,
+                    &block_1_hash,
+                    node_profile_id,
+                    2,
+                );
+                Json(json!({
+                    "ret": 0,
+                    "api_version": 1,
+                    "api": { "transaction_submit_bound": true },
+                    "chain": {
+                        "id": 1,
+                        "height": 900000,
+                        "next_height": 900001,
+                        "mainnet": false
+                    },
+                    "network": {
+                        "kind": "testnet",
+                        "node_profile_id": node_profile_id,
+                        "block_1_hash": block_1_hash,
+                        "instance_id": instance_id,
+                        "transaction_format_version": 2
+                    },
+                    "sync": {
+                        "tip_timestamp_unix": now,
+                        "observed_unix": now,
+                        "tip_age_seconds": 0,
+                        "max_tip_age_seconds": 3600,
+                        "fresh": true
+                    },
+                    "actions": {
+                        "registered": [1, 2, 3, 1041],
+                        "enabled": [1, 2, 3, 1041]
+                    },
+                    "transactions": { "registered": [1, 2, 3], "enabled": [2] }
+                }))
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
@@ -155,6 +206,137 @@ async fn signer_without_authenticated_storage_never_advertises_ready_or_signs() 
             .to_string()
             .contains("durable authenticated L2 storage")
     );
+}
+
+#[tokio::test]
+async fn missing_production_safety_blocks_before_persist_or_signature() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let payer = account("downgrade-payer");
+    let hub_account = account("downgrade-hub");
+    let payer_address = payer.readable().to_owned();
+    let hub_address = hub_account.readable().to_owned();
+    let channel_id = derive_channel_id(&payer_address, &hub_address, 1);
+    let channel = json!({
+        "ret": 0,
+        "id": channel_id,
+        "status": 0,
+        "reuse_version": 1,
+        "left": { "address": payer_address, "hacash": "10", "satoshi": 0 },
+        "right": { "address": hub_address, "hacash": "0", "satoshi": 0 }
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/query/channel",
+            get({
+                let channel = channel.clone();
+                move || {
+                    let channel = channel.clone();
+                    async move { Json(channel) }
+                }
+            }),
+        )
+        .route(
+            "/query/balance",
+            get(|| async { Json(json!({"ret": 0, "list": [{"hacash": "1:250"}]})) }),
+        )
+        .route(
+            "/query/capabilities",
+            get({
+                let calls = calls.clone();
+                move || {
+                    let calls = calls.clone();
+                    async move {
+                        let fresh = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
+                        let block_1_hash =
+                            "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+                        let node_profile_id = "hacash-mainnet";
+                        let instance_id = canonical_network_instance_id(
+                            "mainnet",
+                            0,
+                            true,
+                            block_1_hash,
+                            node_profile_id,
+                            2,
+                        );
+                        Json(json!({
+                            "ret": 0,
+                            "api_version": 1,
+                            "api": { "transaction_submit_bound": true },
+                            "chain": {
+                                "id": 0,
+                                "height": 900000,
+                                "next_height": 900001,
+                                "mainnet": true
+                            },
+                            "network": {
+                                "kind": "mainnet",
+                                "node_profile_id": node_profile_id,
+                                "block_1_hash": block_1_hash,
+                                "instance_id": instance_id,
+                                "transaction_format_version": 2
+                            },
+                            "sync": {
+                                "tip_timestamp_unix": now,
+                                "max_tip_age_seconds": 3600,
+                                "fresh": fresh
+                            },
+                            "actions": {
+                                "registered": [1, 2, 3, 1041],
+                                "enabled": [1, 2, 3, 1041]
+                            },
+                            "transactions": { "registered": [1, 2, 3], "enabled": [2] }
+                        }))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node_address = listener.local_addr().unwrap();
+    let node_handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let directory = tempdir().unwrap();
+    let hub = HubState::new_secure_with_policy(
+        "downgrade hub",
+        hub_address.clone(),
+        format!("http://{node_address}"),
+        None,
+        directory.path().join("state.json"),
+        secret_hex(&hub_account),
+        JOURNAL_KEY,
+        &"a5".repeat(32),
+        "mainnet-pilot",
+        1_000_000,
+        1_000_000,
+    )
+    .unwrap();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let request = request(
+        &payer_address,
+        &hub_address,
+        &channel_id,
+        operation_id.clone(),
+        uuid::Uuid::new_v4().to_string(),
+        "1",
+    );
+    let error = hub.settle_fast_pay(&request).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("external_monotonic_rollback_anchor_is_not_ready"),
+        "{error}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(hub.payment_status(&operation_id).is_none());
+
+    node_handle.abort();
 }
 
 #[tokio::test]
@@ -272,6 +454,14 @@ async fn durable_state_failure_prevents_signature_production() {
     );
     assert!(state.settle_fast_pay(&req).await.is_err());
     assert!(!state.health().settlement_ready);
+    let readiness = state.mainnet_readiness().await;
+    assert!(!readiness.payments_enabled);
+    assert!(
+        readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("authenticated_storage_or_recovery"))
+    );
     drop(state);
 
     let journal = AuthenticatedJournal::open(

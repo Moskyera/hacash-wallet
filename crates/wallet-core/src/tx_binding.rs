@@ -115,6 +115,15 @@ pub fn decode_transaction(body_hex: &str) -> WalletResult<CanonicalTransaction> 
 }
 
 /// Decode a transaction for UI inspection and optionally require one exact chain guard.
+pub fn verify_all_required_signatures(body_hex: &str) -> WalletResult<CanonicalTransaction> {
+    let (tx, raw) = parse_transaction(body_hex)?;
+    tx.verify_signature().map_err(|error| {
+        WalletError::Policy(format!(
+            "transaction signatures are incomplete or invalid: {error}"
+        ))
+    })?;
+    canonical_from_tx(tx.as_read(), &raw)
+}
 pub fn inspect_transaction(
     body_hex: &str,
     expected_chain_id: Option<u32>,
@@ -529,7 +538,8 @@ fn binding_error(message: impl Into<String>) -> WalletError {
 mod tests {
     use super::*;
     use basis::interface::Transaction;
-    use field::{Address, Uint1};
+    use field::{AddrHac, Address, ChannelId, Field, Uint1};
+    use mint::action::ChannelOpen;
     use protocol::action::ReqSignList;
     use protocol::transaction::{TransactionType2, TransactionType3};
     use serde_json::json;
@@ -785,6 +795,38 @@ mod tests {
         let mut wrong_chain = expected;
         wrong_chain.chain_id = Some(1);
         assert!(verify_expected_transaction(&body, &wrong_chain).is_err());
+    }
+
+    #[test]
+    fn type2_channel_open_requires_both_user_and_hub_signatures() {
+        crate::protocol_init::ensure_protocol_setup();
+        let user = sys::Account::create_by("tx-binding-channel-user").unwrap();
+        let hub = sys::Account::create_by("tx-binding-channel-hub").unwrap();
+        let mut tx = TransactionType2::new_by(
+            Address::from_readable(user.readable()).unwrap(),
+            Amount::from("1:244").unwrap(),
+            1_700_000_000,
+        );
+        let mut action = ChannelOpen::new();
+        action.channel_id = ChannelId::from([7_u8; 16]);
+        action.left_bill = AddrHac {
+            address: Address::from_readable(user.readable()).unwrap(),
+            amount: Amount::from("1").unwrap(),
+        };
+        action.right_bill = AddrHac {
+            address: Address::from_readable(hub.readable()).unwrap(),
+            amount: Amount::from("0").unwrap(),
+        };
+        tx.push_action(Box::new(action)).unwrap();
+        tx.fill_sign(&user).unwrap();
+        let user_only = hex::encode(field::Serialize::serialize(&tx));
+        assert!(verify_all_required_signatures(&user_only).is_err());
+
+        tx.fill_sign(&hub).unwrap();
+        let fully_signed = hex::encode(field::Serialize::serialize(&tx));
+        let canonical = verify_all_required_signatures(&fully_signed).unwrap();
+        assert_eq!(canonical.tx_type, 2);
+        assert_eq!(canonical.required_signers.len(), 2);
     }
 
     #[test]

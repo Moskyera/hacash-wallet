@@ -32,6 +32,15 @@ export default function PreparedOperationConfirm() {
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div className="modal card prepared-confirm">
+        {/*
+          Which wallet is being asked to sign.
+          This overlay covers the sidebar switcher and the top bar, the only two
+          places that name the wallet space, so without this line a confirmation
+          for money leaving My Wallet is indistinguishable from one in the Agent
+          Wallet. It is a constant because this component is mounted only by the
+          personal app; the Agent Wallet approves on its own branded screens.
+        */}
+        <span className="modal-space-label">My Wallet</span>
         <h3>{view.display.title}</h3>
         <p>{view.display.summary}</p>
 

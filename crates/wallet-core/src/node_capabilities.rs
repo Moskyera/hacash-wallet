@@ -12,6 +12,11 @@ pub const CAPABILITIES_API_VERSION: u32 = 1;
 pub const HPAY_LOCAL_PILOT_NETWORK_KIND: &str = "local_pilot_v1";
 pub const HPAY_LOCAL_PILOT_PROFILE_ID: &str = "hpay-local-pilot-chain-v1";
 pub const HPAY_LOCAL_PILOT_CHAIN_ID: u32 = 7;
+pub const HPAY_MAINNET_NETWORK_KIND: &str = "mainnet";
+pub const HPAY_MAINNET_PROFILE_ID: &str = "hacash-mainnet";
+pub const HPAY_MAINNET_MIN_SAFE_HEIGHT: u64 = 765_432;
+pub(crate) const MAX_MAINNET_TIP_AGE_SECONDS: u64 = 3_600;
+pub(crate) const MAX_FUTURE_TIP_SKEW_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +34,8 @@ pub struct NodeCapabilities {
     pub chain: NodeChain,
     #[serde(default)]
     pub network: NodeNetworkCapabilities,
+    #[serde(default)]
+    pub sync: NodeSyncCapabilities,
     pub istanbul: IstanbulStatus,
     pub transactions: RegistrySet<u8>,
     pub actions: RegistrySet<u16>,
@@ -36,8 +43,57 @@ pub struct NodeCapabilities {
     #[serde(default)]
     pub api: NodeApiCapabilities,
     pub limits: NodeLimits,
+    /// Who has reached this node, if its build can answer at all.
+    ///
+    /// `None` is the older node that has no such field. It is deliberately
+    /// distinct from `Some(NodePeerCapabilities::default())`, which is a node
+    /// that carries the block and reports it could not count. Both are unknown
+    /// and neither is a passing answer, but they have different fixes and the
+    /// person reading the screen is told which one they have.
+    #[serde(default)]
+    pub peers: Option<NodePeerCapabilities>,
     #[serde(default)]
     pub source: CapabilitySource,
+}
+
+/// What a node answers about the peers on the other end of its connections.
+///
+/// The one field that matters is `inbound_established`: the count of peers
+/// that dialed this node and finished the handshake. A bound listening socket
+/// is not a reached socket, so a node can be synced to the tip, fresh, and
+/// answering every readiness clause while this is zero.
+///
+/// Every count is optional because a node that could not measure must not be
+/// able to publish an unmeasured zero as a measured one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct NodePeerCapabilities {
+    /// False when the node carries the block but could not count.
+    pub measured: bool,
+    pub total: Option<u64>,
+    pub inbound_established: Option<u64>,
+    pub outbound_established: Option<u64>,
+    pub public: Option<u64>,
+    /// The node's own summary of the same thing. Never trusted over the count.
+    pub inbound_proven: bool,
+    /// "participant", "leaf" or "unknown", in the node's own words.
+    pub role: Option<String>,
+}
+
+impl NodePeerCapabilities {
+    /// The inbound count, and only when the node says it actually counted.
+    ///
+    /// An unmeasured zero is not a measured zero, so this answers `None`
+    /// rather than `Some(0)` when the node did not measure. Every caller that
+    /// wants to say "nobody has reached this node" has to get a number out of
+    /// here first.
+    pub fn inbound_established_if_measured(&self) -> Option<u64> {
+        if self.measured {
+            self.inbound_established
+        } else {
+            None
+        }
+    }
 }
 
 /// Authenticated network identity reported by a node. Older nodes omit this
@@ -56,6 +112,18 @@ pub struct NodeNetworkCapabilities {
     pub transaction_format_version: u64,
 }
 
+/// Freshness evidence reported alongside the chain identity. Missing fields
+/// remain readable for legacy Personal Wallet nodes, but can never authorize
+/// Agent Wallet mainnet signing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NodeSyncCapabilities {
+    pub tip_timestamp_unix: u64,
+    pub observed_unix: u64,
+    pub tip_age_seconds: u64,
+    pub max_tip_age_seconds: u64,
+    pub fresh: bool,
+}
+
 /// Transaction API routes compiled into and registered by the reporting node.
 /// Older payloads default to an unavailable contract so sensitive callers can
 /// fail closed without breaking read-only legacy handling.
@@ -63,14 +131,17 @@ pub struct NodeNetworkCapabilities {
 pub struct NodeApiCapabilities {
     pub balance_query: bool,
     pub transaction_submit: bool,
+    #[serde(default)]
+    pub transaction_submit_bound: bool,
     pub transaction_query: bool,
     pub reconciliation_by_tx_hash: bool,
 }
 
 impl NodeApiCapabilities {
-    pub const fn supports_agent_testnet_payment(self) -> bool {
+    pub const fn supports_agent_payment(self) -> bool {
         self.balance_query
             && self.transaction_submit
+            && self.transaction_submit_bound
             && self.transaction_query
             && self.reconciliation_by_tx_hash
     }
@@ -162,6 +233,7 @@ impl NodeCapabilities {
             ));
         }
         self.validate_network_contract()?;
+        self.validate_sync_contract()?;
         validate_registry("transaction", &self.transactions)?;
         validate_registry("action", &self.actions)?;
         if self.chain.mainnet
@@ -260,6 +332,7 @@ impl NodeCapabilities {
                 mainnet: true,
             },
             network: NodeNetworkCapabilities::default(),
+            sync: NodeSyncCapabilities::default(),
             istanbul: IstanbulStatus {
                 activation_height: 0,
                 evaluation_height: 1,
@@ -283,6 +356,9 @@ impl NodeCapabilities {
                 gas_max: protocol::context::decode_gas_budget(1),
                 ast_depth: 1,
             },
+            // A legacy node was never asked this and must not look as if it
+            // answered.
+            peers: None,
             source: CapabilitySource::LegacyType2,
         }
     }
@@ -300,6 +376,40 @@ impl NodeCapabilities {
             && self.network.funding_confirmed
             && self.network.transaction_ready
             && self.chain.height >= 2
+    }
+
+    /// Exact mainnet identity and freshness contract for Agent Fast Pay. This
+    /// enables only the existing Type 2/channel API path; it does not alter
+    /// Hacash consensus or claim Type 4 support.
+    pub fn supports_agent_mainnet_payment(&self, expected_block_one: &str) -> bool {
+        let expected_instance = network_instance_id(
+            &self.network.kind,
+            self.chain.id,
+            self.chain.mainnet,
+            expected_block_one,
+            &self.network.node_profile_id,
+            self.network.transaction_format_version,
+        );
+        self.source == CapabilitySource::Reported
+            && self.chain.id == 0
+            && self.chain.mainnet
+            && self.chain.height >= HPAY_MAINNET_MIN_SAFE_HEIGHT
+            && self.network.kind == HPAY_MAINNET_NETWORK_KIND
+            && self.network.node_profile_id == HPAY_MAINNET_PROFILE_ID
+            && self.network.block_1_available
+            && self.network.block_1_hash.as_deref() == Some(expected_block_one)
+            && self.network.instance_id.as_deref() == Some(expected_instance.as_str())
+            && self.network.current_height == self.chain.height
+            && self.network.transaction_format_version == 2
+            && self.network.transaction_ready
+            && self.sync.fresh
+            && self.supports_transaction(2)
+            && self.supports_action(1)
+            && self.supports_action(2)
+            && self.supports_action(3)
+            && self.supports_action(14)
+            && self.supports_action(0x0411)
+            && self.api.supports_agent_payment()
     }
 
     /// Verify the immutable Local Pilot identity without claiming that the
@@ -326,7 +436,11 @@ impl NodeCapabilities {
             && self.network.transaction_format_version == 2
             && self.supports_transaction(2)
             && self.supports_action(1)
-            && self.api.supports_agent_testnet_payment()
+            && self.supports_action(2)
+            && self.supports_action(3)
+            && self.supports_action(14)
+            && self.supports_action(0x0411)
+            && self.api.supports_agent_payment()
     }
 
     fn validate_network_contract(&self) -> WalletResult<()> {
@@ -374,17 +488,51 @@ impl NodeCapabilities {
                 ));
             }
         }
-        if network.transaction_ready
-            && (self.chain.mainnet
-                || self.chain.id != HPAY_LOCAL_PILOT_CHAIN_ID
-                || self.chain.height < 2
-                || network.kind != HPAY_LOCAL_PILOT_NETWORK_KIND
-                || network.node_profile_id != HPAY_LOCAL_PILOT_PROFILE_ID
-                || !network.funding_confirmed
-                || network.transaction_format_version != 2)
+        if network.transaction_ready {
+            let valid_local_pilot = !self.chain.mainnet
+                && self.chain.id == HPAY_LOCAL_PILOT_CHAIN_ID
+                && self.chain.height >= 2
+                && network.kind == HPAY_LOCAL_PILOT_NETWORK_KIND
+                && network.node_profile_id == HPAY_LOCAL_PILOT_PROFILE_ID
+                && network.funding_confirmed
+                && network.transaction_format_version == 2;
+            let valid_mainnet = self.chain.mainnet
+                && self.chain.id == 0
+                && self.chain.height >= HPAY_MAINNET_MIN_SAFE_HEIGHT
+                && network.kind == HPAY_MAINNET_NETWORK_KIND
+                && network.node_profile_id == HPAY_MAINNET_PROFILE_ID
+                && network.transaction_format_version == 2
+                && self.sync.fresh;
+            if !valid_local_pilot && !valid_mainnet {
+                return Err(WalletError::Node(
+                    "node transaction readiness contradicts its reported network contract".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_sync_contract(&self) -> WalletResult<()> {
+        let sync = &self.sync;
+        if sync == &NodeSyncCapabilities::default() {
+            return Ok(());
+        }
+        let computed_age = sync.observed_unix.saturating_sub(sync.tip_timestamp_unix);
+        let computed_fresh = self.chain.height > 0
+            && sync.tip_timestamp_unix > 0
+            && sync.tip_timestamp_unix
+                <= sync
+                    .observed_unix
+                    .saturating_add(MAX_FUTURE_TIP_SKEW_SECONDS)
+            && computed_age <= sync.max_tip_age_seconds;
+        if sync.observed_unix == 0
+            || sync.max_tip_age_seconds == 0
+            || sync.max_tip_age_seconds > MAX_MAINNET_TIP_AGE_SECONDS
+            || sync.tip_age_seconds != computed_age
+            || sync.fresh != computed_fresh
         {
             return Err(WalletError::Node(
-                "node transaction readiness contradicts the HPAY local pilot contract".into(),
+                "node sync freshness capability is inconsistent".into(),
             ));
         }
         Ok(())
@@ -611,6 +759,7 @@ mod tests {
                 mainnet: true,
             },
             network: NodeNetworkCapabilities::default(),
+            sync: NodeSyncCapabilities::default(),
             istanbul: IstanbulStatus {
                 activation_height: 200,
                 evaluation_height: 100,
@@ -628,6 +777,7 @@ mod tests {
             api: NodeApiCapabilities {
                 balance_query: true,
                 transaction_submit: true,
+                transaction_submit_bound: true,
                 transaction_query: true,
                 reconciliation_by_tx_hash: true,
             },
@@ -639,6 +789,7 @@ mod tests {
                 gas_max: protocol::context::decode_gas_budget(17),
                 ast_depth: 3,
             },
+            peers: None,
             source: CapabilitySource::Reported,
         }
     }
@@ -662,8 +813,8 @@ mod tests {
             enabled: vec![2, 3],
         };
         capabilities.actions = RegistrySet {
-            registered: vec![1],
-            enabled: vec![1],
+            registered: vec![1, 2, 3, 14, 0x0411],
+            enabled: vec![1, 2, 3, 14, 0x0411],
         };
         capabilities.network = NodeNetworkCapabilities {
             kind: HPAY_LOCAL_PILOT_NETWORK_KIND.into(),
@@ -684,6 +835,126 @@ mod tests {
             transaction_format_version: 2,
         };
         capabilities
+    }
+
+    fn mainnet_agent_capabilities() -> NodeCapabilities {
+        const BLOCK_ONE: &str = "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+        let mut capabilities = valid_capabilities();
+        capabilities.chain = NodeChain {
+            id: 0,
+            height: HPAY_MAINNET_MIN_SAFE_HEIGHT,
+            next_height: HPAY_MAINNET_MIN_SAFE_HEIGHT + 1,
+            mainnet: true,
+        };
+        capabilities.istanbul = IstanbulStatus {
+            activation_height: 700_000,
+            evaluation_height: HPAY_MAINNET_MIN_SAFE_HEIGHT + 1,
+            active: true,
+        };
+        capabilities.transactions = RegistrySet {
+            registered: vec![2, 3],
+            enabled: vec![2, 3],
+        };
+        capabilities.actions = RegistrySet {
+            registered: vec![1, 2, 3, 14, 0x0411],
+            enabled: vec![1, 2, 3, 14, 0x0411],
+        };
+        capabilities.network = NodeNetworkCapabilities {
+            kind: HPAY_MAINNET_NETWORK_KIND.into(),
+            node_profile_id: HPAY_MAINNET_PROFILE_ID.into(),
+            block_1_available: true,
+            block_1_hash: Some(BLOCK_ONE.into()),
+            instance_id: Some(network_instance_id(
+                HPAY_MAINNET_NETWORK_KIND,
+                0,
+                true,
+                BLOCK_ONE,
+                HPAY_MAINNET_PROFILE_ID,
+                2,
+            )),
+            funding_confirmed: false,
+            transaction_ready: true,
+            current_height: HPAY_MAINNET_MIN_SAFE_HEIGHT,
+            transaction_format_version: 2,
+        };
+        capabilities.sync = NodeSyncCapabilities {
+            tip_timestamp_unix: 1_999_940,
+            observed_unix: 2_000_000,
+            tip_age_seconds: 60,
+            max_tip_age_seconds: MAX_MAINNET_TIP_AGE_SECONDS,
+            fresh: true,
+        };
+        capabilities
+    }
+
+    #[test]
+    fn agent_mainnet_requires_exact_identity_freshness_and_channel_actions() {
+        const BLOCK_ONE: &str = "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+        let capabilities = mainnet_agent_capabilities().validate().unwrap();
+        assert!(capabilities.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut stale = mainnet_agent_capabilities();
+        stale.sync.fresh = false;
+        assert!(stale.validate().is_err());
+
+        let mut no_close = mainnet_agent_capabilities().validate().unwrap();
+        no_close.actions.enabled.retain(|kind| *kind != 14);
+        assert!(!no_close.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut no_chain_guard = mainnet_agent_capabilities().validate().unwrap();
+        no_chain_guard
+            .actions
+            .enabled
+            .retain(|kind| *kind != 0x0411);
+        assert!(!no_chain_guard.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut no_bound_submit = mainnet_agent_capabilities().validate().unwrap();
+        no_bound_submit.api.transaction_submit_bound = false;
+        assert!(!no_bound_submit.supports_agent_mainnet_payment(BLOCK_ONE));
+
+        let mut wrong_anchor = mainnet_agent_capabilities().validate().unwrap();
+        wrong_anchor.network.block_1_hash = Some("11".repeat(32));
+        assert!(!wrong_anchor.supports_agent_mainnet_payment(BLOCK_ONE));
+    }
+
+    /// The owner's real Hacash mainnet node, captured verbatim from
+    /// `/query/capabilities` on 127.0.0.1:8080 on 2026-08-25 while it served
+    /// height 776330. This is ground truth, not a fixture written to agree
+    /// with the code, so every mainnet predicate can be asked the only
+    /// question that matters: does a real, healthy, fully synced mainnet node
+    /// actually satisfy it?
+    const REAL_MAINNET_CAPABILITY_DOCUMENT: &str = r#"{"actions":{"enabled":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795],"registered":[1,2,3,4,5,6,7,8,10,11,12,13,14,16,17,18,19,22,25,26,32,33,34,35,36,40,41,44,46,1025,1026,1041,1042,1043,1044,1537,1538,1545,1553,1554,1555,1556,1793,1794,1795]},"api":{"balance_query":true,"contract_sandbox_query":true,"hpay_channel_registry_query":true,"reconciliation_by_tx_hash":true,"transaction_query":true,"transaction_submit":true,"transaction_submit_bound":true},"api_version":1,"chain":{"height":776330,"id":0,"mainnet":true,"next_height":776331},"features":{"account_abstraction":true,"action_guard":true,"ast":true,"channel_registry_unilateral_exit":false,"channel_registry_unilateral_exit_evidence":{"bytecode_sha3":"2fa7429d9e686dd2457eeb1b4476f972c7ddd9be6a0371c9765eff2910209b04","channel_key_count":12,"channel_model":{"first_reuse":0,"left_deposit":"positive","maximum_active_channels_per_left_address":1,"right_hub_deposit":"exactly_zero"},"contract_name":"HPAYChannelRegistryV2","deployment":{"contract_address":null,"deployment_height":null,"deployment_tx_hash":null,"enabled":false,"external_audit_complete":false,"independently_verified":false},"deployment_verified":false,"manifest_valid":true,"maximum_renewal_step_periods":150,"must_renew_every_channel_key":true,"must_renew_every_registry_key":true,"on_chain_verification":{"confirmed_tx_height":null,"constructor_network_instance_id":null,"contract_code_matches":false,"contract_code_sha3":null,"deployment_action_verified":false,"deployment_tx_confirmed":false,"hub_address":null,"network_binding_matches":false,"node_network_instance_id":null,"observed_height":null},"protocol_domain":"HPAY/HVM-CHANNEL-REGISTRY/V2","registry_key_count":6,"required_action_kinds":[40,41,44],"schema":"hpay-hvm-channel-registry-exit-evidence/2","settlement_profile":"hpay-hvm-shared-registry-v2","source_sha256":"37fabe6b8ab54431864715530c0f16c89fed3b609c23c227e592cec24e2ab8b5"},"channel_unilateral_exit":false,"channel_unilateral_exit_evidence":{"bytecode_sha3":"11a2efc27a0c951bbc6977186eb58bd076dd331a785f3c57242cf54a72238349","contract_name":"HPAYChannelExitV1","deployment":{"contract_address":null,"deployment_height":null,"deployment_tx_hash":null,"enabled":false,"independently_verified":false},"deployment_verified":false,"funding_model":{"left_deposit":"positive","right_hub_deposit":"exactly_zero"},"manifest_valid":true,"must_renew_every_storage_key":true,"on_chain_verification":{"confirmed_tx_height":null,"contract_code_matches":false,"contract_code_sha3":null,"deployment_tx_confirmed":false,"observed_height":null},"protocol_domain":"HPAY/HVM-CHANNEL/V1","required_action_kinds":[40,41,44],"schema":"hpay-hvm-channel-exit-evidence/1","settlement_profile":"hpay-hvm-channel-v1","source_sha256":"c0a430eb9769d1d506641c379bb8aaf708c7bac7d03694b60a4be03fd001dd06","storage_key_count":18},"contract_state_leasing":true,"exact_unsigned_simulation":false,"hip20":false,"hip20_primitives":true,"hvm":true,"intent":true,"ir_decompilation":false,"native_assets":true,"p2sh":true,"req_sign_list":true,"tex":true,"tx_blob":true,"type4_mainnet":false},"istanbul":{"activation_height":765432,"active":true,"evaluation_height":776331},"limits":{"ast_depth":6,"gas_max":111911,"gas_max_byte":99,"max_tx_actions":200,"max_tx_size":16384,"max_type3_signers":200},"network":{"block_1_available":true,"block_1_hash":"001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56","current_height":776330,"funding_confirmed":false,"instance_id":"5a310ec0f487a37156a182c67778495f66e5c7502f9871829edc790023b123cf","kind":"mainnet","node_profile_id":"hacash-mainnet","transaction_format_version":2,"transaction_ready":true},"node":{"build_time":"2026/7/10 #1","name":"hacash-fullnode","version":"1.0.10"},"peers":{"inbound_established":0,"inbound_proven":false,"measured":true,"note":"inbound_established counts remote peers that dialed this node and completed the p2p handshake. A listening socket is not a reached socket: a bound port and a green sync can both be true while inbound_established is 0, which means no peer has reached this node and it relays for nobody. Only a non zero inbound_established proves the p2p port is reachable from outside. outbound_established counts connections this node opened itself, and public counts peers we hold a dialable address for, which says nothing about us.","outbound_established":4,"public":4,"role":"leaf","total":4},"ret":0,"sync":{"fresh":true,"max_tip_age_seconds":3600,"observed_unix":1787651668,"tip_age_seconds":551,"tip_timestamp_unix":1787651117},"transactions":{"enabled":[0,1,2,3],"registered":[0,1,2,3,4]}}"#;
+
+    #[test]
+    fn the_real_mainnet_node_document_parses_validates_and_is_agent_mainnet_ready() {
+        const BLOCK_ONE: &str = "001e231cb03f9938d54f04407797b8188f0375eb10f0bcb426dccae87dcadb56";
+        let mut capabilities: NodeCapabilities =
+            serde_json::from_str(REAL_MAINNET_CAPABILITY_DOCUMENT).expect("real document parses");
+        capabilities.source = CapabilitySource::Reported;
+        let capabilities = capabilities
+            .validate()
+            .expect("the owner real mainnet node satisfies the capability contract");
+
+        // The field this whole sweep turns on. A real mainnet node reports it
+        // false, and `validate_network_contract` accepts that: `valid_mainnet`
+        // deliberately omits it while `valid_local_pilot` requires it.
+        assert!(!capabilities.network.funding_confirmed);
+        assert!(capabilities.network.transaction_ready);
+
+        // Every other mainnet predicate in wallet-core does hold for it.
+        assert!(capabilities.supports_agent_mainnet_payment(BLOCK_ONE));
+        assert!(capabilities.api.supports_agent_payment());
+        assert!(capabilities.supports_transaction(2));
+        for kind in [1u16, 2, 3, 14, 0x0411] {
+            assert!(capabilities.supports_action(kind), "action {kind}");
+        }
+        assert!(capabilities.sync.fresh);
+        assert!(capabilities.chain.height >= HPAY_MAINNET_MIN_SAFE_HEIGHT);
+
+        // And the local pilot predicate that reads `funding_confirmed` is the
+        // one shape it cannot satisfy, which is correct: it is not that node.
+        assert!(!capabilities.matches_agent_local_pilot_identity(BLOCK_ONE));
+        assert!(!capabilities.supports_agent_local_pilot_payment(BLOCK_ONE));
     }
 
     #[test]
@@ -721,6 +992,62 @@ mod tests {
         let capabilities = valid_capabilities().validate().unwrap();
         assert_eq!(capabilities.network, NodeNetworkCapabilities::default());
         assert!(!capabilities.supports_agent_local_pilot_payment(&"11".repeat(32)));
+    }
+
+    /// The three answers a node can give about who has reached it, and the
+    /// rule that keeps them apart: a missing answer is not a passing answer,
+    /// and an unmeasured zero is not a measured zero.
+    #[test]
+    fn the_peer_block_keeps_absent_unmeasured_and_measured_zero_apart() {
+        let mut absent = serde_json::to_value(valid_capabilities()).unwrap();
+        absent.as_object_mut().unwrap().remove("peers");
+        let absent: NodeCapabilities = serde_json::from_value(absent).unwrap();
+        assert_eq!(absent.peers, None, "an older node answered nothing");
+
+        // The block is there, and the node says it could not count. Every
+        // count must stay unavailable rather than collapsing to zero.
+        let mut unmeasured = serde_json::to_value(valid_capabilities()).unwrap();
+        unmeasured["peers"] = json!({
+            "measured": false,
+            "total": Value::Null,
+            "inbound_established": Value::Null,
+            "outbound_established": Value::Null,
+            "public": Value::Null,
+            "inbound_proven": false,
+            "role": "unknown"
+        });
+        let unmeasured: NodeCapabilities = serde_json::from_value(unmeasured).unwrap();
+        let unmeasured = unmeasured.peers.unwrap();
+        assert!(!unmeasured.measured);
+        assert_eq!(unmeasured.inbound_established_if_measured(), None);
+
+        // The exact block the live mainnet node answered on 2026-08-24.
+        let mut leaf = serde_json::to_value(valid_capabilities()).unwrap();
+        leaf["peers"] = json!({
+            "measured": true,
+            "total": 4,
+            "inbound_established": 0,
+            "outbound_established": 4,
+            "public": 4,
+            "inbound_proven": false,
+            "role": "leaf"
+        });
+        let leaf: NodeCapabilities = serde_json::from_value(leaf).unwrap();
+        let leaf = leaf.peers.unwrap();
+        assert_eq!(leaf.inbound_established_if_measured(), Some(0));
+        assert_eq!(leaf.outbound_established, Some(4));
+        assert_eq!(leaf.role.as_deref(), Some("leaf"));
+
+        // A node that lies by omission: it claims it measured, then leaves the
+        // count out. That is still not a measured zero.
+        let mut half = serde_json::to_value(valid_capabilities()).unwrap();
+        half["peers"] = json!({ "measured": true, "role": "participant" });
+        let half: NodeCapabilities = serde_json::from_value(half).unwrap();
+        assert_eq!(
+            half.peers.unwrap().inbound_established_if_measured(),
+            None,
+            "a claim to have measured is not a measurement"
+        );
     }
 
     #[test]

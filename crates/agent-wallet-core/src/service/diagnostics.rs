@@ -67,7 +67,7 @@ impl AgentWalletManager {
                 "release".to_owned()
             },
             network_id: node.network_kind().to_owned(),
-            node_profile_id: node.node_profile_id().to_owned(),
+            node_profile_id: node.node_profile_commitment().to_owned(),
             node_capability_summary: vec![
                 "hacash-fullnode=1.0.10".to_owned(),
                 format!("network_instance_id={}", node.network_instance_id()),

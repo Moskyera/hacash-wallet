@@ -268,8 +268,10 @@ export default function WelcomeScreen({
                 onChange={(e) => setBackupPassphrase(e.target.value)}
                 placeholder="Passphrase used when backup was created"
               />
+              {/* Restoring writes over whatever wallet is on this device, so
+                  it keeps the loud solid fill that `.primary` gave up. */}
               <button
-                className="primary auth-submit"
+                className="primary auth-submit irreversible-action"
                 disabled={
                   busy ||
                   !backupJson.trim() ||

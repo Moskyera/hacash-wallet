@@ -44,6 +44,19 @@ export type NodeCapabilities = {
     current_height: number;
     transaction_format_version: number;
   };
+  /**
+   * The freshness block. Present on every node that answers the current
+   * capability contract, absent on older ones, which is why it is optional
+   * here and why a missing one produces "not known" on screen rather than a
+   * zero that would read as "up to date".
+   */
+  sync?: {
+    tip_timestamp_unix: number;
+    observed_unix: number;
+    tip_age_seconds: number;
+    max_tip_age_seconds: number;
+    fresh: boolean;
+  };
   istanbul: {
     activation_height: number;
     evaluation_height: number;

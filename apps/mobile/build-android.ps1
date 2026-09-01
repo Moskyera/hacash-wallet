@@ -68,7 +68,7 @@ if (Test-Path -LiteralPath $apkOutput) {
 $previousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    $tauriOutput = @(& $yarnCommand run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked 2>&1)
+    $tauriOutput = @(& $yarnCommand run tauri -- android build --ci --target aarch64 --apk -c tauri.android.build.conf.json -- --locked --features agent-wallet-bounded-mainnet-pilot 2>&1)
     $tauriExit = $LASTEXITCODE
 } finally {
     $ErrorActionPreference = $previousErrorAction
@@ -88,6 +88,21 @@ if ($tauriExit -ne 0) {
     $jniDir = Join-Path $mobile "src-tauri\gen\android\app\src\main\jniLibs\arm64-v8a"
     New-Item -ItemType Directory -Path $jniDir -Force | Out-Null
     Copy-Item -LiteralPath $nativeLib -Destination (Join-Path $jniDir "libhacash_wallet_mobile_lib.so") -Force
+    # The Tauri coordinator stops at the symlink step before it refreshes the
+    # generated Android assets. Package the exact frontend built above, never a
+    # stale app/src/main/assets directory from an older build.
+    $embeddedAssets = Join-Path $mobile "src-tauri\gen\android\app\src\main\assets"
+    $generatedRoot = [IO.Path]::GetFullPath((Join-Path $mobile "src-tauri\gen\android"))
+    $resolvedAssets = [IO.Path]::GetFullPath($embeddedAssets)
+    if (-not $resolvedAssets.StartsWith($generatedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to replace assets outside the generated Android project"
+    }
+    if (Test-Path -LiteralPath $resolvedAssets) {
+        Get-ChildItem -LiteralPath $resolvedAssets -Force | Remove-Item -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $resolvedAssets -Force | Out-Null
+    Copy-Item -Path (Join-Path $mobile "dist\*") -Destination $resolvedAssets -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $mobile "src-tauri\tauri.conf.json") -Destination (Join-Path $resolvedAssets "tauri.conf.json") -Force
 
     $gradleRoot = Join-Path $mobile "src-tauri\gen\android"
     Push-Location $gradleRoot

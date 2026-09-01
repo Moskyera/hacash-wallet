@@ -24,6 +24,7 @@ fn isolated_permission_and_handler_inventory_is_exactly_typed_read_only_companio
         .find(|section| section.contains("identifier = \"allow-main-wallet\""))
         .expect("main wallet permission");
     let commands = [
+        "agent_wallet_companion_close_activity",
         "agent_wallet_companion_identity_status",
         "agent_wallet_companion_create_identity",
         "agent_wallet_companion_decide_payment",
@@ -51,9 +52,33 @@ fn isolated_permission_and_handler_inventory_is_exactly_typed_read_only_companio
             "main UI exposes {command}"
         );
     }
+    for owner_only in [
+        "agent_wallet_prepare_fast_pay_channel",
+        "agent_wallet_confirm_fast_pay_channel_setup",
+        "agent_wallet_recover_fast_pay_channel_setup",
+        "agent_wallet_discard_fast_pay_channel_setup",
+        "agent_wallet_abandon_dead_fast_pay_channel_setup",
+        "agent_wallet_prepare_fast_pay_channel_close",
+        "agent_wallet_confirm_fast_pay_channel_close",
+        "agent_wallet_recover_fast_pay_channel_close",
+    ] {
+        assert!(
+            !permissions.contains(owner_only),
+            "mobile ACL exposes {owner_only}"
+        );
+        assert!(
+            !mobile_lib.contains(owner_only),
+            "mobile handler exposes {owner_only}"
+        );
+        assert!(
+            !capability.contains(owner_only),
+            "companion capability exposes {owner_only}"
+        );
+    }
     assert!(capability.contains("\"local\": true"));
     assert!(capability.contains("\"webviews\": [\"agent-companion\"]"));
     assert!(capability.contains("\"allow-agent-companion\""));
+    assert!(!capability.contains("core:window:allow-close"));
 }
 
 #[test]
@@ -69,6 +94,7 @@ fn command_dtos_cover_pairing_status_sync_ping_disconnect_lifecycle_and_reset() 
         "CompanionPongView",
         "CompanionDisconnectView",
         "CompanionLifecycleRequest",
+        "CompanionActivityCloseView",
         "CompanionLifecycleView",
         "CompanionResetRequest",
         "CompanionResetView",
@@ -172,6 +198,7 @@ fn mobile_bridge_has_no_payment_signing_or_public_listener_and_wallet_fee_is_zer
         read("src-tauri/src/agent_companion/mod.rs"),
         read("src-tauri/src/agent_companion/commands.rs"),
         read("src-tauri/src/agent_companion/lifecycle.rs"),
+        read("src-tauri/src/agent_companion/network.rs"),
         read("src-tauri/src/agent_companion/pairing.rs"),
         read("src-tauri/src/agent_companion/pilot.rs"),
         read("src-tauri/src/agent_companion/session.rs"),
@@ -200,6 +227,13 @@ fn mobile_bridge_has_no_payment_signing_or_public_listener_and_wallet_fee_is_zer
     assert!(module.contains("self.clear_pending_approval(&decision.operation_id)"));
     for required in [
         "CompanionPayload::ApprovalDecision",
+        "CompanionPayload::AgentFastPayApprovalPoll",
+        "CompanionPayload::AgentFastPayApprovalRequest",
+        "CompanionPayload::AgentFastPayApprovalDecision",
+        "agent_fast_pay_network_allowed",
+        "MAINNET_BLOCK_ONE_HASH",
+        "HPAY_MAINNET_PROFILE_ID",
+        "agent-wallet-bounded-mainnet-pilot",
         "CompanionPayload::WitnessReceipt",
         "agent_wallet_companion_decide_payment",
         "agent_wallet_companion_rotation_step",
@@ -238,10 +272,18 @@ fn android_signer_copies_match_and_allow_only_typed_pilot_authority() {
     for required in [
         "signApprovalDecisionApprove",
         "signApprovalDecisionReject",
+        "signAgentFastPayApprovalDecisionApprove",
+        "signAgentFastPayApprovalDecisionReject",
+        "signAgentHvmApprovalDecisionApprove",
+        "signAgentHvmApprovalDecisionReject",
         "Approve this exact HPAY testnet payment",
         "Reject this exact HPAY testnet payment",
+        "Approve this exact HPAY Agent Fast Pay request",
+        "Reject this exact HPAY Agent Fast Pay request",
         "signWitnessReceipt",
         "APPROVAL_DECISION_DOMAIN",
+        "AGENT_FAST_PAY_DECISION_DOMAIN",
+        "AGENT_HVM_DECISION_DOMAIN",
         "WITNESS_RECEIPT_DOMAIN",
         "signWitnessRotationAuthorization",
         "signRotationCandidateAcceptance",
@@ -271,6 +313,8 @@ fn android_signer_copies_match_and_allow_only_typed_pilot_authority() {
     // receipt, stays behind the pilot feature.
     for purpose in [
         "ApprovalDecision",
+        "AgentFastPayApprovalDecision",
+        "AgentHvmApprovalDecision",
         "WitnessReceipt",
         "RotationCandidateAcceptance",
         "WitnessRotationBaselineReceipt",

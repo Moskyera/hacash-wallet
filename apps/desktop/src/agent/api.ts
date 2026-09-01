@@ -3,6 +3,12 @@ import {
   requireSealedAcknowledgement,
   type SealedAcknowledgement,
 } from "./backupWarning";
+import type { AgentHvmRegistryExitProgress, AgentHvmRegistryExitStatus } from "./registryExit";
+import type { AgentHvmRegistryOpenResult, AgentHvmRegistryOpenStatus } from "./registryOpen";
+import type {
+  AgentHvmRegistryAdoptionResult,
+  AgentHvmRegistryFundingResult,
+} from "./registryFunding";
 
 export type AgentWalletRegistryEntry = {
   wallet_id: string;
@@ -153,6 +159,238 @@ export type AgentWalletStatus = {
   payments_suspended: boolean;
 };
 
+export type AgentChannelSetupPhase =
+  | "prepared"
+  | "signature_may_exist"
+  | "signed"
+  | "submitted"
+  | "awaiting_confirmations"
+  | "recovery_required"
+  | "confirmed";
+
+export type AgentChannelSetupReview = {
+  wallet_id: string;
+  operation_id: string;
+  review_commitment: string;
+  expires_at: number;
+  network_mode: "mainnet" | "testnet";
+  hub_url: string;
+  hub_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  deposit_units: string;
+  network_fee_units: string;
+  wallet_fee_units: string;
+  total_debit_units: string;
+  /** Why the network fee is a guess, when it is one. Null means the node quoted it. */
+  fee_estimate_degraded: string | null;
+  /**
+   * Why the Fast Pay Hub last refused this open, in the Hub's own words.
+   *
+   * Null until a Hub answers. It is stored beside the setup rather than only
+   * returned, because the returned error is gone the moment this panel
+   * refreshes, and the owner this field was written for refreshed.
+   */
+  last_hub_refusal: string | null;
+  phase: AgentChannelSetupPhase;
+};
+
+export type AgentChannelClosePhase =
+  | "prepared"
+  | "signature_may_exist"
+  | "signed"
+  | "submitted"
+  | "recovery_required"
+  | "confirmed";
+
+export type AgentChannelCloseReview = {
+  wallet_id: string;
+  operation_id: string;
+  review_commitment: string;
+  expires_at: number;
+  network_mode: "mainnet" | "testnet";
+  hub_url: string;
+  hub_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  channel_open_height: number;
+  bill_auto_number: number;
+  original_agent_units: string;
+  final_agent_units: string;
+  network_fee_units: string;
+  wallet_fee_units: string;
+  /** Why the network fee is a guess, when it is one. Null means the node quoted it. */
+  fee_estimate_degraded: string | null;
+  phase: AgentChannelClosePhase;
+};
+
+export type AgentChannelCloseVoucherPhase =
+  | "signature_may_exist"
+  | "signed"
+  | "held"
+  | "broadcast"
+  | "recovery_required";
+
+export type AgentChannelCloseVoucherBroadcast = {
+  transaction_hash: string;
+  node_url: string;
+  broadcast_at: number;
+};
+
+/**
+ * The owner's exit from a Fast Pay channel: one close transaction, signed by
+ * the owner and countersigned by the Hub, that the owner holds and can
+ * broadcast from their own node at any later time.
+ *
+ * It is not a trustless exit. The Hub had to sign it once, at the start, and it
+ * could have refused. What it removes is the owner's dependence on the Hub
+ * afterwards.
+ */
+export type AgentChannelCloseVoucher = {
+  wallet_id: string;
+  operation_id: string;
+  network_mode: "mainnet" | "testnet";
+  hub_address: string;
+  owner_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  channel_open_height: number;
+  /** What this transaction pays the owner when it settles. */
+  refund_units: string;
+  deposit_units: string;
+  /** The L1 fee the owner pays from their own balance to broadcast it. */
+  network_fee_units: string;
+  transaction_hash?: string | null;
+  signed_transaction_hex?: string | null;
+  signed_transaction_commitment?: string | null;
+  issued_at?: number | null;
+  phase: AgentChannelCloseVoucherPhase;
+  broadcast?: AgentChannelCloseVoucherBroadcast | null;
+};
+
+export type AgentL2Binding = {
+  schema_version: number;
+  wallet_id: string;
+  wallet_scope: string;
+  network_mode: "mainnet" | "testnet";
+  agent_address: string;
+  hub_url: string;
+  hub_address: string;
+  channel_id: string;
+  channel_reuse_version: number;
+  channel_open_height: number;
+  confirmed_at_height: number;
+  deposit_units: string;
+  bound_at: number;
+  commitment_sha256: string;
+  closed?: {
+    transaction_hash: string;
+    close_height: number;
+    closed_at: number;
+  };
+};
+
+export type AgentHvmNetworkBinding = {
+  schema_version: number;
+  network_kind: string;
+  chain_id: number;
+  mainnet: boolean;
+  block_1_hash: string;
+  node_profile_id: string;
+  network_instance_id: string;
+  transaction_format_version: number;
+};
+
+export type AgentHvmContractBinding = {
+  schema: string;
+  settlement_profile: string;
+  network_mode: "mainnet" | "testnet";
+  chain_id: number;
+  network_instance_id: string;
+  contract_address: string;
+  deployment_tx_hash: string;
+  deployment_height: number;
+  bytecode_sha3: string;
+  channel_id: string;
+  reuse_version: number;
+  left_address: string;
+  right_hub_address: string;
+  left_deposit_zhu: number;
+  right_hub_deposit_zhu: number;
+  challenge_blocks: number;
+};
+
+export type AgentHvmChannelBinding = {
+  schema_version: number;
+  wallet_id: string;
+  network_mode: "mainnet" | "testnet";
+  network_binding: AgentHvmNetworkBinding;
+  hub_url: string;
+  hub_address: string;
+  binding_commitment: string;
+  recovery_bundle: {
+    schema: string;
+    binding: AgentHvmContractBinding;
+    initial_recovery_bill: {
+      schema: string;
+      binding_commitment: string;
+      serial: number;
+      left_balance_zhu: number;
+      right_balance_zhu: number;
+      left_signature_hex: string;
+      right_signature_hex: string;
+    };
+  };
+  activation_snapshot_commitment: string;
+  minimum_required_live_blocks: number;
+  minimum_required_recover_blocks: number;
+  adopted_at: number;
+};
+
+export type AgentHvmRegistryBinding = {
+  schema_version: 2;
+  wallet_id: string;
+  network_mode: "mainnet" | "testnet";
+  network_binding: AgentHvmNetworkBinding;
+  hub_url: string;
+  hub_address: string;
+  binding_commitment: string;
+  recovery_bundle: {
+    schema: string;
+    binding: {
+      schema: string;
+      settlement_profile: "hpay-hvm-shared-registry-v2";
+      network_mode: "mainnet" | "testnet";
+      chain_id: number;
+      network_instance_id: string;
+      contract_address: string;
+      deployment_tx_hash: string;
+      deployment_height: number;
+      bytecode_sha3: string;
+      channel_id: string;
+      reuse_version: number;
+      left_address: string;
+      right_hub_address: string;
+      left_deposit_zhu: number;
+      right_hub_deposit_zhu: number;
+      challenge_blocks: number;
+    };
+    initial_recovery_bill: {
+      schema: string;
+      binding_commitment: string;
+      serial: number;
+      left_balance_zhu: number;
+      hub_balance_zhu: number;
+      left_signature_hex: string;
+      hub_signature_hex: string;
+    };
+  };
+  activation_snapshot_commitment: string;
+  minimum_required_live_blocks: number;
+  minimum_required_recover_blocks: number;
+  adopted_at: number;
+};
+
 export type AgentWalletOverview = {
   wallet_id: string;
   address: string;
@@ -184,6 +422,13 @@ export type AgentWalletOverview = {
   unlocked: boolean;
   payments_suspended: boolean;
   mainnet_spending_ready: boolean;
+  trusted_mainnet_fast_pay_pilot: boolean;
+  l2_binding: AgentL2Binding | null;
+  hvm_channel_binding: AgentHvmChannelBinding | null;
+  hvm_registry_binding: AgentHvmRegistryBinding | null;
+  l2_channel_setup: AgentChannelSetupReview | null;
+  l2_channel_close: AgentChannelCloseReview | null;
+  l2_channel_close_voucher: AgentChannelCloseVoucher | null;
   confirmed_balance_units: string | null;
   reserved_units: string;
   available_units: string | null;
@@ -192,6 +437,10 @@ export type AgentWalletOverview = {
   authorized_agents: number;
   pending_approvals: number;
   pilot_enabled: boolean;
+  // Whether the owner asked for the rollback witness on THIS wallet. Default
+  // off. Distinct from `pilot_enabled`, which is the build and still decides
+  // the approval wire format the phone expects.
+  rollback_witness_required: boolean;
   mobile_witness_ready: boolean;
   mobile_witness_synchronized: boolean;
   latest_anchor_sequence: number;
@@ -329,7 +578,14 @@ export type StrandedWitness = {
   transaction_id: string | null;
   anchor_issued: boolean;
   anchor_expires_at: number | null;
+  /** Asking the phone again would succeed right now. */
   retryable: boolean;
+  /**
+   * This wallet can open a fresh confirmation window on its network at all.
+   * Separate from `retryable` because the two reasons a retry is withheld have
+   * different remedies, and the panel has to print the right sentence.
+   */
+  network_supports_witness_retry: boolean;
   abandonable: boolean;
   /** `releaseDeadWitnessAnchor` would succeed right now. */
   anchor_releasable: boolean;
@@ -359,6 +615,136 @@ export type PaymentOperation = {
   tx_hash: string | null;
   final_result: string | null;
 };
+
+export type AgentFastPayStatus =
+  | "payment_intent_created"
+  | "funds_reserved"
+  | "approval_requested"
+  | "approved"
+  | "execution_prepared"
+  | "signed"
+  | "submitted"
+  | "awaiting_recipient"
+  | "exact_retry_ready"
+  | "committed"
+  | "rejected"
+  | "cancelled"
+  | "recovery_required";
+
+/** Exact, zero-fee Agent-only L2 operation. It can never fall back to L1. */
+export type AgentFastPayOperation = {
+  operation_id: string;
+  hub_operation_id: string;
+  agent_wallet_id: string;
+  agent_id: string;
+  agent_authorization_epoch: number;
+  idempotency_key: string;
+  request_commitment: string;
+  binding_commitment: string;
+  route_commitment: string;
+  network_mode: "mainnet" | "testnet";
+  payer: string;
+  recipient: string;
+  amount_units: string;
+  network_fee_units: string;
+  wallet_fee_units: string;
+  total_debit_units: string;
+  reserved_units: string;
+  status: AgentFastPayStatus;
+  policy_epoch: number;
+  signer_epoch: number;
+  emergency_epoch: number;
+  approval_commitment: string | null;
+  owner_authority_commitment: string | null;
+  created_at: number;
+  expires_at: number;
+  settled_at: number | null;
+};
+
+export type AgentHvmPaymentStatus =
+  | "payment_intent_created"
+  | "funds_reserved"
+  | "unsigned_prepared"
+  | "approval_requested"
+  | "approved"
+  | "signing_prepared"
+  | "signed"
+  | "submitted"
+  | "exact_retry_ready"
+  | "committed"
+  | "rejected"
+  | "cancelled"
+  | "recovery_required";
+
+/** Exact, zero-fee Agent HVM operation. It never exposes generic signing or an L1 fallback. */
+export type AgentHvmPaymentOperation = {
+  operation_id: string;
+  hub_operation_id: string;
+  agent_wallet_id: string;
+  agent_id: string;
+  agent_authorization_epoch: number;
+  idempotency_key: string;
+  request_commitment: string;
+  network_mode: "mainnet" | "testnet";
+  hub_url: string;
+  hub_address: string;
+  binding_commitment: string;
+  lease_snapshot_commitment: string | null;
+  previous_bill_commitment: string | null;
+  unsigned_request_commitment: string | null;
+  payer: string;
+  recipient: string;
+  amount_units: string;
+  amount_zhu: number;
+  wallet_fee_zhu: number;
+  hub_fee_zhu: number;
+  total_debit_zhu: number;
+  reserved_units: string;
+  status: AgentHvmPaymentStatus;
+  policy_epoch: number;
+  signer_epoch: number;
+  emergency_epoch: number;
+  approval_commitment: string | null;
+  approval_decision_commitment: string | null;
+  owner_authority_commitment: string | null;
+  created_at: number;
+  expires_at: number;
+  settled_at: number | null;
+};
+
+/**
+ * One rollback-anchor witness, described by what the wallet actually keyed on.
+ *
+ * `signer_address` is recovered from the receipt signature and is half of the
+ * identity. `hub_supplied_label` is a name the Hub typed and is never part of
+ * it; it is shown labelled as such so a reader is not invited to trust it.
+ */
+export type AnchorWitnessRecord = {
+  signer_address: string;
+  witness_instance_id: string;
+  hub_supplied_label: string;
+  witness_epoch: number;
+  first_seen_serial: number;
+  last_seen_serial: number;
+};
+
+/**
+ * The Hub has stopped using at least one witness that signed an earlier bill
+ * on this channel, and the channel will not advance until a person answers.
+ */
+export type AnchorWitnessChange = {
+  binding_commitment: string;
+  serial: number;
+  last_accepted_serial: number;
+  zero_overlap: boolean;
+  headline: string;
+  dropped: AnchorWitnessRecord[];
+  retained: AnchorWitnessRecord[];
+  offered: AnchorWitnessRecord[];
+};
+
+/** The only two answers. There is deliberately no third. */
+export type AnchorWitnessAnswer = "accept_new_witness_set" | "close_channel";
 
 export type ApprovalCommitment = {
   approval_version: string;
@@ -618,6 +1004,19 @@ export const agentWalletApi = {
       walletId,
       operationId,
     }),
+  // The owner's rollback witness switch. It takes the passphrase because the
+  // Rust side re-verifies it against the vault: reaching the command from the
+  // wallet window is necessary but deliberately not sufficient.
+  setRollbackWitnessRequirement: (
+    walletId: string,
+    required: boolean,
+    currentPassphrase: string,
+  ) =>
+    invoke<void>("agent_wallet_set_rollback_witness_requirement", {
+      walletId,
+      required,
+      currentPassphrase,
+    }),
   witnessRotationStatus: (walletId: string) =>
     invoke<WitnessRotationRecord | null>("agent_wallet_witness_rotation_status", {
       walletId,
@@ -759,12 +1158,14 @@ export const agentWalletApi = {
     networkMode: "mainnet" | "testnet",
     nodeUrl: string,
     blockOneFingerprint: string | null,
+    mainnetPilotAcknowledgement: string | null = null,
   ) =>
     invoke<CreatedAgentWallet>("agent_wallet_create", {
       passphrase,
       networkMode,
       nodeUrl,
       blockOneFingerprint,
+      mainnetPilotAcknowledgement,
     }),
   unlock: (walletId: string, passphrase: string) =>
     invoke<AgentWalletStatus>("agent_wallet_unlock", { walletId, passphrase }),
@@ -772,6 +1173,74 @@ export const agentWalletApi = {
     invoke<void>("agent_wallet_lock", { walletId }),
   overview: (walletId: string) =>
     invoke<AgentWalletOverview>("agent_wallet_overview", { walletId }),
+  prepareFastPayChannel: (walletId: string, hubUrl: string, deposit: string) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_prepare_fast_pay_channel", {
+      walletId,
+      hubUrl,
+      deposit,
+    }),
+  confirmFastPayChannelSetup: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_confirm_fast_pay_channel_setup", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
+  recoverFastPayChannelSetup: (walletId: string) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_recover_fast_pay_channel_setup", { walletId }),
+  /** Forget one reviewed setup that was never confirmed. It signs nothing and moves nothing. */
+  discardFastPayChannelSetup: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_discard_fast_pay_channel_setup", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
+  /**
+   * Retire one reviewed setup whose signed request is provably dead.
+   *
+   * The companion to the discard, for the state the discard cannot touch: a
+   * signature exists, its request envelope has closed, and the core has
+   * checked both its own durable store and the chain before agreeing.
+   */
+  abandonDeadFastPayChannelSetup: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelSetupReview>("agent_wallet_abandon_dead_fast_pay_channel_setup", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
+  prepareFastPayChannelClose: (walletId: string) =>
+    invoke<AgentChannelCloseReview>("agent_wallet_prepare_fast_pay_channel_close", { walletId }),
+  confirmFastPayChannelClose: (
+    walletId: string,
+    operationId: string,
+    reviewCommitment: string,
+  ) =>
+    invoke<AgentChannelCloseReview>("agent_wallet_confirm_fast_pay_channel_close", {
+      walletId,
+      operationId,
+      reviewCommitment,
+    }),
+  recoverFastPayChannelClose: (walletId: string) =>
+    invoke<AgentChannelCloseReview>("agent_wallet_recover_fast_pay_channel_close", { walletId }),
+  fastPayChannelVoucher: (walletId: string) =>
+    invoke<AgentChannelCloseVoucher | null>("agent_wallet_fast_pay_channel_voucher", { walletId }),
+  takeFastPayChannelVoucher: (walletId: string) =>
+    invoke<AgentChannelCloseVoucher>("agent_wallet_take_fast_pay_channel_voucher", { walletId }),
+  broadcastFastPayChannelVoucher: (walletId: string) =>
+    invoke<AgentChannelCloseVoucher>("agent_wallet_broadcast_fast_pay_channel_voucher", {
+      walletId,
+    }),
   diagnosticsPreview: (walletId: string) =>
     invoke<AgentPilotDiagnosticsPreview>("agent_wallet_pilot_diagnostics_preview", { walletId }),
   diagnosticsExport: (
@@ -796,6 +1265,183 @@ export const agentWalletApi = {
     invoke<AgentPolicy>("agent_wallet_update_policy", { walletId, agentId, policy }),
   listActivity: (walletId: string) =>
     invoke<PaymentOperation[]>("agent_wallet_list_activity", { walletId }),
+  listFastPayActivity: (walletId: string) =>
+    invoke<AgentFastPayOperation[]>("agent_wallet_list_fast_pay_activity", { walletId }),
+  executeApprovedFastPay: (walletId: string, operationId: string) =>
+    invoke<AgentFastPayOperation>("agent_wallet_execute_approved_fast_pay", {
+      walletId,
+      operationId,
+    }),
+  reconcileFastPay: (walletId: string, operationId: string) =>
+    invoke<AgentFastPayOperation>("agent_wallet_reconcile_fast_pay", {
+      walletId,
+      operationId,
+    }),
+  retryFastPayExact: (walletId: string, operationId: string) =>
+    invoke<AgentFastPayOperation>("agent_wallet_retry_fast_pay_exact", {
+      walletId,
+      operationId,
+    }),
+  bindHvmChannel: (walletId: string, hubUrl: string, bindingCommitment: string) =>
+    invoke<AgentHvmChannelBinding>("agent_wallet_bind_hvm_channel", {
+      walletId,
+      hubUrl,
+      bindingCommitment,
+    }),
+  bindHvmRegistry: (walletId: string, hubUrl: string, bindingCommitment: string) =>
+    invoke<AgentHvmRegistryBinding>("agent_wallet_bind_hvm_registry", {
+      walletId,
+      hubUrl,
+      bindingCommitment,
+    }),
+  listHvmActivity: (walletId: string) =>
+    invoke<AgentHvmPaymentOperation[]>("agent_wallet_list_hvm_activity", { walletId }),
+  executeApprovedHvm: (walletId: string, operationId: string) =>
+    invoke<AgentHvmPaymentOperation>("agent_wallet_execute_approved_hvm", {
+      walletId,
+      operationId,
+    }),
+  reconcileHvm: (walletId: string, operationId: string) =>
+    invoke<AgentHvmPaymentOperation>("agent_wallet_reconcile_hvm", {
+      walletId,
+      operationId,
+    }),
+  retryHvmExact: (walletId: string, operationId: string) =>
+    invoke<AgentHvmPaymentOperation>("agent_wallet_retry_hvm_exact", {
+      walletId,
+      operationId,
+    }),
+  hvmAnchorDecision: (walletId: string, operationId: string) =>
+    invoke<AnchorWitnessChange | null>("agent_wallet_hvm_anchor_decision", {
+      walletId,
+      operationId,
+    }),
+  // Asks the Hub to re-anchor this channel's existing head - same serial, same
+  // bill commitment, nothing newly signed - under the witness it is answering
+  // with now, and adjudicates the result. This is the only route into the
+  // witness ratchet on a channel whose Hub has lost its one witness and will
+  // therefore never co-sign another bill; every other route needs a new bill.
+  refreshHvmAnchorContinuity: (walletId: string, operationId: string) =>
+    invoke<AnchorWitnessChange | null>("agent_wallet_refresh_hvm_anchor_continuity", {
+      walletId,
+      operationId,
+    }),
+  resolveHvmAnchorDecision: (
+    walletId: string,
+    operationId: string,
+    decision: AnchorWitnessAnswer,
+  ) =>
+    invoke<{ resolved: boolean }>("agent_wallet_resolve_hvm_anchor_decision", {
+      walletId,
+      operationId,
+      decision,
+    }),
+  /**
+   * What this wallet can see about opening a channel with one provider,
+   * before anything is asked of that provider and before anything is signed.
+   */
+  hvmRegistryOpenStatus: (walletId: string, hubUrl: string, depositZhu: number) =>
+    invoke<AgentHvmRegistryOpenStatus>("agent_wallet_hvm_registry_open_status", {
+      walletId,
+      hubUrl,
+      depositZhu,
+    }),
+  /**
+   * Opens and funds one provider channel.
+   *
+   * The order is the whole point and it is enforced in Rust, not here: the
+   * provider countersigns a receipt returning the entire deposit, this wallet
+   * validates that signature against its own binding, the countersigned bundle
+   * is stored durably, and only then is funding built at all. A provider that
+   * refuses leaves nothing behind, so a rejected promise from this call means
+   * no money moved.
+   */
+  openHvmRegistryChannel: (
+    walletId: string,
+    hubUrl: string,
+    binding: unknown,
+    depositZhu: number,
+  ) =>
+    invoke<AgentHvmRegistryOpenResult>("agent_wallet_open_hvm_registry_channel", {
+      walletId,
+      hubUrl,
+      binding,
+      depositZhu,
+    }),
+  /**
+   * Takes a channel from nothing to usable in one press, and continues from
+   * wherever it stopped if pressed again.
+   *
+   * The ordering is decided in Rust from this wallet's own durable record,
+   * not here and not from these arguments: ask the provider for a
+   * countersigned refund, sign the deposit once, wait for it to reach a
+   * block, then adopt from the chain alone. A resumed press never goes back
+   * to a provider that has already countersigned, which is the hop that
+   * matters, because on the day someone presses twice the provider is
+   * usually the thing that stopped answering.
+   *
+   * There is exactly one wait nothing can shorten: the deposit reaching a
+   * block. The result reports that as progress rather than as an error, so a
+   * screen can say what it is waiting for instead of looking broken.
+   */
+  establishHvmRegistryChannel: (
+    walletId: string,
+    hubUrl: string,
+    binding: unknown,
+    depositZhu: number,
+  ) =>
+    invoke<unknown>("agent_wallet_establish_hvm_registry_channel", {
+      walletId,
+      hubUrl,
+      binding,
+      depositZhu,
+    }),
+  /**
+   * Puts the deposit into the channel the countersigned receipt already covers.
+   *
+   * The destination, the amount and the chain are re-derived in Rust from that
+   * stored receipt and a live reading of this wallet's own fullnode; nothing
+   * here chooses any of them, and there is no argument through which it could.
+   * The signed bytes are made durable before any node sees them, so a crash
+   * between signing and submitting loses nothing.
+   *
+   * Calling it again after a crash re-submits the same bytes and asks the chain
+   * what became of them. It never signs a second transfer into one channel.
+   */
+  fundHvmRegistryChannel: (walletId: string) =>
+    invoke<AgentHvmRegistryFundingResult>("agent_wallet_fund_hvm_registry_channel", {
+      walletId,
+    }),
+  /**
+   * Writes this wallet's own record of the funded channel, asking the provider
+   * nothing at all.
+   *
+   * It is the step the exit refuses without, and it is deliberately reachable
+   * when the provider is gone: the bundle is this wallet's own, the deposit is
+   * one this wallet signed and has seen in a block, and the only other party is
+   * the owner's fullnode. It moves no money and sends no transaction.
+   */
+  adoptHvmRegistryChannel: (walletId: string) =>
+    invoke<AgentHvmRegistryAdoptionResult>("agent_wallet_adopt_hvm_registry_channel", {
+      walletId,
+    }),
+  /**
+   * What the owner's own fullnode says about walking out of the registry
+   * channel alone. It never contacts the Hub, so it answers the same whether
+   * the provider is healthy, unreachable or hostile.
+   */
+  hvmRegistryExitStatus: (walletId: string) =>
+    invoke<AgentHvmRegistryExitStatus>("agent_wallet_hvm_registry_exit_status", {
+      walletId,
+    }),
+  /**
+   * Starts the unilateral close. It is the owner's key that signs and the
+   * owner's fullnode that carries it; the provider is not asked.
+   */
+  startHvmRegistryExit: (walletId: string) =>
+    invoke<AgentHvmRegistryExitProgress>("agent_wallet_start_hvm_registry_exit", {
+      walletId,
+    }),
   listPendingApprovals: (walletId: string) =>
     invoke<PaymentOperation[]>("agent_wallet_list_pending_approvals", { walletId }),
   revokeAgent: (walletId: string, agentId: string) =>

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use hacash_wallet_core::settings::validate_node_url;
+use hacash_wallet_core::settings::validate_signing_node_url;
 use hpay_companion_protocol::{
     DesktopChallengeSequence, DeviceId, DevicePublicRecord, SignedRollbackAnchor,
     SignedRotationCandidateAcceptance, SignedRotationPairingTicket, SignedWitnessReceipt,
@@ -16,6 +16,8 @@ use crate::amount::HacUnits;
 use crate::companion_signer::AgentDesktopCompanionSigner;
 use crate::emergency::AgentEmergencyController;
 use crate::error::{AgentWalletError, AgentWalletResult};
+use crate::fast_pay_operation::AgentFastPayOperation;
+use crate::hvm_payment_operation::AgentHvmPaymentOperation;
 use crate::journal::AgentJournalEventKind;
 use crate::node_binding::{
     AgentNodeSnapshot, AgentNodeStatus, anchor_for_new_wallet, probe_agent_node,
@@ -35,6 +37,10 @@ mod companion;
 mod connector;
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 mod diagnostics;
+mod hvm;
+mod hvm_registry;
+mod hvm_registry_open;
+mod l2;
 mod payment;
 mod state;
 
@@ -42,11 +48,12 @@ mod state;
 use payment::validate_policy_for_request;
 use payment::{agent_spending_ready, require_agent_spending_network, validate_authorization};
 use state::{
-    active_reservations, cancel_pre_signing_operations, mark_explicit_emergency_stop,
-    prune_terminal_pre_signing_for_agent, spent_in_window, validate_text,
+    active_fast_pay_reservations, active_l1_reservations, cancel_pre_signing_operations,
+    fast_pay_channel_exposure, mark_explicit_emergency_stop, prune_terminal_pre_signing_for_agent,
+    spent_in_window, validate_text,
 };
 #[cfg(test)]
-use state::{journal_path, scoped_idempotency_key};
+use state::{active_reservations, journal_path, scoped_idempotency_key};
 
 pub use backup::{
     AGENT_WALLET_BACKUP_WARNING, AGENT_WALLET_RESTORE_WARNING, AgentWalletBackupAcknowledgement,
@@ -60,6 +67,27 @@ pub use companion::{
 };
 #[cfg(feature = "agent-wallet-testnet-pilot")]
 pub use companion::{StrandedWitnessRecovery, WitnessRotationControls};
+pub use hvm::AgentHvmChannelBinding;
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+pub use hvm_registry::{
+    AGENT_REGISTRY_EXIT_GAS_BUDGET, AGENT_REGISTRY_EXIT_GAS_MAX,
+    AGENT_REGISTRY_EXIT_MIN_BILLING_BYTES, AGENT_REGISTRY_EXIT_NETWORK_FEE_ZHU,
+    AGENT_VM_LOWEST_FEE_PURITY_UNIT238, AgentHvmRegistryExitProgress,
+    AgentHvmRegistryExitStepProgress, agent_registry_exit_gas_reserve_zhu,
+    agent_registry_exit_transaction_ceiling_zhu,
+};
+pub use hvm_registry::{AgentHvmRegistryBinding, AgentHvmRegistryExitHead};
+pub use hvm_registry_open::{
+    AgentHvmRegistryChannelOpen, AgentHvmRegistryCountersignedRefund, AgentHvmRegistryFunding,
+};
+use l2::{
+    AgentChannelCloseOperation, AgentChannelCloseVoucherOperation, AgentChannelSetupOperation,
+};
+pub use l2::{
+    AgentChannelClosePhase, AgentChannelCloseReview, AgentChannelCloseVoucherBroadcast,
+    AgentChannelCloseVoucherPhase, AgentChannelCloseVoucherView, AgentChannelSetupPhase,
+    AgentChannelSetupReview, AgentL2Binding,
+};
 
 const STATE_SCHEMA_VERSION: u32 = 1;
 const STATE_NAME: &str = "wallet_state";
@@ -76,6 +104,118 @@ const MAX_OPERATIONS_PER_WALLET: usize = 4_096;
 // the 4,096-record cap and the authenticated 30-requests/minute rate limit.
 const MAX_REQUESTS_PER_AGENT_PER_MINUTE: usize = 30;
 const ZERO_HASH_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// The sentence the owner must have ticked, compared byte for byte at
+/// `service.rs:666`, so it has to stay identical to the one the screen shows
+/// in `apps/desktop/src/agent/access.ts`. If the two drift, consent that was
+/// genuinely given stops being recognised.
+///
+/// It replaces "a trusted bounded pilot and I accept its recovery limits",
+/// which was true and told a reader neither the amount at risk nor what
+/// trusted costs them. This names both, because a consent that does not name
+/// the number is not consent to the number.
+///
+/// The failure it names was corrected on 2026-08-23. It used to say the
+/// provider could put an old receipt on chain while the owner slept and take
+/// the difference. That is wrong on both rails this build can run. Native
+/// ChannelPay registers only action 3 and `channel_close` in the node checks
+/// BOTH signatures, so a provider acting alone cannot move the money; on the
+/// HVM registry rail a stale receipt pays the owner MORE, which is why
+/// `decide_user_exit_action` finishes what is standing rather than answering
+/// it. The real exposure, and the one the 10 HAC cap is for, is that the money
+/// comes out only if the provider co-signs.
+pub const AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT: &str = "I understand that this provider holds my channel funds. This channel can only be closed if the provider co-signs it: the chain requires both signatures and no unilateral exit exists on this rail, so if it stops answering, refuses to sign, or disappears, what is in this channel stays locked and nobody can release it for me. At most 10 HAC per channel is at risk. I will not put in more than I can afford to lose.";
+
+/// The owner's rollback-witness setting, as every money-path site must read it.
+///
+/// DEFAULT OFF. A wallet whose owner has never touched this pays with no phone
+/// paired and no witness record, and `WitnessPhoneRequiredForApproval` is not
+/// reachable for them.
+///
+/// Two things this deliberately is not:
+///
+/// It is not a build flag. Off a pilot build the whole witness lifecycle is not
+/// compiled, so the setting has nothing to turn on and this returns false
+/// whatever is stored - which keeps a non-pilot build byte-for-byte the
+/// behaviour it had before the setting existed.
+///
+/// It is not readable as consent when nobody consented. `None` is "no owner has
+/// decided", and what then stands in for a decision is what the wallet can see
+/// the owner already did: a witness record, or a paired witness phone. A wallet
+/// showing either was using a phone under the build flag and keeps it; a wallet
+/// showing neither never was.
+///
+/// WHAT IT ACTUALLY GUARDS, so no screen has to guess. Not a stolen unlocked
+/// computer - every payment needs the passphrase and a press either way. It is
+/// a WHOLE-MACHINE RESTORE: put the disk back to last week and the vault and
+/// the journal go back together, mutually consistent, so nothing here can tell.
+/// Today's spend is spendable again and a device revoked since is live again.
+/// The phone is the one party the restore cannot reach, which is the whole of
+/// what turning this on buys and the whole of what turning it off costs.
+fn rollback_witness_required(state: &AgentWalletState) -> bool {
+    if !cfg!(feature = "agent-wallet-testnet-pilot") {
+        return false;
+    }
+    // ASKED BEFORE THE OWNER'S ANSWER, because on a network that cannot carry
+    // an anchor no answer can be honoured. `pending_rollback_anchor` refuses
+    // every non-testnet wallet outright (companion/witness.rs), so deriving
+    // "required" there does not buy a check - it signs a payment into
+    // `SignedAwaitingWitness` whose only remaining door is the stranded-witness
+    // exit. `set_rollback_witness_requirement` already refuses to switch it ON
+    // off testnet; this is the derived reading agreeing with it.
+    //
+    // It also repairs the second arm below. Reading `rollback_witness` alone
+    // was accidentally safe here - a mainnet wallet can hold no witness record,
+    // because minting one is the very thing refused - and asking about a paired
+    // phone instead took that accident away without replacing it.
+    if !witness_anchor_reachable(state) {
+        return false;
+    }
+    match state.rollback_witness_required {
+        Some(decided) => decided,
+        // `rollback_witness` is written by the FIRST anchor, not by pairing, so
+        // reading it alone silently disarmed a control for an owner whose only
+        // visible action was pairing a witness phone: on the previous build
+        // that wallet required the phone, through the same registry question
+        // `pinned_witness_phone_can_sign` falls back to. Ask both, so an
+        // undecided wallet keeps exactly the behaviour it had.
+        None => state.rollback_witness.is_some() || has_paired_witness_phone(state),
+    }
+}
+
+/// Whether a phone that MAY witness is paired right now.
+///
+/// Split out and cfg-gated rather than inlined above because `cfg!` evaluates
+/// to false without removing the code around it: the accessor it reaches for
+/// does not exist off a pilot build, so an inline call compiled there at all
+/// only by accident. This pair compiles both ways and answers false where the
+/// witness lifecycle is not built.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn has_paired_witness_phone(state: &AgentWalletState) -> bool {
+    state
+        .companion_security
+        .as_ref()
+        .is_some_and(companion::CompanionSecurityState::has_active_witness_device)
+}
+
+#[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+fn has_paired_witness_phone(_state: &AgentWalletState) -> bool {
+    false
+}
+
+/// Whether this wallet's network can carry a rollback anchor at all.
+#[cfg(feature = "agent-wallet-testnet-pilot")]
+fn witness_anchor_reachable(state: &AgentWalletState) -> bool {
+    companion::witness_anchor_available_on_network(&state.network_mode)
+}
+
+#[cfg(not(feature = "agent-wallet-testnet-pilot"))]
+fn witness_anchor_reachable(_state: &AgentWalletState) -> bool {
+    false
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -85,6 +225,8 @@ pub struct CreateAgentWallet {
     pub node_url: String,
     #[serde(default)]
     pub block_one_fingerprint: Option<String>,
+    #[serde(default)]
+    pub mainnet_pilot_acknowledgement: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,14 +261,40 @@ pub struct AgentWalletOverview {
     pub unlocked: bool,
     pub payments_suspended: bool,
     pub mainnet_spending_ready: bool,
+    pub trusted_mainnet_fast_pay_pilot: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_binding: Option<AgentL2Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_channel_setup: Option<AgentChannelSetupReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_channel_close: Option<AgentChannelCloseReview>,
+    /// The one delta-zero close the owner holds for this channel, if the Hub
+    /// countersigned it. Surfaced so a person can see that an exit exists,
+    /// what it pays them, and that broadcasting it needs no Hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_channel_close_voucher: Option<AgentChannelCloseVoucherView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hvm_channel_binding: Option<AgentHvmChannelBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hvm_registry_binding: Option<AgentHvmRegistryBinding>,
     pub confirmed_balance_units: Option<HacUnits>,
     pub reserved_units: HacUnits,
     pub available_units: Option<HacUnits>,
+    pub fast_pay_deposit_units: Option<HacUnits>,
+    pub fast_pay_reserved_units: HacUnits,
+    pub fast_pay_available_units: Option<HacUnits>,
     pub spent_today_units: HacUnits,
     pub spent_this_month_units: HacUnits,
     pub authorized_agents: u32,
     pub pending_approvals: u32,
     pub pilot_enabled: bool,
+    /// Whether the owner asked for the rollback witness on this wallet.
+    ///
+    /// Distinct from `pilot_enabled`, which is the BUILD, and which still
+    /// decides the approval wire format the phone expects. This one is the
+    /// owner's setting, and it is what the UI must consult before it tells
+    /// anyone a phone is needed.
+    pub rollback_witness_required: bool,
     pub mobile_witness_ready: bool,
     pub mobile_witness_synchronized: bool,
     pub latest_anchor_sequence: u64,
@@ -154,6 +322,11 @@ impl AgentAuthorization {
     fn agent_id(&self) -> &AgentId {
         &self.agent_id
     }
+
+    #[cfg(any(test, feature = "agent-wallet-testnet-pilot"))]
+    fn capability(&self) -> AgentPermission {
+        self.capability
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +345,73 @@ struct AgentWalletState {
     emergency_epoch: u64,
     payments_suspended: bool,
     external_rollback_anchor_ready: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    trusted_mainnet_fast_pay_pilot: bool,
+    /// THE OWNER'S ROLLBACK-WITNESS SETTING. Default off.
+    ///
+    /// WHAT TURNING IT ON BUYS, exactly and only: detection of a machine
+    /// RESTORE. A desktop rolled back to an earlier snapshot - a VM image, a
+    /// disk backup, a ransomware rollback - comes up with a vault and a journal
+    /// that are mutually consistent at that earlier point, so every local
+    /// integrity check passes while the daily and monthly spend counters have
+    /// silently reset, revoked agents are active again, the policy epoch is
+    /// back where it was and completed payments are missing from history. The
+    /// owner presses Approve on a payment that looks entirely correct, in a
+    /// wallet whose accounting was reset underneath them, and nothing on this
+    /// machine can tell them. The phone can, because it holds the last anchor
+    /// sequence, anchor hash, journal sequence and journal head on hardware the
+    /// restore did not touch, and refuses to countersign anything older.
+    ///
+    /// WHAT TURNING IT OFF COSTS, exactly and only: that. A desktop compromised
+    /// WHILE UNLOCKED loses a second barrier, and nothing else changes.
+    ///
+    /// WHAT IT NEVER WAS, so this setting is not read as one: it is not what
+    /// stops an agent spending on its own. `ApprovalMode::requires_explicit_
+    /// user_action` is always true and `require_wallet_shell` guards every
+    /// approval command, so every payment still needs an unlocked vault and an
+    /// explicit press in the owner's own trusted window whatever this says. It
+    /// is also not a second display of what is being signed: the phone renders
+    /// the amount and recipient the desktop sent it and holds the signed bytes
+    /// only as an opaque commitment, so a compromised unlocked desktop shows it
+    /// whatever it likes. It caps no amount and allowlists no recipient.
+    ///
+    /// `None` means no owner has decided, which is every wallet written before
+    /// this field existed. `rollback_witness_required` reads that case off the
+    /// durable witness record instead, so a wallet that was already using a
+    /// phone keeps using it across the upgrade, and a wallet that never paired
+    /// one gets the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_witness_required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_binding: Option<AgentL2Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_channel_setup: Option<AgentChannelSetupOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_channel_close: Option<AgentChannelCloseOperation>,
+    /// The owner's exit from the Fast Pay channel: one countersigned
+    /// delta-zero close, taken once immediately after the open confirms and
+    /// never refreshed. Written through the same encrypted `persist_event`
+    /// path as everything else here and carried in the encrypted backup, so it
+    /// survives a restore. A voucher that does not survive a restore is not an
+    /// exit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    l2_channel_close_voucher: Option<AgentChannelCloseVoucherOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_channel_binding: Option<AgentHvmChannelBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_registry_binding: Option<AgentHvmRegistryBinding>,
+    /// The newest fully-signed registry bill, kept explicitly rather than
+    /// recovered by scanning `hvm_payment_operations`. Without it the user's
+    /// route out of a channel depends on a payment-operation map staying
+    /// intact; see [`AgentHvmRegistryExitHead`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_registry_exit_head: Option<AgentHvmRegistryExitHead>,
+    /// The wallet's own half of a registry channel open: the left-signed
+    /// serial-1 full refund, and the Hub countersignature once this wallet has
+    /// checked it. Written before any funding may be built, and the only thing
+    /// [`AgentWalletManager::hvm_registry_funding_authorization`] will accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hvm_registry_open: Option<AgentHvmRegistryChannelOpen>,
     agents: BTreeMap<String, AgentRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pairing_completion_outbox: BTreeMap<String, PairingCompletionOutboxEntry>,
@@ -184,6 +424,10 @@ struct AgentWalletState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     witness_rotation_history: Vec<AuthenticatedWitnessRotationState>,
     operations: BTreeMap<String, AgentOperation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    fast_pay_operations: BTreeMap<String, AgentFastPayOperation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    hvm_payment_operations: BTreeMap<String, AgentHvmPaymentOperation>,
     idempotency: BTreeMap<String, IdempotencyRecord>,
     // Legacy V1 fields remain parseable only for authenticated state compatibility.
     // They are required to stay empty and are never an authorization authority.
@@ -334,9 +578,26 @@ impl AuthenticatedRollbackWitnessState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OperationRail {
+    #[default]
+    L1,
+    FastPay,
+    HvmFastPay,
+}
+
+impl OperationRail {
+    const fn is_l1(&self) -> bool {
+        matches!(self, Self::L1)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct IdempotencyRecord {
+    #[serde(default, skip_serializing_if = "OperationRail::is_l1")]
+    rail: OperationRail,
     request_commitment: String,
     operation_id: OperationId,
 }
@@ -379,12 +640,12 @@ pub struct AgentWalletManager {
     /// `persist_event`, so the on-disk state is byte-for-byte what a process
     /// that died at that instant leaves behind, and the test reopens the wallet
     /// from that disk rather than from memory.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_after_witness_accepted: bool,
     /// Same, one step later: the receipt is durable AND the broadcast has
     /// already happened, and the archive that would move the payment on never
     /// runs.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_before_witness_archive: bool,
     /// The sweep's two other multi-write boundaries, injected so the claim that
     /// they are already recoverable is executed rather than read:
@@ -393,7 +654,7 @@ pub struct AgentWalletManager {
     /// `WitnessRotationBaselineAccepted` and then revokes the old phone.
     #[cfg(test)]
     pub(crate) crash_after_approval_granted: bool,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_after_rotation_baseline: bool,
     /// The two boundaries the second sweep found still open.
     ///
@@ -414,7 +675,7 @@ pub struct AgentWalletManager {
     /// mints the anchor; `create_payment_intent` journals `FundsReserved` and
     /// then builds the transaction at the node; `resume_payment` journals
     /// `TransactionSigned` and then reloads and broadcasts.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) crash_after_witness_state_initialized: bool,
     #[cfg(test)]
     pub(crate) crash_after_funds_reserved: bool,
@@ -449,7 +710,7 @@ pub(crate) enum RestoreCrashPoint {
     AfterRegistry,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
 impl RestoreCrashPoint {
     /// Every window, so a test cannot silently cover only some of them.
     pub(crate) const ALL: [Self; 8] = [
@@ -488,19 +749,19 @@ impl AgentWalletManager {
             unlocked: BTreeMap::new(),
             emergency_controllers,
             challenge_sequences: Mutex::new(BTreeMap::new()),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_after_witness_accepted: false,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_before_witness_archive: false,
             #[cfg(test)]
             crash_after_approval_granted: false,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_after_rotation_baseline: false,
             #[cfg(test)]
             crash_after_broadcast_persisted: false,
             #[cfg(test)]
             crash_after_mobile_approval_granted: false,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
             crash_after_witness_state_initialized: false,
             #[cfg(test)]
             crash_after_funds_reserved: false,
@@ -565,23 +826,17 @@ impl AgentWalletManager {
         request: CreateAgentWallet,
         now: u64,
     ) -> AgentWalletResult<CreatedAgentWallet> {
-        // New autonomous-spending pockets are testnet-only. Legacy authenticated
-        // mainnet state remains loadable.
-        //
-        // The reason this line used to give - that there was no separately
-        // encrypted Agent Wallet backup and restore flow - is no longer the
-        // reason: that flow exists now, in `service/backup.rs`, with its
-        // consequences executed in
-        // `service/companion/tests/state_backup.rs`. The refusal stays exactly
-        // as it was, because it never rested only on the missing backup: an
-        // Agent Wallet on mainnet is a key that spends real money without a
-        // human in the loop for each payment, and nothing about being able to
-        // copy its state changes that. Lifting it is a separate, deliberate
-        // decision and not a side effect of this one.
-        if request.network_mode != "testnet" {
+        let trusted_mainnet_fast_pay_pilot = request.network_mode == "mainnet"
+            && request.mainnet_pilot_acknowledgement.as_deref()
+                == Some(AGENT_MAINNET_PILOT_ACKNOWLEDGEMENT);
+        if !matches!(request.network_mode.as_str(), "mainnet" | "testnet")
+            || (request.network_mode == "testnet"
+                && request.mainnet_pilot_acknowledgement.is_some())
+            || !agent_spending_ready(&request.network_mode, trusted_mainnet_fast_pay_pilot)
+        {
             return Err(AgentWalletError::InvalidPaymentRequest);
         }
-        let node_url = validate_node_url(&request.node_url)
+        let node_url = validate_signing_node_url(&request.node_url, &request.network_mode)
             .map_err(|_| AgentWalletError::InvalidPaymentRequest)?;
         let block_one_fingerprint = anchor_for_new_wallet(
             &request.network_mode,
@@ -624,6 +879,19 @@ impl AgentWalletManager {
             emergency_epoch: 1,
             payments_suspended: true,
             external_rollback_anchor_ready: false,
+            trusted_mainnet_fast_pay_pilot,
+            // A new wallet pays with no phone anywhere in the picture. Someone
+            // who wants the restore detection turns it on afterwards, from the
+            // wallet window, with their passphrase.
+            rollback_witness_required: Some(false),
+            l2_binding: None,
+            l2_channel_setup: None,
+            l2_channel_close: None,
+            l2_channel_close_voucher: None,
+            hvm_channel_binding: None,
+            hvm_registry_binding: None,
+            hvm_registry_exit_head: None,
+            hvm_registry_open: None,
             agents: BTreeMap::new(),
             pairing_completion_outbox: BTreeMap::new(),
             companion_security: None,
@@ -631,6 +899,8 @@ impl AgentWalletManager {
             witness_rotation: None,
             witness_rotation_history: Vec::new(),
             operations: BTreeMap::new(),
+            fast_pay_operations: BTreeMap::new(),
+            hvm_payment_operations: BTreeMap::new(),
             idempotency: BTreeMap::new(),
             authentication_challenges: BTreeMap::new(),
             authenticated_sessions: BTreeMap::new(),
@@ -698,7 +968,7 @@ impl AgentWalletManager {
     /// Split out so the crash-recovery suite can reopen a wallet exactly as it
     /// stood before the recovery existed, and prove that the residue really has
     /// no exit without it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "agent-wallet-testnet-pilot"))]
     pub(crate) fn unlock_without_witness_recovery_for_test(
         &mut self,
         wallet_id: &AgentWalletId,
@@ -892,15 +1162,26 @@ impl AgentWalletManager {
                     node_error: None,
                     unlocked: false,
                     payments_suspended: true,
-                    mainnet_spending_ready: agent_spending_ready(vault.network_mode()),
+                    mainnet_spending_ready: agent_spending_ready(vault.network_mode(), false),
+                    trusted_mainnet_fast_pay_pilot: false,
+                    l2_binding: None,
+                    l2_channel_setup: None,
+                    l2_channel_close: None,
+                    l2_channel_close_voucher: None,
+                    hvm_channel_binding: None,
+                    hvm_registry_binding: None,
                     confirmed_balance_units: None,
                     reserved_units: HacUnits::ZERO,
                     available_units: None,
+                    fast_pay_deposit_units: None,
+                    fast_pay_reserved_units: HacUnits::ZERO,
+                    fast_pay_available_units: None,
                     spent_today_units: HacUnits::ZERO,
                     spent_this_month_units: HacUnits::ZERO,
                     authorized_agents: 0,
                     pending_approvals: 0,
                     pilot_enabled: cfg!(feature = "agent-wallet-testnet-pilot"),
+                    rollback_witness_required: false,
                     mobile_witness_ready: false,
                     mobile_witness_synchronized: false,
                     latest_anchor_sequence: 0,
@@ -948,7 +1229,17 @@ impl AgentWalletManager {
         } else {
             (None, node_probe.status, node_probe.error)
         };
-        let reserved = active_reservations(&state)?;
+        let reserved = active_l1_reservations(&state)?;
+        let fast_pay_reserved = active_fast_pay_reservations(&state)?;
+        let fast_pay_deposit = state
+            .l2_binding
+            .as_ref()
+            .filter(|binding| binding.is_active())
+            .map(AgentL2Binding::deposit_units);
+        let fast_pay_available = fast_pay_deposit
+            .map(|deposit| deposit.checked_sub(fast_pay_channel_exposure(&state)?))
+            .transpose()
+            .map_err(|_| AgentWalletError::RecoveryRequired)?;
         let payments_suspended = self
             .emergency_controller(wallet_id)?
             .status(state.payments_suspended)
@@ -971,10 +1262,32 @@ impl AgentWalletManager {
             node_error,
             unlocked: true,
             payments_suspended,
-            mainnet_spending_ready: agent_spending_ready(&state.network_mode),
+            mainnet_spending_ready: agent_spending_ready(
+                &state.network_mode,
+                state.trusted_mainnet_fast_pay_pilot,
+            ),
+            trusted_mainnet_fast_pay_pilot: state.trusted_mainnet_fast_pay_pilot,
+            l2_binding: state.l2_binding.clone(),
+            l2_channel_setup: state
+                .l2_channel_setup
+                .as_ref()
+                .map(|operation| operation.review.clone()),
+            l2_channel_close: state
+                .l2_channel_close
+                .as_ref()
+                .map(|operation| operation.review.clone()),
+            l2_channel_close_voucher: state
+                .l2_channel_close_voucher
+                .as_ref()
+                .map(|operation| operation.view.clone()),
+            hvm_channel_binding: state.hvm_channel_binding.clone(),
+            hvm_registry_binding: state.hvm_registry_binding.clone(),
             confirmed_balance_units: confirmed,
             reserved_units: reserved,
             available_units: available,
+            fast_pay_deposit_units: fast_pay_deposit,
+            fast_pay_reserved_units: fast_pay_reserved,
+            fast_pay_available_units: fast_pay_available,
             spent_today_units: spent_in_window(&state, now, 86_400)?,
             spent_this_month_units: spent_in_window(&state, now, 31 * 86_400)?,
             authorized_agents: state
@@ -989,9 +1302,20 @@ impl AgentWalletManager {
                 .values()
                 .filter(|operation| operation.status() == OperationStatus::ApprovalRequested)
                 .count()
+                .saturating_add(
+                    state
+                        .fast_pay_operations
+                        .values()
+                        .filter(|operation| {
+                            operation.status()
+                                == crate::fast_pay_operation::AgentFastPayStatus::ApprovalRequested
+                        })
+                        .count(),
+                )
                 .try_into()
                 .map_err(|_| AgentWalletError::IntegerOverflow)?,
             pilot_enabled: cfg!(feature = "agent-wallet-testnet-pilot"),
+            rollback_witness_required: rollback_witness_required(&state),
             mobile_witness_ready: state.rollback_witness.is_some(),
             mobile_witness_synchronized: state
                 .rollback_witness
@@ -1095,6 +1419,120 @@ impl AgentWalletManager {
         // persist_event reload-verifies the authenticated state. Only now may
         // the independent marker and in-memory latch be cleared.
         emergency.clear_after_authenticated_enable(enable_permit, false)
+    }
+
+    /// Turn the rollback witness requirement on or off for this wallet.
+    ///
+    /// WHAT THE OWNER IS TRADING, and the same sentence is on the screen this
+    /// is called from: turning it OFF means a desktop compromised WHILE UNLOCKED
+    /// loses a second barrier, and nothing else changes. Turning it ON means
+    /// every payment waits for a receipt from the pinned phone, which is what
+    /// makes a machine restore detectable. Neither direction touches what stops
+    /// an agent spending alone - an unlocked vault and an explicit press in the
+    /// owner's own window - because that was never the phone's job.
+    ///
+    /// WHO MAY CALL IT. The passphrase is the authority, and it is checked
+    /// against the vault here rather than accepted from the caller's word, so
+    /// this method is safe even if its transport were not. Above it,
+    /// `agent_wallet_set_rollback_witness_requirement` is behind
+    /// `require_wallet_shell`, so it can only be reached from webview `main` on
+    /// a `tauri:` origin. Neither an agent nor a companion device has a verb for
+    /// it at all: an agent's vocabulary is `AgentPermission`, which has no
+    /// settings verb, and a companion's entire write vocabulary is
+    /// `SuspendAgentPayments`, `RevokeAgent` and `RevokeMobileDevice`, all three
+    /// of which narrow authority and none of which widens it.
+    ///
+    /// WHEN IT REFUSES, and why each refusal is the safe answer rather than a
+    /// nuisance. The requirement is pinned into each payment, so a change only
+    /// decides what NEW payments get - but a payment that is mid-flight has
+    /// already been pinned, and the surfaces around it have not. So:
+    ///
+    /// - Any non-terminal payment: refuse. Turning the requirement ON while a
+    ///   payment sits `Signed` would be the worst state this wallet can reach.
+    ///   `Signed` is not pre-signing so it cannot be cancelled, it does not
+    ///   await a witness so it cannot be abandoned, it retains its reservation
+    ///   and it is not terminal, and every later intent is refused while it
+    ///   exists. Refusing here is what keeps that state unreachable.
+    /// - A live pending anchor: refuse. Neither exit out of a stranded witness
+    ///   operation works while an anchor is still inside its five minute life,
+    ///   so a flip during that window can leave a payment with no exit until it
+    ///   expires. This is covered by the rule above and stated separately so a
+    ///   later loosening of that rule cannot silently take this with it.
+    /// - An unfinished rotation: refuse. A rotation is moving the witness pin
+    ///   itself and only the new phone's completion anchor can finish it.
+    /// - Turning it ON where no anchor can be minted: refuse. `pending_rollback_
+    ///   anchor` refuses off the local pilot rail with
+    ///   `WitnessAnchorNetworkUnsupported`, so on mainnet a payment would sign
+    ///   into `SignedAwaitingWitness` and then find no door out except
+    ///   `abandon_stranded_witness_operation`. Saying so is honest; letting the
+    ///   owner switch it on and discover it at their next payment is not.
+    pub fn set_rollback_witness_requirement(
+        &mut self,
+        wallet_id: &AgentWalletId,
+        passphrase: &str,
+        required: bool,
+        now: u64,
+    ) -> AgentWalletResult<()> {
+        self.ensure_session_active(wallet_id, now)?;
+        let registry = self.storage.load_registry()?;
+        let entry = registry
+            .wallet(wallet_id)
+            .ok_or(AgentWalletError::AgentWalletNotFound)?;
+        let paths = self.storage.paths(wallet_id)?;
+        let vault = AgentEncryptedVault::load(&paths.vault_path())?;
+        if vault.wallet_id() != wallet_id || vault.address() != entry.address {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        // The passphrase is verified against the vault, not taken on trust.
+        drop(vault.unlock(passphrase)?);
+
+        let session = self.session(wallet_id)?;
+        let mut state =
+            self.load_verified_state(wallet_id, &session.state_master, &session.journal_key)?;
+        if rollback_witness_required(&state) == required
+            && state.rollback_witness_required == Some(required)
+        {
+            return Ok(());
+        }
+        if !cfg!(feature = "agent-wallet-testnet-pilot") && required {
+            return Err(AgentWalletError::SigningBlocked);
+        }
+        if state
+            .operations
+            .values()
+            .any(|operation| !operation.status().is_terminal())
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        if state
+            .rollback_witness
+            .as_ref()
+            .is_some_and(|witness| witness.pending.is_some())
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        if state
+            .witness_rotation
+            .as_ref()
+            .is_some_and(|rotation| rotation.phase != WitnessRotationPhase::Completed)
+        {
+            return Err(AgentWalletError::InvalidOperationState);
+        }
+        #[cfg(feature = "agent-wallet-testnet-pilot")]
+        if required && !companion::witness_anchor_available_on_network(&state.network_mode) {
+            return Err(AgentWalletError::WitnessAnchorNetworkUnsupported);
+        }
+        state.rollback_witness_required = Some(required);
+        state.updated_at = now;
+        self.persist_event(
+            &mut state,
+            &session.state_master,
+            &session.journal_key,
+            AgentJournalEventKind::RollbackWitnessRequirementChanged,
+            None,
+            None,
+            now,
+        )
     }
 
     pub fn revoke_agent(

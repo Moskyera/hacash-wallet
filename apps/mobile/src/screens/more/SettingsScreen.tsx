@@ -3,6 +3,7 @@ import {
   IstanbulSafetyPanel,
   OFFICIAL_NODE_URL,
   isOfficialNodeUrl,
+  mainnetSigningTransportIsEligible,
 } from "@hacash/wallet-ui";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useState } from "react";
@@ -16,6 +17,7 @@ import {
 } from "../../api";
 import AppUpdateSection from "../../components/AppUpdateSection";
 import HubDiscoveryPanel from "../../components/HubDiscoveryPanel";
+import NodeSyncSection from "../../components/NodeSyncSection";
 import { formatInvokeError } from "../../formatInvokeError";
 import { useLocale } from "../../locale";
 
@@ -97,6 +99,23 @@ export default function SettingsScreen({
     [status?.node_url, nodeUrl],
   );
 
+  /**
+   * Whether this node can carry everything, judged the way the core judges it.
+   *
+   * Deliberately the STRICT rule and not the payment rule. An ordinary payment
+   * goes through the official node now, but Fast Pay setup and channel closes
+   * do not, and the notice this gates says both halves. Keying it off the
+   * payment rule would hide the sentence that explains the next refusal.
+   */
+  const nodeCanSign = useMemo(
+    () =>
+      mainnetSigningTransportIsEligible(
+        status?.node_url ?? nodeUrl,
+        settings?.network_mode ?? "mainnet",
+      ),
+    [status?.node_url, nodeUrl, settings?.network_mode],
+  );
+
   const applyOfficial = () => {
     setNodeUrl(OFFICIAL_NODE_URL);
     setShowCustomNode(false);
@@ -155,6 +174,33 @@ export default function SettingsScreen({
           )}
         </p>
 
+        {/*
+          WHICH CHAIN, HOW FAR ALONG, HOW MUCH LONGER, in that order.
+
+          It sits directly under the node this wallet is pointed at because the
+          first of those three questions is the one that decides whether the
+          other two are worth waiting on, and a person who is reading a node URL
+          is exactly the person who needs it. There is no spinner here on
+          purpose: a node catching up and a node on a private chain of its own
+          both climb, and a spinner turns the same way for both.
+        */}
+        <NodeSyncSection />
+
+        {/*
+          Said to the person sitting on the default, not only to the person who
+          already worked out that the node was the thing to look at.
+
+          This notice used to render only inside the "Change node" branch
+          below, which is the branch somebody reaches after diagnosing the
+          problem. The one reader who needed it was the one who had pressed
+          nothing.
+        */}
+        {!nodeCanSign ? (
+          <p className="muted small" role="note">
+            {t("settings.officialHttpNotice")}
+          </p>
+        ) : null}
+
         {!showCustomNode ? (
           <div className="row-btns">
             <button type="button" className="small" disabled={busy} onClick={() => setShowCustomNode(true)}>
@@ -178,9 +224,6 @@ export default function SettingsScreen({
               autoCorrect="off"
               spellCheck={false}
             />
-            <p className="muted">
-              {t("settings.officialHttpNotice")}
-            </p>
             <button type="button" className="small" disabled={busy} onClick={applyOfficial}>
               {t("node.useOfficial")}
             </button>
@@ -225,6 +268,7 @@ export default function SettingsScreen({
           busy={busy}
           setBusy={setBusy}
           onApplyHub={onApplyHub}
+          onHubUrlChange={setHubUrl}
           onToast={onToast}
         />
         <div className="row-btns">
@@ -260,12 +304,19 @@ export default function SettingsScreen({
                   setDiscovery(report);
                   setNodeUrl(report.active_node);
                   if (!isOfficialNodeUrl(report.active_node)) setShowCustomNode(true);
-                  onToast(
-                    report.switched
-                      ? t("settings.connectedTo", { node: report.active_node })
-                      : t("settings.activeHealthy"),
-                    "success",
-                  );
+                  // A working node was found and deliberately not adopted,
+                  // because adopting it would have left this wallet unable to
+                  // sign on mainnet. Declining silently was half the defect.
+                  if (report.failover_declined) {
+                    onToast(report.failover_declined, "error");
+                  } else {
+                    onToast(
+                      report.switched
+                        ? t("settings.connectedTo", { node: report.active_node })
+                        : t("settings.activeHealthy"),
+                      "success",
+                    );
+                  }
                 })
                 .catch((error) => onToast(formatInvokeError(error), "error"))
                 .finally(() => setBusy(false));

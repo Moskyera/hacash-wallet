@@ -33,7 +33,18 @@ export default defineConfig({
   root: appRoot,
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    /*
+     * `.tsx` as well as `.ts`.
+     *
+     * The mobile suite could not contain a component test, because the glob only
+     * matched `.ts`. Every mobile assertion was therefore about a pure function
+     * or about the text of a source file, and a whole family of defects - a
+     * control that renders but is never reachable, a message the core produces
+     * and the screen never prints - was invisible to all 344 of them by
+     * construction. Individual files opt into a DOM with `@vitest-environment
+     * jsdom`; the default stays `node`, so nothing already here pays for it.
+     */
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
   define: {
     __BUILD_ID__: JSON.stringify(buildId()),

@@ -12,7 +12,8 @@ if ($capabilities.ret -ne 0 -or $capabilities.chain.id -ne 7 -or
     $capabilities.network.kind -ne "local_pilot_v1" -or
     $capabilities.network.node_profile_id -ne "hpay-local-pilot-chain-v1" -or
     $capabilities.network.current_height -ne $capabilities.chain.height -or
-    $capabilities.network.transaction_format_version -ne 2) {
+    $capabilities.network.transaction_format_version -ne 2 -or
+    $capabilities.api.transaction_submit_bound -ne $true) {
     Fail "endpoint identity does not match HPAY Local Pilot Chain V1"
 }
 $blockOne = $null

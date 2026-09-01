@@ -12,7 +12,27 @@ use zeroize::Zeroizing;
 
 use crate::state::{AppState, WALLET_BUSY_RETRY};
 
-async fn sync_relay_after_node_change(app: &AppHandle) -> Result<(), String> {
+/// Put the embedded relay back in step with the wallet it belongs to.
+///
+/// Called after anything that moves one of the two things the relay is built
+/// from: the node it forwards to, and the address it carries mail for. The
+/// second was not called at all, and that was a real divergence rather than a
+/// tidiness point - `wallet_create` and `wallet_reset` change the owner
+/// address, the Privacy screen recomputed the served list from that address the
+/// instant it moved, and the socket went on enforcing the list it was started
+/// with. After a reset the screen therefore said "this relay will carry mail
+/// for nobody" while the relay was still carrying mail for the deleted
+/// wallet's address. `relay_endpoint` now reads the enforced list off the
+/// running relay so it can no longer print a list nothing is enforcing, and
+/// this makes the relay follow the wallet so the two do not need to disagree in
+/// the first place.
+pub(crate) async fn sync_relay_after_wallet_identity_change<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    sync_relay_after_node_change(app).await
+}
+
+async fn sync_relay_after_node_change<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     #[cfg(feature = "desktop")]
     {
         return crate::desktop_relay::sync_managed_relay(app).await;
@@ -125,24 +145,39 @@ pub fn wallet_status(state: State<'_, AppState>) -> Result<serde_json::Value, St
 }
 
 #[tauri::command]
-pub fn wallet_create(passphrase: String, state: State<'_, AppState>) -> Result<String, String> {
+pub async fn wallet_create<R: tauri::Runtime>(
+    passphrase: String,
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let passphrase = Zeroizing::new(passphrase);
-    let mut svc = state.inner.blocking_lock();
-    svc.create_wallet(&passphrase).map_err(|e| e.to_string())
+    let address = {
+        let mut svc = state.inner.lock().await;
+        svc.create_wallet(&passphrase).map_err(|e| e.to_string())?
+    };
+    // The new owner is now one of the addresses this machine's relay is for,
+    // and the relay has to be told before anything quotes the list back.
+    sync_relay_after_node_change(&app).await?;
+    Ok(address)
 }
 
 #[tauri::command]
-pub fn wallet_import(
+pub async fn wallet_import<R: tauri::Runtime>(
     seed: String,
     passphrase: String,
     expected_address: String,
+    app: AppHandle<R>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let seed = Zeroizing::new(seed);
     let passphrase = Zeroizing::new(passphrase);
-    let mut svc = state.inner.blocking_lock();
-    svc.import_wallet(&seed, &passphrase, &expected_address)
-        .map_err(|e| e.to_string())
+    let address = {
+        let mut svc = state.inner.lock().await;
+        svc.import_wallet(&seed, &passphrase, &expected_address)
+            .map_err(|e| e.to_string())?
+    };
+    sync_relay_after_node_change(&app).await?;
+    Ok(address)
 }
 
 #[tauri::command]
@@ -315,7 +350,12 @@ pub async fn wallet_reset(
     if final_kind != initial_kind {
         return Err("wallet changed while reset authorization was in progress".into());
     }
-    svc.reset_wallet().map_err(|e| e.to_string())
+    svc.reset_wallet().map_err(|e| e.to_string())?;
+    drop(svc);
+    // The address this relay was carrying mail for has just been deleted. Stop
+    // carrying it: without this the socket went on serving the deleted wallet
+    // while the screen said it served nobody.
+    sync_relay_after_node_change(&app).await
 }
 
 #[tauri::command]
@@ -432,9 +472,74 @@ pub async fn wallet_hub_health(state: State<'_, AppState>) -> Result<serde_json:
 }
 
 #[tauri::command]
-pub async fn wallet_discover_hubs(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn wallet_discover_hubs(
+    hub_url: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    // The URL the person has typed but not yet saved. Discovery used to read
+    // only the saved setting, so the field the panel told them to paste into
+    // was the one thing the scan skipped.
+    let typed: Vec<String> = hub_url.into_iter().collect();
     let svc = state.inner.lock().await;
-    let report = svc.discover_hubs().await.map_err(|e| e.to_string())?;
+    let report = svc.discover_hubs(&typed).await.map_err(|e| e.to_string())?;
+    serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
+/// Read one Hub's own `/v1/health` and `/v1/readiness/mainnet` and return them
+/// verbatim, so a person choosing a Hub sees that Hub answering for itself
+/// rather than this build's compile-time ceilings.
+///
+/// Read-only. Saves nothing and authorizes nothing; the readiness document is
+/// re-fetched and re-gated at the signing boundary regardless of what this
+/// returned.
+#[tauri::command]
+pub async fn wallet_hub_declaration(
+    hub_url: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let declaration = svc.hub_declaration(&hub_url).await;
+    serde_json::to_value(declaration).map_err(|e| e.to_string())
+}
+
+/// Run the read-only mainnet preflight for the native ChannelPay rail with a
+/// close voucher, and return the whole report.
+///
+/// Read-only, and it stays that way by never calling a function that can
+/// write: five GETs and a pure judgement. It signs nothing, unlocks nothing,
+/// mutates nothing and broadcasts nothing, and it does not require an unlocked
+/// wallet.
+///
+/// Every argument is optional and falls back to what this wallet already
+/// holds. A missing one yields a red item with a reason rather than an error,
+/// because a preflight that throws tells a person less than one that reports.
+///
+/// This exists because the only preflight before it checked the HVM
+/// shared-registry rail - `features.hvm`, `contract_state_leasing`, actions
+/// 40/41/44, and a verified on-chain registry deployment - which the native
+/// rail never touches, and it was reachable only through `cargo run`. A wallet
+/// owner has an app, not a toolchain.
+#[tauri::command]
+pub async fn wallet_native_rail_preflight(
+    node_url: Option<String>,
+    hub_url: Option<String>,
+    hub_address: Option<String>,
+    owner_address: Option<String>,
+    channel_deposit_hac: String,
+    payment_hac: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let svc = state.inner.lock().await;
+    let report = svc
+        .native_rail_preflight(
+            node_url,
+            hub_url,
+            hub_address,
+            owner_address,
+            channel_deposit_hac,
+            payment_hac,
+        )
+        .await;
     serde_json::to_value(report).map_err(|e| e.to_string())
 }
 
@@ -651,15 +756,16 @@ pub async fn wallet_channel_info(state: State<'_, AppState>) -> Result<serde_jso
 }
 
 #[tauri::command]
-pub fn wallet_preview_channel_open(
+pub async fn wallet_preview_channel_open(
     hub_address: String,
-    user_deposit_mei: f64,
-    hub_deposit_mei: f64,
+    user_deposit_mei: String,
+    hub_deposit_mei: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let mut svc = state.inner.blocking_lock();
+    let mut svc = state.inner.lock().await;
     let preview = svc
-        .preview_channel_open(&hub_address, user_deposit_mei, hub_deposit_mei)
+        .preview_channel_open(&hub_address, &user_deposit_mei, &hub_deposit_mei)
+        .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(preview).map_err(|e| e.to_string())
 }
@@ -745,6 +851,25 @@ pub fn wallet_set_second_factor_threshold(
     let current_passphrase = Zeroizing::new(current_passphrase);
     let mut svc = state.inner.blocking_lock();
     svc.set_second_factor_threshold(&current_passphrase, amount_mei)
+        .map_err(|e| e.to_string())
+}
+
+/// Give or withdraw consent to the capped, Hub-dependent mainnet Fast Pay pilot.
+///
+/// Its own authenticated command, because `wallet_update_settings` refuses to
+/// turn it on: it chooses the settlement model every later mainnet payment and
+/// channel open is judged under. Withdrawing consent also works through the
+/// generic settings command, so a user is never locked into the pilot by a
+/// screen that cannot ask for a passphrase.
+#[tauri::command]
+pub fn wallet_set_mainnet_fast_pay_consent(
+    consented: bool,
+    current_passphrase: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let current_passphrase = Zeroizing::new(current_passphrase);
+    let mut svc = state.inner.blocking_lock();
+    svc.set_trusted_mainnet_fast_pay_pilot(&current_passphrase, consented)
         .map_err(|e| e.to_string())
 }
 

@@ -36,3 +36,7 @@ windows = { version = "0.58", features = [
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 agent-wallet-testnet-pilot = ["wallet-tauri-common/agent-wallet-testnet-pilot"]
+agent-wallet-bounded-mainnet-pilot = [
+    "agent-wallet-testnet-pilot",
+    "wallet-tauri-common/agent-wallet-bounded-mainnet-pilot",
+]

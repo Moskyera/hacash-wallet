@@ -317,6 +317,28 @@ async fn a_desktop_approval_is_discovered_witnessed_and_submitted() {
         "exactly one submission, after the witness and not before"
     );
 
+    let bodies = node.submitted_bodies.read().await;
+    assert_eq!(bodies.len(), 1);
+    let canonical = hacash_wallet_core::tx_binding::decode_transaction(&bodies[0]).unwrap();
+    assert_eq!(canonical.tx_type, 2);
+    assert_eq!(
+        canonical.actions.len(),
+        1,
+        "no treasury or wallet-fee action exists"
+    );
+    assert_eq!(canonical.actions[0].kind, 1);
+    assert_eq!(
+        canonical.actions[0]
+            .canonical_json
+            .get("to")
+            .and_then(serde_json::Value::as_str),
+        Some(RECIPIENT)
+    );
+    assert_eq!(
+        field::Amount::from(canonical.fee.as_str()).unwrap(),
+        field::Amount::from(HacUnits::MIN_NETWORK_FEE.to_decimal().as_str()).unwrap()
+    );
+    drop(bodies);
     // And it is durable: a restart reads back the same operation in the same
     // place, not a payment that has to be rediscovered.
     drop(manager);

@@ -4,6 +4,7 @@ import type {
   AssetPriceResponse,
   CanonicalTransaction,
   HacdDiamondInfo as SharedHacdDiamondInfo,
+  NativeRailPreflightView,
   NodeCapabilities,
   ParsedAddress,
   Type4ProbeResult,
@@ -82,6 +83,7 @@ export type WalletSettings = {
   auto_node_failover?: boolean;
   network_mode?: "mainnet" | "testnet";
   l2_hub_url: string | null;
+  trusted_mainnet_fast_pay_pilot: boolean;
   hub_right_address: string | null;
   channel_id_hex: string | null;
   webauthn_enabled: boolean;
@@ -142,6 +144,12 @@ export type NodeDiscoveryReport = {
   switched: boolean;
   network_mode: "mainnet" | "testnet";
   candidates: NodeCandidateStatus[];
+  /**
+   * Set when automatic failover found a working node and deliberately did not
+   * move to it, because moving would have traded a node this wallet can sign
+   * against for one it cannot. Absent from older cores.
+   */
+  failover_declined?: string | null;
 };
 
 export type MessageDirection = "in" | "out";
@@ -153,12 +161,82 @@ export type ChatMessage = {
   body: string;
   timestamp_utc: string;
   delivered: boolean;
+  /**
+   * Whether this one message travelled sealed to the peer's own key (v2).
+   * `false` is v1, whose key comes from the two addresses the relay holds in
+   * clear. `null` or absent is a record written before the wallet tracked it,
+   * about which nothing is known.
+   */
+  sealed?: boolean | null;
+  /**
+   * When this wallet took delivery of an incoming message, by its own clock.
+   *
+   * `timestamp_utc` is the sender's own signed claim, and a relay that holds a
+   * message back for a week hands that claim over untouched. The conversation
+   * is ordered on this instead. Absent on outgoing messages and on records
+   * written before the wallet kept it.
+   */
+  received_utc?: string | null;
+  /**
+   * Why no relay took an outgoing message, in the relay's own words.
+   *
+   * "No relay accepted it" used to be the whole story, so a relay that was down
+   * and a recipient whose mailbox was full read identically.
+   */
+  delivery_error?: string | null;
+  /**
+   * WHICH relay accepted an outgoing message, when one did.
+   *
+   * A send stops at the first relay in the list that accepts, and a wallet
+   * hosting its own relay always has one that accepts: its own, on this
+   * machine. So `delivered: true` was also the answer for a message that never
+   * left the computer it was typed on, while the friend's replies kept
+   * arriving because collecting mail tries every relay. Absent on incoming
+   * messages, on undelivered ones, and on records written before this existed.
+   */
+  delivered_via?: string | null;
+};
+
+/** What the screen may say about one conversation's privacy. */
+export type MessengerPeerSecurity = {
+  /** The wallet holds a verified key for this peer, so the next send is sealed. */
+  sends_sealed: boolean;
+  /** Messages already in the thread that are not known to have been sealed. */
+  unsealed_messages: number;
+};
+
+/**
+ * What one pass over the configured relays actually managed to do.
+ *
+ * A bare count cannot separate an empty inbox from a relay that never answered
+ * or one that refused the claim, and the screen used to report all three as
+ * "nothing new".
+ */
+export type MessengerPollOutcome = {
+  added: number;
+  relays_tried: number;
+  relays_answered: number;
+  relays_refused: number;
+  rejected_envelopes: number;
+  /**
+   * Correctly signed envelopes whose body this wallet could not open, cleared
+   * from the relay rather than left there. Left there, they held the inbox at
+   * the relay's cap and every correspondent was refused with "inbox full"
+   * while the owner was told there was nothing new.
+   */
+  undecryptable: number;
+  /** The local store is at its ceiling, so messages were left on the relay. */
+  store_full: boolean;
 };
 
 export type ChatThread = {
   peer: string;
+  /** The newest message in the thread, cut short for the list row. */
   last_message: string;
+  /** The sender's own claim about when the newest message was written. */
   last_timestamp_utc: string;
+  /** When this wallet last saw activity here. The list is ordered on this. */
+  last_activity_utc: string;
   unread: number;
 };
 
@@ -199,6 +277,8 @@ export type HubHealth = {
   hub_fee_mei?: string | number;
   settlement_ready?: boolean;
   cross_channel_ready?: boolean;
+  trusted_bounded_pilot_ready?: boolean;
+  deployment_profile?: string;
 };
 
 export type HubDiscoveryEntry = {
@@ -231,6 +311,16 @@ export type SendPreview = {
     rail_detail: string;
     fee_breakdown: SendFeeBreakdown;
     l1_fee_tiers?: L1FeeTierQuote[];
+    // Set when the wallet had Fast Pay set up for this send and chose
+    // not to use it. The blockchain fallback is correct; doing it in
+    // silence was not.
+    fast_pay_declined?: string | null;
+    // Set when the fee above is a guess rather than a quote, because the node
+    // did not answer the fee query or could not build the body. The fallback
+    // is correct; showing an invented fee as though the network had quoted it
+    // was not. An under-priced transfer that sits unconfirmed inside a channel
+    // challenge window loses the window, and the older split settles.
+    fee_estimate_degraded?: string | null;
   };
   from: string;
   to: string;
@@ -324,6 +414,7 @@ export type ChannelInfo = {
 
 export type ChannelSetupPreview = {
   channel_id: string;
+  reuse_version: number;
   left_address: string;
   right_address: string;
   left_deposit: string;
@@ -344,6 +435,63 @@ export type BtcSendPreview = {
   hip23: Hip23Check;
   summary: string;
 };
+
+export type DeclaredHubCaps = {
+  max_payment_hac: string | null;
+  max_channel_funding_hac: string | null;
+  max_aggregate_tvl_hac: string | null;
+  aggregate_tvl_within_limit: boolean | null;
+  /**
+   * Whether this Hub can admit a new channel of any size at all.
+   *
+   * Optional because an older Hub does not publish it, and `false` is the
+   * alarming value: a required field defaulted to false would tell everyone
+   * their Hub was closed. `aggregate_tvl_within_limit` cannot answer this
+   * question - it is `current <= cap`, so it reads true at exactly the cap,
+   * which is where the first mainnet channel open landed.
+   */
+  new_channel_admission_available?: boolean | null;
+  /** What the Hub says its aggregate TVL is right now, in HAC. */
+  aggregate_tvl_hac?: string | null;
+};
+
+/**
+ * One Hub answering for itself. Every field is transcribed from that Hub's
+ * /v1/health and /v1/readiness/mainnet, so a person choosing a provider sees
+ * the Hub's declared caps and the Hub's own named blockers rather than this
+ * build's compile-time ceilings. Read-only: the readiness document is
+ * re-fetched and re-gated at the signing boundary regardless.
+ */
+export type HubDeclaration = {
+  hub_url: string;
+  reachable: boolean;
+  error: string | null;
+  name: string | null;
+  hub_address: string | null;
+  version: number | null;
+  settlement_ready: boolean;
+  cross_channel_ready: boolean;
+  hub_fee_mei: string | null;
+  deployment_profile: string | null;
+  mainnet_checked: boolean;
+  readiness_profile: string | null;
+  payments_enabled: boolean | null;
+  declared_caps: DeclaredHubCaps;
+  blockers: string[];
+  disclosed_blockers: string[];
+  limitations: string[];
+  readiness_error: string | null;
+};
+
+/**
+ * The read-only mainnet preflight for the native ChannelPay rail with a close
+ * voucher. Shape mirrors `hpay_native_rail_preflight::PreflightReport`.
+ *
+ * Aliased from the shared UI package rather than restated here, so the type,
+ * the never-show-PASS rule and the card that renders it all read one
+ * definition.
+ */
+export type NativeRailPreflight = NativeRailPreflightView;
 
 export type AirgapUnsigned = {
   v: number;
@@ -534,10 +682,49 @@ export const api = {
   fastPayInbox: () => invoke<FastPayInboxItem[]>("wallet_fast_pay_inbox"),
   acceptFastPay: (paymentId: string) =>
     invoke<FastPayExecution>("wallet_accept_fast_pay", { paymentId }),
-  enableFastPay: (depositMei?: number) =>
-    invoke<FastPayStatus>("wallet_enable_fast_pay", { depositMei }),
+  // `wallet_enable_fast_pay` is deliberately NOT bound here.
+  //
+  // It was, and nothing called it, and that cost real time: the owner audited
+  // every gate inside `WalletService::enable_fast_pay` against their live Hub
+  // looking for why "Enable Fast Pay" would not start, and that function is not
+  // on the button's path at all. `enable_fast_pay` configures a provider and
+  // stops at `needs_channel` on purpose, because opening a funded channel is
+  // irreversible L1 work that the core only permits through the exact prepared
+  // ceremony. The button uses `prepareChannelOpen` plus
+  // `executePreparedChannelOpen` below, which is that ceremony. The command
+  // still exists and is still in the ACL; it is what the read-only mainnet
+  // observation harness calls.
   hubHealth: () => invoke<HubHealth | null>("wallet_hub_health"),
-  discoverHubs: () => invoke<HubDiscoveryReport>("wallet_discover_hubs"),
+  // hubUrl is what the person has typed but not yet saved. Discovery used to
+  // read only the saved setting, so the field the panel told them to paste
+  // into was the one thing the scan skipped.
+  discoverHubs: (hubUrl?: string) =>
+    invoke<HubDiscoveryReport>("wallet_discover_hubs", { hubUrl: hubUrl?.trim() || null }),
+  hubDeclaration: (hubUrl: string) =>
+    invoke<HubDeclaration>("wallet_hub_declaration", { hubUrl }),
+  /**
+   * Read-only. Signs nothing, unlocks nothing, broadcasts nothing.
+   *
+   * Every argument may be left out, in which case the wallet uses what it
+   * already has saved. A missing value produces a red item with a reason
+   * rather than an error, because a report tells a person more than a throw.
+   */
+  nativeRailPreflight: (args: {
+    nodeUrl?: string;
+    hubUrl?: string;
+    hubAddress?: string;
+    ownerAddress?: string;
+    channelDepositHac: string;
+    paymentHac: string;
+  }) =>
+    invoke<NativeRailPreflight>("wallet_native_rail_preflight", {
+      nodeUrl: args.nodeUrl?.trim() || null,
+      hubUrl: args.hubUrl?.trim() || null,
+      hubAddress: args.hubAddress?.trim() || null,
+      ownerAddress: args.ownerAddress?.trim() || null,
+      channelDepositHac: args.channelDepositHac,
+      paymentHac: args.paymentHac,
+    }),
   previewSend: (to: string, amountMei: number, sendOptions?: SendOptions) =>
     invoke<SendPreview>("wallet_preview_send", { to, amountMei, sendOptions }),
   prepareSendHac: (to: string, amountMei: number, sendOptions?: SendOptions) =>
@@ -606,19 +793,22 @@ export const api = {
     invoke<SendResult>("wallet_execute_prepared_hacd", { operationId }),  sendHacd: (to: string, diamondNames: string[]) =>
     invoke<SendResult>("wallet_send_hacd", { to, diamondNames }),
   channelInfo: () => invoke<ChannelInfo | null>("wallet_channel_info"),
-  previewChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  previewChannelOpen: (hubAddress: string, userDepositMei: string, hubDepositMei: string) =>
     invoke<ChannelSetupPreview>("wallet_preview_channel_open", {
       hubAddress,
       userDepositMei,
       hubDepositMei,
     }),
-  prepareChannelOpen: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+  prepareChannelOpen: (hubAddress: string, userDepositMei: string, hubDepositMei: string) =>
     invoke<PreparedOperationView>("wallet_prepare_channel_open", { hubAddress, userDepositMei, hubDepositMei }),
   executePreparedChannelOpen: (operationId: string) =>
     invoke<string>("wallet_execute_prepared_channel_open", { operationId }),
   prepareChannelClose: () => invoke<PreparedOperationView>("wallet_prepare_channel_close"),
   executePreparedChannelClose: (operationId: string) =>
-    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
+    invoke<string>("wallet_execute_prepared_channel_close", { operationId }),
+  recoverChannelOpen: () => invoke<string>("wallet_recover_channel_open"),
+  recoverChannelClose: () => invoke<string>("wallet_recover_channel_close"),
+  openChannel: (hubAddress: string, userDepositMei: number, hubDepositMei: number) =>
     invoke<string>("wallet_open_channel", { hubAddress, userDepositMei, hubDepositMei }),
   closeChannel: () => invoke<string>("wallet_close_channel"),
   importWatchOnly: (address: string) => invoke<string>("wallet_import_watch_only", { address }),
@@ -627,6 +817,8 @@ export const api = {
     invoke<void>("wallet_set_security_profile", { profile, currentPassphrase }),
   setSecondFactorThreshold: (amountMei: number | null, currentPassphrase: string) =>
     invoke<void>("wallet_set_second_factor_threshold", { amountMei, currentPassphrase }),
+  setMainnetFastPayConsent: (consented: boolean, currentPassphrase: string) =>
+    invoke<void>("wallet_set_mainnet_fast_pay_consent", { consented, currentPassphrase }),
   setHardwareMode: (mode: SigningPolicy, currentPassphrase: string) =>
     invoke<void>("wallet_set_hardware_mode", { mode, currentPassphrase }),
   // Cold Vault is irreversible, so it has its own prepared ceremony instead of
@@ -700,7 +892,15 @@ export const messengerApi = {
   threads: () => invoke<ChatThread[]>("messenger_threads"),
   messages: (peer: string) => invoke<ChatMessage[]>("messenger_messages", { peer }),
   markRead: (peer: string) => invoke<void>("messenger_mark_read", { peer }),
+  /**
+   * Whether the next message to this peer is sealed to that peer's own key, and
+   * how many messages already in the thread are not known to have been. The
+   * screen says nothing about privacy that this answer does not support.
+   */
+  peerSecurity: (peer: string) =>
+    invoke<MessengerPeerSecurity>("messenger_peer_security", { peer }),
   send: (peer: string, body: string, peer_pubkey?: string) =>
     invoke<ChatMessage>("messenger_send", { peer, body, peer_pubkey }),
-  pollInbox: () => invoke<number>("messenger_poll_inbox"),
+  /** Reports what the poll reached, not only how many messages it took. */
+  pollInbox: () => invoke<MessengerPollOutcome>("messenger_poll_inbox"),
 };

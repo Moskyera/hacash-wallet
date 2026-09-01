@@ -41,6 +41,12 @@ pub enum JournalOperationType {
     RecipientConfirmation,
     Recovery,
     Reconciliation,
+    L1ChannelOpen,
+    L1ChannelClose,
+    HvmChannelActivation,
+    HvmPayment,
+    HvmWatchtower,
+    HvmLeaseRenewal,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +67,65 @@ pub enum JournalPhase {
     RecoveryStarted,
     RecoveryCompleted,
     ReconciliationCompleted,
+    L1IntentValidated,
+    L1OpenAbandonedUnsigned,
+    L1OpenSignatureMayExist,
+    L1SignatureProduced,
+    L1OpenSubmissionStarted,
+    L1OpenSubmitted,
+    L1OpenConfirmed,
+    /// A signed and broadcast channel-open was read off the chain one last
+    /// time, found to be neither mined nor pending, and retired so that the
+    /// pilot admission budget it was holding is released. The operation is
+    /// kept and keeps being watched; only its reservation is given up.
+    L1OpenAbandonedUnmined,
+    L1OpenRecoveryRequired,
+    L1CloseFreezeIntentPersisted,
+    L1CloseFrozenBeforeSigning,
+    L1CloseSignatureMayExist,
+    L1CloseSubmissionStarted,
+    L1CloseSubmitted,
+    L1CloseConfirmed,
+    L1CloseRetired,
+    /// A channel-close freeze that the durable record proves was never signed
+    /// was released: the channel is unfrozen and the Hub-wide close-liquidity
+    /// reservation it was holding is given up. The audit record is kept.
+    L1CloseCancelledBeforeSigning,
+    L1CloseRecoveryRequired,
+    /// A channel-close voucher was reserved for one channel and made durable
+    /// before the Hub signer was called. The entry alone bars this channel from
+    /// ever being issued a second voucher, whether or not the signature that
+    /// followed survived.
+    L1CloseVoucherSignatureMayExist,
+    /// The exact countersigned delta-zero close bytes were made durable and
+    /// handed to the owner. Nothing was broadcast, and the channel stays open.
+    L1CloseVoucherIssued,
+    HvmChannelActivated,
+    HvmPaymentProposalPersisted,
+    HvmPaymentSignatureMayExist,
+    HvmPaymentFullySigned,
+    HvmChainIntentPersisted,
+    HvmChainSignatureMayExist,
+    HvmChainSigned,
+    HvmChainSubmissionStarted,
+    HvmChainSubmitted,
+    HvmChainConfirmed,
+    HvmChainRecoveryRequired,
+    /// A signed chain transaction was proven inadmissible by a consensus rule
+    /// that block verification itself applies, read from the chain one last
+    /// time and found absent, and retired to a terminal state so a correct
+    /// replacement can be signed.
+    HvmChainAbandonedInadmissible,
+    /// The exact external rollback anchor request was made durable before it
+    /// went on the wire. A receipt that matches no such record matches
+    /// nothing.
+    RollbackAnchorRequestPersisted,
+    /// The witness's signed receipt was verified and made durable together
+    /// with the advanced counter, before the signing key was used.
+    RollbackAnchorReceiptPersisted,
+    /// The witness refused. The channel is latched and will not sign again
+    /// without `docs/l2/ROLLBACK-ANCHOR-RECOVERY.md`.
+    RollbackAnchorRefused,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +373,25 @@ impl AuthenticatedJournal {
         let mut encoded =
             serde_json::to_vec(&record).map_err(|error| HubError::State(error.to_string()))?;
         encoded.push(b'\n');
+        if encoded.len() > MAX_RECORD_BYTES {
+            return Err(HubError::State("L2 journal record is oversized".into()));
+        }
+        reject_symlink(&self.path, "L2 journal")?;
+        let current_len = if self.path.exists() {
+            fs::metadata(&self.path)
+                .map_err(|error| HubError::State(error.to_string()))?
+                .len()
+        } else {
+            0
+        };
+        let projected_len = current_len
+            .checked_add(encoded.len() as u64)
+            .ok_or_else(|| HubError::State("L2 journal size overflow".into()))?;
+        if projected_len > MAX_JOURNAL_BYTES {
+            return Err(HubError::State(
+                "L2 journal append would exceed the size limit".into(),
+            ));
+        }
 
         let mut options = OpenOptions::new();
         options.create(true).append(true);

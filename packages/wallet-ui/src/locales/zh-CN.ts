@@ -127,7 +127,8 @@ export const zhCN = {
   "node.change": "更换节点",
   "node.useOfficial": "使用官方节点",
   "node.customTitle": "自定义节点",
-  "node.customHint": "仅在您运行自己的 Hacash 节点或需要私有端点时更改。",
+  "node.customHint":
+    "在主网上，本钱包通过官方节点以明文 HTTP 发送，因为该节点只提供这一种方式。传输你流量的人可以看到你在查询哪个地址，也可以报出错误的网络手续费，所以批准前请先看手续费。路上没有人能改变收款人或金额，也不能替你签名。在这台电脑上运行 Hacash 并使用 http://127.0.0.1:8080 可以消除以上全部，也是设置 Fast Pay 或关闭通道的唯一方式。",
   "node.grapheneTitle": "GrapheneOS / 去 Google 化手机",
   "node.grapheneHelp": "使用与其他 Android 设备相同的 APK。在应用信息中启用网络权限。如果浏览器阻止 APK，请从文件管理器安装。官方节点使用普通 HTTP，VPN 或过滤器可能会阻止它。无需单独的 Graphene 版本。",
   "quantum.funding.title": "为量子账户充值",

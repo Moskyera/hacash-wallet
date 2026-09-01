@@ -21,11 +21,14 @@ pub struct LegacyHttpFastPayAdapter {
 }
 
 impl LegacyHttpFastPayAdapter {
-    pub fn new(base_url: impl Into<String>) -> Self {
-        Self {
-            client: L2HubClient::new(base_url),
-        }
-    }
+    // No `new(base_url)` constructor, deliberately. It built its client with
+    // `L2HubClient::new`, which hard-wires testnet and the trustless-only
+    // policy: every mainnet gate in that client sits behind `if self.mainnet`,
+    // so an adapter built that way and pointed at a mainnet Hub would have
+    // walked past all of them. It had no callers, which is the only reason it
+    // was not a second door - and a door with no lock and no traffic is still a
+    // door. Wrap a client someone else built with the wallet owner's policy:
+    // `LegacyHttpFastPayAdapter::from(L2HubClient::new_for_wallet_policy(..))`.
 
     pub fn client(&self) -> &L2HubClient {
         &self.client
@@ -60,9 +63,17 @@ impl From<LegacyHttpFastPayAdapter> for L2HubClient {
 mod tests {
     use super::*;
 
+    /// The adapter can only ever wrap a client someone else built, and the
+    /// only constructors that exist take the wallet owner's network and
+    /// consent. There is no way to reach a mainnet Hub through this type with
+    /// the mainnet gates switched off.
     #[test]
     fn legacy_adapter_preserves_existing_client_surface() {
-        let adapter = LegacyHttpFastPayAdapter::new("http://127.0.0.1:8790/");
+        let adapter = LegacyHttpFastPayAdapter::from(L2HubClient::new_for_wallet_policy(
+            "http://127.0.0.1:8790/",
+            "testnet",
+            false,
+        ));
         let _: &L2HubClient = adapter.client();
         let _: &L2HubClient = &adapter;
     }

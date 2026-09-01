@@ -298,9 +298,11 @@ export default function WelcomeScreen({
             value={passphrase}
             onChange={(event) => setPassphrase(event.target.value)}
           />
+          {/* Restoring writes over whatever wallet is on this device, so it
+              keeps the loud solid fill that `.primary` gave up. */}
           <button
             type="button"
-            className="primary"
+            className="primary irreversible-action"
             disabled={
               busy ||
               !backupJson ||

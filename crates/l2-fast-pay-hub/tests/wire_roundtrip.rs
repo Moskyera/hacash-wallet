@@ -10,6 +10,8 @@ fn sample_channel(id: &str, left: &str, right: &str, left_mei: &str) -> ChannelI
         ret: 0,
         id: id.to_owned(),
         status: 0,
+        open_height: 100,
+        close_height: 0,
         reuse_version: 1,
         left: ChannelPartyBalance {
             address: left.into(),

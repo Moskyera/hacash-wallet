@@ -1,6 +1,6 @@
 # HPAY Wallet L2 Safety Model
 
-Status: implemented for the custom HPAY Wallet Hub API v4 transport.
+Status: implemented for the custom HPAY Wallet Hub API v7 transport.
 
 This document does not claim Official Hacash ChannelPay interoperability and
 does not make the custom transport suitable for large-value mainnet use.
@@ -18,15 +18,18 @@ The safety layer applies only to Fast Pay state transitions. It does not change:
 
 ## Durable state
 
-The hub requires all three of the following before it advertises
+The hub requires all four of the following before it advertises
 `settlement_ready`:
 
 1. a signing key;
 2. a durable state-file path;
 3. an independent 32-byte journal storage key.
+4. a different independent 32-byte key that seals the complete durable state container with AES-256-GCM.
 
 The journal storage key must not be the hub blockchain signing key. The hub
-reads it from `HACASH_HUB_JOURNAL_KEY_HEX`.
+reads it from HACASH_HUB_JOURNAL_KEY_HEX.
+The state key is read from HACASH_HUB_STATE_KEY_HEX. Mainnet refuses plaintext
+state and refuses any reuse among signer, journal, and state keys.
 
 The Personal Wallet stores a separate operation journal under:
 
@@ -126,12 +129,60 @@ verified signature from the exact local wallet address.
 
 ## Mainnet fail-closed gate
 
-Wallet Hub API v4 now advertises explicit readiness fields for the external
+Wallet Hub API v7 advertises explicit readiness fields for the external
 rollback anchor, L1 dispute path, authenticated Official ChannelPay session, and
-aggregate production readiness. This legacy implementation sets all four to
-`false`. On mainnet the wallet requires every field before selecting Fast Pay;
-otherwise it remains on L1. Testnet and local development retain the existing
-custom transport and all HPAY safety extensions.
+aggregate production readiness. The fullnode capability response also
+advertises two unilateral-exit capabilities, each with its own exact HVM
+deployment evidence document, and the gate reads exactly one of them.
+
+`features.channel_registry_unilateral_exit` is the shared registry contract,
+settlement profile `hpay-hvm-shared-registry-v2`. **This is the gated one**,
+because it is the contract this system's channels are opened, funded, billed and
+exited under. `features.channel_unilateral_exit` is the older per-channel
+contract `hpay-hvm-channel-v1`; it is still published and still validated on
+parse, and it gates nothing. Measuring V1 was a real defect once: it made the
+flag insensitive to deploying the contract that matters, and sensitive to
+deploying one no user travels.
+
+Both currently report `false`. V1 is false because legacy Go dispute action
+numbers collide with Istanbul TEX/AST kinds and cannot be copied into mainnet.
+The registry is false because nothing is deployed: its evidence names the
+artifact exactly - source hash, bytecode hash, storage key counts, renewal step
+- and reports every chain-derived term as null. It stays false until the running
+node confirms the deployment transaction, the exact on-chain contract edition
+hash, that the deploying transaction really carried the contract deploy, and
+that the constructor bound the registry to this node's own network instance. The
+node never auto-enables the boolean from deployment evidence. Both Hub and wallet
+require the boolean and the complete evidence, so an operator flag or edited
+manifest cannot override the missing dispute path.
+
+Deployment alone is still not enough, and this is the part most easily lost: the
+node's report is a statement a node makes about itself. The published
+`unilateral_l1_enforceable` also requires that this software can put the exit
+transactions in a *user's* hands, which today it cannot
+(`USER_SIDE_UNILATERAL_EXIT_DRIVER_READY` is `false`). The readiness document
+re-derives both guarantee flags from the evidence it publishes beside them, so
+no caller and no operator can assert a guarantee the document itself contradicts.
+The bounded trusted-Hub
+pilot remains separately capped; cooperative recovery close stays available.
+Testnet and local development retain the existing custom transport and all HPAY
+safety extensions.
+
+The HVM candidate now has a separate, non-authorizing evidence chain:
+
+- exact per-channel binding and two-party initial recovery bill;
+- a strict recovery bundle that rejects unknown fields;
+- a full-node live snapshot of the exact contract code, 18 storage values and
+  every active/recovery lease;
+- a Hub verifier that binds the bundle and snapshot to the same fresh pinned
+  mainnet node and network instance.
+
+The exact recovery bundle and its live snapshot can now be written atomically
+to sealed Hub state and the authenticated journal. The activation is
+idempotent, survives restart and rejects contract or channel-incarnation reuse.
+It remains deliberately separate from the native payment ledger and cannot
+enable payments. HVM ledger creation, renewal/watchtower operations and full
+restart reconciliation remain explicit gates.
 
 ## Remaining limits
 
@@ -140,6 +191,11 @@ It detects partial rollback or tampering, but an attacker who can restore the
 entire directory to one internally consistent older snapshot can also restore
 the checkpoint. Strong rollback resistance needs an external monotonic anchor,
 such as a TPM/OS-keystore counter or a remote witness.
+
+An existing plaintext Hub state cannot be opened by the mainnet profile. It
+must remain offline until a reviewed one-time migration tool can authenticate,
+seal, verify, and preserve the original file. Manual editing or renaming is not
+a migration and must not be used.
 
 Large-value mainnet use also remains blocked by:
 
