@@ -111,7 +111,18 @@ jobs:
   rust-agent-wallet:
     name: Agent Wallet security and recovery tests
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    # Measured, not guessed. This job runs the suite with
+    # --test-threads=1, and most of these tests spawn a pilot node and
+    # wait on it, so they cost ~28 seconds each in CI against under 5
+    # minutes for the whole suite in parallel on a developer machine.
+    # Run 33510020635 got through 255 of 358 tests in 118 minutes and
+    # was still progressing normally when the 120-minute cap killed it -
+    # nothing hung, the budget simply ran out. 358 at that rate is about
+    # 166 minutes, so 120 no longer fits and 180 leaves real headroom.
+    #
+    # Raising this rather than parallelising because the serial flag is
+    # deliberate: these tests bind ports and drive a shared node.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
