@@ -185,7 +185,16 @@ function checkVersion(expected, tag) {
   }
 
   if (tag) {
-    const allowed = new Set(["v" + expected + "-desktop", "v" + expected + "-mobile"]);
+    // `-hub` belongs here too. Without it `release-hub.yml` could never run:
+    // it fires on `v*-hub`, and its very first step calls this check, which
+    // rejected the only tag shape that reaches it. That is why no Hub release
+    // has ever been published from this repository - the workflow existed and
+    // failed at step three every time it was tried.
+    const allowed = new Set([
+      "v" + expected + "-desktop",
+      "v" + expected + "-mobile",
+      "v" + expected + "-hub",
+    ]);
     if (!allowed.has(tag)) fail("tag " + tag + " does not match version " + expected);
   }
 }
