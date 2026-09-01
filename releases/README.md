@@ -2,60 +2,49 @@
 
 ## Latest downloads
 
-### Desktop — v0.1.18
+**→ [github.com/Moskyera/hacash-wallet/releases/latest](https://github.com/Moskyera/hacash-wallet/releases/latest)**
 
-#### Windows x64
+Or the download page, which picks the newest build for you:
+**[moskyera.github.io](https://moskyera.github.io/)**
 
-| File | Link |
-|------|------|
-| **Setup (recommended)** | [setup.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64-setup.exe) |
-| MSI installer | [msi](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64.msi) |
-| Portable EXE | [portable.exe](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64-portable.exe) |
+This file used to carry download tables. It listed `v0.1.18` twenty times, long
+after the wallet reached 1.0 — and every one of those links still answered 200
+and handed a browser a real pre-1.0 wallet. Nobody saw an error; they just got
+software eight releases old, from a file titled "Latest downloads".
 
-#### Linux x64
+So the tables are gone rather than corrected. A version written down in a second
+place is a version that goes stale, and the two places that resolve the newest
+release on their own have never needed touching:
 
-| File | Link |
-|------|------|
-| **AppImage (recommended)** | [AppImage](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64.AppImage) |
-| Debian/Ubuntu (.deb) | [deb](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64.deb) |
-| Portable binary | [portable](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-desktop/hacash-wallet-desktop-v0.1.18-x64-portable) |
+- the releases page above always shows the newest tag
+- `moskyera.github.io` reads the newest `-desktop` and `-mobile` tags from the
+  GitHub API on every load and picks the assets by filename, so a release
+  reaches people without anyone editing anything
 
-```bash
-# AppImage
-chmod +x hacash-wallet-desktop-v0.1.18-x64.AppImage
-./hacash-wallet-desktop-v0.1.18-x64.AppImage
+## What is published
 
-# Debian/Ubuntu
-sudo dpkg -i hacash-wallet-desktop-v0.1.18-x64.deb
-```
-
-### Mobile (Android arm64) — v0.1.18
-
-| File | Link |
-|------|------|
-| APK | [hacash-wallet-mobile-v0.1.18-arm64.apk](https://github.com/Moskyera/hacash-wallet/releases/download/v0.1.18-mobile/hacash-wallet-mobile-v0.1.18-arm64.apk) |
-
-App display name: **Hacash Wallet**
+Each desktop tag (`v<version>-desktop`) carries Windows setup, MSI and portable
+executables, a Linux AppImage, a `.deb`, a portable Linux binary, and a
+`SHA256SUMS` file. Each mobile tag (`v<version>-mobile`) carries an arm64 APK.
 
 ## Install — Windows
 
-1. Download `hacash-wallet-desktop-v0.1.17-x64-setup.exe`
-2. Run installer → open **Hacash Wallet** from Start menu
+1. Download the setup executable from the releases page above
+2. Run it, then open **HPAY** from the Start menu
 
-## Install — Mobile (GrapheneOS / Android)
+## Install — Android
 
-1. Download APK in browser
-2. Files → Downloads → tap APK
-3. Allow install from browser/Files if prompted
-4. Open **Hacash Wallet**
+1. Download the APK in a browser
+2. Files → Downloads → tap the APK
+3. Allow installation from that app if prompted
 
-Or via adb:
+Or with adb, using the file you actually downloaded:
 
 ```bash
-adb install hacash-wallet-mobile-v0.1.16-arm64.apk
+adb install <the-apk-you-downloaded>.apk
 ```
 
 ## Release notes
 
-- Desktop: `v0.1.17-desktop-notes.md`
-- Mobile: `v0.1.16-mobile-notes.md`
+Written on each GitHub release itself, so the notes and the files can never
+describe different builds.
