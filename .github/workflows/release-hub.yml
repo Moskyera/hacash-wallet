@@ -97,10 +97,90 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The wallet ships for Windows, and until now the only Hub anyone could
+  # download for it was Linux-only. A Windows owner had no Hub at all, which is
+  # why the download page ended up pointing at a different program that carries
+  # the same name and serves none of this wallet's routes.
+  build-windows:
+    name: Build and verify Windows x64 Hub package
+    runs-on: windows-2022
+    timeout-minutes: 60
+    outputs:
+      package-name: ${{ steps.release-version.outputs.package-name }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify release version and tag
+        id: release-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-version.mjs check
+          version="$(node -p "require('fs').readFileSync('Cargo.toml','utf8').match(/^version = \"([0-9.]+)\"$/m)[1]")"
+          [[ "$version" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}-hub" ]]; then
+            echo "Hub release tag must be v${version}-hub, got ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          package="hpay-fast-pay-hub-v${version}-windows-x64"
+          printf 'package-name=%s\n' "$package" >> "$GITHUB_OUTPUT"
+          printf 'PACKAGE_NAME=%s\n' "$package" >> "$GITHUB_ENV"
+
+      - name: Checkout pinned fullnodedev
+        shell: pwsh
+        run: ./scripts/checkout-fullnode.ps1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: release-fast-pay-hub-windows-x64
+
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Enforce Hub mainnet Rust advisory policy
+        run: node scripts/check-rust-advisories.mjs release linux-hub-mainnet
+
+      - name: Verify Hub source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt -p l2-fast-pay-hub -- --check
+          cargo clippy -p l2-fast-pay-hub --all-targets --all-features --locked -- -D warnings
+          cargo test -p l2-fast-pay-hub --all-targets --all-features --locked -- --test-threads=1
+
+      - name: Build Hub binary
+        run: cargo build --release -p l2-fast-pay-hub --features server --bin fast-pay-hub --locked
+
+      - name: Stage exact package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stage = "dist-release/$env:PACKAGE_NAME"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item target/release/fast-pay-hub.exe "$stage/fast-pay-hub.exe"
+          Copy-Item scripts/hpay-fast-pay-hub/START-HUB.bat "$stage/START-HUB.bat"
+          Copy-Item scripts/hpay-fast-pay-hub/README-WINDOWS.md "$stage/README.md"
+          $bytes = [System.IO.File]::ReadAllBytes("$stage/fast-pay-hub.exe")
+          if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { throw "fast-pay-hub.exe is not a PE image" }
+          if ($bytes.Length -lt 1000000) { throw "fast-pay-hub.exe is implausibly small: $($bytes.Length) bytes" }
+          Compress-Archive -Path $stage -DestinationPath "dist-release/$env:PACKAGE_NAME.zip" -CompressionLevel Optimal
+          Remove-Item -Recurse -Force $stage
+          $hash = (Get-FileHash -Algorithm SHA256 "dist-release/$env:PACKAGE_NAME.zip").Hash.ToLowerInvariant()
+          "$hash  $env:PACKAGE_NAME.zip" | Out-File -FilePath "dist-release/SHA256SUMS-$env:PACKAGE_NAME.txt" -Encoding ascii
+          $files = @(Get-ChildItem -LiteralPath dist-release -File)
+          if ($files.Count -ne 2) { throw "expected exactly 2 files, found $($files.Count)" }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fast-pay-hub-windows-x64
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish verified Fast Pay Hub release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build-linux
+    needs: [build-linux, build-windows]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -113,16 +193,27 @@ jobs:
           name: fast-pay-hub-linux-x64
           path: dist-release
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: fast-pay-hub-windows-x64
+          path: dist-release
+
       - name: Verify exact artifact and checksum
         shell: bash
         env:
           PACKAGE_NAME: ${{ needs.build-linux.outputs.package-name }}
+          WINDOWS_PACKAGE_NAME: ${{ needs.build-windows.outputs.package-name }}
         run: |
           set -euo pipefail
-          test "$(find dist-release -maxdepth 1 -type f | wc -l)" -eq 2
+          # Four now, not two: both platforms and a checksum for each.
+          # Counted rather than globbed so an extra file cannot ride along.
+          test "$(find dist-release -maxdepth 1 -type f | wc -l)" -eq 4
           test -f "dist-release/${PACKAGE_NAME}.tar.gz"
           test -f "dist-release/SHA256SUMS-${PACKAGE_NAME}.txt"
+          test -f "dist-release/${WINDOWS_PACKAGE_NAME}.zip"
+          test -f "dist-release/SHA256SUMS-${WINDOWS_PACKAGE_NAME}.txt"
           (cd dist-release && sha256sum --check "SHA256SUMS-${PACKAGE_NAME}.txt")
+          (cd dist-release && sha256sum --check "SHA256SUMS-${WINDOWS_PACKAGE_NAME}.txt")
 
       - name: Attest verified Hub provenance
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
@@ -139,7 +230,17 @@ jobs:
           body: |
             ### HPAY Fast Pay Hub ${{ github.ref_name }}
 
-            One-click Linux x64 VPS package for the bounded HPAY Fast Pay mainnet pilot.
+            The Hub the HPAY wallet talks to. Windows x64 and Linux x64.
+
+            Windows: unzip, set the Hub address and keys in the window you start it
+            from, run START-HUB.bat. It refuses to start and names any missing
+            variable, and never prints or stores a key.
+
+            Linux: one-click VPS package with a systemd unit.
+
+            The Hub listens on 127.0.0.1:8790 and reads a Hacash full node on
+            127.0.0.1:8080. Two different ports, so the Hub and the node run on one
+            machine at the same time.
 
             Requirements:
             - synchronized HPAY-compatible Hacash full node on the same VPS
