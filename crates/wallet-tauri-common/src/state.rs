@@ -110,12 +110,30 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(service: WalletService) -> Self {
+        // The owner's fullnode pick, restored before anything can look for a
+        // node. It used to live only in memory, so every launch started with no
+        // pick and the search list carried a hardcoded Windows path to find one
+        // again - a path any account on the machine could overwrite, which the
+        // supervisor then ran. Restoring the pick is what let that path go.
+        #[cfg(feature = "desktop")]
+        let node = {
+            let node = NodeProcess::new();
+            let stored = service.get_settings().node_binary_path;
+            if let Some(path) = stored
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                node.set_picked_binary(Some(std::path::PathBuf::from(path)));
+            }
+            Arc::new(node)
+        };
         Self {
             inner: Arc::new(Mutex::new(service)),
             #[cfg(feature = "desktop")]
             relay: RelayProcess::new(),
             #[cfg(feature = "desktop")]
-            node: Arc::new(NodeProcess::new()),
+            node,
             dapp_approval: Arc::new(DappApprovalQueue::new()),
             updates: UpdateOfferStore::new(),
         }

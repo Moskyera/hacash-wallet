@@ -954,6 +954,19 @@ impl WalletService {
     /// this on: it selects the settlement model every later mainnet payment and
     /// channel open is judged under, and the wallet asks for at least as much
     /// authority to change that as it does to change a channel id.
+    /// Remember which fullnode binary the owner picked.
+    ///
+    /// No passphrase, deliberately, because this is parity with the command
+    /// that already existed: `wallet_node_supervisor_set_binary` probes and
+    /// adopts a path with nothing more than the desktop shell behind it. What
+    /// changes is only that the answer now survives a restart, which is what
+    /// let the hardcoded `C:/hpay/fullnode.exe` fallback be deleted. The router
+    /// is not refreshed because it holds node URLs, not binaries.
+    pub fn set_node_binary_path(&mut self, path: Option<String>) -> WalletResult<()> {
+        self.settings.node_binary_path = path;
+        self.settings.save()
+    }
+
     pub fn set_trusted_mainnet_fast_pay_pilot(
         &mut self,
         current_passphrase: &str,

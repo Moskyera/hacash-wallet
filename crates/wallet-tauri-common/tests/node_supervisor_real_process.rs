@@ -638,9 +638,18 @@ fn a_chain_folder_that_cannot_be_made_is_a_refusal_with_words_rather_than_an_err
     // This needs a binary to resolve, so that the run reaches the folder step at
     // all. The only one this machine may have is the one the guide tells people
     // to build, and it is never executed here.
-    if !Path::new("C:/hpay/fullnode.exe").is_file() {
+    //
+    // PICKED EXPLICITLY, because the search list no longer ends at a hardcoded
+    // `C:/hpay/fullnode.exe`: that entry was removed for being a path every
+    // account on the machine can write and the supervisor then runs. This test
+    // used to lean on it, which is the same reliance the change is about. An
+    // explicit pick is how a person points the wallet at their own node now, so
+    // it is what the test does.
+    let candidate = Path::new("C:/hpay/fullnode.exe");
+    if !candidate.is_file() {
         return;
     }
+    process.set_picked_binary(Some(candidate.to_path_buf()));
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

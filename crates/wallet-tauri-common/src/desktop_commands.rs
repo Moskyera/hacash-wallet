@@ -107,14 +107,30 @@ pub async fn wallet_node_supervisor_set_binary(
     path: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<crate::desktop_node::NodeSupervisorReport, String> {
-    match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        None => state.node.set_picked_binary(None),
+    // PERSISTED, not just held. The pick used to live in a `Mutex` that died
+    // with the process, so the next launch had none and the search list fell
+    // through to a hardcoded `C:/hpay/fullnode.exe` that any account on the
+    // machine could overwrite and the supervisor would run. Writing it down is
+    // what allowed that path to be removed, so the write is not a convenience.
+    let chosen = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        None => {
+            state.node.set_picked_binary(None);
+            None
+        }
         Some(path) => {
             let path = std::path::PathBuf::from(path);
             crate::desktop_node::probe_node_binary(&path)
                 .map_err(|reason| format!("{}: {reason}", path.display()))?;
-            state.node.set_picked_binary(Some(path));
+            state.node.set_picked_binary(Some(path.clone()));
+            Some(path.to_string_lossy().into_owned())
         }
-    }
+    };
+    // After the probe, so a path that does not run is never written down.
+    state
+        .inner
+        .lock()
+        .await
+        .set_node_binary_path(chosen)
+        .map_err(|error| error.to_string())?;
     crate::desktop_node::node_supervisor_status(&state.node).await
 }

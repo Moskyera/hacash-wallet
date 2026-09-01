@@ -338,6 +338,21 @@ pub struct WalletSettings {
     /// Legacy plaintext storage. migrated to `quantum.keystore.enc` on unlock.
     #[serde(default)]
     pub quantum_keystore_json: Option<String>,
+    /// The fullnode binary the owner picked, kept so the pick survives a restart.
+    ///
+    /// Before this existed the pick lived in a `Mutex` and died with the
+    /// process, which is why the search list carried a hardcoded
+    /// `C:/hpay/fullnode.exe` to find a node again on the next launch. That
+    /// path is writable by every authenticated account on the machine, and the
+    /// supervisor EXECUTES what it finds - every three seconds while the
+    /// settings screen is open, with no signature check and no prompt. The
+    /// fallback is gone; this is what replaces it.
+    ///
+    /// A party who can write this file can point it anywhere, but that party is
+    /// already the owner - which is exactly the difference from a path any
+    /// account on a shared machine could overwrite.
+    #[serde(default)]
+    pub node_binary_path: Option<String>,
 }
 
 impl Default for WalletSettings {
@@ -364,6 +379,7 @@ impl Default for WalletSettings {
             quantum_mode: false,
             quantum_meta: None,
             quantum_keystore_json: None,
+            node_binary_path: None,
         }
     }
 }

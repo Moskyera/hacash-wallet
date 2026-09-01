@@ -369,6 +369,10 @@ pub enum NodeBinarySource {
     /// Found where a person can drop one by hand.
     Found,
     /// Where the guide told people to build it.
+    /// No longer produced. `node_binary_search_paths` used to end at a
+    /// hardcoded `C:/hpay/fullnode.exe`; see the comment there for why it went.
+    /// The variant stays so a report written by an older build still parses,
+    /// and so the tests that exercise report rendering keep their fixture.
     Legacy,
 }
 
@@ -431,12 +435,22 @@ pub fn node_binary_search_paths(picked: Option<&Path>) -> Vec<(NodeBinarySource,
         NodeBinarySource::Found,
         node_state_dir().join("bin").join(executable_name()),
     ));
-    if cfg!(windows) {
-        out.push((
-            NodeBinarySource::Legacy,
-            PathBuf::from("C:/hpay/fullnode.exe"),
-        ));
-    }
+    // NO HARDCODED WINDOWS PATH. `C:/hpay/fullnode.exe` used to sit here as a
+    // last resort, and `resolve_node_binary` does not merely stat a candidate -
+    // it RUNS it to read a version, and the supervisor then starts what it
+    // found. On this machine that file carries
+    // `NT AUTHORITY\Authenticated Users:(I)(M)`, inherited from the Windows
+    // default on `C:\` itself, so any account on the computer could replace it
+    // and the wallet would execute it while merely showing a settings screen:
+    // NodeSupervisorPanel polls every 3000 ms, before any button exists to
+    // confirm against. This tree already refuses to install an unattributable
+    // Windows binary - `update_download.rs` pins a publisher certificate - and
+    // applied none of that here.
+    //
+    // Removing it costs nothing now that a pick is persisted in
+    // `WalletSettings::node_binary_path`: an owner running a node at that path
+    // chooses it once and it comes back on every launch, as `Picked`, which is
+    // first in this list and which `resolve_node_binary` refuses to fall past.
     out
 }
 

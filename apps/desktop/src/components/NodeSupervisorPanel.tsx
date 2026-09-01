@@ -300,7 +300,7 @@ export default function NodeSupervisorPanel({ onInfo, onError }: Props) {
             id="node-binary-path"
             type="text"
             value={pickedPath}
-            placeholder="C:\\hpay\\fullnode.exe"
+            placeholder="Path to fullnode.exe"
             onChange={(event) => setPickedPath(event.target.value)}
           />
           <button
