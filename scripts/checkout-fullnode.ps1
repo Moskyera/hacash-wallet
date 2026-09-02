@@ -47,6 +47,18 @@ if (Test-Path -LiteralPath $Destination) {
 New-Item -ItemType Directory -Path $Destination | Out-Null
 try {
     Invoke-Git -C $Destination init
+    # LF, on every platform, before anything is fetched.
+    #
+    # hvm_pilot.rs embeds vm/contracts/hpay_channel_exit_v1.fitsh from this
+    # checkout and compares its SHA-256 against a pinned constant. On a
+    # Windows runner git rewrites the newlines on checkout, the hash moves,
+    # and eleven tests fail with "canonical HVM source or bytecode hash
+    # drifted" - a message that reads like the contract changed when only
+    # the line endings did. The Linux job never saw it, so the Windows Hub
+    # build failed on its first run for a reason that had nothing to do
+    # with the Hub.
+    Invoke-Git -C $Destination config core.autocrlf false
+    Invoke-Git -C $Destination config core.eol lf
     Invoke-Git -C $Destination remote add origin $Repository
     Invoke-Git -C $Destination fetch --no-tags --depth 1 origin $revision
     Invoke-Git -C $Destination checkout --detach FETCH_HEAD
