@@ -166,7 +166,17 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "dist-release/$env:PACKAGE_NAME.zip" -CompressionLevel Optimal
           Remove-Item -Recurse -Force $stage
           $hash = (Get-FileHash -Algorithm SHA256 "dist-release/$env:PACKAGE_NAME.zip").Hash.ToLowerInvariant()
-          "$hash  $env:PACKAGE_NAME.zip" | Out-File -FilePath "dist-release/SHA256SUMS-$env:PACKAGE_NAME.txt" -Encoding ascii
+          # WriteAllText, not Out-File. Out-File terminates with CRLF, and the
+          # publish job checks this on ubuntu with `sha256sum --check`, which
+          # does not strip the CR - it folds it into the FILENAME and reports
+          # "No such file or directory" for a file sitting right there.
+          # Reproduced locally against the real artifact before this landed.
+          # It also ships to users, who are told in the release body to verify
+          # the checksum, so a CRLF sums file breaks that for every Linux and
+          # macOS downloader too. Fixed at the producer for that reason.
+          $sums = "dist-release/SHA256SUMS-$env:PACKAGE_NAME.txt"
+          [System.IO.File]::WriteAllText($sums, "$hash  $env:PACKAGE_NAME.zip`n", [System.Text.Encoding]::ASCII)
+          if ([System.IO.File]::ReadAllBytes($sums) -contains 13) { throw "sums file contains a CR" }
           $files = @(Get-ChildItem -LiteralPath dist-release -File)
           if ($files.Count -ne 2) { throw "expected exactly 2 files, found $($files.Count)" }
 

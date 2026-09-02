@@ -49,7 +49,8 @@ try {
     Invoke-Git -C $Destination init
     # LF, on every platform, before anything is fetched.
     #
-    # hvm_pilot.rs embeds vm/contracts/hpay_channel_exit_v1.fitsh from this
+    # hvm_pilot.rs and hvm_registry_pilot.rs embed hpay_channel_exit_v1.fitsh
+    # and hpay_channel_registry_v2.fitsh from this
     # checkout and compares its SHA-256 against a pinned constant. On a
     # Windows runner git rewrites the newlines on checkout, the hash moves,
     # and eleven tests fail with "canonical HVM source or bytecode hash
