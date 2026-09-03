@@ -1,0 +1,15 @@
+# `manifest.json` is read from disk and hashed byte-exactly against
+# MANIFEST_SHA256 (crates/wallet-core/src/channelpay_interop.rs), so its bytes
+# have to be the same on every machine. It is the only i/lf file here; the ten
+# .bin vectors beside it are already binary to git and are never rewritten.
+#
+# Without this, a Windows clone with core.autocrlf=true materialises it CRLF,
+# the digest moves, and the test fails with "Official ChannelPay fixture
+# manifest digest mismatch" - which reads as fixture tampering rather than as
+# line endings. No CI job runs it today; a Windows developer's first fresh
+# clone does.
+#
+# `text eol=lf` and not `text=auto`: text=auto still defers to core.autocrlf
+# and would leave it CRLF on Windows, fixing nothing.
+manifest.json text eol=lf
+*.bin -text
