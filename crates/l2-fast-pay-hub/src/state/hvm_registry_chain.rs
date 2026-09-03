@@ -1754,7 +1754,7 @@ impl HubState {
                 JournalOperationType::HvmWatchtower
             },
             operation_phase: phase,
-            amount_units: operation.network_fee_zhu,
+            amount_zhu: operation.network_fee_zhu,
             sender: self.hub_address.clone(),
             recipient: binding.contract_address.clone(),
             previous_state_commitment: String::new(),

@@ -54,8 +54,8 @@ pub use channel_id::derive_channel_id;
 pub use error::{HubError, HubResult};
 pub use hub_signer::HubSigner;
 pub use journal::{
-    AuthenticatedJournal, JournalBinding, JournalEvent, JournalHead, JournalOperationType,
-    JournalPhase, JournalRecord,
+    AuthenticatedJournal, JournalAmountUnit, JournalBinding, JournalEvent, JournalHead,
+    JournalOperationType, JournalPhase, JournalRecord,
 };
 pub use operation::{IdempotencyRecord, ReservationStatus, request_commitment};
 pub use routing::{PayeeRoute, resolve_payee_route};

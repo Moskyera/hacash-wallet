@@ -124,6 +124,21 @@ pub enum JournalPhase {
     RollbackAnchorRefused,
 }
 
+/// The unit of [`JournalRecord::amount_units`].
+///
+/// Recorded in the entry rather than left to be inferred from
+/// `operation_type`, because inferring it is what made an incident journal
+/// unreadable: the same column held `100000000` for a 1 HAC channel deposit
+/// and `8` for an 0.008 HAC Fast Pay bill on the same channel, five orders of
+/// magnitude apart with nothing in the entry saying which scale applied.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalAmountUnit {
+    /// The chain's smallest indivisible unit. 1 HAC = 100,000,000 zhu, and
+    /// 1 millimei = [`crate::readiness::ZHU_PER_MILLIMEI`] zhu.
+    Zhu,
+}
+
 #[derive(Debug, Clone)]
 pub struct JournalEvent {
     pub wallet_scope: String,
@@ -133,7 +148,13 @@ pub struct JournalEvent {
     pub operation_id: String,
     pub operation_type: JournalOperationType,
     pub operation_phase: JournalPhase,
-    pub amount_units: u64,
+    /// The amount, in zhu, always.
+    ///
+    /// Named for its unit so that a caller holding millimeis cannot reach this
+    /// field without renaming what it writes and noticing.
+    /// [`crate::amount::HacAmount`] holds millimeis and converts with
+    /// `checked_as_zhu`.
+    pub amount_zhu: u64,
     pub sender: String,
     pub recipient: String,
     pub previous_state_commitment: String,
@@ -158,7 +179,27 @@ pub struct JournalRecord {
     pub operation_id: String,
     pub operation_type: JournalOperationType,
     pub operation_phase: JournalPhase,
+    /// The recorded amount, in the unit named by `amount_unit`.
+    ///
+    /// An entry written before `amount_unit` existed names no unit and has to
+    /// be read by operation type: `fast_pay` recorded millimeis
+    /// (1 millimei = [`crate::readiness::ZHU_PER_MILLIMEI`] zhu) and every
+    /// other operation type recorded zhu. Every entry written since is zhu and
+    /// says so.
     pub amount_units: u64,
+    /// The unit of `amount_units`. Absent only on entries written before this
+    /// field existed.
+    ///
+    /// `skip_serializing_if` is load bearing and not tidiness. `entry_hash` is
+    /// a SHA over the serialized entry body, and `verify` recomputes it from
+    /// each deserialized record; a field that always serializes would rewrite
+    /// the hash of every entry already on disk and fail the owner's whole
+    /// journal with `JournalAuthenticationFailed` on the first start of the
+    /// upgraded binary. Absent, an existing entry hashes exactly as it did
+    /// before. Pinned by `an_entry_written_before_the_unit_stamp_still_verifies`
+    /// and by `a_new_journal_field_must_not_move_an_existing_entry_hash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_unit: Option<JournalAmountUnit>,
     pub sender: String,
     pub recipient: String,
     pub previous_state_commitment: String,
@@ -169,6 +210,24 @@ pub struct JournalRecord {
     pub unsigned_state_commitment: Option<String>,
     pub created_at: u64,
     pub authentication_tag: String,
+}
+
+impl JournalRecord {
+    /// `amount_units` in zhu, when the entry states its own unit.
+    ///
+    /// `None` for an entry written before `amount_unit` existed. That entry's
+    /// unit is not recoverable from the entry alone; it has to be read from
+    /// `operation_type` against the rule documented on `amount_units`. This
+    /// returns nothing rather than guess a scale on an operator's behalf.
+    pub fn amount_zhu(&self) -> Option<u64> {
+        // Matched rather than mapped: a second unit added to
+        // `JournalAmountUnit` must fail to compile here rather than silently
+        // return a number on the wrong scale.
+        let unit = self.amount_unit?;
+        match unit {
+            JournalAmountUnit::Zhu => Some(self.amount_units),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,6 +243,8 @@ struct RecordBody<'a> {
     operation_type: JournalOperationType,
     operation_phase: JournalPhase,
     amount_units: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    amount_unit: Option<JournalAmountUnit>,
     sender: &'a str,
     recipient: &'a str,
     previous_state_commitment: &'a str,
@@ -352,7 +413,8 @@ impl AuthenticatedJournal {
             operation_id: event.operation_id,
             operation_type: event.operation_type,
             operation_phase: event.operation_phase,
-            amount_units: event.amount_units,
+            amount_units: event.amount_zhu,
+            amount_unit: Some(JournalAmountUnit::Zhu),
             sender: event.sender,
             recipient: event.recipient,
             previous_state_commitment: event.previous_state_commitment,
@@ -526,7 +588,15 @@ fn derive_auth_key(
 }
 
 fn record_hash(record: &JournalRecord) -> HubResult<String> {
-    let body = RecordBody {
+    let encoded = serde_json::to_vec(&record_body(record))
+        .map_err(|error| HubError::State(error.to_string()))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+/// Exactly the bytes `entry_hash` is taken over. Pinned by
+/// `a_new_journal_field_must_not_move_an_existing_entry_hash`.
+fn record_body(record: &JournalRecord) -> RecordBody<'_> {
+    RecordBody {
         journal_version: record.journal_version,
         entry_sequence: record.entry_sequence,
         previous_entry_hash: &record.previous_entry_hash,
@@ -538,6 +608,7 @@ fn record_hash(record: &JournalRecord) -> HubResult<String> {
         operation_type: record.operation_type,
         operation_phase: record.operation_phase,
         amount_units: record.amount_units,
+        amount_unit: record.amount_unit,
         sender: &record.sender,
         recipient: &record.recipient,
         previous_state_commitment: &record.previous_state_commitment,
@@ -547,9 +618,7 @@ fn record_hash(record: &JournalRecord) -> HubResult<String> {
         expected_bill_number: record.expected_bill_number,
         unsigned_state_commitment: record.unsigned_state_commitment.as_deref(),
         created_at: record.created_at,
-    };
-    let encoded = serde_json::to_vec(&body).map_err(|error| HubError::State(error.to_string()))?;
-    Ok(hex::encode(Sha256::digest(encoded)))
+    }
 }
 
 fn checkpoint_payload(checkpoint: &AuthenticatedCheckpoint) -> HubResult<Vec<u8>> {
@@ -732,7 +801,7 @@ mod tests {
             operation_id: format!("operation-{sequence}"),
             operation_type: JournalOperationType::FastPay,
             operation_phase: JournalPhase::FundsReserved,
-            amount_units: sequence,
+            amount_zhu: sequence,
             sender: "payer".into(),
             recipient: "payee".into(),
             previous_state_commitment: format!("state-{}", sequence - 1),
@@ -752,6 +821,134 @@ mod tests {
             binding(Some("channel-a")),
         )
         .unwrap()
+    }
+
+    /// The entry the previous binary wrote: no `amount_unit` key anywhere in
+    /// it, and an `entry_hash` taken over a body that had no such key either.
+    fn unstamped_record(journal: &AuthenticatedJournal, sequence: u64) -> JournalRecord {
+        let event = event(sequence);
+        let mut record = JournalRecord {
+            journal_version: JOURNAL_VERSION,
+            entry_sequence: sequence,
+            previous_entry_hash: String::new(),
+            entry_hash: String::new(),
+            wallet_scope: event.wallet_scope,
+            hub_or_provider_identity: event.hub_or_provider_identity,
+            channel_id: event.channel_id,
+            channel_reuse_version: event.channel_reuse_version,
+            operation_id: event.operation_id,
+            operation_type: event.operation_type,
+            operation_phase: event.operation_phase,
+            amount_units: event.amount_zhu,
+            amount_unit: None,
+            sender: event.sender,
+            recipient: event.recipient,
+            previous_state_commitment: event.previous_state_commitment,
+            new_state_commitment: event.new_state_commitment,
+            idempotency_key: event.idempotency_key,
+            request_commitment: event.request_commitment,
+            expected_bill_number: event.expected_bill_number,
+            unsigned_state_commitment: event.unsigned_state_commitment,
+            created_at: event.created_at,
+            authentication_tag: String::new(),
+        };
+        record.entry_hash = record_hash(&record).unwrap();
+        record.authentication_tag = compute_tag(&journal.auth_key[..], &record.entry_hash).unwrap();
+        record
+    }
+
+    /// AN UPGRADED BINARY MUST NOT INVALIDATE A JOURNAL IT NEVER WROTE TO.
+    ///
+    /// The owner's Hub has entries on disk that were written before any unit
+    /// was recorded. `verify` re-derives `entry_hash` from every one of them on
+    /// every start and on every append; if the new field serialized when it is
+    /// absent, each of those hashes would move and the Hub would refuse its own
+    /// journal with `JournalAuthenticationFailed`.
+    #[test]
+    fn an_entry_written_before_the_unit_stamp_still_verifies() {
+        let directory = tempfile::tempdir().unwrap();
+        let journal = journal(directory.path());
+
+        let legacy = unstamped_record(&journal, 1);
+        let encoded = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            !encoded.as_object().unwrap().contains_key("amount_unit"),
+            "an unstamped entry must not grow a key it was not written with"
+        );
+        fs::write(
+            journal.path(),
+            format!("{}\n", serde_json::to_string(&legacy).unwrap()),
+        )
+        .unwrap();
+
+        // It verifies, and appending on top of it still verifies.
+        assert_eq!(journal.verify().unwrap().len(), 1);
+        journal.append(event(2)).unwrap();
+        let records = journal.verify().unwrap();
+        assert_eq!(records.len(), 2);
+
+        // The old entry names no unit and does not pretend to.
+        assert_eq!(records[0].amount_unit, None);
+        assert_eq!(records[0].amount_zhu(), None);
+        // Everything written since is zhu and says so.
+        assert_eq!(records[1].amount_unit, Some(JournalAmountUnit::Zhu));
+        assert_eq!(records[1].amount_zhu(), Some(2));
+    }
+
+    /// A NEW FIELD THAT ALWAYS SERIALIZES REWRITES EVERY HASH ALREADY ON DISK.
+    ///
+    /// `entry_hash` is a SHA over the serialized `RecordBody`, so the key set
+    /// below is the hash input, not a formatting detail. It is spelled out
+    /// rather than derived so that the next field added without
+    /// `skip_serializing_if` fails here, in a test that says why, instead of on
+    /// an owner's machine as a journal that will not open.
+    #[test]
+    fn a_new_journal_field_must_not_move_an_existing_entry_hash() {
+        const BODY_KEYS_THE_PREVIOUS_BINARY_HASHED: &[&str] = &[
+            "amount_units",
+            "channel_id",
+            "channel_reuse_version",
+            "created_at",
+            "entry_sequence",
+            "expected_bill_number",
+            "hub_or_provider_identity",
+            "idempotency_key",
+            "journal_version",
+            "new_state_commitment",
+            "operation_id",
+            "operation_phase",
+            "operation_type",
+            "previous_entry_hash",
+            "previous_state_commitment",
+            "recipient",
+            "request_commitment",
+            "sender",
+            "unsigned_state_commitment",
+            "wallet_scope",
+        ];
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal = journal(directory.path());
+        let legacy = unstamped_record(&journal, 1);
+
+        let body = serde_json::to_value(record_body(&legacy)).unwrap();
+        let mut keys: Vec<String> = body.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        let expected: Vec<String> = BODY_KEYS_THE_PREVIOUS_BINARY_HASHED
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect();
+        assert_eq!(
+            keys, expected,
+            "the hashed shape of an entry written before this change moved, which changes entry_hash for every entry already on disk and stops an upgraded Hub from reading its own journal. A new field must carry #[serde(skip_serializing_if = \"Option::is_none\")]"
+        );
+
+        // And once a unit is recorded it is hashed, so it cannot be edited
+        // afterwards without breaking authentication.
+        let mut stamped = legacy;
+        stamped.amount_unit = Some(JournalAmountUnit::Zhu);
+        let body = serde_json::to_value(record_body(&stamped)).unwrap();
+        assert_eq!(body.get("amount_unit"), Some(&serde_json::json!("zhu")));
     }
 
     #[test]

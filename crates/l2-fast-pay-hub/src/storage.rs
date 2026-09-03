@@ -803,7 +803,7 @@ pub(crate) fn initialize_authenticated_state(
             operation_id: "legacy-state-migration-v1".into(),
             operation_type: JournalOperationType::Migration,
             operation_phase: JournalPhase::ReconciliationCompleted,
-            amount_units: 0,
+            amount_zhu: 0,
             sender: String::new(),
             recipient: String::new(),
             previous_state_commitment: current_commitment.clone(),

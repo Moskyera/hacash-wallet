@@ -138,7 +138,7 @@ pub(super) struct RollbackAnchorSubject<'a> {
     pub proposed_bill_commitment: String,
     pub payer: &'a str,
     pub recipient: &'a str,
-    pub amount_units: u64,
+    pub amount_zhu: u64,
     pub idempotency_key: &'a str,
 }
 
@@ -1238,7 +1238,7 @@ impl HubState {
             operation_id: operation_id.to_owned(),
             operation_type: JournalOperationType::HvmPayment,
             operation_phase: phase,
-            amount_units: 0,
+            amount_zhu: 0,
             sender: self.hub_address.trim().to_owned(),
             recipient: self.hub_address.trim().to_owned(),
             previous_state_commitment: String::new(),
@@ -1266,7 +1266,7 @@ impl HubState {
             operation_id: subject.operation_id.to_owned(),
             operation_type: JournalOperationType::HvmPayment,
             operation_phase: phase,
-            amount_units: subject.amount_units,
+            amount_zhu: subject.amount_zhu,
             sender: subject.payer.to_owned(),
             recipient: subject.recipient.to_owned(),
             previous_state_commitment: String::new(),

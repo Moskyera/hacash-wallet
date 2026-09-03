@@ -1345,7 +1345,7 @@ impl ClientL2Safety {
                 operation_id: format!("rollback-anchor-witness:{binding_commitment}"),
                 operation_type: JournalOperationType::HvmPayment,
                 operation_phase: phase,
-                amount_units: 0,
+                amount_zhu: 0,
                 sender: String::new(),
                 recipient: String::new(),
                 previous_state_commitment: String::new(),
@@ -1945,7 +1945,7 @@ impl ClientL2Safety {
                 operation_id,
                 operation_type,
                 operation_phase: phase,
-                amount_units: 0,
+                amount_zhu: 0,
                 sender: self.local_address.clone(),
                 recipient,
                 previous_state_commitment: String::new(),
@@ -2062,6 +2062,14 @@ impl ClientL2Safety {
         next.schema_version = 1;
         next.operations
             .insert(operation.operation_id.clone(), operation.clone());
+        // `ClientL2Operation::amount_units` is millimeis and is inside
+        // `state_commitment`, so it keeps its unit and its scale here; the
+        // journal takes zhu from every writer, so the conversion happens on
+        // the way into the entry rather than in the persisted operation.
+        let amount_zhu = operation
+            .amount_units
+            .checked_mul(crate::l2_hub::ZHU_PER_MILLIMEI)
+            .ok_or_else(|| WalletError::L2("L2 amount overflows when converted to zhu".into()))?;
         self.commit(
             next,
             JournalEvent {
@@ -2072,7 +2080,7 @@ impl ClientL2Safety {
                 operation_id: operation.operation_id.clone(),
                 operation_type: JournalOperationType::FastPay,
                 operation_phase: phase,
-                amount_units: operation.amount_units,
+                amount_zhu,
                 sender: operation.payer.clone(),
                 recipient: operation.payee.clone(),
                 previous_state_commitment: String::new(),
@@ -2571,7 +2579,7 @@ fn initialize_state(
                 operation_id: "personal-l2-store-v1".into(),
                 operation_type: JournalOperationType::Migration,
                 operation_phase: JournalPhase::RecoveryCompleted,
-                amount_units: 0,
+                amount_zhu: 0,
                 sender: String::new(),
                 recipient: String::new(),
                 previous_state_commitment: current.clone(),

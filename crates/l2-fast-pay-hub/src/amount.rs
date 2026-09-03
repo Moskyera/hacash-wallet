@@ -25,6 +25,20 @@ impl HacAmount {
         self.0
     }
 
+    /// This amount in zhu, the unit the authenticated journal records.
+    ///
+    /// The journal takes zhu from every writer so that one column means one
+    /// thing; a Fast Pay amount reaches it through here rather than through
+    /// `as_millimeis`, which is a hundred-thousandth of the scale the L1
+    /// operations on the same channel record. Checked rather than cast: a
+    /// silently wrapped amount in an authenticated record is worse than a
+    /// refused payment.
+    pub fn checked_as_zhu(self) -> HubResult<u64> {
+        self.0
+            .checked_mul(crate::readiness::ZHU_PER_MILLIMEI)
+            .ok_or_else(|| HubError::Payment("HAC amount overflow".into()))
+    }
+
     pub fn checked_add(self, other: Self) -> HubResult<Self> {
         self.0
             .checked_add(other.0)
@@ -208,6 +222,29 @@ mod tests {
             HacAmount::from_millimeis(1_000)
         );
         assert!(parse_amount_mei("1:244").is_err());
+    }
+
+    /// The journal records zhu, and this is the conversion that gets it there.
+    ///
+    /// The numbers are the ones an operator actually read side by side in one
+    /// journal file: a 0.008 HAC Fast Pay bill and a 1 HAC channel deposit on
+    /// the same channel, recorded in the same column as `8` and `100000000`.
+    #[test]
+    fn a_fast_pay_amount_reaches_the_journal_on_the_same_scale_as_a_deposit() {
+        let bill = parse_amount_mei("0.008").unwrap();
+        assert_eq!(bill.as_millimeis(), 8);
+        assert_eq!(bill.checked_as_zhu().unwrap(), 800_000);
+
+        let deposit = parse_amount_mei("1").unwrap();
+        assert_eq!(deposit.checked_as_zhu().unwrap(), 100_000_000);
+
+        // Checked, not cast: a wrapped amount inside an authenticated record
+        // is worse than a refused payment.
+        assert!(
+            HacAmount::from_millimeis(u64::MAX)
+                .checked_as_zhu()
+                .is_err()
+        );
     }
 
     #[test]
