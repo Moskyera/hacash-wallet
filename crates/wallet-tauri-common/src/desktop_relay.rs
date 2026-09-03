@@ -4,6 +4,11 @@
 //! defaults to on. What this module now also answers is the question a person
 //! has to be able to answer before that is any use to them: what address is my
 //! wallet serving on, and can anybody else reach it. See `relay_endpoint`.
+//!
+//! An address is worth quoting only while something is serving it, and a
+//! serve task can end without anything else being told. So the report asks the
+//! task rather than the wallet's own note of what it started. See
+//! `RelayProcess::live_bind`.
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Mutex;
@@ -25,6 +30,10 @@ pub struct RelayProcess {
     /// What the socket is actually bound to, read back from the listener
     /// rather than from the settings that asked for it. The screen quotes
     /// this, so it has to be the kernel's answer and not our intention.
+    ///
+    /// It records what was BOUND, which is not the same as what is being
+    /// SERVED: nothing writes here when the serve task ends on its own. Every
+    /// reader goes through `live_bind` for that reason.
     bound: Mutex<Option<SocketAddr>>,
     /// THE RUNNING RELAY'S OWN STORE AND ITS OWN LIST.
     ///
@@ -57,6 +66,69 @@ impl RelayProcess {
             bound: Mutex::new(None),
             inbox: Mutex::new(None),
             node_url: Mutex::new(None),
+        }
+    }
+
+    /// THE ADDRESS THE RELAY IS SERVING ON RIGHT NOW, OR NOTHING.
+    ///
+    /// `managed` and `bound` are what the wallet STARTED. They are written
+    /// when the socket is bound and cleared when the wallet itself stops the
+    /// relay, and there is a third way for a relay to end that clears neither:
+    /// the task can finish on its own. `serve_router` returning an error logs
+    /// one line and the task exits, and a panic inside it ends just as
+    /// quietly. A report built from the note alone therefore says a dead relay
+    /// is serving and prints the address it used to be on, which is the
+    /// address a person is invited to hand to a friend.
+    ///
+    /// So the question is put to the task. `is_finished` is true however the
+    /// task ended, which is what clearing the note from inside the task would
+    /// not have been: an aborted or panicking task never reaches its own last
+    /// line.
+    ///
+    /// This asks and writes nothing. `wallet_relay_endpoint` is documented as
+    /// starting nothing, stopping nothing and changing no setting, and it is
+    /// the caller.
+    fn live_bind(&self) -> Result<Option<SocketAddr>, String> {
+        if !*self.managed.lock().map_err(|e| e.to_string())? {
+            return Ok(None);
+        }
+        let serving = self
+            .task
+            .lock()
+            .map_err(|e| e.to_string())?
+            .as_ref()
+            .is_some_and(|task| !task.inner().is_finished());
+        if !serving {
+            return Ok(None);
+        }
+        Ok(*self.bound.lock().map_err(|e| e.to_string())?)
+    }
+
+    /// END THE SERVE TASK AND TELL NOBODY, WHICH IS WHAT STOPPING ON ITS OWN
+    /// LOOKS LIKE FROM IN HERE.
+    ///
+    /// Here because there is no way to make a listening socket fail on demand
+    /// from outside the process, and the state that follows one is the state
+    /// worth a test: the task gone, `managed` and `bound` still saying what
+    /// was started, and nothing told. The handle is left where it is rather
+    /// than taken, so what notices has to be the task's own state.
+    ///
+    /// Returns whether there was a task to end.
+    ///
+    /// Nothing in the wallet calls this, and
+    /// `crates/wallet-tauri-common/tests/relay_that_stopped_serving.rs` fails
+    /// if anything begins to.
+    #[doc(hidden)]
+    pub fn stop_serving_and_tell_nobody(&self) -> bool {
+        let Ok(task) = self.task.lock() else {
+            return false;
+        };
+        match task.as_ref() {
+            Some(task) => {
+                task.abort();
+                true
+            }
+            None => false,
         }
     }
 }
@@ -145,7 +217,12 @@ pub async fn sync_managed_relay<R: Runtime>(app: &AppHandle<R>) -> Result<(), St
     // on the relay, and it makes a list change take effect on the very next
     // request rather than after a rebind.
     {
-        let already_bound = *state.relay.bound.lock().map_err(|e| e.to_string())?;
+        // `live_bind` and not the note, because a relay whose task has ended
+        // still has an address written down beside it. Swapping the address
+        // list on that one changes nothing any socket enforces and returns Ok,
+        // so the save would report success and leave the relay stopped. A
+        // relay that is no longer serving falls through to the rebuild below.
+        let already_bound = state.relay.live_bind()?;
         let same_node = state
             .relay
             .node_url
@@ -236,7 +313,9 @@ pub struct RelayEndpointReport {
     /// The wallet is configured to host a relay: whisper on, auto-start on,
     /// and a loopback URL of its own in the list.
     pub hosting: bool,
-    /// A socket is bound and being served right now.
+    /// A socket is bound AND the task serving it is still running. Both
+    /// halves are asked every time this report is built: a relay that stopped
+    /// on its own is not serving, whatever the wallet last wrote down.
     pub serving: bool,
     /// The bound address, from the listener. `None` when nothing is serving.
     pub listen_addr: Option<String>,
@@ -253,7 +332,9 @@ pub struct RelayEndpointReport {
     pub lan_addr: Option<String>,
     /// That address as a relay URL, which is the string a friend pastes.
     pub lan_url: Option<String>,
-    /// Why nothing is being hosted, when nothing is.
+    /// Why there is nothing to reach, when there is nothing to reach. Given
+    /// when this wallet is not hosting a relay, and also when it is set to
+    /// host one and nothing is serving it.
     pub idle_reason: Option<String>,
     /// The addresses the person deliberately added, exactly as stored. This
     /// does NOT include the wallet's own address: see `served_addresses`.
@@ -297,8 +378,12 @@ pub async fn relay_endpoint<R: Runtime>(app: &AppHandle<R>) -> Result<RelayEndpo
         let address = svc.status().address;
         (svc.dust_whisper_settings(), address)
     };
-    let bound = *state.relay.bound.lock().map_err(|e| e.to_string())?;
-    let serving = *state.relay.managed.lock().map_err(|e| e.to_string())? && bound.is_some();
+    // Asked of the task, not of the note the wallet made when it started one.
+    // See `RelayProcess::live_bind`. This is the field the screen turns into
+    // "your wallet is serving a relay on ...", beside an address to give
+    // somebody.
+    let bound = state.relay.live_bind()?;
+    let serving = bound.is_some();
     let hosting = should_manage_relay(&settings);
     let own_url = own_relay_url(&settings);
     let port = own_url.as_deref().and_then(managed_relay_port);
@@ -314,7 +399,7 @@ pub async fn relay_endpoint<R: Runtime>(app: &AppHandle<R>) -> Result<RelayEndpo
         _ => (None, None),
     };
 
-    let idle_reason = if hosting {
+    let idle_reason = if hosting && serving {
         None
     } else if !settings.enabled {
         Some("DUST Whisper is off, so this wallet is not hosting a relay.".to_string())
@@ -328,8 +413,15 @@ pub async fn relay_endpoint<R: Runtime>(app: &AppHandle<R>) -> Result<RelayEndpo
             "No relay address on this computer is configured, so this wallet is not hosting one."
                 .to_string(),
         )
-    } else {
+    } else if !hosting {
         Some("This wallet is not hosting a relay.".to_string())
+    } else {
+        // Set to host, and nothing serving it. Either it never started, which
+        // the save that could not bind the port said at the time, or it
+        // stopped on its own afterwards and said nothing to anybody. Both
+        // leave a person holding an address that refuses connections, so the
+        // sentence covers both and does not guess between them.
+        Some(NOT_SERVING.to_string())
     };
 
     let served = served_addresses(own_address.as_deref(), &settings);
@@ -379,6 +471,13 @@ fn route_local_address() -> Option<IpAddr> {
     }
     Some(addr)
 }
+
+/// SET TO HOST, AND NOTHING IS SERVING.
+///
+/// A relay can stop without anybody being told, and the address a person was
+/// shown outlives it in every place they wrote it down. So the report says
+/// what is true of the address rather than only that something is off.
+pub const NOT_SERVING: &str = "This wallet is set to host a relay and nothing is serving one. Nothing can reach it at any address, including this computer, and an address given to somebody earlier refuses their connection until it is serving again. Saving your relay settings starts it.";
 
 /// The transaction path, in the words the screen uses.
 ///
